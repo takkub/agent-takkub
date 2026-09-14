@@ -310,12 +310,18 @@ def format_for_cli(records: list[dict], *, limit: int = 20) -> list[str]:
     for rec in records[-limit:]:
         clock = datetime.fromtimestamp(float(rec.get("ts", 0.0))).strftime("%H:%M:%S")
         state = str(rec.get("state", "?"))
-        badge = {
-            "delivered": "✅ ถึงแล้ว",
-            "sent": "⏳ ส่งแล้วยังไม่ยืนยัน",
-            "abandoned": "⛔ ส่งไม่สำเร็จ",
-            "queued_no_pane": "🕓 รอ pane เปิด",
-        }.get(state, state)
+        if state == "abandoned" and rec.get("abandoned_reason") == "expired_queued_message":
+            # #615: keep "dropped for being stale" visually distinct from a
+            # genuine delivery failure — same underlying state, different
+            # reason, and Lead needs to tell them apart at a glance.
+            badge = "🗑️ หมดอายุ (>12h) ถูกยกเลิก"
+        else:
+            badge = {
+                "delivered": "✅ ถึงแล้ว",
+                "sent": "⏳ ส่งแล้วยังไม่ยืนยัน",
+                "abandoned": "⛔ ส่งไม่สำเร็จ",
+                "queued_no_pane": "🕓 รอ pane เปิด",
+            }.get(state, state)
         replays = int(rec.get("replays", 0))
         replay_note = f" · ส่งซ้ำหลัง respawn {replays}x" if replays else ""
         body = " ".join(str(rec.get("body", "")).split())

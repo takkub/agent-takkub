@@ -773,19 +773,45 @@ class CliServer(QObject):
                             )
                             return
                     else:
-                        if mode_requested in {"code", "e2e", "ui"}:
-                            self._reply(
-                                sock,
-                                ok=False,
-                                msg=f"--mode {mode_requested} is only valid for --role reviewer",
-                            )
-                            return
-                        if mode_requested is not None and mode_requested not in {
-                            "pane",
-                            "subagent",
-                        }:
-                            self._reply(sock, ok=False, msg="--mode must be pane or subagent")
-                            return
+                        from .routing_planner import REVIEWER_MODE_ALIASES
+
+                        alias_mode = REVIEWER_MODE_ALIASES.get(req_base_role)
+                        if alias_mode is not None:
+                            # #613: qa/critic ARE reviewer --mode e2e/ui — the
+                            # client already resolved a bare role to this
+                            # alias mode, so it must not bounce back here.
+                            if mode_requested is None:
+                                mode_requested = alias_mode
+                            elif mode_requested == alias_mode:
+                                pass
+                            elif mode_requested in {"code", "e2e", "ui"}:
+                                self._reply(
+                                    sock,
+                                    ok=False,
+                                    msg=(
+                                        f"--role {req_base_role} ผูกกับ --mode {alias_mode} "
+                                        f"อยู่แล้ว (#513) — ใช้ --role reviewer --mode "
+                                        f"{mode_requested} แทนถ้าต้องการโหมดนั้น"
+                                    ),
+                                )
+                                return
+                            elif mode_requested not in {"pane", "subagent"}:
+                                self._reply(sock, ok=False, msg="--mode must be pane or subagent")
+                                return
+                        else:
+                            if mode_requested in {"code", "e2e", "ui"}:
+                                self._reply(
+                                    sock,
+                                    ok=False,
+                                    msg=f"--mode {mode_requested} is only valid for --role reviewer",
+                                )
+                                return
+                            if mode_requested is not None and mode_requested not in {
+                                "pane",
+                                "subagent",
+                            }:
+                                self._reply(sock, ok=False, msg="--mode must be pane or subagent")
+                                return
                     # #364 lever 2: when the caller left --mode unset, decide
                     # pane vs. subagent here instead of defaulting straight to
                     # "pane" — an explicit --mode from the caller always wins

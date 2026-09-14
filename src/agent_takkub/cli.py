@@ -677,8 +677,6 @@ def cmd_assign(args: argparse.Namespace) -> dict:
     # assign ต้องพิมพ์ scope + เหตุผล 1 บรรทัดกลับมาเสมอ (ทั้งตอน auto และตอน Lead ระบุเอง)
     print(f"scope: {scope} ({scope_reason})")
 
-    _warn_deprecated_role(base_role)
-
     mode_requested = getattr(args, "mode", None)
     if base_role == "reviewer":
         if mode_requested is None:
@@ -689,16 +687,47 @@ def cmd_assign(args: argparse.Namespace) -> dict:
                 "msg": f"--mode for reviewer must be code, e2e, or ui (got {mode_requested!r})",
             }
     else:
-        if mode_requested in {"code", "e2e", "ui"}:
-            return {
-                "ok": False,
-                "msg": f"--mode {mode_requested} is only valid for --role reviewer",
-            }
-        if mode_requested is not None and mode_requested not in {"pane", "subagent"}:
-            return {
-                "ok": False,
-                "msg": "--mode must be pane or subagent",
-            }
+        from .routing_planner import REVIEWER_MODE_ALIASES
+
+        if base_role in REVIEWER_MODE_ALIASES:
+            # #613: qa/critic ARE reviewer --mode e2e/ui under the hood
+            # (#513) — the matching mode is a no-op, not a conflict.
+            # Printing both an error AND a "use reviewer --mode e2e instead"
+            # warn for the exact same `--role qa --mode e2e` combo was
+            # #613 itself. Only a genuinely different mode is an error now,
+            # and only a bare role (no --mode at all) gets the deprecation
+            # nudge, since that's the only case still leaving the mode to
+            # the (deprecated) default instead of stating it explicitly.
+            alias_mode = REVIEWER_MODE_ALIASES[base_role]
+            if mode_requested is None:
+                _warn_deprecated_role(base_role)
+                mode_requested = alias_mode
+            elif mode_requested == alias_mode:
+                pass
+            elif mode_requested in {"code", "e2e", "ui"}:
+                return {
+                    "ok": False,
+                    "msg": (
+                        f"--role {base_role} ผูกกับ --mode {alias_mode} อยู่แล้ว (#513) — "
+                        f"ใช้ --role reviewer --mode {mode_requested} แทนถ้าต้องการโหมดนั้น"
+                    ),
+                }
+            elif mode_requested not in {"pane", "subagent"}:
+                return {
+                    "ok": False,
+                    "msg": "--mode must be pane or subagent",
+                }
+        else:
+            if mode_requested in {"code", "e2e", "ui"}:
+                return {
+                    "ok": False,
+                    "msg": f"--mode {mode_requested} is only valid for --role reviewer",
+                }
+            if mode_requested is not None and mode_requested not in {"pane", "subagent"}:
+                return {
+                    "ok": False,
+                    "msg": "--mode must be pane or subagent",
+                }
 
     # #1: validate --shards BEFORE the `or 1` fallback so explicit 0 / negative /
     # >8 values are rejected with a clear message rather than silently clamped.
@@ -2485,8 +2514,19 @@ def cmd_wait(args: argparse.Namespace) -> dict:
         print(f"[wait] {result.get('msg', 'cancel requested')}")
         return result
 
-    timeout = getattr(args, "timeout", None) or _WAIT_DEFAULT_TIMEOUT_S
+    raw_timeout = getattr(args, "timeout", None)
+    timeout = raw_timeout or _WAIT_DEFAULT_TIMEOUT_S
     timeout = max(_WAIT_MIN_TIMEOUT_S, min(float(timeout), _WAIT_MAX_TIMEOUT_S))
+    # #612: a caller-requested --timeout above the hard ceiling used to be
+    # clamped silently — Lead would compute against the value it asked for
+    # (e.g. "should be done well before 3000s") and get surprised by a
+    # return at 1800s instead. Warn once, up front, with the exact clamped
+    # value and how to keep waiting past it.
+    if raw_timeout is not None and float(raw_timeout) > _WAIT_MAX_TIMEOUT_S:
+        print(
+            f"warn: --timeout {int(float(raw_timeout))} เกินเพดาน {int(_WAIT_MAX_TIMEOUT_S)}s "
+            f"— ใช้ {int(_WAIT_MAX_TIMEOUT_S)}s (ตั้ง wait ใหม่ต่อได้เมื่อหมด)"
+        )
     no_interrupt = getattr(args, "no_interrupt", False)
     requested_roles = _split_role_args(getattr(args, "role", None))
     _warn_deprecated_role(requested_roles)
@@ -2673,7 +2713,14 @@ def cmd_wait(args: argparse.Namespace) -> dict:
         for role, reason in sorted(gone.items()):
             print(f"    - {role}: {reason}")
     if pending:
-        reason_label = "wait interrupted, see above" if interrupted_by else "timeout reached"
+        if interrupted_by:
+            reason_label = "wait interrupted, see above"
+        elif raw_timeout is not None and float(raw_timeout) > _WAIT_MAX_TIMEOUT_S:
+            reason_label = (
+                f"timeout reached — was clamped to {int(_WAIT_MAX_TIMEOUT_S)}s, see warn above"
+            )
+        else:
+            reason_label = "timeout reached"
         print(f"  still pending ({reason_label}):")
         for role, reason in sorted(pending.items()):
             print(f"    - {role}: {reason}")
@@ -5571,7 +5618,8 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         metavar="SECONDS",
         help=f"max seconds to block (default {int(_WAIT_DEFAULT_TIMEOUT_S)}, "
-        f"capped at {int(_WAIT_MAX_TIMEOUT_S)})",
+        f"capped at {int(_WAIT_MAX_TIMEOUT_S)} — a value above the cap is clamped "
+        "with a warning, not rejected)",
     )
     swt.add_argument(
         "--cancel",
