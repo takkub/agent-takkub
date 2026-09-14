@@ -299,6 +299,27 @@ def resolve_role_alias(role: str) -> tuple[str, str | None]:
     return role, None
 
 
+def pane_role_resolution_chain(role: str) -> list[str]:
+    """Return a list of pane role names to search for when resolving *role*.
+
+    Used by CLI commands and orchestrator to find the actual pane when a
+    role name (particularly "reviewer") doesn't specify which mode variant.
+    Searches in order: if role is an alias (qa/critic), returns the
+    corresponding mode's pane; if role is reviewer (or unresolvable),
+    returns [reviewer, qa, critic] search chain.
+    """
+    r = (role or "").strip().lower()
+    base_role = r.split("#", 1)[0]
+    shard_suffix = ("#" + r.split("#", 1)[1]) if "#" in r else ""
+    if base_role in REVIEWER_MODE_ALIASES:
+        mode = REVIEWER_MODE_ALIASES[base_role]
+        legacy = _MODE_TO_LEGACY_ROLE.get(mode, "reviewer")
+        return [f"{legacy}{shard_suffix}"]
+    if base_role == "reviewer":
+        return [f"reviewer{shard_suffix}", f"qa{shard_suffix}", f"critic{shard_suffix}"]
+    return [r]
+
+
 def _deprecation_note(old_role: str, mode: str) -> str:
     """Reason fragment for a routing decision that resolved a deprecated
     ``qa``/``critic`` role name through the #513 alias. The role FILE
