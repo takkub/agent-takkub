@@ -2439,6 +2439,19 @@ class SpawnEngineMixin:
                             )
                         ),
                     )
+                    # #621: same team response-language directive claude
+                    # specialists and Lead get — `None` under "as-typed" omits it.
+                    from .response_language import prompt_directive as _lang_directive
+
+                    _lang_line = _lang_directive()
+                    if _lang_line:
+                        _skill_extra += f"""
+
+---
+
+## ภาษาที่ตอบ (#621)
+
+{_lang_line}"""
                     ensure_agents_md(spawn_cwd, extra=_skill_extra)
                 except Exception:
                     _log.exception(
@@ -2922,6 +2935,24 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
                 # otherwise Read it wholesale and balloon its own per-turn
                 # context (re-charged as cache_read each turn). Always-on.
                 _appendix += BIG_FILE_GUARD
+                # #621: same team response-language directive Lead gets —
+                # `None` under "as-typed" (no override) omits the block.
+                try:
+                    from .response_language import prompt_directive as _lang_directive
+
+                    _lang_line = _lang_directive()
+                    if _lang_line:
+                        _appendix += f"""
+
+---
+
+## 🗣️ ภาษาที่ตอบ (#621)
+
+{_lang_line}"""
+                except Exception:
+                    _log.exception(
+                        "could not resolve response-language directive for %s", base_role
+                    )
                 # Stale-file race guard (teammate-only): recognise the
                 # "File has been modified since read" loop caused by a running
                 # dev-server/IDE watcher and stop it instead of retry-looping

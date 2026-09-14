@@ -6493,6 +6493,36 @@ class Orchestrator(
             return False
         return getattr(pane, "state", "") != "working"
 
+    def _language_nudge_suffix(
+        self, project_ns: str, from_role: str, note: str, task_id: str | None
+    ) -> str:
+        """#621: soft, warn-never-reject heuristic — appended to a done()/
+        progress() reply when Settings → General's team response-language is
+        Thai but *note* reads as English-only prose. At most once per
+        (project, role, task_id): a long-running task calling `progress()`
+        repeatedly must not get nagged on every call."""
+        try:
+            from . import response_language
+
+            if not response_language.should_nudge(note):
+                return ""
+            seen = getattr(self, "_lang_nudge_sent", None)
+            if seen is None:
+                seen = {}
+                self._lang_nudge_sent = seen
+            key = (project_ns, from_role)
+            if seen.get(key) == task_id:
+                return ""
+            seen[key] = task_id
+            return "\n\n" + response_language.LANGUAGE_NUDGE
+        except Exception:
+            import logging
+
+            logging.getLogger(__name__).exception(
+                "could not evaluate response-language nudge for %s", from_role
+            )
+            return ""
+
     def done(
         self,
         from_role: str,
@@ -6518,6 +6548,10 @@ class Orchestrator(
         pane = project_panes.get(from_role)
         if pane is None:
             return False, f"unknown role: {from_role}"
+
+        # #621: capture task_id before any teardown below pops _pane_state —
+        # the language-nudge one-shot-per-task flag near the end needs it.
+        _lang_task_id = getattr(self._pane_state.get(f"{project_ns}::{from_role}"), "task_id", None)
 
         # #433: a frontend/mobile done on a UI-shaped task must carry real
         # screenshot evidence — see `orchestrator_text.ui_evidence_gate`.
@@ -7326,7 +7360,9 @@ class Orchestrator(
         # without waiting up to a minute for the periodic tick.
         self._write_hot_md()
         self.agentDone.emit(project_ns, from_role, note)
-        return True, f"{from_role} reported done"
+        _msg = f"{from_role} reported done"
+        _msg += self._language_nudge_suffix(project_ns, from_role, note, _lang_task_id)
+        return True, _msg
 
     def progress(
         self, from_role: str, note: str = "", project: str | None = None
@@ -7411,7 +7447,9 @@ class Orchestrator(
             kind="progress",
         )
         _log_event("progress", role=from_role, project=project_ns, note=note[:200])
-        return True, f"{from_role} progress reported"
+        _msg = f"{from_role} progress reported"
+        _msg += self._language_nudge_suffix(project_ns, from_role, note, _ps_self.task_id)
+        return True, _msg
 
     def consume_pane_hook(
         self,
