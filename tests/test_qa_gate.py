@@ -559,17 +559,24 @@ class TestNodeProjectGate:
         (node_repo / "pnpm-lock.yaml").write_text("", encoding="utf-8")
         recorder: list = []
         monkeypatch.setattr(subprocess, "run", _fake_run_factory(recorder, []))
+        # #607: this test is about #600's force-full-output flags, not
+        # platform-dependent concurrency capping — pin it off Windows so the
+        # expected command shape is the same on every CI runner.
+        monkeypatch.setattr(qa_gate, "_WIN", False)
 
         report = qa_gate.run_gate(cwd=node_repo, write_report=False)
 
         ran = [cmd for cmd, _env in recorder]
         # #600: turbo-backed verify must force a real, fully-logged run.
+        # #608: `--continue` so one workspace failing doesn't fail-fast-kill
+        # every other workspace's task.
         assert len(ran) == 1 and ran[0][1:] == [
             "run",
             "verify",
             "--",
             "--output-logs=full",
             "--force",
+            "--continue",
         ]
         assert "pnpm" in str(ran[0][0])
         assert report.ok
@@ -622,6 +629,218 @@ class TestNodeProjectGate:
 
         assert not report.ok
         assert any("refuse" in s.detail for s in report.steps)
+
+
+# ── #607/#608: Windows worker-pool timeout retry + turbo fail-fast/stale DB ─
+
+
+class TestNodeConcurrencyAndWorkerTimeoutRetry:
+    def test_windows_limits_turbo_concurrency(self, node_repo, monkeypatch) -> None:
+        (node_repo / "package.json").write_text(
+            '{"scripts": {"test": "turbo run test"}}', encoding="utf-8"
+        )
+        (node_repo / "tsconfig.json").unlink()
+        monkeypatch.setattr(qa_gate, "_WIN", True)
+        recorder: list = []
+        monkeypatch.setattr(subprocess, "run", _fake_run_factory(recorder, []))
+
+        qa_gate.run_gate(cwd=node_repo, write_report=False)
+
+        ran = [cmd for cmd, _env in recorder]
+        assert len(ran) == 1 and "--concurrency=1" in ran[0]
+
+    def test_non_windows_no_contention_leaves_concurrency_unlimited(
+        self, node_repo, monkeypatch
+    ) -> None:
+        (node_repo / "package.json").write_text(
+            '{"scripts": {"test": "turbo run test"}}', encoding="utf-8"
+        )
+        (node_repo / "tsconfig.json").unlink()
+        monkeypatch.setattr(qa_gate, "_WIN", False)
+        recorder: list = []
+        monkeypatch.setattr(subprocess, "run", _fake_run_factory(recorder, []))
+
+        qa_gate.run_gate(cwd=node_repo, write_report=False)
+
+        ran = [cmd for cmd, _env in recorder]
+        assert len(ran) == 1 and "--concurrency=1" not in ran[0]
+
+    def test_worker_timeout_signature_retries_serial_and_passes(
+        self, node_repo, monkeypatch
+    ) -> None:
+        """#607: a vitest-pool worker timeout alongside a real passed-tests
+        summary is machine-load, not a regression — one serial retry, and it
+        must count as PASS, not FAIL."""
+        (node_repo / "package.json").write_text(
+            '{"scripts": {"test": "turbo run test"}}', encoding="utf-8"
+        )
+        (node_repo / "tsconfig.json").unlink()
+        monkeypatch.setattr(qa_gate, "_WIN", False)
+        real_run = subprocess.run
+        calls = {"n": 0}
+
+        def fake_run(cmd, **kwargs):
+            if cmd[0] == "git":
+                return real_run(cmd, **kwargs)
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return _FakeCompleted(
+                    1,
+                    stdout="Tests  42 passed\n"
+                    "[vitest-pool] Timeout waiting for worker to respond\n",
+                )
+            assert "--concurrency=1" in cmd  # the serial retry itself
+            return _FakeCompleted(0, stdout="Tests  42 passed\n")
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+
+        report = qa_gate.run_gate(cwd=node_repo, write_report=False)
+
+        test_step = next(s for s in report.steps if s.name == "test")
+        assert calls["n"] == 2
+        assert test_step.ok is True
+        assert "retry serial" in test_step.detail
+        assert report.ok
+
+    def test_worker_timeout_retries_serial_for_a_direct_non_turbo_vitest_script(
+        self, node_repo, monkeypatch
+    ) -> None:
+        """Regression: a bare `vitest run` script's actual argv is `npm run
+        test ...` — it never contains the literal word "vitest", so the
+        retry-command builder must derive the runner from
+        `_detect_node_test_runner` (package.json), not by sniffing the argv
+        (caught only by a real, non-mocked run against a real npm/vitest
+        shim — see the #607 manual verification)."""
+        # node_repo's own package.json already has {"test": "vitest run"}.
+        (node_repo / "tsconfig.json").unlink()
+        monkeypatch.setattr(qa_gate, "_WIN", False)
+        real_run = subprocess.run
+        calls = {"n": 0}
+
+        def fake_run(cmd, **kwargs):
+            if cmd[0] == "git":
+                return real_run(cmd, **kwargs)
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return _FakeCompleted(
+                    1,
+                    stdout="Tests  42 passed\n"
+                    "[vitest-pool] Timeout waiting for worker to respond\n",
+                )
+            assert "--poolOptions.forks.maxForks=1" in cmd  # vitest single-fork serial retry
+            return _FakeCompleted(0, stdout="Tests  42 passed\n")
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+
+        report = qa_gate.run_gate(cwd=node_repo, write_report=False)
+
+        test_step = next(s for s in report.steps if s.name == "test")
+        assert calls["n"] == 2
+        assert test_step.ok is True
+        assert report.ok
+
+    def test_real_assertion_failure_is_not_retried(self, node_repo, monkeypatch) -> None:
+        """A genuine red test (no worker-timeout signature) must stay FAIL
+        and must NOT get a bonus retry attempt."""
+        (node_repo / "package.json").write_text(
+            '{"scripts": {"test": "turbo run test"}}', encoding="utf-8"
+        )
+        (node_repo / "tsconfig.json").unlink()
+        monkeypatch.setattr(qa_gate, "_WIN", False)
+        recorder: list = []
+        real_run = subprocess.run
+
+        def fake_run(cmd, **kwargs):
+            if cmd[0] == "git":
+                return real_run(cmd, **kwargs)
+            recorder.append(cmd)
+            return _FakeCompleted(1, stdout="Tests  1 failed, 41 passed\nFAIL src/x.test.ts\n")
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+
+        report = qa_gate.run_gate(cwd=node_repo, write_report=False)
+
+        test_step = next(s for s in report.steps if s.name == "test")
+        assert len(recorder) == 1  # no retry attempted
+        assert test_step.ok is False
+        assert not report.ok
+
+
+class TestNodeStaleTestDbMarker:
+    def test_stale_marker_with_reset_script_runs_it_before_test(
+        self, node_repo, monkeypatch
+    ) -> None:
+        """#608: a marker left over from a killed previous run must trigger
+        the project's own reset script before `test` runs."""
+        (node_repo / "package.json").write_text(
+            '{"scripts": {"test": "vitest run", "db:test:reset": "prisma migrate reset --force"}}',
+            encoding="utf-8",
+        )
+        (node_repo / "tsconfig.json").unlink()
+        marker = qa_gate._node_test_marker_path(node_repo)
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.write_text("99999999", encoding="utf-8")
+        recorder: list = []
+        monkeypatch.setattr(subprocess, "run", _fake_run_factory(recorder, []))
+
+        report = qa_gate.run_gate(cwd=node_repo, write_report=False)
+
+        names = [s.name for s in report.steps]
+        assert names.index("test-db-reset") < names.index("test")
+        reset_step = next(s for s in report.steps if s.name == "test-db-reset")
+        assert reset_step.ok is True and not reset_step.skipped
+        ran = [cmd for cmd, _env in recorder]
+        assert any("db:test:reset" in cmd for cmd in ran)
+        assert not marker.exists()  # cleared once the test step itself finished
+
+    def test_stale_marker_without_reset_script_only_warns(self, node_repo, monkeypatch) -> None:
+        (node_repo / "package.json").write_text(
+            '{"scripts": {"test": "vitest run"}}', encoding="utf-8"
+        )
+        (node_repo / "tsconfig.json").unlink()
+        (node_repo / "docker-compose.yml").write_text(
+            "services:\n  test-db:\n    image: postgres:16\n", encoding="utf-8"
+        )
+        marker = qa_gate._node_test_marker_path(node_repo)
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.write_text("99999999", encoding="utf-8")
+        recorder: list = []
+        monkeypatch.setattr(subprocess, "run", _fake_run_factory(recorder, []))
+
+        report = qa_gate.run_gate(cwd=node_repo, write_report=False)
+
+        reset_step = next(s for s in report.steps if s.name == "test-db-reset")
+        assert reset_step.warn is True
+        assert reset_step.skipped is True
+        ran = [cmd for cmd, _env in recorder]
+        assert not any("test-db-reset" in " ".join(map(str, cmd)) for cmd in ran)
+
+    def test_no_marker_no_reset_step_at_all(self, node_repo, monkeypatch) -> None:
+        (node_repo / "package.json").write_text(
+            '{"scripts": {"test": "vitest run", "db:test:reset": "x"}}', encoding="utf-8"
+        )
+        (node_repo / "tsconfig.json").unlink()
+        monkeypatch.setattr(subprocess, "run", _fake_run_factory([], []))
+
+        report = qa_gate.run_gate(cwd=node_repo, write_report=False)
+
+        assert not any(s.name == "test-db-reset" for s in report.steps)
+
+    def test_marker_with_no_db_signal_at_all_is_ignored(self, node_repo, monkeypatch) -> None:
+        """A plain Node project with no reset script and no compose db
+        service has nothing to reset — a leftover marker must not warn."""
+        (node_repo / "package.json").write_text(
+            '{"scripts": {"test": "vitest run"}}', encoding="utf-8"
+        )
+        (node_repo / "tsconfig.json").unlink()
+        marker = qa_gate._node_test_marker_path(node_repo)
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.write_text("99999999", encoding="utf-8")
+        monkeypatch.setattr(subprocess, "run", _fake_run_factory([], []))
+
+        report = qa_gate.run_gate(cwd=node_repo, write_report=False)
+
+        assert not any(s.name == "test-db-reset" for s in report.steps)
 
 
 # ── #469: Node gate wiring for the Prisma drift/checksum checks ───────────

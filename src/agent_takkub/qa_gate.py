@@ -861,6 +861,136 @@ def _looks_like_timeout_failure(detail: str) -> bool:
     return bool(_TIMEOUT_HINT_RE.search(detail))
 
 
+# ── #607: vitest/jest worker-pool timeout on Windows — false-negative FAIL ──
+#
+# A `turbo run test`/bare vitest running every workspace in parallel died on
+# Windows with `[vitest-pool] Timeout waiting for worker to respond` (or
+# jest's `Exceeded timeout of Nms waiting`) while the same 7,386 tests all
+# passed cleanly one workspace at a time — a worker's heartbeat starving
+# under CPU contention, not a real assertion failure. The signature that
+# tells the two apart: the timeout error AND a genuine "N passed" summary
+# both present in the same output (a real regression never prints a full
+# passed-tests summary alongside its own failure).
+
+_WORKER_TIMEOUT_RE = re.compile(
+    r"\[vitest-pool\]|timeout waiting for worker to respond|exceeded timeout of \d+\s*ms waiting",
+    re.IGNORECASE,
+)
+_TEST_SUMMARY_RE = re.compile(
+    r"tests?\s*:?\s*\d+\s+passed|test suites?:.*passed|\b\d+\s+passed\b", re.IGNORECASE
+)
+
+
+def _node_worker_timeout_flake(step: StepResult) -> bool:
+    """True for the #607 signature. Reads the full log when the gate wrote
+    one (every full-tier run does); a targeted/auto-tier run with no log
+    file falls back to the step's own tail — a false negative there just
+    means the gate reports a plain FAIL instead of a masked retry, never a
+    masked FAIL turning into a false PASS."""
+    text = step.detail
+    if step.log_path is not None:
+        try:
+            text = step.log_path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            pass
+    return bool(_WORKER_TIMEOUT_RE.search(text) and _TEST_SUMMARY_RE.search(text))
+
+
+def _serial_retry_cmd(cmd: list[str], runner: str | None) -> list[str] | None:
+    """The narrowest safe serial re-run of *cmd* for the #607 retry — `None`
+    when this command can't be told apart from an unrecognized custom
+    runner (caller then skips the retry rather than guessing a flag).
+
+    `runner` comes from `_detect_node_test_runner` (jest/vitest/None) — NOT
+    sniffed from *cmd* itself: a real command is `npm run test ...`, which
+    never contains the literal word "vitest"/"jest" even though the
+    package.json script it runs does (caught by the #607 manual real-repo
+    verification: the old text-sniffed version silently never retried
+    anything real, only its own mocked-cmd unit tests)."""
+    if "--continue" in cmd:
+        return [*cmd, "--concurrency=1"]
+    if runner == "vitest":
+        extra = ["--pool=forks", "--poolOptions.forks.maxForks=1"]
+    elif runner == "jest":
+        extra = ["--runInBand"]
+    else:
+        return None
+    return [*cmd, *extra] if "--" in cmd else [*cmd, "--", *extra]
+
+
+# ── #608: stale test DB from a killed node test run ─────────────────────────
+#
+# `--continue` (verify._turbo_force_args) already stops turbo's own
+# fail-fast from killing a sibling workspace's integration test mid-`finally
+# { cleanup }` — this is the defensive layer for the other way a test run
+# can get cut short: the whole `takkub qa-gate` process itself dies (Ctrl-C,
+# a killed pane, an OOM) before the node test-like step finishes. A marker
+# written right before that step starts and removed right after it
+# completes (pass or fail — either way the process reached its own cleanup)
+# is still present at the START of the next run only when the process
+# itself never got that far last time.
+
+_DB_RESET_SCRIPT_NAMES: tuple[str, ...] = ("db:test:reset", "test:db:reset", "test:db")
+_COMPOSE_DB_SERVICE_RE = re.compile(
+    r"(?im)^\s{2,4}[\w.-]*(db|database|postgres|mysql|mongo)[\w.-]*:\s*$"
+)
+
+
+def _node_test_marker_path(root: Path) -> Path:
+    safe = _log_stem(str(root.resolve()))
+    return _runtime_dir() / "qa-reports" / "node-test-markers" / f"{safe}.marker"
+
+
+def _has_test_db_signal(root: Path, scripts: dict) -> bool:
+    """Opt-in by project shape only (mirrors db_preflight.py's own rule):
+    a reset-ish script, or a docker-compose file with what looks like a
+    db/postgres/mysql/mongo service — never trip this for a project with no
+    test DB at all."""
+    if any(s in scripts for s in _DB_RESET_SCRIPT_NAMES):
+        return True
+    for pattern in ("docker-compose*.yml", "docker-compose*.yaml"):
+        for compose_path in root.glob(pattern):
+            try:
+                text = compose_path.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                continue
+            if _COMPOSE_DB_SERVICE_RE.search(text):
+                return True
+    return False
+
+
+def _maybe_warn_or_reset_stale_test_db(
+    root: Path, scripts: dict, pm: str, env: dict, report: GateReport
+) -> None:
+    marker = _node_test_marker_path(root)
+    if not marker.exists() or not _has_test_db_signal(root, scripts):
+        return
+    reset_script = next((s for s in _DB_RESET_SCRIPT_NAMES if s in scripts), None)
+    if reset_script is None:
+        report.steps.append(
+            StepResult(
+                "test-db-reset",
+                True,
+                True,
+                0.0,
+                "warn: the previous node test run looks like it was cut short (#608) — "
+                "the test DB may have stale rows from an interrupted integration test, and "
+                f"this project has no {'/'.join(_DB_RESET_SCRIPT_NAMES)} script to auto-fix "
+                "it. Reset it by hand before trusting this run's results.",
+                warn=True,
+            )
+        )
+        return
+    from .verify import pm_run
+
+    step = _run_step("test-db-reset", pm_run(pm, reset_script), env, root, None)
+    step.detail = (
+        f"[#608: previous node test run was cut short — reset stale test DB via "
+        f"`{reset_script}`] {step.detail}"
+    )
+    report.steps.append(step)
+
+
 def _run_step_contended(
     name: str,
     cmd: list[str],
@@ -1502,7 +1632,17 @@ def _non_python_gate(
 
     from .verify import detect_stack
 
-    checks = detect_stack(root)
+    # #607: cap turbo/vitest/jest parallelism when the machine is under
+    # pressure — always true on Windows (where the worker-pool timeout was
+    # observed: `[vitest-pool] Timeout waiting for worker to respond` under
+    # turbo's default per-workspace concurrency, 7,386 tests passing cleanly
+    # run one workspace at a time), or on any OS when another full qa-gate is
+    # already running here (same signal `_run_step_contended` already uses
+    # for #472's CPU-contention retry — reused rather than invented twice).
+    limit_concurrency = _WIN or (
+        lock_base is not None and _active_full_gate_count(lock_base, exclude=lock_exclude) > 0
+    )
+    checks = detect_stack(root, limit_concurrency=limit_concurrency)
     if only_names is not None:
         # #436 style tier: typecheck is the only Node check a CSS/asset diff
         # can break; skipping test/lint here is the whole point.
@@ -1634,15 +1774,19 @@ def _non_python_gate(
         )
 
     for index, check in enumerate(checks):
-        # #529: a check that actually runs the test suite ("test", a
-        # narrowed "test:<runner>-related", or "verify" which combines
-        # everything and can't be split out) is exactly the one that dies
-        # with N connection-refused failures when the test DB container is
-        # missing/not started — preflight it right before THIS check runs
-        # (not the whole tier) so typecheck/lint above it are unaffected.
-        if check.name == "verify" or check.name == "test" or check.name.startswith("test:"):
+        # #529/#607/#608: a check that actually runs the test suite ("test",
+        # a narrowed "test:<runner>-related", or "verify" which combines
+        # everything and can't be split out).
+        is_test_like = (
+            check.name == "verify" or check.name == "test" or check.name.startswith("test:")
+        )
+        if is_test_like:
             from .db_preflight import check_test_db_reachable
+            from .verify import detect_package_manager, load_package_json
 
+            # #529: preflight right before THIS check runs (not the whole
+            # tier) so typecheck/lint above it are unaffected by a missing
+            # test DB container.
             db_finding = check_test_db_reachable(env)
             if db_finding is not None:
                 report.steps.append(
@@ -1660,6 +1804,21 @@ def _non_python_gate(
                             _skip(rest.name, "test-db-preflight failed — fail-fast (#529)")
                         )
                     break
+
+            # #608: the test DB may carry stale rows from a previous run's
+            # process getting killed mid-test (see `_node_test_marker_path`).
+            db_pkg = load_package_json(root)
+            db_scripts = db_pkg.get("scripts")
+            db_scripts = db_scripts if isinstance(db_scripts, dict) else {}
+            _maybe_warn_or_reset_stale_test_db(
+                root, db_scripts, detect_package_manager(root, db_pkg), env, report
+            )
+
+        marker = _node_test_marker_path(root) if is_test_like else None
+        if marker is not None:
+            marker.parent.mkdir(parents=True, exist_ok=True)
+            marker.write_text(str(os.getpid()), encoding="utf-8")
+
         if lock_base is not None:
             step = _run_step_contended(
                 check.name,
@@ -1672,6 +1831,30 @@ def _non_python_gate(
             )
         else:
             step = _run_step(check.name, check.cmd, env, check.cwd or root, log_dir)
+
+        # #607: a worker-pool timeout signature alongside a real passed-tests
+        # summary is machine load, not a regression — retry serial once.
+        if is_test_like and not step.ok and _node_worker_timeout_flake(step):
+            runner = _detect_node_test_runner(root, db_pkg)
+            retry_cmd = _serial_retry_cmd(check.cmd, runner)
+            if retry_cmd is not None:
+                print(
+                    f"qa-gate: {check.name} failed on a vitest/jest worker-pool timeout "
+                    "signature (#607) while its own output still shows a real passed-tests "
+                    f"summary — retrying {check.name} serial once (machine-load signal, "
+                    "not a real regression)."
+                )
+                retry_step = _run_step(check.name, retry_cmd, env, check.cwd or root, log_dir)
+                if retry_step.ok:
+                    retry_step.detail = (
+                        "[passed after retry serial — worker-timeout signature, #607] "
+                        f"{retry_step.detail}"
+                    )
+                    step = retry_step
+
+        if marker is not None:
+            marker.unlink(missing_ok=True)
+
         report.steps.append(step)
         if not step.ok:
             for rest in checks[index + 1 :]:
