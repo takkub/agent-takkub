@@ -43,8 +43,13 @@ def _tail(text: str, lines: int = 50) -> str:
     return "\n".join(text.splitlines()[-lines:])
 
 
-def detect_stack(cwd: Path) -> list[Check]:
-    """Return checks appropriate for the project in cwd."""
+def detect_stack(cwd: Path, *, limit_concurrency: bool = False) -> list[Check]:
+    """Return checks appropriate for the project in cwd.
+
+    `limit_concurrency` (#607) threads down to `node_checks` — default False
+    keeps every existing caller's command shape unchanged; qa_gate.py is the
+    one caller that computes and passes it explicitly.
+    """
     checks: list[Check] = []
 
     if (cwd / "pyproject.toml").exists():
@@ -72,7 +77,7 @@ def detect_stack(cwd: Path) -> list[Check]:
         )
 
     if (cwd / "package.json").exists():
-        checks.extend(node_checks(cwd))
+        checks.extend(node_checks(cwd, limit_concurrency=limit_concurrency))
 
     return checks
 
@@ -220,7 +225,32 @@ def _segment_uses_turbo(segment: str) -> bool:
     return words[0] in ("pnpm", "yarn") and words[1] == "exec" and words[2:3] == ["turbo"]
 
 
-def _turbo_force_args(script_value: str) -> list[str]:
+_CONCURRENCY_FLAG_RE = re.compile(r"--pool\b|poolOptions|--maxWorkers\b|--concurrency\b")
+
+
+def _direct_runner_concurrency_args(script_value: str) -> list[str]:
+    """Cap parallelism for a `test`/`verify` script that calls vitest/jest
+    DIRECTLY (no turbo) — #607's Windows worker-pool timeouts aren't
+    turbo-only, a bare `vitest run`/`jest` in a monorepo sub-package hits the
+    same `[vitest-pool] Timeout waiting for worker to respond` under machine
+    load. Left alone when the script already pins its own concurrency
+    (`--pool`, `poolOptions`, `--maxWorkers`) — forcing a second, possibly
+    conflicting flag onto a runner is worse than doing nothing.
+
+    ponytail: recognizes vitest/jest by name in the script text only, same
+    as `_detect_node_test_runner` in qa_gate.py — a runner invoked through an
+    unrecognized wrapper gets no concurrency args here (still runs, just
+    without the cap)."""
+    if _CONCURRENCY_FLAG_RE.search(script_value):
+        return []
+    if "vitest" in script_value:
+        return ["--pool=forks", "--poolOptions.forks.maxForks=2"]
+    if "jest" in script_value:
+        return ["--maxWorkers=50%"]
+    return []
+
+
+def _turbo_force_args(script_value: str, *, limit_concurrency: bool = False) -> list[str]:
     """A `verify`/`test` script that delegates to turbo can cache-hit and
     replay only a bare `PASS 58.7s` status line — no underlying jest/vitest
     `Tests: N passed` summary, leaving qa-gate's own log with no evidence a
@@ -236,13 +266,37 @@ def _turbo_force_args(script_value: str) -> list[str]:
     healthy script into a red qa-gate. Only a command that actually IS (or
     chains through) `turbo ...` counts — including package-manager
     wrappers like `npx turbo` / `pnpm exec turbo` (#605 L3).
+
+    `--continue` is always added once turbo is detected (#608): turbo's
+    default fail-fast kills every OTHER workspace's task the moment one
+    fails, including an in-flight integration test whose `finally { cleanup
+    }` never runs — leaving the test DB with stale rows for the next run.
+    `--continue` lets every workspace finish (and clean up after itself);
+    the gate still reports FAIL overall when any of them did.
+
+    `limit_concurrency` (#607) adds `--concurrency=1`: on Windows, turbo's
+    default per-workspace parallelism was hitting a vitest/jest worker-pool
+    timeout (`[vitest-pool] Timeout waiting for worker to respond`) purely
+    from CPU contention, with 7,386 tests passing cleanly when run one
+    workspace at a time. Caller (qa_gate.py) decides when to set this — also
+    true when another qa-gate pane is already running on this machine, not
+    only on Windows.
     """
     segments = [s.strip() for s in re.split(r"&&|\|\||;", script_value) if s.strip()]
     uses_turbo = any(_segment_uses_turbo(seg) for seg in segments)
-    return ["--", "--output-logs=full", "--force"] if uses_turbo else []
+    if uses_turbo:
+        args = ["--output-logs=full", "--force", "--continue"]
+        if limit_concurrency:
+            args.append("--concurrency=1")
+        return ["--", *args]
+    if limit_concurrency:
+        extra = _direct_runner_concurrency_args(script_value)
+        if extra:
+            return ["--", *extra]
+    return []
 
 
-def node_checks(cwd: Path) -> list[Check]:
+def node_checks(cwd: Path, *, limit_concurrency: bool = False) -> list[Check]:
     """The Node gate (#329 + #368). Order matters — typecheck runs BEFORE test
     because the whole point is that vitest/jest transpile through esbuild and
     never see a type error: a spec written against an old signature passes
@@ -263,7 +317,9 @@ def node_checks(cwd: Path) -> list[Check]:
     checks: list[Check] = []
 
     if "verify" in scripts:
-        verify_cmd = pm_run(pm, "verify") + _turbo_force_args(str(scripts["verify"]))
+        verify_cmd = pm_run(pm, "verify") + _turbo_force_args(
+            str(scripts["verify"]), limit_concurrency=limit_concurrency
+        )
         checks.append(Check(name="verify", cmd=verify_cmd, stack="node"))
     else:
         if "typecheck" in scripts:
@@ -287,7 +343,9 @@ def node_checks(cwd: Path) -> list[Check]:
                     )
                 )
         if "test" in scripts:
-            test_cmd = pm_run(pm, "test") + _turbo_force_args(str(scripts["test"]))
+            test_cmd = pm_run(pm, "test") + _turbo_force_args(
+                str(scripts["test"]), limit_concurrency=limit_concurrency
+            )
             checks.append(Check(name="test", cmd=test_cmd, stack="node"))
 
     eslintrc_patterns = [
