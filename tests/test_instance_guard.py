@@ -578,3 +578,50 @@ class TestHeredocDataVsCommand:
         v2 = pane_guard.classify(cmd2, "lead")
         assert not v2.allowed, f"Should deny redirect before delimiter: {cmd2}"
         assert v2.rule == "instance_guard:protected_data_home"
+
+
+class TestPythonHeredocWrites633:
+    """`python - <<'EOF'` bodies are executed code: heredoc stripping (data
+    bodies) must not hide a write/delete into a protected DATA_HOME."""
+
+    @pytest.mark.parametrize("root", ["/tmp/py_heredoc_posix", "C:/py_heredoc_win"])
+    @pytest.mark.parametrize(
+        "body",
+        [
+            "open('{home}/projects.json', 'w').write('{{}}')",
+            "import shutil\nshutil.rmtree('{home}/runtime')",
+            "import pathlib\npathlib.Path('{home}/projects.json').write_text('')",
+            "import os\nos.remove('{home}\\projects.json')",
+        ],
+    )
+    def test_python_heredoc_write_into_protected_home_denied(
+        self, monkeypatch: pytest.MonkeyPatch, root: str, body: str
+    ) -> None:
+        home = pathlib.Path(root).resolve()
+        monkeypatch.setenv("TAKKUB_PROTECTED_DATA_HOMES", str(home))
+        code = body.format(home=home.as_posix())
+        for intro in ("python - <<'EOF'", "python3 <<EOF", "py - <<'PY'"):
+            delim = intro.rsplit("<<", 1)[1].strip("'\"")
+            cmd = f"{intro}\n{code}\n{delim}"
+            verdict = pane_guard.evaluate_instance_guard(cmd, "lead", cwd=str(home.parent))
+            assert verdict is not None and not verdict.allowed, cmd
+            assert verdict.rule == "instance_guard:protected_data_home"
+
+    def test_python_heredoc_read_only_allowed(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        home = pathlib.Path("/tmp/py_heredoc_read").resolve()
+        monkeypatch.setenv("TAKKUB_PROTECTED_DATA_HOMES", str(home))
+        cmd = f"python - <<'EOF'\nprint(open('{home.as_posix()}/runtime/port').read())\nEOF"
+        verdict = pane_guard.evaluate_instance_guard(cmd, "lead", cwd=str(home.parent))
+        assert verdict is None or verdict.allowed
+
+    def test_non_python_heredoc_mentioning_write_is_data(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        home = pathlib.Path("/tmp/py_heredoc_data").resolve()
+        monkeypatch.setenv("TAKKUB_PROTECTED_DATA_HOMES", str(home))
+        cmd = (
+            "gh issue comment 1 --body-file - <<'EOF'\n"
+            f"repro: open('{home.as_posix()}/projects.json', 'w')\nEOF"
+        )
+        verdict = pane_guard.evaluate_instance_guard(cmd, "lead", cwd=str(home.parent))
+        assert verdict is None or verdict.allowed

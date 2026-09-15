@@ -2708,6 +2708,32 @@ _PYTHON_INLINE_WRITE = re.compile(
     r"""(?:python[0-9.]*(?:\.exe)?|pythonw[0-9.]*(?:\.exe)?|py(?:\.exe)?)\s+[^;&|]*-c\s+["'](?P<code>.+)["']""",
     re.I,
 )
+# File-mutating calls inside Python source handed to an interpreter — shared by
+# the `python -c "..."` check and the `python - <<'EOF'` heredoc check below.
+_PYTHON_WRITE_CALL_RE = re.compile(
+    r"""open\s*\([^)]*['"](?:w|a|r\+|w\+|x)|(?:\.write_text|\.write_bytes|\.unlink|\.rmdir)\s*\(|os\.(?:remove|unlink|rmdir|rename|replace)\s*\(|shutil\.(?:rmtree|move|copy)\s*\(""",
+    re.I,
+)
+# A Python interpreter on the heredoc's introducer line (`python - <<'EOF'`,
+# `py <<EOF`). `_strip_heredoc_bodies` blanks those bodies as data for the
+# command-pattern checks — but Python EXECUTES them, so a write into a
+# protected DATA_HOME from such a body must still be caught (#633).
+_PYTHON_HEREDOC_SINK = re.compile(
+    r"(?<![\w-])(?:python[0-9.]*|pythonw[0-9.]*|py)(?:\.exe)?(?![\w.-])", re.I
+)
+
+
+def _python_heredoc_bodies(cmd: str) -> list[str]:
+    """Bodies of heredocs whose introducer line runs a Python interpreter."""
+    if "<<" not in cmd:
+        return []
+    bodies: list[str] = []
+    for match in _HEREDOC.finditer(cmd):
+        line_start = cmd.rfind("\n", 0, match.start()) + 1
+        if _PYTHON_HEREDOC_SINK.search(cmd[line_start : match.start()]):
+            bodies.append(match.group("body"))
+    return bodies
+
 
 _CANDIDATE_BOOT_RE = re.compile(r"agent[-_]takkub", re.I)
 _CANDIDATE_KILL_RE = re.compile(
@@ -2775,6 +2801,24 @@ def evaluate_instance_guard(
     cmd = (command or "").strip()
     if not cmd:
         return None
+
+    # #633: Python heredoc bodies are EXECUTED, not data — check them for writes
+    # into a protected DATA_HOME before `_strip_heredoc_bodies` blanks them (the
+    # pre-filter below would otherwise never see them). Protected homes are only
+    # resolved when a body actually contains a file-mutating call.
+    for body in _python_heredoc_bodies(cmd):
+        if not _PYTHON_WRITE_CALL_RE.search(body):
+            continue
+        for lit in re.findall(r"""['"]([^'"\r\n]+)['"]""", body):
+            in_prot, prot_home = is_in_protected_data_home(
+                lit, cwd=cwd, own_home=own_home, protected_homes=protected_homes
+            )
+            if in_prot:
+                return Verdict(
+                    False,
+                    rule="instance_guard:protected_data_home",
+                    reason=f"ห้ามรัน Python code เขียนหรือลบไฟล์ใน Protected DATA_HOME ({prot_home}) (#633)",
+                )
 
     cmd = _strip_heredoc_bodies(cmd)
 
