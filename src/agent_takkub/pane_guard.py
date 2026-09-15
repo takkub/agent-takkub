@@ -2682,6 +2682,20 @@ def _split_args_tokens(args_str: str) -> list[str]:
     return [m.group(0).strip("\"'") for m in re.finditer(r"""[^\s"']+|"[^"]*"|'[^']*'""", args_str)]
 
 
+_WIN_CLI_SWITCH_RE = re.compile(r"^/[A-Za-z?]{1,4}(:[^/\\]*)?$")
+
+
+def _is_cli_switch(token: str) -> bool:
+    """Check if token is a CLI flag/switch (e.g. -f, --recursive, or Windows switch /F, /Q, /PID, /A:D).
+    Tokens starting with '/' that contain further slashes or do not match Windows switch syntax
+    are treated as potential filesystem paths (e.g. POSIX paths /tmp/foo, /var/log)."""
+    if not token:
+        return False
+    if token.startswith("-"):
+        return True
+    return bool(_WIN_CLI_SWITCH_RE.match(token))
+
+
 def evaluate_instance_guard(
     command: str,
     role: str | None = None,
@@ -2857,7 +2871,7 @@ def evaluate_instance_guard(
                 args = m.group("args")
                 tokens = _split_args_tokens(args)
                 for t in tokens:
-                    if t.startswith(("-", "/")):
+                    if _is_cli_switch(t):
                         continue
                     in_prot, prot_home = is_in_protected_data_home(
                         t, cwd=cwd, own_home=own_home, protected_homes=prot_homes
@@ -2874,7 +2888,7 @@ def evaluate_instance_guard(
                 args = m.group("args")
                 tokens = _split_args_tokens(args)
                 for t in tokens:
-                    if t.startswith(("-", "/")):
+                    if _is_cli_switch(t):
                         continue
                     in_prot, prot_home = is_in_protected_data_home(
                         t, cwd=cwd, own_home=own_home, protected_homes=prot_homes
@@ -2902,7 +2916,7 @@ def evaluate_instance_guard(
                             reason=f"ห้ามคัดลอกไฟล์ไปยังปลายทางใน Protected DATA_HOME ({prot_home}): {dest} (#633)",
                         )
                 else:
-                    tokens = [t for t in _split_args_tokens(args) if not t.startswith(("-", "/"))]
+                    tokens = [t for t in _split_args_tokens(args) if not _is_cli_switch(t)]
                     if len(tokens) >= 2:
                         dest = tokens[-1]
                         in_prot, prot_home = is_in_protected_data_home(
@@ -2920,7 +2934,7 @@ def evaluate_instance_guard(
                 args = m.group("args")
                 tokens = _split_args_tokens(args)
                 for t in tokens:
-                    if t.startswith(("-", "/")):
+                    if _is_cli_switch(t):
                         continue
                     in_prot, prot_home = is_in_protected_data_home(
                         t, cwd=cwd, own_home=own_home, protected_homes=prot_homes

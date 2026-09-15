@@ -160,6 +160,9 @@ class TestProtectedDataHomeMutation633:
             "git -C '{foreign}' log -n 1",
             "echo 'safe' > ./own_output.txt",
             "rm ./own_temp.txt",
+            "del /F /Q ./own_temp.txt",
+            "rmdir /S /Q ./own_temp_dir",
+            "taskkill /F /PID 999999",
         ],
     )
     def test_reads_and_own_mutations_allowed(self, mock_instance_env, sub_cmd: str) -> None:
@@ -167,6 +170,26 @@ class TestProtectedDataHomeMutation633:
         cmd = sub_cmd.format(foreign=foreign_home.as_posix())
         verdict = pane_guard.classify(cmd, "lead", cwd=str(own_home))
         assert verdict.allowed, f"Should allow read or own file: {cmd}: {verdict.reason}"
+
+    @pytest.mark.parametrize(
+        "cmd",
+        [
+            "rm /tmp/foreign_posix_test/projects.json",
+            "mv '/tmp/foreign_posix_test/projects.json' ./backup.json",
+            "cp ./temp.json '/tmp/foreign_posix_test/projects.json'",
+            "Set-Content -Path '/tmp/foreign_posix_test/projects.json' -Value '{}'",
+            "Out-File -FilePath '/tmp/foreign_posix_test/projects.json'",
+            "echo ok && rm -rf '/tmp/foreign_posix_test'",
+        ],
+    )
+    def test_posix_style_paths_denied(self, monkeypatch: pytest.MonkeyPatch, cmd: str) -> None:
+        """Verify that absolute POSIX-style paths (/tmp/...) are NOT skipped as switches
+        and are denied when targeting a protected DATA_HOME (#633)."""
+        prot_home = pathlib.Path("/tmp/foreign_posix_test").resolve()
+        monkeypatch.setenv("TAKKUB_PROTECTED_DATA_HOMES", str(prot_home))
+        verdict = pane_guard.classify(cmd, "lead")
+        assert not verdict.allowed, f"Should deny mutation for posix-style path: {cmd}"
+        assert verdict.rule == "instance_guard:protected_data_home"
 
     def test_path_under_own_home_and_worktrees_not_protected(
         self, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
