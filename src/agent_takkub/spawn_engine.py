@@ -1023,6 +1023,15 @@ class PaneState:
     # giving `takkub ma` one line per stretch to explain the skip. Cleared
     # back to "" the moment the pane is no longer in either blocked state.
     proactive_compact_busy_logged: str = ""
+    # proactive_compact_not_ready_since (#614): wall-clock when the CURRENT
+    # not-ready stretch for this pane began (seeded on the first
+    # not-ready tick of a stretch, cleared the first tick the pane is
+    # observed back at its ready prompt). Lets the proactive-compact
+    # watchdog tell "went not-ready right after an injection the cockpit
+    # itself made into Lead" (hold the idle clock) apart from "genuinely
+    # started new work" (reset it) — see orchestrator._check_proactive_compact
+    # and PROACTIVE_COMPACT_INJECT_HOLD_AFTER_S. None = no active stretch.
+    proactive_compact_not_ready_since: float | None = None
     # ── stuck-tool watchdog (#308) ───────────────────────────────────────
     # tool_stuck_escalated: True from the tick a ProviderSpec.tool_running_
     # markers hit has sat on screen for TOOL_STUCK_TIMEOUT_SEC with no other

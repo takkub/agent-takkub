@@ -703,7 +703,20 @@ claude_spec = ProviderSpec(
     # but claude.exe itself still runs on a bundled node runtime, so a plain
     # `node` child is the one scaffolding process actually confirmed under
     # it (#272).
-    scaffolding_process_names=("node.exe", "node"),
+    #
+    # #619: the CLI's own process (claude.exe / claude) stands in this pane's
+    # tree at every close BY CONSTRUCTION — a done pane auto-closes 2.5 s
+    # after `takkub done` while the CLI that ran the whole turn is still
+    # there, the exact self-reference #286 already documents for `takkub`
+    # itself. Anything else would warn "about to be killed" on EVERY done.
+    # Both spellings listed though normalize_process_name strips ".exe", so
+    # the list is self-documenting.
+    scaffolding_process_names=(
+        "node.exe",
+        "node",
+        "claude.exe",
+        "claude",
+    ),
 )
 
 
@@ -935,6 +948,12 @@ codex_spec = ProviderSpec(
     # spawn_engine's own PowerShell discovery falls back to it when `pwsh` is
     # absent from PATH — a machine without PowerShell 7 must get the same
     # silence, not a warning every close.
+    #
+    # #619: the CLI's own process (codex.exe / codex) is in this pane's tree
+    # at every close by construction (same self-reference as #286/takkub and
+    # claude's entry above) — without it, every codex `done` close warned
+    # "about to be killed" once psutil enumerates the real EXE (not the .cmd
+    # shim that resolves to cmd.exe/node.exe anyway).
     scaffolding_process_names=(
         "node.exe",
         "node",
@@ -944,6 +963,8 @@ codex_spec = ProviderSpec(
         "pwsh",
         "powershell.exe",
         "powershell",
+        "codex.exe",
+        "codex",
     ),
 )
 
@@ -1141,6 +1162,12 @@ gemini_spec = ProviderSpec(
     feedback_prompt_markers=("how's the cli experience so far", "cli experience so far"),
     feedback_prompt_skip_key="0\r",
     auto_skip_feedback=True,
+    # #619: the CLI's own process (agy.exe / agy) is in this pane's tree at
+    # every close by construction (same self-reference as #286/takkub and
+    # claude's entry above). No other helper process has been confirmed under
+    # a live agy pane yet (#272 evidence discipline — the CLI is a static Go
+    # binary with no bundled runtime).
+    scaffolding_process_names=("agy.exe", "agy"),
 )
 
 
@@ -1229,7 +1256,20 @@ opencode_spec = ProviderSpec(
     # opencode-ai is npm-installed (same shim shape as claude/codex), so a
     # `node` child is expected scaffolding, not evidence of unfinished work
     # (#272).
-    scaffolding_process_names=("node.exe", "node"),
+    #
+    # #619 (ORIGINAL report): the CLI's own process (opencode.exe / opencode)
+    # was flagged as "still running" on EVERY opencode `done` close — it is
+    # in this pane's tree by construction (same self-reference as
+    # #286/takkub). Live evidence 2026-09-15: `done_close_deferred_live_children`
+    # children=["opencode.exe"], notice "ยังมี 1 subprocess (opencode.exe)
+    # เลื่อนปิดสูงสุด 15 นาที", then "about to be killed (opencode.exe)" —
+    # two false negatives for zero real unfinished work.
+    scaffolding_process_names=(
+        "node.exe",
+        "node",
+        "opencode.exe",
+        "opencode",
+    ),
 )
 
 
@@ -1351,7 +1391,19 @@ kimi_spec = ProviderSpec(
     # interpreter (uv shims resolve to a python entry point), so a `python`
     # child is expected scaffolding under a live kimi pane, not evidence of
     # unfinished work (#272).
-    scaffolding_process_names=("python.exe", "python", "python3"),
+    #
+    # #619: the CLI's own process (kimi.exe / kimi) is in this pane's tree at
+    # every close by construction (same self-reference as #286/takkub).
+    # ./kimi.cmd is a batch shim whose cmd.exe is already covered by the
+    # Windows-universal baseline; the concrete EXE entry below is what psutil
+    # reports for the real uv shim binary.
+    scaffolding_process_names=(
+        "python.exe",
+        "python",
+        "python3",
+        "kimi.exe",
+        "kimi",
+    ),
 )
 
 
@@ -1448,6 +1500,23 @@ cursor_spec = ProviderSpec(
     # uncalibrated_providers() (empty ready_rules), so display_state already
     # reads "unknown" for it ahead of any quota tier anyway.
     quota_markers=(),
+    # #619: the CLI's own process is in this pane's tree at every close by
+    # construction (same self-reference as #286/takkub). Cursor's installer
+    # installs the binary literally as `agent`, so both that and the
+    # `cursor-agent` alias the spec discovers are cut here. ⚠ `agent` is a
+    # dangerously generic name — listed anyway because CONSTANCY is the #272
+    # discriminator: under a live cursor pane it is THE CLI, present on every
+    # single close, while genuine finished-work leftovers vary. A real worker
+    # process that happened to be literally named `agent` would be masked,
+    # but no such child has been observed under a cursor pane (and the value
+    # side — no false "about to be killed" on cursor closes — outweighs the
+    # theoretical miss).
+    scaffolding_process_names=(
+        "agent.exe",
+        "agent",
+        "cursor-agent.exe",
+        "cursor-agent",
+    ),
 )
 
 
