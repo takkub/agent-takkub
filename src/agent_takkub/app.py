@@ -54,6 +54,14 @@ def _boot_log(msg: str) -> None:
             pass
 
 
+# #631: interpreter-exit control flow, never a cockpit bug. A Ctrl+C in the
+# launching terminal surfaces as KeyboardInterrupt (sometimes inside a Qt
+# slot/lambda — cf. boot_flow_window's `resultReady` handler — where it
+# escapes through the exception hook), and SystemExit is an intentional exit.
+# Both used to be filed as severity-high auto-issues.
+_EXIT_EXCEPTIONS: tuple[type[BaseException], ...] = (KeyboardInterrupt, SystemExit)
+
+
 def _log_unhandled(exc_type, exc_value, exc_tb, *, source: str) -> None:
     import traceback
 
@@ -65,9 +73,14 @@ def _log_unhandled(exc_type, exc_value, exc_tb, *, source: str) -> None:
     except Exception:
         pass
     try:
-        from .auto_issue_capture import capture_cockpit_crash
+        # #631: KeyboardInterrupt/SystemExit are process-control events, not
+        # crashes — log (above) but never file an auto-issue. Filtered in this
+        # one helper that sys.excepthook, threading.excepthook AND
+        # unraisablehook all funnel through, so no path can bypass it.
+        if exc_type is None or not issubclass(exc_type, _EXIT_EXCEPTIONS):
+            from .auto_issue_capture import capture_cockpit_crash
 
-        capture_cockpit_crash(exc_type, exc_value, exc_tb, source=source)
+            capture_cockpit_crash(exc_type, exc_value, exc_tb, source=source)
     except Exception:
         pass
 
@@ -770,6 +783,41 @@ def _install_signal_handlers(window: MainWindow) -> None:
                 pass
 
 
+# #631: Ctrl+C between process start and `_install_signal_handlers` — i.e.
+# while the boot-flow wizard (or the headless auto-migrate gate) is on screen —
+# used to surface as a KeyboardInterrupt with NO graceful handler installed. It
+# escaped through the non-default sys.excepthook (→ filed as a severity-high
+# auto-issue) and was then swallowed, so the cockpit just kept booting. These two
+# hooks close that window: the signal requests a graceful quit instead.
+_quit_requested = False
+
+
+def _request_quit() -> None:
+    """Idempotent "shut the app down" flag, set from the boot-phase signal
+    handler. main() checks it after the boot flow so a Ctrl+C during the wizard
+    aborts the boot (never constructing a MainWindow it's about to tear down)."""
+    global _quit_requested
+    _quit_requested = True
+    app = QApplication.instance()
+    if app is not None:
+        app.quit()
+
+
+def _install_boot_phase_signal_handlers() -> None:
+    """Route SIGINT / SIGTERM / SIGBREAK to a graceful quit BEFORE the boot-flow
+    wizard exists. The full teardown handler in `_install_signal_handlers`
+    re-registers the same three signals once the MainWindow is live, replacing
+    these stubs."""
+    for sig_name in ("SIGINT", "SIGTERM", "SIGBREAK"):
+        sig = getattr(signal, sig_name, None)
+        if sig is not None:
+            try:
+                signal.signal(sig, lambda _sig, _frame: _request_quit())
+            except (ValueError, OSError):
+                # not all signals are settable on all platforms
+                pass
+
+
 def _check_cli_bin_present() -> None:
     """Installed builds must find a real ``takkub`` binary in
     ``config.CLI_BIN_DIR`` — that's the dir every spawned pane's PATH is
@@ -978,7 +1026,7 @@ def _boot_main_window() -> MainWindow:
         # surface is skipped, logged to the boot log instead.
         _run_auto_migrate_headless()
         return MainWindow()
-    return run_boot_flow_gate(MainWindow)
+    return run_boot_flow_gate(MainWindow, quit_requested=lambda: _quit_requested)
 
 
 def _run_auto_migrate_headless() -> None:
@@ -1057,6 +1105,10 @@ def main(argv: list[str] | None = None) -> int:
     from .config import ensure_gui_path
 
     ensure_gui_path()
+    # #631: install the Ctrl+C/termination handlers before the boot-flow wizard,
+    # so a keypress during boot quits cleanly instead of being swallowed as a
+    # KeyboardInterrupt by the exception guard (and filed as an auto-issue).
+    _install_boot_phase_signal_handlers()
     # Layer C: silent fast-forward pull before UI starts.  If a pull
     # succeeds, os.execv re-execs into the new code — execution never
     # reaches the next line.  Any failure returns False silently.
@@ -1109,6 +1161,10 @@ def main(argv: list[str] | None = None) -> int:
         ):
             _boot_log("[single-instance] restart successor — predecessor exited, lock acquired")
             w = _boot_main_window()
+            if _quit_requested:
+                # #631: Ctrl+C/SIGTERM landed during the boot flow — abort before
+                # wiring a window we were just asked to close.
+                return 0
             _install_signal_handlers(w)
             _start_deadman_watchdog(w)
             w.show()
@@ -1256,6 +1312,13 @@ def main(argv: list[str] | None = None) -> int:
                     return 1
 
     w = _boot_main_window()
+    if _quit_requested:
+        # #631: Ctrl+C/SIGTERM landed during the boot-flow wizard (or the
+        # headless migrate gate). The MainWindow constructor merely SCHEDULES
+        # pane spawns on the event loop, so nothing has been spawned and there
+        # is nothing to tear down — quit cleanly instead of spinning up a window
+        # that was just asked to close.
+        return 0
     _install_signal_handlers(w)
     _start_deadman_watchdog(w)
     # #297: report cockpit defects that never raise. The crash hook above only

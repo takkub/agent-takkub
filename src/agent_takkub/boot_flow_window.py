@@ -2299,11 +2299,20 @@ def _circle_icon(bg: str, check: bool = False, warn: bool = False) -> QWidget:
     return icon
 
 
-def run_boot_flow_gate(main_window_factory: Callable[[], Any]) -> Any:
+def run_boot_flow_gate(
+    main_window_factory: Callable[[], Any],
+    quit_requested: Callable[[], bool] | None = None,
+) -> Any:
     """Show the wizard, run it to completion via a local `QEventLoop` (never
     a nested `QApplication.exec()`), then construct and return the main
     window — or exit the process if the user explicitly chose to close the
-    program rather than migrate (page B's "close program" button)."""
+    program rather than migrate (page B's "close program" button).
+
+    ``quit_requested`` is a polling predicate (typically registers at least
+    SIGINT/SIGTERM/SIGBREAK): while the wizard's modal loop runs, a QTimer
+    checks it every 100 ms and, when it turns True, closes the gate the same
+    way the "close program" button does — clean exit(0), never a late
+    KeyboardInterrupt surfacing through the wizard's worker lambdas (#631)."""
     from PyQt6.QtCore import QEventLoop
 
     wizard = BootFlowWindow()
@@ -2314,10 +2323,24 @@ def run_boot_flow_gate(main_window_factory: Callable[[], Any]) -> Any:
         result["proceed"] = proceed
         loop.quit()
 
+    def _poll_quit() -> None:
+        if quit_requested is not None and quit_requested():
+            result["proceed"] = False
+            loop.quit()
+
     wizard.flowFinished.connect(_on_finished)
+    if quit_requested is not None:
+        poll_timer = QTimer()
+        poll_timer.setInterval(100)
+        poll_timer.timeout.connect(_poll_quit)
+        poll_timer.start()
+    else:
+        poll_timer = None
     wizard.show()
     QTimer.singleShot(0, wizard.start)
     loop.exec()
+    if poll_timer is not None:
+        poll_timer.stop()
     if not result["proceed"]:
         sys.exit(0)
     return main_window_factory()

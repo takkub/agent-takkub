@@ -59,4 +59,31 @@ class TestBootMainWindowGate:
         monkeypatch.setattr("agent_takkub.boot_flow_window.run_boot_flow_gate", gate)
         result = app_mod._boot_main_window()
         assert result is sentinel
-        gate.assert_called_once_with(app_mod.MainWindow)
+        # #631: the gate must be given the boot-phase quit-request predicate so
+        # a Ctrl+C during the wizard aborts boot instead of being swallowed.
+        assert gate.call_args.args == (app_mod.MainWindow,)
+        assert callable(gate.call_args.kwargs["quit_requested"])
+
+    def test_boot_phase_quit_request_disarms_boot(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """#631: a Ctrl+C during the boot-phase signal-window (before
+        `_install_signal_handlers`) must set `_quit_requested` and the
+        predicate handed to the boot-flow gate must report it, so the wizard
+        aborts the boot instead of surfacing a swallowed KeyboardInterrupt."""
+        monkeypatch.delenv("TAKKUB_BOOT_UPDATE", raising=False)
+        monkeypatch.setattr(app_mod, "_quit_requested", False)
+        monkeypatch.setattr(
+            app_mod, "QApplication", type("QApp", (), {"instance": staticmethod(lambda: None)})
+        )
+        captured: dict = {}
+
+        def _fake_gate(factory, quit_requested=None):
+            captured["factory"] = factory
+            captured["quit_requested"] = quit_requested
+
+        monkeypatch.setattr("agent_takkub.boot_flow_window.run_boot_flow_gate", _fake_gate)
+        monkeypatch.setattr(app_mod, "MainWindow", object)
+        app_mod._boot_main_window()
+        assert captured["quit_requested"]() is False
+        app_mod._request_quit()
+        assert app_mod._quit_requested is True
+        assert captured["quit_requested"]() is True
