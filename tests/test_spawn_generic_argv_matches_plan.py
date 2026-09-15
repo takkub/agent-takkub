@@ -89,7 +89,7 @@ def _spawn_codex_and_capture_argv(qapp, monkeypatch, tmp_path) -> list[str]:
         patch("agent_takkub.spawn_engine.sys.platform", "win32"),
         patch("agent_takkub.provider_config.effective_provider_for", return_value=CODEX),
         patch("agent_takkub.codex_helper.find_codex_executable", return_value="codex"),
-        patch("agent_takkub.codex_agents_md.ensure_agents_md"),
+        patch("agent_takkub.codex_agents_md.ensure_agents_md", return_value=(True, "written")),
         patch("agent_takkub.orchestrator.inject_user_profile_env"),
         # Force a real --model flag into the argv (default test env has no
         # role/provider model configured, which would leave model_argv empty
@@ -138,3 +138,83 @@ def test_assemble_generic_argv_reproduces_live_branch_argv(qapp, monkeypatch, tm
         f"live:        {real_argv}\n"
         f"reassembled: {reassembled}"
     )
+
+
+def _assign_codex_and_capture_paste(
+    qapp, monkeypatch, tmp_path, *, ensure_agents_md_return: tuple[bool, str]
+) -> str:
+    """Same generic-codex fresh-spawn scaffolding as
+    `_spawn_codex_and_capture_argv`, but driven through `assign()` (not a
+    bare `spawn()`) so the #621 M3 fallback — prepend the language directive
+    to the delivered paste text when `ensure_agents_md` reports a user-owned
+    AGENTS.md — is exercised end to end, same as a real Lead `takkub assign`
+    onto a fresh codex pane would."""
+    from agent_takkub import shared_dev_tools as sdt
+    from agent_takkub.provider_config import CODEX
+
+    orch = _make_orchestrator(qapp, monkeypatch)
+    pane = _make_codex_pane()
+    orch._panes_by_project[TEST_PROJECT] = {"codex": pane}
+    monkeypatch.setattr(sdt, "SHARED_MCP_FILE", tmp_path / "shared-mcp.json")
+
+    pty_spawn_calls: list[dict] = []
+
+    with (
+        patch.object(orch, "_is_spawn_blocked", return_value=False),
+        patch.object(orch, "_final_gate_clear", return_value=True),
+        patch("agent_takkub.orchestrator.PtySession") as mock_pty_cls,
+        patch("agent_takkub.orchestrator.QTimer.singleShot"),
+        patch("agent_takkub.orchestrator._build_pane_env", return_value={}),
+        patch("agent_takkub.spawn_engine.sys.platform", "win32"),
+        patch("agent_takkub.provider_config.effective_provider_for", return_value=CODEX),
+        patch("agent_takkub.codex_helper.find_codex_executable", return_value="codex"),
+        patch(
+            "agent_takkub.codex_agents_md.ensure_agents_md",
+            return_value=ensure_agents_md_return,
+        ),
+        patch("agent_takkub.spawn_engine._cwd_within_project", return_value=True),
+        patch("agent_takkub.orchestrator.inject_user_profile_env"),
+        patch("agent_takkub.provider_models.model_for", return_value="gpt-5-codex"),
+        patch("agent_takkub.mcp_bridge._codex_resolved_mcp_names", return_value=["demo"]),
+        patch("agent_takkub.mcp_bridge.mcp_argv_for_provider", return_value=FAKE_MCP_ARGV),
+        patch("agent_takkub.mcp_bridge.describe_mcp_handshake", return_value={}),
+        patch("agent_takkub.task_ledger.create_assignment", return_value=None),
+        patch.object(orch, "_send_when_ready") as mock_send,
+    ):
+        mock_pty = MagicMock()
+        mock_pty.spawn.side_effect = lambda **kw: pty_spawn_calls.append(kw)
+        mock_pty_cls.return_value = mock_pty
+        pane.attach_session = MagicMock()
+
+        ok, msg = orch.assign(
+            "codex",
+            cwd=str(tmp_path),
+            task="[ROLE: codex]\ndo the thing",
+            project=TEST_PROJECT,
+        )
+
+    assert ok is True, msg
+    assert pty_spawn_calls, "PtySession.spawn was not called"
+    mock_send.assert_called_once()
+    return mock_send.call_args.args[1]
+
+
+def test_user_owned_agents_md_prepends_language_directive_to_delivered_paste(
+    qapp, monkeypatch, tmp_path
+):
+    paste_text = _assign_codex_and_capture_paste(
+        qapp, monkeypatch, tmp_path, ensure_agents_md_return=(False, "user-owned")
+    )
+    assert paste_text.startswith("[ภาษาที่ตอบ (#621)]")
+    assert paste_text.count("ภาษาที่ตอบ (#621)") == 1
+
+
+def test_managed_agents_md_does_not_duplicate_directive_in_delivered_paste(
+    qapp, monkeypatch, tmp_path
+):
+    paste_text = _assign_codex_and_capture_paste(
+        qapp, monkeypatch, tmp_path, ensure_agents_md_return=(True, "written")
+    )
+    # directive already lives in the AGENTS.md file ensure_agents_md just
+    # wrote — the delivered paste must not carry a second copy.
+    assert "ภาษาที่ตอบ (#621)" not in paste_text
