@@ -156,6 +156,20 @@ def _stage_assets() -> None:
                 dst.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(f, dst)
 
+    # Report builder kit (assets/report/* — #626): HTML template + mobile/tables
+    # checker scripts used by `takkub report build`. report_builder.py reads the
+    # template from `_assets/report/` on an installed build and from the repo-root
+    # `assets/report/` in a dev checkout (see its `_report_asset_root`), so the
+    # source of truth stays committed at the repo root next to the icons.
+    report_src = _ROOT / "assets" / "report"
+    if report_src.is_dir():
+        for f in sorted(report_src.rglob("*")):
+            if not f.is_file():
+                continue
+            dst = _ASSETS / "report" / f.relative_to(report_src)
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(f, dst)
+
     _assert_no_home_path_leak()
 
 

@@ -1,6 +1,6 @@
 {
   "generated_by": "grimp 3.14",
-  "module_count": 342,
+  "module_count": 343,
   "modules": [
     {
       "module": "agent_takkub",
@@ -464,6 +464,7 @@
         "agent_takkub.provider_spec",
         "agent_takkub.qa_gate",
         "agent_takkub.release",
+        "agent_takkub.report_builder",
         "agent_takkub.resource_lock",
         "agent_takkub.routing_planner",
         "agent_takkub.services",
@@ -483,7 +484,7 @@
         "agent_takkub.__main__"
       ],
       "fan_in": 1,
-      "fan_out": 49
+      "fan_out": 50
     },
     {
       "module": "agent_takkub.cli_server",
@@ -677,6 +678,7 @@
         "agent_takkub.remote.notify",
         "agent_takkub.remote.reports",
         "agent_takkub.remote.tunnel",
+        "agent_takkub.report_builder",
         "agent_takkub.response_language",
         "agent_takkub.role_memory",
         "agent_takkub.rtk_helper",
@@ -704,7 +706,7 @@
         "agent_takkub.vault_mirror",
         "agent_takkub.worktree_manager"
       ],
-      "fan_in": 108,
+      "fan_in": 109,
       "fan_out": 1
     },
     {
@@ -4139,6 +4141,17 @@
       ],
       "fan_in": 2,
       "fan_out": 3
+    },
+    {
+      "module": "agent_takkub.report_builder",
+      "imports": [
+        "agent_takkub.config"
+      ],
+      "imported_by": [
+        "agent_takkub.cli"
+      ],
+      "fan_in": 1,
+      "fan_out": 1
     },
     {
       "module": "agent_takkub.resource_governor",

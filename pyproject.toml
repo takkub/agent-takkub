@@ -82,6 +82,10 @@ agent_takkub = [
     "_assets/.claude/agents/*.md",
     "_assets/capabilities/skills/*/SKILL.md",
     "_assets/docs/lead/*.md",
+    # Report builder kit (#626) — template + mobile/tables checks, staged by
+    # setup.py from repo-root assets/report/. report_builder.py reads it from
+    # here on an installed build (dev checkout reads the repo-root source).
+    "_assets/report/*",
     # remote/ (P0 scaffold) mobile PWA — glob stays empty (no error) until
     # P1 adds files; deleting remote/ makes it empty again, build still works.
     "remote/static/*",
