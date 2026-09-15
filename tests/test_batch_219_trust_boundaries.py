@@ -17,11 +17,26 @@ from agent_takkub import pane_guard, qa_gate
         'pwsh -c "git restore ."',
         "git.exe restore .",
         "git -c alias.discard=restore discard .",
+        # #609 H2 round 2: wrapper unwrap used to only fire at position zero
+        # of the whole raw command — a chained or `rtk`-prefixed wrapper
+        # sailed through unrecognised.
+        "echo x && cmd /c git restore .",
+        'echo x; pwsh -c "git restore ."',
+        "rtk proxy cmd /c git stash",
     ],
 )
 def test_wrapped_shared_restore_must_be_denied(command):
     verdict = pane_guard.classify(command, "frontend", cwd="C:/shared project")
     assert not verdict.allowed, command
+
+
+def test_wrapper_text_inside_a_quoted_argument_is_not_unwrapped():
+    # `cmd /c` appearing only as a string literal (an argument to `echo`,
+    # never invoked) must not be mistaken for an actual wrapper invocation.
+    verdict = pane_guard.classify(
+        'echo "cmd /c git restore ."', "frontend", cwd="C:/shared project"
+    )
+    assert verdict.allowed
 
 
 def test_worktree_cwd_does_not_authorize_shared_target():

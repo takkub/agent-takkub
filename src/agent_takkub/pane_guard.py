@@ -1660,9 +1660,6 @@ def _push_is_own_worktree_branch(cmd: str, role: str | None) -> bool:
 # destructive command spelled behind one of these shell wrappers sailed
 # straight through unrecognised (confirmed live: `cmd /c git restore .` and
 # `pwsh -c "git restore ."` both bypassed the restore guard outright).
-# Anchored to the WHOLE command (not mid-chain) — good enough for the shape
-# these wrappers are actually invoked in; a `foo && cmd /c ...` chain is not
-# unwrapped, a known/accepted gap.
 _SHELL_WRAPPER_RE = re.compile(
     r"^\s*(?:cmd(?:\.exe)?(?:\s+/[A-Za-z]+)*\s+/c\s+"
     r"|pwsh(?:\.exe)?(?:\s+-[\w-]+)*\s+(?:-c|-Command)\s+"
@@ -1672,18 +1669,85 @@ _SHELL_WRAPPER_RE = re.compile(
     re.I | re.S,
 )
 
+# #609 H2 round 2: the wrapper regex above was only ever applied to the
+# WHOLE raw command, so `foo && cmd /c git restore .` and `rtk proxy cmd /c
+# git stash` sailed through unrecognised — the wrapper never sat at true
+# start-of-string, it sat after a chain separator or the `rtk`/`rtk proxy`
+# prefix (proven live: `pane_guard.classify` on both shapes still ALLOWed a
+# shared-tree `git restore`/`git stash`). Every rule below already tolerates
+# a wrapper anywhere a *segment* can start (`_CMD_START` = start-of-string,
+# after `&&`/`||`/`;`/`|`/newline, or after `sudo `) — this now unwraps at
+# each of those positions too, not just position zero of the whole string.
+_SEG_RTK_PREFIX_RE = re.compile(
+    r"^\s*rtk(?:\.(?:exe|cmd|bat|ps1))?(?![\w-])\s+(?:proxy(?![\w-])\s+)?", re.I
+)
+_SEG_SUDO_PREFIX_RE = re.compile(r"^\s*sudo\s+", re.I)
+_SEG_TIME_PREFIX_RE = re.compile(r"^\s*time\s+", re.I)
+_SEG_ENV_PREFIX_RE = re.compile(r"^\s*env\s+(?:[A-Za-z_]\w*=(?:\"[^\"]*\"|'[^']*'|\S*)\s+)*", re.I)
+_SEG_PREFIX_PATTERNS = (
+    _SEG_RTK_PREFIX_RE,
+    _SEG_SUDO_PREFIX_RE,
+    _SEG_TIME_PREFIX_RE,
+    _SEG_ENV_PREFIX_RE,
+)
 
-def _unwrap_shell_wrappers(cmd: str, _depth: int = 0) -> str:
-    """Peel off up to 3 layers of recognised shell/interpreter wrapper so
-    every rule below sees the command that actually runs, not the wrapper
-    invoking it (#609 H2)."""
-    if _depth >= 3:
-        return cmd
-    m = _SHELL_WRAPPER_RE.match(cmd)
+# Quote-aware split of a command into chain segments on top-level
+# `&&`/`||`/`;`/`|`/newline — the alternatives before the `sep` group consume
+# a whole quoted string atomically so a separator CHARACTER inside a quoted
+# argument (`echo "cmd /c git restore ."`, no chain operator at all here,
+# but the same machinery would also protect `echo "a && b" && cmd /c ...`)
+# is never mistaken for a split point.
+_CHAIN_SEP_RE = re.compile(r'"(?:[^"\\]|\\.)*"' r"|'[^']*'" r"|(?P<sep>\r\n|\n|\|\||&&|[;|&])")
+
+
+def _split_chain_segments(cmd: str) -> list[str]:
+    """Split *cmd* into `[seg0, sep0, seg1, sep1, ..., segN]` — always starts
+    and ends with a (possibly empty) segment, separators verbatim so
+    rejoining with `"".join(...)` reproduces *cmd* unchanged."""
+    parts: list[str] = []
+    pos = 0
+    for m in _CHAIN_SEP_RE.finditer(cmd):
+        sep = m.group("sep")
+        if sep is None:
+            continue  # matched a quoted string, not a split point
+        parts.append(cmd[pos : m.start()])
+        parts.append(sep)
+        pos = m.end()
+    parts.append(cmd[pos:])
+    return parts
+
+
+def _unwrap_segment(segment: str, _depth: int = 0) -> str:
+    """Peel off up to 4 layers of `rtk [proxy]`/`sudo`/`time`/`env VAR=x`
+    prefix plus one recognised shell/interpreter wrapper from a single chain
+    segment, recursively (#609 H2). Returns *segment* unchanged when no
+    wrapper is present — losing a plain prefix on an unwrapped segment is
+    harmless since `_CMD_START` already treats the prefix as optional."""
+    if _depth >= 4:
+        return segment
+    stripped = segment
+    while True:
+        for pattern in _SEG_PREFIX_PATTERNS:
+            m = pattern.match(stripped)
+            if m and m.end() > 0:
+                stripped = stripped[m.end() :]
+                break
+        else:
+            break
+    m = _SHELL_WRAPPER_RE.match(stripped)
     if not m:
-        return cmd
+        return segment
     inner = _strip_matching_quotes(m.group("body"))
-    return _unwrap_shell_wrappers(inner, _depth + 1)
+    return _unwrap_segment(inner, _depth + 1)
+
+
+def _unwrap_shell_wrappers(cmd: str) -> str:
+    """Unwrap a recognised shell/interpreter wrapper in EVERY chain segment
+    of *cmd* (#609 H2), not just at position zero of the whole string."""
+    parts = _split_chain_segments(cmd)
+    for i in range(0, len(parts), 2):
+        parts[i] = _unwrap_segment(parts[i])
+    return "".join(parts)
 
 
 # #609 H2: `-c alias.<name>=<value>` defines a git alias inline, on the same
