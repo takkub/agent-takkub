@@ -1934,7 +1934,21 @@ GENERIC_SCAFFOLDING_PROCESS_NAMES_WIN32: tuple[str, ...] = ("cmd.exe", "conhost.
 # CONSTRUCTION. Warning Lead that the cockpit is about to kill the very
 # call that triggered the warning is pure self-reference, and it is the
 # only child guaranteed to be there on every single done-close.
-GENERIC_SCAFFOLDING_PROCESS_NAMES: tuple[str, ...] = ("takkub", "takkub.exe")
+# #635: MCP tool children (node MCP servers, Playwright/chromium browsers)
+# that can be safely terminated shouldn't block the done-close. These are
+# helper processes orchestrated by the pane's own work, not real work.
+GENERIC_SCAFFOLDING_PROCESS_NAMES: tuple[str, ...] = (
+    "takkub",
+    "takkub.exe",
+    "node",
+    "node.exe",
+    "playwright",
+    "playwright.exe",
+    "chrome",
+    "chrome.exe",
+    "chromium",
+    "chromium.exe",
+)
 
 
 def normalize_process_name(name: str) -> str:
