@@ -1674,6 +1674,191 @@ class TestLeadDirectEditIssues628And625:
         assert verdict.rule == "lead_direct_edit:deep_category"
 
     @pytest.mark.parametrize(
+        "file_name",
+        [
+            "migration-plan.html",
+            "schema-plan.html",
+            "migration_notes.txt",
+            "schema.csv",
+            "schema_diagram.png",
+            "schema_export.jpg",
+        ],
+    )
+    def test_scratchpad_outside_root_nonsource_schema_migration_allowed(
+        self, tmp_path, monkeypatch, file_name: str
+    ) -> None:
+        """Non-source files (.html, .txt, .csv, .png, .jpg) outside project root
+        containing schema/migration words must be allowed (e.g. scratchpad plans).
+        Tests both Windows and POSIX path structures."""
+        repo_root = tmp_path / "proj"
+        repo_root.mkdir()
+        monkeypatch.setattr(
+            "agent_takkub.lead_context._allowed_project_roots",
+            lambda p: [repo_root.resolve()],
+        )
+        state_file = tmp_path / "state.json"
+
+        # 1. Windows / tmp_path fixture path
+        scratch_win = tmp_path / "scratchpad" / file_name
+        scratch_win.parent.mkdir(exist_ok=True)
+        v_win = pane_guard.evaluate_lead_direct_edit(
+            "Write",
+            {"file_path": str(scratch_win), "content": "<h1>Plan</h1>\n"},
+            cwd=str(repo_root),
+            project="proj",
+            scope="tiny",
+            state_file=state_file,
+        )
+        assert v_win.allowed, f"Should allow {file_name} in scratchpad (Windows path)"
+
+        # 2. POSIX path structure
+        posix_path = f"/tmp/scratchpad/{file_name}"
+        v_posix = pane_guard.evaluate_lead_direct_edit(
+            "Write",
+            {"file_path": posix_path, "content": "<h1>Plan</h1>\n"},
+            cwd=str(repo_root),
+            project="proj",
+            scope="tiny",
+            state_file=state_file,
+        )
+        assert v_posix.allowed, f"Should allow {posix_path} in scratchpad (POSIX path)"
+
+    @pytest.mark.parametrize(
+        "file_name",
+        [
+            "migration.py",
+            "schema.sql",
+            "schema.ts",
+            "schema.json",
+            "docker-compose.yml",
+            "Dockerfile",
+        ],
+    )
+    def test_scratchpad_outside_root_source_config_schema_migration_still_denied(
+        self, tmp_path, monkeypatch, file_name: str
+    ) -> None:
+        """Source and config files (.py, .sql, .ts, .json, .yml, Dockerfile) outside project root
+        that match structural patterns must still be denied."""
+        repo_root = tmp_path / "proj"
+        repo_root.mkdir()
+        monkeypatch.setattr(
+            "agent_takkub.lead_context._allowed_project_roots",
+            lambda p: [repo_root.resolve()],
+        )
+        state_file = tmp_path / "state.json"
+
+        # 1. Windows path
+        scratch_win = tmp_path / "scratchpad" / file_name
+        scratch_win.parent.mkdir(exist_ok=True)
+        v_win = pane_guard.evaluate_lead_direct_edit(
+            "Write",
+            {"file_path": str(scratch_win), "content": "data = 1\n"},
+            cwd=str(repo_root),
+            project="proj",
+            scope="tiny",
+            state_file=state_file,
+        )
+        assert not v_win.allowed, f"Should deny source/config {file_name} in scratchpad"
+        assert v_win.rule == "lead_direct_edit:deep_category"
+
+        # 2. POSIX path
+        posix_path = f"/tmp/scratchpad/{file_name}"
+        v_posix = pane_guard.evaluate_lead_direct_edit(
+            "Write",
+            {"file_path": posix_path, "content": "data = 1\n"},
+            cwd=str(repo_root),
+            project="proj",
+            scope="tiny",
+            state_file=state_file,
+        )
+        assert not v_posix.allowed, f"Should deny POSIX source/config {posix_path}"
+        assert v_posix.rule == "lead_direct_edit:deep_category"
+
+    @pytest.mark.parametrize(
+        "file_name",
+        [
+            "package.json",
+            "requirements.txt",
+            "pyproject.toml",
+            "go.mod",
+            "cargo.toml",
+            "package-lock.json",
+            "pnpm-lock.yaml",
+            "yarn.lock",
+        ],
+    )
+    def test_scratchpad_outside_root_manifests_lockfiles_still_denied(
+        self, tmp_path, monkeypatch, file_name: str
+    ) -> None:
+        """Manifests and lockfiles must be denied everywhere, including scratchpad (#587 F3)."""
+        repo_root = tmp_path / "proj"
+        repo_root.mkdir()
+        monkeypatch.setattr(
+            "agent_takkub.lead_context._allowed_project_roots",
+            lambda p: [repo_root.resolve()],
+        )
+        state_file = tmp_path / "state.json"
+
+        scratch_win = tmp_path / "scratchpad" / file_name
+        scratch_win.parent.mkdir(exist_ok=True)
+        v_win = pane_guard.evaluate_lead_direct_edit(
+            "Write",
+            {"file_path": str(scratch_win), "content": "{}\n"},
+            cwd=str(repo_root),
+            project="proj",
+            scope="tiny",
+            state_file=state_file,
+        )
+        assert not v_win.allowed
+        assert v_win.rule == "lead_direct_edit:deep_category"
+
+        posix_path = f"/tmp/scratchpad/{file_name}"
+        v_posix = pane_guard.evaluate_lead_direct_edit(
+            "Write",
+            {"file_path": posix_path, "content": "{}\n"},
+            cwd=str(repo_root),
+            project="proj",
+            scope="tiny",
+            state_file=state_file,
+        )
+        assert not v_posix.allowed
+        assert v_posix.rule == "lead_direct_edit:deep_category"
+
+    @pytest.mark.parametrize(
+        "rel_path",
+        [
+            "migration-plan.html",
+            "schema-plan.html",
+            "src/schema.ts",
+            "migrations/0001_init.sql",
+        ],
+    )
+    def test_inside_project_root_structural_deep_denied(
+        self, tmp_path, monkeypatch, rel_path: str
+    ) -> None:
+        """Inside project root, structural deep patterns (including html plans) are denied."""
+        repo_root = tmp_path / "proj"
+        repo_root.mkdir()
+        monkeypatch.setattr(
+            "agent_takkub.lead_context._allowed_project_roots",
+            lambda p: [repo_root.resolve()],
+        )
+        state_file = tmp_path / "state.json"
+
+        target_file = repo_root / rel_path
+        target_file.parent.mkdir(parents=True, exist_ok=True)
+        verdict = pane_guard.evaluate_lead_direct_edit(
+            "Write",
+            {"file_path": str(target_file), "content": "hello\n"},
+            cwd=str(repo_root),
+            project="proj",
+            scope="tiny",
+            state_file=state_file,
+        )
+        assert not verdict.allowed, f"Should deny inside root: {rel_path}"
+        assert verdict.rule == "lead_direct_edit:deep_category"
+
+    @pytest.mark.parametrize(
         "content",
         [
             "def check_auth_token(): pass\n",
