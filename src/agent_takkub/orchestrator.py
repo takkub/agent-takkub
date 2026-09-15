@@ -2291,6 +2291,18 @@ class Orchestrator(
             f'When finished, run: takkub subagent-done --role {role_name} "<one-line summary>"\n'
             "For analysis/review, save detailed findings under docs/ before that completion command."
         )
+        # #621 M3: this capsule is the only context a native subagent ever
+        # gets (it never goes through spawn_engine.py's own prompt-building
+        # branches) — inject the same team response-language directive here,
+        # `None` under "as-typed" omits it, same as every other injection site.
+        try:
+            from .response_language import prompt_directive as _lang_directive
+
+            _lang_line = _lang_directive()
+            if _lang_line:
+                capsule += f"\n\n---\n\n## ภาษาที่ตอบ (#621)\n\n{_lang_line}"
+        except Exception:
+            _log_event("response_language_directive_failed", role=role_name, project=project_ns)
         capsule_dir = _task_handoff_dir(project_ns)
         capsule_path = capsule_dir / (
             f"{datetime.now().strftime('%H%M%S')}-{role_name}-subagent-{task_id[:8]}.md"
@@ -3622,6 +3634,14 @@ class Orchestrator(
             ps_assign.spawn_initial_task_fallback = None
             ps_assign.spawn_initial_prompt_file = None
             ps_assign.spawn_initial_task_state = ""
+            # #621 M3: spawn() just found a user-owned AGENTS.md for this
+            # generic-provider pane — our response-language directive never
+            # landed there, so carry it as the first line of the paste
+            # instead of losing it silently.
+            _pending_lang = ps_assign.pending_lang_directive
+            ps_assign.pending_lang_directive = None
+            if _pending_lang:
+                paste_text = f"[ภาษาที่ตอบ (#621)] {_pending_lang}\n\n{paste_text}"
             self._send_when_ready(role_name, paste_text, project=project)
         initial_delivery = ps_assign.spawn_initial_task_state or "pointer"
         if initial_delivery == "delivered":

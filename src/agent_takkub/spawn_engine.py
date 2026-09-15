@@ -752,6 +752,12 @@ class PaneState:
     spawn_initial_task_fallback: str | None = None
     spawn_initial_prompt_file: str | None = None
     spawn_initial_task_state: str = ""
+    # #621 M3: set by the generic-provider branch when ensure_agents_md()
+    # found a user-owned AGENTS.md (our response-language directive never
+    # landed there). `assign()` reads + clears this right after spawn()
+    # returns, prepending it to the initial task paste as a fallback so the
+    # directive still reaches the pane by some route.
+    pending_lang_directive: str | None = None
     # assign_ts: wall-clock when this pane's current task was dispatched
     # (_assign_dispatch). done() reads this BEFORE popping the PaneState so it
     # can scan the artifacts dir for screenshots newer than the assignment
@@ -2452,7 +2458,16 @@ class SpawnEngineMixin:
 ## ภาษาที่ตอบ (#621)
 
 {_lang_line}"""
-                    ensure_agents_md(spawn_cwd, extra=_skill_extra)
+                    _planted, _agents_md_reason = ensure_agents_md(spawn_cwd, extra=_skill_extra)
+                    if not _planted and _agents_md_reason == "user-owned" and _lang_line:
+                        # #621 M3: user-owned AGENTS.md means _skill_extra
+                        # (directive included) never gets written — carry the
+                        # directive through the initial-task paste fallback
+                        # instead (read + cleared by orchestrator.assign()
+                        # right after this spawn() call returns).
+                        self._ps(
+                            _exit_key(project_ns, role_name)
+                        ).pending_lang_directive = _lang_line
                 except Exception:
                     _log.exception(
                         "could not render %s role context for %s; spawning without it",

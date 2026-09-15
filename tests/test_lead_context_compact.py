@@ -106,3 +106,26 @@ class TestParallelModeWorktreeRule:
         assert "Execution mode: PARALLEL" in text
         assert "--isolation worktree" in text
         assert "merge proposal" in text
+
+
+class TestResponseLanguageDirective:
+    """#621 M3: Lead's rendered context must actually carry the team
+    response-language directive — default (no settings file, isolated
+    SETTINGS_HOME) is Thai; "as-typed" omits the block entirely."""
+
+    def test_directive_present_by_default(
+        self, runtime_tmp: pathlib.Path, cockpit_md: pathlib.Path
+    ) -> None:
+        result_path = _render_lead_context("default")
+        text = pathlib.Path(result_path).read_text(encoding="utf-8")
+        assert "ภาษาที่ตอบ (#621)" in text
+
+    def test_directive_omitted_under_as_typed(
+        self, runtime_tmp: pathlib.Path, cockpit_md: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from agent_takkub import response_language
+
+        monkeypatch.setattr(response_language, "prompt_directive", lambda mode=None: None)
+        result_path = _render_lead_context("default")
+        text = pathlib.Path(result_path).read_text(encoding="utf-8")
+        assert "ภาษาที่ตอบ (#621)" not in text

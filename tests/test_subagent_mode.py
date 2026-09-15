@@ -49,6 +49,37 @@ def test_subagent_assign_creates_capsule_without_pane(orch: Orchestrator, tmp_pa
     assert "subagent-done --role reviewer" in text
 
 
+def test_subagent_assign_capsule_includes_language_directive(
+    orch: Orchestrator, tmp_path: Path
+) -> None:
+    """#621 M3: the native subagent capsule is the only context a subagent
+    ever gets (it never goes through spawn_engine.py) — it must carry the
+    same team response-language directive every pane gets. Default mode
+    (no settings file, isolated SETTINGS_HOME) is Thai."""
+    ok, _ = orch.assign(
+        "reviewer", str(tmp_path), "audit auth defaults", mode="subagent", project="subtest"
+    )
+    assert ok is True
+    state = orch._subagent_assignments[("subtest", "reviewer")]
+    text = Path(state["capsule"]).read_text(encoding="utf-8")
+    assert "ภาษาที่ตอบ (#621)" in text
+
+
+def test_subagent_capsule_omits_directive_under_as_typed(
+    orch: Orchestrator, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from agent_takkub import response_language
+
+    monkeypatch.setattr(response_language, "prompt_directive", lambda mode=None: None)
+    ok, _ = orch.assign(
+        "reviewer", str(tmp_path), "audit auth defaults", mode="subagent", project="subtest"
+    )
+    assert ok is True
+    state = orch._subagent_assignments[("subtest", "reviewer")]
+    text = Path(state["capsule"]).read_text(encoding="utf-8")
+    assert "ภาษาที่ตอบ (#621)" not in text
+
+
 def test_subagent_done_updates_ledger_wait_and_inbox_path(
     orch: Orchestrator, tmp_path: Path
 ) -> None:
