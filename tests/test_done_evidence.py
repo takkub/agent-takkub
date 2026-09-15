@@ -774,7 +774,7 @@ class TestSuspectCaptureFlagging:
 
         result = Orchestrator._scan_done_evidence("proj", "qa", assign_ts)
 
-        assert "big.png (50.0KB)" in result
+        assert re.search(r"big\.png \(50\.0KB(?: · #[0-9a-f]{8})?\)", result), result
         assert "⚠" not in result
 
     def test_small_file_flagged_suspect(self, orch, tmp_path):

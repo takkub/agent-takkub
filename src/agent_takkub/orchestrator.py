@@ -5864,8 +5864,8 @@ class Orchestrator(
         same evidence batch (issue #182). `digest`, when given, appends a
         short `#<8 hex chars>` tag (issue #610) so Lead can eyeball whether
         two entries across separate done() notices are actually the same
-        bytes — trailing, so it never disturbs the `(NN.NKB)` suffix callers
-        already match on."""
+        bytes — kept inside the same trailing parenthesis as the size/warning
+        so the evidence line still ends with `)` (issue #610 fix-loop)."""
         reasons = []
         if size < _EVIDENCE_SUSPECT_MIN_BYTES:
             reasons.append("small")
@@ -5875,8 +5875,8 @@ class Orchestrator(
             reasons.append(f"dup-of:{dup_of.name}")
         tag = f" ⚠{'+'.join(reasons)}" if reasons else ""
         posix_path = str(path).replace("\\", "/")
-        digest_tag = f" #{digest[:8]}" if digest else ""
-        return f"{posix_path} ({size / 1024:.1f}KB{tag}){digest_tag}"
+        digest_tag = f" · #{digest[:8]}" if digest else ""
+        return f"{posix_path} ({size / 1024:.1f}KB{tag}{digest_tag})"
 
     @classmethod
     def _find_evidence_files(
