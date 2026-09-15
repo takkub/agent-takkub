@@ -215,7 +215,10 @@ class TestWorktreeByCommandTarget:
         ],
     )
     def test_commit_merge_allowed_when_command_targets_worktree(self, command: str) -> None:
-        assert pane_guard.classify(command, "frontend", cwd=_SHARED).allowed, command
+        # #609 H2: the carve-out now also requires the targeted worktree to
+        # be owned by the CALLING role (`_worktree_role_owns`) — `_WT` is a
+        # `backend`-owned checkout, so the calling role must be `backend`.
+        assert pane_guard.classify(command, "backend", cwd=_SHARED).allowed, command
 
     @pytest.mark.parametrize(
         "command",
