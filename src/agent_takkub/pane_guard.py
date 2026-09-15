@@ -217,13 +217,15 @@ on where the path actually leads, not its literal spelling.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import os
 import pathlib
 import re
+import tempfile
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from datetime import datetime
 
@@ -1101,6 +1103,20 @@ def evaluate_lead_direct_edit(
     file_path = str(tool_input.get("file_path") or "").strip()
     if not file_path:
         return Verdict(True)
+
+    # #633: Protected DATA_HOME check runs BEFORE note exemption and BEFORE
+    # lead_may_implement — an edit targeting another cockpit instance's
+    # DATA_HOME (e.g. ~/.agent-takkub/projects.json) is NEVER allowed.
+    in_prot, prot_home = is_in_protected_data_home(file_path, cwd=cwd)
+    if in_prot:
+        return Verdict(
+            False,
+            rule="instance_guard:protected_data_home",
+            reason=(
+                f"ไฟล์ {file_path} อยู่ใน Protected DATA_HOME ของ cockpit instance อื่น "
+                f"({prot_home}) — ห้ามทุก role แก้ไข ย้าย หรือลบ เพื่อป้องกันข้อมูลเสียหาย (#633)"
+            ),
+        )
 
     if _is_note_exempt(file_path):
         return Verdict(True)
@@ -2118,6 +2134,851 @@ def _unwrap_shell_wrappers(cmd: str) -> str:
     return "".join(parts)
 
 
+# ── #633: Cross-cockpit protection & app boot guard ──
+# Root incident (2026-09-15 11:39): a dev cockpit pane ran `python -m agent_takkub`
+# using system python which booted prod installed data_home (~/.agent-takkub),
+# killed the prod cockpit process, and wrote empty configuration files into prod root.
+#
+# This guard layer enforces:
+# 1. Protection of every other cockpit DATA_HOME on the machine (write/move/delete denied).
+# 2. Protection of every other cockpit process / child process (kill denied).
+# 3. Blocking booting bare `agent_takkub` or launchers or global npm installs
+#    across ALL roles including Lead, unless temp AGENT_TAKKUB_HOME is supplied.
+
+
+def _instance_lock_key(data_home: pathlib.Path | str | None = None) -> str:
+    """Short stable key derived from DATA_HOME, identical to app.py's formula."""
+    if data_home is None:
+        home = get_own_data_home()
+    else:
+        home = pathlib.Path(data_home).resolve()
+    return hashlib.sha1(str(home).encode("utf-8")).hexdigest()[:12]
+
+
+def get_own_data_home() -> pathlib.Path:
+    """Return the resolved canonical DATA_HOME path of the cockpit instance
+    this pane belongs to."""
+    override = os.environ.get("TAKKUB_PORT_FILE", "").strip()
+    if override:
+        p = pathlib.Path(override)
+        if p.name == "port" and p.parent.name == "runtime":
+            return p.parent.parent.resolve()
+    storage = os.environ.get("TAKKUB_STORAGE_ROOT", "").strip()
+    if storage:
+        sp = pathlib.Path(storage)
+        if sp.name == "v2":
+            return sp.parent.resolve()
+        return sp.resolve()
+    artifacts = os.environ.get("TAKKUB_ARTIFACTS_DIR", "").strip()
+    if artifacts:
+        ap = pathlib.Path(artifacts)
+        parts = ap.parts
+        if "runtime" in parts:
+            idx = parts.index("runtime")
+            return pathlib.Path(*parts[:idx]).resolve()
+    try:
+        from . import config
+
+        return config.DATA_HOME.resolve()
+    except Exception:
+        return pathlib.Path.cwd().resolve()
+
+
+_PROTECTED_DATA_HOMES_CACHE: tuple[float, tuple, frozenset[pathlib.Path]] | None = None
+_FOREIGN_PIDS_CACHE: tuple[float, tuple, frozenset[int]] | None = None
+_CACHE_TTL_S = 2.0
+
+
+def _get_cached_protected_data_homes(own_resolved: pathlib.Path) -> frozenset[pathlib.Path] | None:
+    global _PROTECTED_DATA_HOMES_CACHE
+    if _PROTECTED_DATA_HOMES_CACHE is None:
+        return None
+    ts, key, data = _PROTECTED_DATA_HOMES_CACHE
+    if time.monotonic() - ts > _CACHE_TTL_S:
+        _PROTECTED_DATA_HOMES_CACHE = None
+        return None
+    current_key = (
+        str(own_resolved),
+        os.environ.get("TAKKUB_PROTECTED_DATA_HOMES", ""),
+        os.environ.get("AGENT_TAKKUB_HOME", ""),
+        os.environ.get("TAKKUB_STORAGE_ROOT", ""),
+        os.environ.get("TAKKUB_PORT_FILE", ""),
+    )
+    if key == current_key:
+        return data
+    return None
+
+
+def _set_cached_protected_data_homes(
+    own_resolved: pathlib.Path, data: frozenset[pathlib.Path]
+) -> None:
+    global _PROTECTED_DATA_HOMES_CACHE
+    key = (
+        str(own_resolved),
+        os.environ.get("TAKKUB_PROTECTED_DATA_HOMES", ""),
+        os.environ.get("AGENT_TAKKUB_HOME", ""),
+        os.environ.get("TAKKUB_STORAGE_ROOT", ""),
+        os.environ.get("TAKKUB_PORT_FILE", ""),
+    )
+    _PROTECTED_DATA_HOMES_CACHE = (time.monotonic(), key, data)
+
+
+def _get_cached_foreign_pids(own_resolved: pathlib.Path) -> frozenset[int] | None:
+    global _FOREIGN_PIDS_CACHE
+    if _FOREIGN_PIDS_CACHE is None:
+        return None
+    ts, key, data = _FOREIGN_PIDS_CACHE
+    if time.monotonic() - ts > _CACHE_TTL_S:
+        _FOREIGN_PIDS_CACHE = None
+        return None
+    current_key = (
+        str(own_resolved),
+        os.environ.get("TAKKUB_FOREIGN_PIDS", ""),
+    )
+    if key == current_key:
+        return data
+    return None
+
+
+def _set_cached_foreign_pids(own_resolved: pathlib.Path, data: frozenset[int]) -> None:
+    global _FOREIGN_PIDS_CACHE
+    key = (
+        str(own_resolved),
+        os.environ.get("TAKKUB_FOREIGN_PIDS", ""),
+    )
+    _FOREIGN_PIDS_CACHE = (time.monotonic(), key, data)
+
+
+def clear_instance_guard_cache() -> None:
+    """Clear memory caches for instance guard protected homes and foreign PIDs."""
+    global _PROTECTED_DATA_HOMES_CACHE, _FOREIGN_PIDS_CACHE
+    _PROTECTED_DATA_HOMES_CACHE = None
+    _FOREIGN_PIDS_CACHE = None
+
+
+def _get_git_common_dir(p: pathlib.Path) -> pathlib.Path | None:
+    """Return the common .git directory for a git repo or worktree, if any."""
+    git_entry = p / ".git"
+    try:
+        if git_entry.is_dir():
+            return git_entry.resolve()
+        if git_entry.is_file():
+            content = git_entry.read_text(encoding="utf-8", errors="ignore").strip()
+            if content.startswith("gitdir:"):
+                target = content[len("gitdir:") :].strip()
+                git_path = pathlib.Path(target)
+                if not git_path.is_absolute():
+                    git_path = (p / git_path).resolve()
+                else:
+                    git_path = git_path.resolve()
+                parts = git_path.parts
+                if "worktrees" in parts:
+                    idx = parts.index("worktrees")
+                    return pathlib.Path(*parts[:idx]).resolve()
+                return git_path
+    except Exception:
+        pass
+    try:
+        import subprocess
+
+        from ._win_console import SUBPROCESS_NO_WINDOW
+
+        res = subprocess.run(
+            ["git", "rev-parse", "--git-common-dir"],
+            cwd=str(p),
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=0.5,
+            check=False,
+            creationflags=SUBPROCESS_NO_WINDOW,
+        )
+        if res.returncode == 0 and res.stdout.strip():
+            raw = res.stdout.strip()
+            gp = pathlib.Path(raw)
+            if not gp.is_absolute():
+                gp = (p / gp).resolve()
+            return gp.resolve()
+    except Exception:
+        pass
+    return None
+
+
+def _is_candidate_own_or_worktree(candidate: pathlib.Path, own_resolved: pathlib.Path) -> bool:
+    """Check whether candidate belongs to own_home or is a git worktree of the
+    same repository as own_home (#633 requirement 2).
+
+    Paths under own_home (including worktrees/** of own_home) or git worktrees
+    sharing the same common git directory are excluded from protection.
+    """
+    try:
+        c_resolved = candidate.resolve()
+    except Exception:
+        c_resolved = candidate.absolute()
+
+    c_norm = c_resolved.as_posix().lower().rstrip("/")
+    own_norm = own_resolved.as_posix().lower().rstrip("/")
+
+    # 1. Exact match
+    if c_norm == own_norm:
+        return True
+
+    # 2. Path under own home (e.g. worktrees/** under own home)
+    if c_norm.startswith(own_norm + "/"):
+        return True
+
+    # 3. Own home is under candidate (e.g. own home is worktree inside repo)
+    if own_norm.startswith(c_norm + "/"):
+        return True
+
+    # 4. Worktree path pattern comparison: .../worktrees/<project>/...
+    if "/worktrees/" in c_norm:
+        wt_base = c_norm.split("/worktrees/")[0]
+        if own_norm == wt_base or own_norm.startswith(wt_base + "/"):
+            return True
+    if "/worktrees/" in own_norm:
+        wt_base = own_norm.split("/worktrees/")[0]
+        if c_norm == wt_base or c_norm.startswith(wt_base + "/"):
+            return True
+
+    # 5. Shared git repository or worktree (via common git dir)
+    c_git = _get_git_common_dir(c_resolved)
+    if c_git is not None:
+        own_git = _get_git_common_dir(own_resolved)
+        if own_git is not None and c_git == own_git:
+            return True
+        c_git_norm = c_git.as_posix().lower().rstrip("/")
+        if (
+            c_git_norm == (own_norm + "/.git")
+            or c_git.parent.as_posix().lower().rstrip("/") == own_norm
+        ):
+            return True
+
+    return False
+
+
+def get_protected_data_homes(*, own_home: pathlib.Path | None = None) -> frozenset[pathlib.Path]:
+    """Return all known cockpit DATA_HOME directories on the host that do NOT
+    belong to this pane's own instance."""
+    if own_home is None:
+        own_home = get_own_data_home()
+    own_resolved = own_home.resolve()
+
+    cached = _get_cached_protected_data_homes(own_resolved)
+    if cached is not None:
+        return cached
+
+    candidates: set[pathlib.Path] = set()
+
+    # 1. Standard installed default
+    candidates.add((pathlib.Path.home() / ".agent-takkub").resolve())
+
+    # 2. Source repo root (if dev checkout)
+    try:
+        from . import config
+
+        candidates.add(config.REPO_ROOT.resolve())
+    except Exception:
+        pass
+
+    # 3. Explicit AGENT_TAKKUB_HOME in environment
+    env_home = os.environ.get("AGENT_TAKKUB_HOME", "").strip()
+    if env_home:
+        candidates.add(pathlib.Path(env_home).resolve())
+
+    # 4. Explicit test/custom override in environment
+    env_extra = os.environ.get("TAKKUB_PROTECTED_DATA_HOMES", "").strip()
+    if env_extra:
+        for item in re.split(r"[,;]", env_extra):
+            if item.strip():
+                candidates.add(pathlib.Path(item.strip()).resolve())
+
+    # 5. Check active port files in tempdir (fast scandir + live PID check)
+    try:
+        tdir = tempfile.gettempdir()
+        with os.scandir(tdir) as it:
+            for entry in it:
+                if entry.name.startswith("agent-takkub-port."):
+                    m = re.match(r"^agent-takkub-port\.(\d+)$", entry.name)
+                    if m:
+                        pid = int(m.group(1))
+                        try:
+                            import psutil
+
+                            if not psutil.pid_exists(pid):
+                                continue
+                        except Exception:
+                            pass
+                    try:
+                        port_num = int(pathlib.Path(entry.path).read_text(encoding="utf-8").strip())
+                        from .config import check_cockpit_port_alive
+
+                        alive, info = check_cockpit_port_alive(port_num, timeout=0.03)
+                        if alive and info and info.get("data_home"):
+                            candidates.add(pathlib.Path(info["data_home"]).resolve())
+                    except Exception:
+                        pass
+    except Exception:
+        pass
+
+    filtered = frozenset(
+        c for c in candidates if not _is_candidate_own_or_worktree(c, own_resolved)
+    )
+    _set_cached_protected_data_homes(own_resolved, filtered)
+    return filtered
+
+
+def get_foreign_cockpit_pids(*, own_home: pathlib.Path | None = None) -> frozenset[int]:
+    """Return all process IDs that belong to another cockpit instance (or child
+    processes of another cockpit instance)."""
+    if own_home is None:
+        own_home = get_own_data_home()
+    own_resolved = own_home.resolve()
+    own_lock_key = _instance_lock_key(own_resolved)
+
+    cached = _get_cached_foreign_pids(own_resolved)
+    if cached is not None:
+        return cached
+
+    pids: set[int] = set()
+
+    # 1. Explicit test/custom override in environment
+    env_pids = os.environ.get("TAKKUB_FOREIGN_PIDS", "").strip()
+    if env_pids:
+        for p_str in env_pids.split(","):
+            if p_str.strip().isdigit():
+                pids.add(int(p_str.strip()))
+
+    try:
+        import psutil
+
+        has_psutil = True
+    except Exception:
+        has_psutil = False
+
+    # 2. From lock files in tempdir (fast scandir + live PID check)
+    try:
+        tdir = tempfile.gettempdir()
+        with os.scandir(tdir) as it:
+            for entry in it:
+                if entry.name.startswith("agent-takkub-cockpit-") and entry.name.endswith(".lock"):
+                    m = re.match(r"agent-takkub-cockpit-([a-f0-9]+)\.lock$", entry.name)
+                    if m and m.group(1) != own_lock_key:
+                        try:
+                            line1 = (
+                                pathlib.Path(entry.path)
+                                .read_text(encoding="utf-8")
+                                .splitlines()[0]
+                                .strip()
+                            )
+                            if line1.isdigit():
+                                lpid = int(line1)
+                                if not has_psutil or psutil.pid_exists(lpid):
+                                    pids.add(lpid)
+                        except Exception:
+                            pass
+    except Exception:
+        pass
+
+    # 3. From active port files of protected DATA_HOMEs
+    try:
+        from .config import check_cockpit_port_alive
+
+        for prot_home in get_protected_data_homes(own_home=own_resolved):
+            pf = prot_home / "runtime" / "port"
+            if pf.is_file():
+                try:
+                    port_num = int(pf.read_text(encoding="utf-8").strip())
+                    alive, info = check_cockpit_port_alive(port_num, timeout=0.03)
+                    if alive and info and info.get("pid"):
+                        pids.add(int(info["pid"]))
+                except Exception:
+                    pass
+    except Exception:
+        pass
+
+    # 4. Include descendants of foreign cockpit PIDs via psutil
+    if has_psutil:
+        try:
+            extra_children = set()
+            for fpid in list(pids):
+                try:
+                    proc = psutil.Process(fpid)
+                    if proc.is_running():
+                        for child in proc.children(recursive=True):
+                            extra_children.add(child.pid)
+                except (psutil.NoSuchProcess, psutil.AccessDenied):
+                    pass
+            pids.update(extra_children)
+        except Exception:
+            pass
+
+    result = frozenset(pids)
+    _set_cached_foreign_pids(own_resolved, result)
+    return result
+
+
+def is_in_protected_data_home(
+    target_path: str | pathlib.Path,
+    *,
+    cwd: str | pathlib.Path | None = None,
+    own_home: pathlib.Path | None = None,
+    protected_homes: Iterable[pathlib.Path] | None = None,
+) -> tuple[bool, pathlib.Path | None]:
+    """Check whether `target_path` resolves inside any protected DATA_HOME.
+    Returns (True, matching_protected_home) if inside a protected DATA_HOME,
+    or (False, None) if safe."""
+    if not target_path:
+        return False, None
+    raw = str(target_path).strip().strip("\"'")
+    if not raw:
+        return False, None
+    raw = os.path.expandvars(raw)
+    raw = re.sub(
+        r"\$env:([A-Za-z0-9_]+)", lambda m: os.environ.get(m.group(1), ""), raw, flags=re.I
+    )
+    raw = re.sub(r"\$([A-Za-z0-9_]+)", lambda m: os.environ.get(m.group(1), ""), raw)
+    raw = os.path.expanduser(raw)
+    p = pathlib.Path(raw)
+    if not p.is_absolute():
+        base = pathlib.Path(cwd) if cwd else pathlib.Path.cwd()
+        p = base / p
+    try:
+        resolved = p.resolve()
+    except (OSError, ValueError):
+        resolved = p.absolute()
+
+    if own_home is None:
+        own_home_resolved = get_own_data_home().resolve()
+    else:
+        own_home_resolved = own_home.resolve()
+
+    # Files inside own home or own worktree are never foreign/protected (#633 requirement 2)
+    if _is_candidate_own_or_worktree(resolved, own_home_resolved):
+        return False, None
+
+    norm_target = resolved.as_posix().lower().rstrip("/")
+    if protected_homes is None:
+        protected_homes = get_protected_data_homes(own_home=own_home_resolved)
+
+    for home in protected_homes:
+        norm_home = home.resolve().as_posix().lower().rstrip("/")
+        if norm_target == norm_home or norm_target.startswith(norm_home + "/"):
+            return True, home
+    return False, None
+
+
+_PYTHON_M_BARE_AGENT_TAKKUB = re.compile(
+    r"""(?:^|[;&|]\s*|\bexec\s+)(?:[\w.\\/:-]*[/\\])?(?:python[0-9.]*(?:\.exe)?|pythonw[0-9.]*(?:\.exe)?|py(?:\.exe)?)\s+(?:-[a-zA-Z0-9_-]+(?:\s+[^\s-]+)?\s+)*-m\s+["']?agent_takkub["']?(?:\s+|$|[;&|])""",
+    re.IGNORECASE,
+)
+_AGENT_TAKKUB_LAUNCHER = re.compile(
+    r"""(?:^|[;&|]\s*|\bexec\s+)(?:[\w.\\/:-]*[/\\])?agent-takkub(?:\.exe|\.cmd|\.bat|\.ps1)?(?:\s+|$|[;&|])""",
+    re.IGNORECASE,
+)
+_NPM_GLOBAL_AGENT_TAKKUB = re.compile(
+    r"""\bnpm\s+(?:i|install|add|update)\s+.*?(?:-g|--global)\s+.*?agent-takkub\b|\bnpm\s+(?:i|install|add|update)\s+.*?agent-takkub\b.*?(?:-g|--global)""",
+    re.IGNORECASE,
+)
+
+
+def _has_temp_agent_takkub_home(cmd: str) -> bool:
+    m = re.search(
+        r"""(?:\bAGENT_TAKKUB_HOME\s*=\s*|\$env:AGENT_TAKKUB_HOME\s*=\s*|\bset\s+AGENT_TAKKUB_HOME\s*=\s*)["']?([^"';&\r\n]+)["']?""",
+        cmd,
+        re.I,
+    )
+    if not m:
+        return False
+    val = m.group(1).strip()
+    norm = val.replace("\\", "/").lower()
+    tdir = tempfile.gettempdir().replace("\\", "/").lower()
+    return (tdir in norm) or ("/tmp" in norm) or ("/temp" in norm) or ("temp" in norm)
+
+
+_PID_KILL_PATTERNS = (
+    re.compile(r"\btaskkill(?:\.exe)?\s+.*?(?:/pid|-pid|--pid)\s+(\d+)", re.I),
+    re.compile(r"\b(?:Stop-Process|spp)\s+.*?(?:-Id|-PID)\s+(\d+)", re.I),
+    re.compile(r"(?:^|[;&|\s])kill\s+(?:-[A-Za-z0-9]+\s+)*(\d+)", re.I),
+    re.compile(r"\bpkill\s+(?:-[A-Za-z0-9]+\s+)*(\d+)", re.I),
+    re.compile(r"\bos\.kill\s*\(\s*(\d+)\s*,", re.I),
+    re.compile(r"\bpsutil\.Process\s*\(\s*(\d+)\s*\)\.(?:kill|terminate)", re.I),
+)
+
+_IMAGE_KILL_PATTERNS = (
+    re.compile(r"\btaskkill(?:\.exe)?\s+.*?(?:/im|-im|--im)\s+([^\s;&|]+)", re.I),
+    re.compile(r"\b(?:Stop-Process|spp)\s+.*?(?:-Name|-ProcessName)\s+([^\s;&|]+)", re.I),
+    re.compile(r"\bpkill\s+(?:-[A-Za-z0-9]+\s+)*([^\s;&|0-9][^\s;&|]*)", re.I),
+    re.compile(r"\bkillall\s+(?:-[A-Za-z0-9]+\s+)*([^\s;&|]+)", re.I),
+)
+
+_REDIRECTION_TARGET_RE = re.compile(r"""(?:>>|>|1>|2>|\*>)\s*["']?([^\s"'&|;<>\r\n]+)["']?""")
+_POWERSHELL_OUT_FILE_RE = re.compile(
+    r"""\|\s*(?:Out-File|Set-Content|sc|Add-Content|ac|tee)\s+(?:(?:-FilePath|-Path)\s+)?["']?([^\s"'&|;\r\n]+)["']?""",
+    re.I,
+)
+
+_FILE_DELETE_CMDS = re.compile(
+    r"""(?:^|[;&|]\s*|\bexec\s+)(?:rm|del|erase|rmdir|rd|unlink|shred|Remove-Item|ri)\b(?P<args>[^;&|\r\n]+)""",
+    re.I,
+)
+_FILE_MOVE_CMDS = re.compile(
+    r"""(?:^|[;&|]\s*|\bexec\s+)(?:mv|move|Move-Item|mi)\b(?P<args>[^;&|\r\n]+)""",
+    re.I,
+)
+_FILE_COPY_CMDS = re.compile(
+    r"""(?:^|[;&|]\s*|\bexec\s+)(?:cp|copy|Copy-Item|cpi)\b(?P<args>[^;&|\r\n]+)""",
+    re.I,
+)
+_FILE_WRITE_CMDS = re.compile(
+    r"""(?:^|[;&|]\s*|\bexec\s+)(?:touch|mkdir|md|New-Item|ni|Set-Content|sc|Add-Content|ac|Out-File|truncate)\b(?P<args>[^;&|\r\n]+)""",
+    re.I,
+)
+_GIT_MUTATE_CMD = re.compile(
+    r"""\bgit\s+(?:-[A-Za-z0-9_-]+\s+)*(?:-C|--git-dir=|--work-tree=)\s*["']?([^\s"';&|\r\n]+)["']?\s+([A-Za-z0-9_-]+)""",
+    re.I,
+)
+_PYTHON_INLINE_WRITE = re.compile(
+    r"""(?:python[0-9.]*(?:\.exe)?|pythonw[0-9.]*(?:\.exe)?|py(?:\.exe)?)\s+[^;&|]*-c\s+["'](?P<code>.+)["']""",
+    re.I,
+)
+
+_CANDIDATE_BOOT_RE = re.compile(r"agent[-_]takkub", re.I)
+_CANDIDATE_KILL_RE = re.compile(
+    r"\b(?:taskkill|Stop-Process|spp|kill|pkill|killall)\b|os\.kill|psutil", re.I
+)
+_CANDIDATE_MUTATE_RE = re.compile(
+    r"""(?x)
+    >
+    | \b(?:
+        rm|del|erase|rmdir|rd|unlink|shred|Remove-Item|ri|
+        mv|move|Move-Item|mi|
+        cp|copy|Copy-Item|cpi|
+        touch|mkdir|md|New-Item|ni|Set-Content|sc|Add-Content|ac|Out-File|tee|truncate
+      )\b
+    | \bgit\b.*?(?:-C|--git-dir|--work-tree)
+    | \b(?:python[0-9.]*(?:\.exe)?|pythonw[0-9.]*(?:\.exe)?|py(?:\.exe)?)\b.*?-c\b
+    """,
+    re.I | re.DOTALL,
+)
+
+
+def is_instance_guard_candidate(command: str) -> bool:
+    """Fast pre-filter check to see if a command could possibly be subject to
+    #633 instance guard rules (app boot, process kill, or DATA_HOME mutation).
+    Commands that return False bypass all instance guard overhead (< 20 microseconds)."""
+    if not command or not command.strip():
+        return False
+    cmd = command.strip()
+    return bool(
+        _CANDIDATE_BOOT_RE.search(cmd)
+        or _CANDIDATE_KILL_RE.search(cmd)
+        or _CANDIDATE_MUTATE_RE.search(cmd)
+    )
+
+
+def _split_args_tokens(args_str: str) -> list[str]:
+    return [m.group(0).strip("\"'") for m in re.finditer(r"""[^\s"']+|"[^"]*"|'[^']*'""", args_str)]
+
+
+def evaluate_instance_guard(
+    command: str,
+    role: str | None = None,
+    *,
+    cwd: str | None = None,
+    own_home: pathlib.Path | None = None,
+    protected_homes: Iterable[pathlib.Path] | None = None,
+    foreign_pids: Iterable[int] | None = None,
+) -> Verdict | None:
+    """Evaluate #633 cross-instance protection and app boot guard rules on a command.
+    Returns a Verdict(False, ...) if blocked, or None if safe."""
+    cmd = (command or "").strip()
+    if not cmd:
+        return None
+
+    # Fast pre-filter: Non-candidate commands bypass instance guard completely (< 20 us)
+    if not is_instance_guard_candidate(cmd):
+        return None
+
+    has_boot = bool(_CANDIDATE_BOOT_RE.search(cmd))
+    has_kill = bool(_CANDIDATE_KILL_RE.search(cmd))
+    has_mutate = bool(_CANDIDATE_MUTATE_RE.search(cmd))
+
+    # Lazy loaders for protected_homes and foreign_pids
+    _prot_homes_cache: frozenset[pathlib.Path] | None = (
+        frozenset(protected_homes) if protected_homes is not None else None
+    )
+    _for_pids_cache: frozenset[int] | None = (
+        frozenset(foreign_pids) if foreign_pids is not None else None
+    )
+
+    def _get_prot_homes() -> frozenset[pathlib.Path]:
+        nonlocal _prot_homes_cache
+        if _prot_homes_cache is None:
+            _prot_homes_cache = get_protected_data_homes(own_home=own_home)
+        return _prot_homes_cache
+
+    def _get_for_pids() -> frozenset[int]:
+        nonlocal _for_pids_cache
+        if _for_pids_cache is None:
+            _for_pids_cache = get_foreign_cockpit_pids(own_home=own_home)
+        return _for_pids_cache
+
+    # Check for temporary AGENT_TAKKUB_HOME anywhere in the full command
+    has_temp_home = _has_temp_agent_takkub_home(cmd) if has_boot else False
+
+    parts = _split_chain_segments(cmd)
+    for i in range(0, len(parts), 2):
+        seg = _unwrap_segment(parts[i]).strip()
+        while True:
+            for pat in _SEG_PREFIX_PATTERNS:
+                m = pat.match(seg)
+                if m and m.end() > 0:
+                    seg = seg[m.end() :].strip()
+                    break
+            else:
+                break
+        if not seg:
+            continue
+
+        # 1. Check App Booting
+        if has_boot:
+            if _PYTHON_M_BARE_AGENT_TAKKUB.search(seg):
+                if not has_temp_home:
+                    role_desc = f"role `{role}`" if role else "Pane"
+                    return Verdict(
+                        False,
+                        rule="cli_invocation:python_m_agent_takkub",
+                        reason=(
+                            f"{role_desc} รัน `python -m agent_takkub` ไม่ได้ (นโยบาย cockpit #633). "
+                            "ห้ามบูต app ซ้อนหรือเข้าถึง prod DATA_HOME เว้นแต่มี AGENT_TAKKUB_HOME ชี้ temp ในคำสั่งเดียวกัน. "
+                            "เรียก CLI ด้วย `takkub <cmd>` ตรงๆ"
+                        ),
+                    )
+            if _AGENT_TAKKUB_LAUNCHER.search(seg):
+                if not has_temp_home:
+                    role_desc = f"role `{role}`" if role else "Pane"
+                    return Verdict(
+                        False,
+                        rule="instance_guard:app_boot",
+                        reason=(
+                            f"{role_desc} เรียก app launcher `agent-takkub` ไม่ได้ (นโยบาย cockpit #633). "
+                            "ห้ามบูต app ซ้อนเว้นแต่มี AGENT_TAKKUB_HOME ชี้ temp ในคำสั่งเดียวกัน"
+                        ),
+                    )
+            if _NPM_GLOBAL_AGENT_TAKKUB.search(seg):
+                role_desc = f"role `{role}`" if role else "Pane"
+                return Verdict(
+                    False,
+                    rule="instance_guard:app_boot",
+                    reason=(
+                        f"{role_desc} ติดตั้ง global package `npm -g agent-takkub` ไม่ได้ (นโยบาย cockpit #633)"
+                    ),
+                )
+
+        # 2. Check Process Termination
+        if has_kill:
+            for pat in _PID_KILL_PATTERNS:
+                for m in pat.finditer(seg):
+                    target_pid = int(m.group(1))
+                    foreign_pids_set = _get_for_pids()
+                    if target_pid in foreign_pids_set:
+                        return Verdict(
+                            False,
+                            rule="instance_guard:kill_foreign_instance",
+                            reason=f"ห้าม kill process PID {target_pid} ซึ่งเป็นของ cockpit instance อื่น (นโยบาย cockpit #633)",
+                        )
+                    try:
+                        import psutil
+
+                        proc = psutil.Process(target_pid)
+                        if proc.is_running():
+                            proc_cwd = proc.cwd()
+                            cwd_prot, prot_home = is_in_protected_data_home(
+                                proc_cwd,
+                                cwd=cwd,
+                                own_home=own_home,
+                                protected_homes=_get_prot_homes(),
+                            )
+                            if cwd_prot:
+                                return Verdict(
+                                    False,
+                                    rule="instance_guard:kill_foreign_instance",
+                                    reason=f"ห้าม kill process PID {target_pid} ซึ่งทำงานอยู่ใน Protected DATA_HOME ({prot_home}) (นโยบาย cockpit #633)",
+                                )
+                    except Exception:
+                        pass
+
+            # Image kill of python/pythonw/agent-takkub
+            if role in _UNGUARDED_ROLES or not role:
+                for pat in _IMAGE_KILL_PATTERNS:
+                    m = pat.search(seg)
+                    if m:
+                        image = m.group(1).lower()
+                        if re.search(r"^(?:python|pythonw|agent-takkub)", image):
+                            if _get_for_pids():
+                                return Verdict(
+                                    False,
+                                    rule="instance_guard:kill_foreign_instance",
+                                    reason=f"ห้าม kill process ด้วย image name '{image}' เพราะมี cockpit instance อื่นกำลังทำงานอยู่บนเครื่อง (นโยบาย cockpit #633)",
+                                )
+
+        # 3. Check Mutations to Protected DATA_HOME
+        if has_mutate:
+            prot_homes = _get_prot_homes()
+
+            # Redirections to Protected DATA_HOME
+            for m in _REDIRECTION_TARGET_RE.finditer(seg):
+                target = m.group(1)
+                in_prot, prot_home = is_in_protected_data_home(
+                    target, cwd=cwd, own_home=own_home, protected_homes=prot_homes
+                )
+                if in_prot:
+                    return Verdict(
+                        False,
+                        rule="instance_guard:protected_data_home",
+                        reason=f"ห้ามเขียนหรือ redirect ข้อมูลลงใน Protected DATA_HOME ({prot_home}): {target} (#633)",
+                    )
+            for m in _POWERSHELL_OUT_FILE_RE.finditer(seg):
+                target = m.group(1)
+                in_prot, prot_home = is_in_protected_data_home(
+                    target, cwd=cwd, own_home=own_home, protected_homes=prot_homes
+                )
+                if in_prot:
+                    return Verdict(
+                        False,
+                        rule="instance_guard:protected_data_home",
+                        reason=f"ห้ามเขียนไฟล์ลงใน Protected DATA_HOME ({prot_home}): {target} (#633)",
+                    )
+
+            # File Deletions
+            for m in _FILE_DELETE_CMDS.finditer(seg):
+                args = m.group("args")
+                tokens = _split_args_tokens(args)
+                for t in tokens:
+                    if t.startswith(("-", "/")):
+                        continue
+                    in_prot, prot_home = is_in_protected_data_home(
+                        t, cwd=cwd, own_home=own_home, protected_homes=prot_homes
+                    )
+                    if in_prot:
+                        return Verdict(
+                            False,
+                            rule="instance_guard:protected_data_home",
+                            reason=f"ห้ามลบไฟล์ใน Protected DATA_HOME ({prot_home}): {t} (#633)",
+                        )
+
+            # File Moves
+            for m in _FILE_MOVE_CMDS.finditer(seg):
+                args = m.group("args")
+                tokens = _split_args_tokens(args)
+                for t in tokens:
+                    if t.startswith(("-", "/")):
+                        continue
+                    in_prot, prot_home = is_in_protected_data_home(
+                        t, cwd=cwd, own_home=own_home, protected_homes=prot_homes
+                    )
+                    if in_prot:
+                        return Verdict(
+                            False,
+                            rule="instance_guard:protected_data_home",
+                            reason=f"ห้ามย้ายไฟล์ในหรือไปยัง Protected DATA_HOME ({prot_home}): {t} (#633)",
+                        )
+
+            # File Copies (Destination only)
+            for m in _FILE_COPY_CMDS.finditer(seg):
+                args = m.group("args")
+                dest_m = re.search(r"""-Destination\s+["']?([^\s"';&|]+)["']?""", args, re.I)
+                if dest_m:
+                    dest = dest_m.group(1)
+                    in_prot, prot_home = is_in_protected_data_home(
+                        dest, cwd=cwd, own_home=own_home, protected_homes=prot_homes
+                    )
+                    if in_prot:
+                        return Verdict(
+                            False,
+                            rule="instance_guard:protected_data_home",
+                            reason=f"ห้ามคัดลอกไฟล์ไปยังปลายทางใน Protected DATA_HOME ({prot_home}): {dest} (#633)",
+                        )
+                else:
+                    tokens = [t for t in _split_args_tokens(args) if not t.startswith(("-", "/"))]
+                    if len(tokens) >= 2:
+                        dest = tokens[-1]
+                        in_prot, prot_home = is_in_protected_data_home(
+                            dest, cwd=cwd, own_home=own_home, protected_homes=prot_homes
+                        )
+                        if in_prot:
+                            return Verdict(
+                                False,
+                                rule="instance_guard:protected_data_home",
+                                reason=f"ห้ามคัดลอกไฟล์ไปยังปลายทางใน Protected DATA_HOME ({prot_home}): {dest} (#633)",
+                            )
+
+            # File Writes / Creates
+            for m in _FILE_WRITE_CMDS.finditer(seg):
+                args = m.group("args")
+                tokens = _split_args_tokens(args)
+                for t in tokens:
+                    if t.startswith(("-", "/")):
+                        continue
+                    in_prot, prot_home = is_in_protected_data_home(
+                        t, cwd=cwd, own_home=own_home, protected_homes=prot_homes
+                    )
+                    if in_prot:
+                        return Verdict(
+                            False,
+                            rule="instance_guard:protected_data_home",
+                            reason=f"ห้ามเขียนหรือสร้างไฟล์ใน Protected DATA_HOME ({prot_home}): {t} (#633)",
+                        )
+
+            # Git Mutate
+            for m in _GIT_MUTATE_CMD.finditer(seg):
+                path, subcmd = m.group(1), m.group(2).lower()
+                in_prot, prot_home = is_in_protected_data_home(
+                    path, cwd=cwd, own_home=own_home, protected_homes=prot_homes
+                )
+                if in_prot:
+                    if subcmd not in (
+                        "status",
+                        "log",
+                        "show",
+                        "diff",
+                        "blame",
+                        "rev-parse",
+                        "ls-files",
+                        "cat-file",
+                        "describe",
+                    ):
+                        return Verdict(
+                            False,
+                            rule="instance_guard:protected_data_home",
+                            reason=f"ห้ามรัน git mutating command (`{subcmd}`) ใน Protected DATA_HOME ({prot_home}) (#633)",
+                        )
+
+            # Python Inline Writes
+            for m in _PYTHON_INLINE_WRITE.finditer(seg):
+                code = m.group("code")
+                literals = re.findall(r"""['"]([^'"]+)['"]""", code)
+                for lit in literals:
+                    in_prot, prot_home = is_in_protected_data_home(
+                        lit, cwd=cwd, own_home=own_home, protected_homes=prot_homes
+                    )
+                    if in_prot:
+                        if re.search(
+                            r"""open\s*\([^)]*['"](?:w|a|r\+|w\+|x)|(?:\.write_text|\.write_bytes|\.unlink|\.rmdir)\s*\(|os\.(?:remove|unlink|rmdir|rename|replace)\s*\(|shutil\.(?:rmtree|move|copy)\s*\(""",
+                            code,
+                            re.I,
+                        ):
+                            return Verdict(
+                                False,
+                                rule="instance_guard:protected_data_home",
+                                reason=f"ห้ามรัน Python code เขียนหรือลบไฟล์ใน Protected DATA_HOME ({prot_home}) (#633)",
+                            )
+
+    return None
+
+
 # ── #609/#611 round 5: `-c <key>=<value>`/`--config-env` config injection ──
 # `git -c diff.external=<script> diff` runs *<script>* as a subprocess —
 # proven live (reviewer, round 5) to execute arbitrary commands regardless
@@ -2714,6 +3575,14 @@ def classify(
                         "ใช้ targeted test/typecheck ไฟล์เดียว หรือรอให้เครื่องว่างก่อน"
                     ),
                 )
+
+    # #633: Cross-cockpit protection & app boot guard.
+    # Default-deny for EVERY role including Lead and shell.
+    # Protects other cockpit instances on the machine (e.g. prod ~/.agent-takkub).
+    if name:
+        inst_verdict = evaluate_instance_guard(raw_cmd, name, cwd=cwd)
+        if inst_verdict and not inst_verdict.allowed:
+            return inst_verdict
 
     if not name or name in _UNGUARDED_ROLES:
         return Verdict(True)
