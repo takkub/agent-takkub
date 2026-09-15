@@ -596,6 +596,15 @@ _POLL_LOOP_SLEEP = re.compile(
     re.I,
 )
 
+# #632: Block `python -m agent_takkub ...` for specialist roles. Specialist
+# commands must be called directly with `takkub <cmd>` (which is on PATH).
+# Running `python -m agent_takkub` can boot the GUI app rather than CLI.
+# Submodules like `python -m agent_takkub.foo` remain allowed.
+_PYTHON_M_AGENT_TAKKUB = re.compile(
+    r"""(?:^|[;&|]\s*|\bexec\s+)(?:[\w.\\/:-]*[/\\])?(?:python[0-9.]*(?:\.exe)?|py(?:\.exe)?)\s+(?:-[a-zA-Z0-9_-]+(?:\s+[^\s-]+)?\s+)*-m\s+["']?agent_takkub["']?(?:\s+|$|;)""",
+    re.IGNORECASE,
+)
+
 # A heredoc body is DATA handed to a program (`gh issue create --body <<'EOF'`,
 # `git commit -F -`), not shell the pane executes — so the poll-loop rule must
 # not read it as code. Found the moment the rule shipped: writing #287's own
@@ -2786,6 +2795,16 @@ def classify(
                 rule=f"pip_editable:{rule}",
                 reason=(f"role `{name}` ใช้คำสั่งนี้ไม่ได้ (นโยบาย cockpit). {PIP_EDITABLE_RULE_TEXT}"),
             )
+
+    if _PYTHON_M_AGENT_TAKKUB.search(cmd):
+        return Verdict(
+            False,
+            rule="cli_invocation:python_m_agent_takkub",
+            reason=(
+                f"role `{name}` รัน `python -m agent_takkub` ไม่ได้ (นโยบาย cockpit). "
+                "specialist เรียก CLI ด้วยคำสั่ง `takkub <cmd>` ตรงๆ เท่านั้น (`takkub` อยู่ใน PATH ของ pane แล้ว)"
+            ),
+        )
 
     # `tester` (optional role, on-demand — see .claude/agents/tester.md) exists
     # specifically to run the raw, un-narrowed test runner on a pane of its

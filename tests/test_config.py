@@ -194,6 +194,88 @@ class TestPortFile:
         config.PORT_FILE.write_text("not-a-number", encoding="utf-8")
         assert config.read_port() is None
 
+    def test_write_port_refuses_to_overwrite_live_owner(
+        self, projects_file: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        config.write_port(54321)
+        # Mock check_cockpit_port_alive to simulate 54321 being actively alive
+        monkeypatch.setattr(
+            config,
+            "check_cockpit_port_alive",
+            lambda p, timeout=0.5: (
+                (True, {"pid": 9999, "port": 54321}) if p == 54321 else (False, None)
+            ),
+        )
+        with pytest.raises(RuntimeError, match="cockpit instance already running on port 54321"):
+            config.write_port(54322)
+        # Port file must NOT have changed
+        assert config.read_port() == 54321
+
+    def test_write_port_overwrites_dead_owner(
+        self, projects_file: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        config.write_port(54321)
+        # Mock check_cockpit_port_alive to simulate dead port
+        monkeypatch.setattr(
+            config, "check_cockpit_port_alive", lambda p, timeout=0.5: (False, None)
+        )
+        config.write_port(54322)
+        assert config.read_port() == 54322
+
+    def test_write_port_force_overwrites(
+        self, projects_file: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        config.write_port(54321)
+        monkeypatch.setattr(
+            config,
+            "check_cockpit_port_alive",
+            lambda p, timeout=0.5: (True, {"pid": 9999, "port": 54321}),
+        )
+        config.write_port(54322, force=True)
+        assert config.read_port() == 54322
+
+    def test_check_cockpit_port_alive_real_socket(self) -> None:
+        import socket
+        import threading
+
+        # Start a dummy loopback server that speaks takkub CLI JSON protocol
+        server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        server.bind(("127.0.0.1", 0))
+        server.listen(1)
+        port = server.getsockname()[1]
+
+        def _serve():
+            try:
+                conn, _ = server.accept()
+                req = conn.recv(1024)
+                if b"instance-identity" in req or b"ping" in req:
+                    conn.sendall(b'{"ok": true, "msg": "pong", "pid": 1234}\n')
+                conn.close()
+            except Exception:
+                pass
+            finally:
+                server.close()
+
+        t = threading.Thread(target=_serve, daemon=True)
+        t.start()
+
+        alive, info = config.check_cockpit_port_alive(port, timeout=1.0)
+        t.join(timeout=1.0)
+        assert alive is True
+        assert info is not None and info.get("ok") is True
+
+    def test_check_cockpit_port_alive_closed_port(self) -> None:
+        import socket
+
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]
+        s.close()
+
+        alive, info = config.check_cockpit_port_alive(port, timeout=0.5)
+        assert alive is False
+        assert info is None
+
 
 class TestEffectivePortFileForApp:
     """#354: the app-startup port-file resolver must reject an inherited

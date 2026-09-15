@@ -21,11 +21,12 @@
     {
       "module": "agent_takkub.__main__",
       "imports": [
-        "agent_takkub.app"
+        "agent_takkub.app",
+        "agent_takkub.cli"
       ],
       "imported_by": [],
       "fan_in": 0,
-      "fan_out": 1
+      "fan_out": 2
     },
     {
       "module": "agent_takkub._assets",
@@ -478,8 +479,10 @@
         "agent_takkub.verify",
         "agent_takkub.worktree_manager"
       ],
-      "imported_by": [],
-      "fan_in": 0,
+      "imported_by": [
+        "agent_takkub.__main__"
+      ],
+      "fan_in": 1,
       "fan_out": 49
     },
     {

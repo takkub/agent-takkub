@@ -1053,6 +1053,7 @@ def _set_macos_app_name(name: str = "agent-takkub") -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
+    from . import config
     from .config import ensure_gui_path
 
     ensure_gui_path()
@@ -1112,6 +1113,45 @@ def main(argv: list[str] | None = None) -> int:
             _start_deadman_watchdog(w)
             w.show()
             return app.exec()
+
+        # Before attempting auto-kill, probe whether the existing instance is
+        # actually alive and listening on its port. If alive, refuse duplicate boot
+        # without touching the running instance.
+        effective_port_file = config._effective_port_file_for_app()
+        existing_port = None
+        if effective_port_file.exists():
+            try:
+                existing_port = int(effective_port_file.read_text(encoding="utf-8").strip())
+            except (ValueError, OSError):
+                existing_port = None
+        alive, info = (
+            config.check_cockpit_port_alive(existing_port)
+            if existing_port is not None
+            else (False, None)
+        )
+        if alive:
+            pid_str = f" (pid {info.get('pid')})" if info and info.get("pid") else ""
+            _boot_log(
+                f"[single-instance] active cockpit already running on port {existing_port}{pid_str} "
+                f"for DATA_HOME={config.DATA_HOME} — refusing second instance"
+            )
+            try:
+                if sys.__stderr__ is not None:
+                    sys.__stderr__.write(
+                        f"agent-takkub already running on port {existing_port}{pid_str}\n"
+                    )
+            except Exception:
+                pass
+            QMessageBox.warning(
+                None,
+                "agent-takkub already running",
+                f"A cockpit window is already open (port {existing_port}{pid_str}).\n\n"
+                "Close the existing window before starting a new one.\n\n"
+                "If the old window is unresponsive, use Task Manager to end\n"
+                "the 'pythonw.exe' process and try again.",
+            )
+            return 1
+
         _boot_log(
             f"[single-instance] lock held — attempting auto-kill of stale process (pid={os.getpid()})"
         )
@@ -1182,6 +1222,38 @@ def main(argv: list[str] | None = None) -> int:
                 "the 'pythonw.exe' process and try again.",
             )
             return 1
+
+    # Defense in depth: even if _instance_lock was acquired (e.g. separate worktree lock path),
+    # verify that the effective port file is not owned by an active running cockpit.
+    if not _should_allow_multi():
+        effective_port_file = config._effective_port_file_for_app()
+        if effective_port_file.exists():
+            try:
+                existing_port = int(effective_port_file.read_text(encoding="utf-8").strip())
+            except (ValueError, OSError):
+                existing_port = None
+            if existing_port is not None:
+                alive, info = config.check_cockpit_port_alive(existing_port)
+                if alive:
+                    pid_str = f" (pid {info.get('pid')})" if info and info.get("pid") else ""
+                    _boot_log(
+                        f"[single-instance] cockpit already running on port {existing_port}{pid_str} "
+                        f"for {effective_port_file} — refusing second instance"
+                    )
+                    try:
+                        if sys.__stderr__ is not None:
+                            sys.__stderr__.write(
+                                f"agent-takkub already running on port {existing_port}{pid_str}\n"
+                            )
+                    except Exception:
+                        pass
+                    QMessageBox.warning(
+                        None,
+                        "agent-takkub already running",
+                        f"A cockpit window is already open on port {existing_port}{pid_str} for {config.DATA_HOME}.\n\n"
+                        "Close the existing window before starting a new one.",
+                    )
+                    return 1
 
     w = _boot_main_window()
     _install_signal_handlers(w)

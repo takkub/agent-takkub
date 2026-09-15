@@ -347,7 +347,11 @@ class CliServer(QObject):
         if not self._server.listen(QHostAddress.SpecialAddress.LocalHost, port):
             raise RuntimeError(f"failed to bind cli server: {self._server.errorString()}")
         actual = int(self._server.serverPort())
-        write_port(actual)
+        try:
+            write_port(actual)
+        except Exception:
+            self._server.close()
+            raise
         self.started.emit(actual)
         return actual
 
@@ -1229,6 +1233,18 @@ class CliServer(QObject):
                     disabled_roles=_disabled_roles_fn(project=project_ns_list),
                 )
                 return
+            elif cmd == "ping":
+                from . import config
+
+                self._reply(
+                    sock,
+                    ok=True,
+                    msg="pong",
+                    pid=os.getpid(),
+                    port=self._server.serverPort(),
+                    data_home=str(config.DATA_HOME),
+                )
+                return
             elif cmd in ("instance-identity", "version"):
                 # #354/#564: read-only, same trust level as `list` — lets
                 # `takkub doctor` (and cross-instance CLI banners) query instance
@@ -1239,6 +1255,7 @@ class CliServer(QObject):
                     sock,
                     ok=True,
                     msg="instance identity",
+                    pid=os.getpid(),
                     port=self._server.serverPort(),
                     data_home=str(config.DATA_HOME),
                     version=config.instance_display_version(),

@@ -896,6 +896,8 @@ _NON_INTERACTIVE_HYGIENE = (
     "- คำสั่งที่รอ 'Press any key', 'Are you sure', 'Overwrite?' → "
     "ต้องผ่าน flag `--force` / `--yes` / `--no-interaction` "
     "หรือ pipe `yes |` ก่อนเรียก\n"
+    "- **เรียก CLI takkub ด้วย `takkub <cmd>` เท่านั้น ห้าม `python -m agent_takkub`** — "
+    "`takkub` อยู่บน PATH ใน pane อยู่แล้ว การรัน `python -m agent_takkub` จะบูต GUI cockpit ซ้อน\n"
 )
 
 
@@ -1157,9 +1159,73 @@ def reconcile_inherited_pane_env() -> list[str]:
     return changed
 
 
-def write_port(port: int) -> None:
+def check_cockpit_port_alive(port: int, timeout: float = 0.5) -> tuple[bool, dict | None]:
+    """Check if an existing cockpit server is actively listening on loopback port.
+
+    Connects to 127.0.0.1:<port> and probes with 'instance-identity' and/or 'ping'.
+    Returns (True, info_dict) if an active agent-takkub cockpit responded,
+    (False, None) if the port is closed, unresponsive, or not an agent-takkub server.
+    Stdlib-only (pure-leaf safe).
+    """
+    if not isinstance(port, int) or not (1 <= port <= 65535):
+        return False, None
+    import socket
+
+    try:
+        with socket.create_connection(("127.0.0.1", port), timeout=timeout) as s:
+            s.settimeout(timeout)
+            # Try instance-identity first (supported across all takkub cockpit versions)
+            s.sendall(b'{"cmd": "instance-identity"}\n')
+            buf = b""
+            while b"\n" not in buf and len(buf) < 4096:
+                chunk = s.recv(1024)
+                if not chunk:
+                    break
+                buf += chunk
+            if buf:
+                try:
+                    resp = json.loads(buf.decode("utf-8"))
+                    if resp.get("ok"):
+                        return True, resp
+                except Exception:
+                    pass
+            # Fallback to ping
+            s.sendall(b'{"cmd": "ping"}\n')
+            buf = b""
+            while b"\n" not in buf and len(buf) < 4096:
+                chunk = s.recv(1024)
+                if not chunk:
+                    break
+                buf += chunk
+            if buf:
+                try:
+                    resp = json.loads(buf.decode("utf-8"))
+                    if resp.get("ok") or resp.get("msg", "").startswith("unknown cmd:"):
+                        return True, resp
+                except Exception:
+                    pass
+    except Exception:
+        pass
+    return False, None
+
+
+def write_port(port: int, *, force: bool = False) -> None:
     ensure_runtime()
-    _effective_port_file_for_app().write_text(str(port), encoding="utf-8")
+    port_file = _effective_port_file_for_app()
+    if not force and port_file.exists():
+        try:
+            existing_port = int(port_file.read_text(encoding="utf-8").strip())
+        except (ValueError, OSError):
+            existing_port = None
+        if existing_port is not None and existing_port != port:
+            alive, info = check_cockpit_port_alive(existing_port)
+            if alive:
+                pid_desc = f" (pid {info.get('pid')})" if info and info.get("pid") else ""
+                raise RuntimeError(
+                    f"cockpit instance already running on port {existing_port}{pid_desc}; "
+                    f"refusing to overwrite port file {port_file}"
+                )
+    port_file.write_text(str(port), encoding="utf-8")
 
 
 def read_port() -> int | None:
