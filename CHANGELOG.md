@@ -4,6 +4,43 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 
 ## [vNEXT]
 
+## [v2.1.9] - 2026-09-15
+
+### Added (เพิ่ม)
+
+- **ภาษาที่ให้ทีมตอบ (#621)** — Settings → General เลือก ไทย / English / ตามที่ผู้ใช้พิมพ์ (default ไทย)
+  ฉีดเป็นประโยคเดียวเข้า prompt ของ Lead และ specialist ทุก provider ตอน spawn (คง identifier/คำสั่ง/
+  path/log เป็นอังกฤษ) · done/progress note ที่เป็นอังกฤษล้วนขณะตั้งไทยได้คำเตือน 1 ครั้งต่อ task ไม่ reject
+- **done ไม่รับภาพหลักฐานซ้ำ/เก่า (#610)** — ภาพ byte-identical กันเองหรือซ้ำกับที่ pane เดิมส่งมาก่อน
+  (คนละชื่อไฟล์) หรือ mtime เก่ากว่าเวลา assign → reject พร้อมบอกคู่ไฟล์ · บรรทัด evidence มี `#<8hex>` digest
+
+### Fixed (แก้)
+
+- **qa-gate บน Windows แดงหลอกจาก vitest/jest worker timeout (#607) + fail-fast ฆ่า test อื่นทำ test DB ค้าง (#608)** —
+  จำกัด concurrency ของ node test เมื่อเป็น Windows หรือมี gate อื่นรันอยู่ (`turbo --concurrency=1` /
+  `--pool=forks --maxForks=2` / `--maxWorkers=50%` เว้นแต่ script ตั้งเอง), เจอ signature worker-timeout ทั้งที่
+  `N passed` ครบ → retry serial 1 ครั้ง (assertion fail จริงไม่ retry), turbo ได้ `--continue` เสมอ, รอบที่ถูกฆ่า
+  กลางคันทิ้ง marker → รอบถัดไปรัน `db:test:reset`-shaped script หรือเตือน
+- **pane รัน `git stash`/`restore`/`clean -f` บน shared tree ที่มีงานคนอื่นค้าง (#609)** — เปลี่ยนเป็น **default-deny**:
+  บน shared tree (target หลัง realpath ไม่ใช่ worktree ของ role) git ผ่านได้เฉพาะ allow-list อ่าน/เพิ่ม
+  (status/diff/log/show/add/fetch/branch list/stash list…) ที่เหลือ deny · wrapper (`cmd /c`, `pwsh -c`, `rtk`), chain,
+  quoted/relative path, `--git-dir`/`--work-tree`/`GIT_DIR=` env, junction ถูก normalize ก่อนตรวจ · shared refs
+  (stash pop/drop/clear, branch/tag -f, worktree admin, fetch refspec) Lead-only · `-c <key>=`/`git config` write/
+  `GIT_EXTERNAL_DIFF`/`GIT_SSH_COMMAND`/`GIT_CONFIG_*` ฯลฯ deny ทุก cwd ยกเว้น key แสดงผล (color/log/pager=cat) ·
+  prose ใน role file + AGENTS.md template ตรงกับกติกา · reviewer เจาะ 5 รอบ (`docs/audit/2026-09-15-batch-2.1.9-review.md`)
+- **คู่มือ Lead (ทุกเครื่อง):** กฎ "หารูให้ครบก่อนแล้วแก้ทีเดียว ห้ามเจอ 1 แก้ 1", เพดาน fix-loop 2 รอบรวม review,
+  และ user directive 9 ข้อที่เคยอยู่แค่ memory (dead code, จำลองเป็น user, mockup, อย่าเชื่อ done note, เช็คสด…)
+  ย้ายลง `docs/lead/` · กฎพัฒนา cockpit (release/test) ลง `CLAUDE.md`
+- **Lead tiny-fix guard จัดหมวด deep จากชื่อ path `security-e2e` (#611)** — คำ auth/security/token/crypto ตรวจกับเนื้อหา
+  diff + path ที่ไม่ใช่ไฟล์เทส/e2e; schema/migration/lockfile/manifest ยัง path-only เหมือนเดิม
+- **`takkub wait --timeout` เกิน 1800s ถูกตัดเงียบ (#612)** — เตือนตอนเริ่มและตอนหมดเวลา + บอกใน --help
+- **`--role qa --mode e2e` / `--role critic --mode ui` ถูกปฏิเสธทั้งที่เป็น alias ตรงกัน (#613)** — ยอมรับ; mode ไม่ตรง
+  → error บอกคำสั่งที่ใช้ได้; warn deprecated ขึ้นเฉพาะตอนไม่ระบุ mode
+- **"queued messages older than 12 hours will be dropped" ขึ้นทุกครั้งแต่ไม่ลบ (#615)** — drop จริงครั้งเดียว,
+  `takkub messages` แยก `หมดอายุ` ออกจาก `รอ pane เปิด`
+- **`scope=deep` ที่เขียนไว้ในข้อความ task ถูกมองข้าม (#620)** — marker `scope=`/`scope:`/`(scope x)` ในหัวข้อชนะ
+  keyword; `--scope` ของ Lead ยังชนะทุกอย่าง
+
 ## [v2.1.8] - 2026-09-15
 
 ### Added (เพิ่ม)
