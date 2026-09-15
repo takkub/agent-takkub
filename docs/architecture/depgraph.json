@@ -79,6 +79,7 @@
         "agent_takkub.opencode_helper",
         "agent_takkub.orchestrator_text",
         "agent_takkub.pane_env",
+        "agent_takkub.pane_guard",
         "agent_takkub.plugin_installer",
         "agent_takkub.prisma_gate",
         "agent_takkub.project_explorer",
@@ -107,7 +108,7 @@
         "agent_takkub.verify",
         "agent_takkub.worktree_manager"
       ],
-      "fan_in": 46,
+      "fan_in": 47,
       "fan_out": 0
     },
     {
@@ -3345,6 +3346,7 @@
     {
       "module": "agent_takkub.pane_guard",
       "imports": [
+        "agent_takkub._win_console",
         "agent_takkub.config",
         "agent_takkub.lead_context",
         "agent_takkub.team_preset"
@@ -3359,7 +3361,7 @@
         "agent_takkub.pipeline_executor"
       ],
       "fan_in": 7,
-      "fan_out": 3
+      "fan_out": 4
     },
     {
       "module": "agent_takkub.pane_health",

@@ -2281,13 +2281,18 @@ def _get_git_common_dir(p: pathlib.Path) -> pathlib.Path | None:
     try:
         import subprocess
 
+        from ._win_console import SUBPROCESS_NO_WINDOW
+
         res = subprocess.run(
             ["git", "rev-parse", "--git-common-dir"],
             cwd=str(p),
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=0.5,
             check=False,
+            creationflags=SUBPROCESS_NO_WINDOW,
         )
         if res.returncode == 0 and res.stdout.strip():
             raw = res.stdout.strip()
