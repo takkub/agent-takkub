@@ -702,6 +702,48 @@ class TestNodeConcurrencyAndWorkerTimeoutRetry:
         assert "retry serial" in test_step.detail
         assert report.ok
 
+    def test_worker_timeout_retry_preserves_attempt1_log(
+        self, node_repo, monkeypatch, tmp_path
+    ) -> None:
+        """#607 H3: the retry must not silently overwrite attempt 1's log in
+        place — it's copied aside to `<name>.attempt1.log` before the retry
+        runs, and the final report detail must mention both rounds."""
+        (node_repo / "package.json").write_text(
+            '{"scripts": {"test": "turbo run test"}}', encoding="utf-8"
+        )
+        (node_repo / "tsconfig.json").unlink()
+        monkeypatch.setattr(qa_gate, "_WIN", False)
+        monkeypatch.setattr(qa_gate, "_runtime_dir", lambda: tmp_path / "data-home" / "runtime")
+        real_run = subprocess.run
+        calls = {"n": 0}
+        attempt1_output = "Tests  42 passed\n[vitest-pool] Timeout waiting for worker to respond\n"
+        attempt2_output = "Tests  42 passed\n"
+
+        def fake_run(cmd, **kwargs):
+            if cmd[0] == "git":
+                return real_run(cmd, **kwargs)
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return _FakeCompleted(1, stdout=attempt1_output)
+            assert "--concurrency=1" in cmd
+            return _FakeCompleted(0, stdout=attempt2_output)
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+
+        report = qa_gate.run_gate(cwd=node_repo, write_report=True)
+
+        test_step = next(s for s in report.steps if s.name == "test")
+        assert calls["n"] == 2
+        assert test_step.ok is True
+        assert "round 1 (worker timeout)" in test_step.detail
+        assert "round 2 (retry serial)" in test_step.detail
+        assert test_step.log_path is not None
+        assert test_step.log_path.read_text(encoding="utf-8") == attempt2_output
+        attempt1_log = test_step.log_path.with_name(
+            f"{test_step.log_path.stem}.attempt1{test_step.log_path.suffix}"
+        )
+        assert attempt1_log.read_text(encoding="utf-8") == attempt1_output
+
     def test_worker_timeout_retries_serial_for_a_direct_non_turbo_vitest_script(
         self, node_repo, monkeypatch
     ) -> None:
@@ -711,7 +753,13 @@ class TestNodeConcurrencyAndWorkerTimeoutRetry:
         `_detect_node_test_runner` (package.json), not by sniffing the argv
         (caught only by a real, non-mocked run against a real npm/vitest
         shim — see the #607 manual verification)."""
-        # node_repo's own package.json already has {"test": "vitest run"}.
+        # node_repo's own package.json already has {"test": "vitest run"};
+        # add a declared vitest version <4 so H4's version gate (#607) picks
+        # the poolOptions flag family this test asserts on.
+        (node_repo / "package.json").write_text(
+            '{"scripts": {"test": "vitest run"}, "devDependencies": {"vitest": "^2.0.0"}}',
+            encoding="utf-8",
+        )
         (node_repo / "tsconfig.json").unlink()
         monkeypatch.setattr(qa_gate, "_WIN", False)
         real_run = subprocess.run
@@ -738,6 +786,120 @@ class TestNodeConcurrencyAndWorkerTimeoutRetry:
         assert calls["n"] == 2
         assert test_step.ok is True
         assert report.ok
+
+    def test_worker_timeout_retry_uses_maxworkers_on_vitest4(
+        self, node_repo, monkeypatch, tmp_path
+    ) -> None:
+        """#607 H4: Vitest 4 dropped `--poolOptions.forks.maxForks` — CLI
+        parsing rejects it outright. The serial retry must use
+        `--maxWorkers=N` once the declared vitest version is >=4, verified
+        against a real Vitest 4.0.0/3.2.4 binary A/B (see the batch-2.1.9
+        review fixture)."""
+        (node_repo / "package.json").write_text(
+            '{"scripts": {"test": "vitest run"}, "devDependencies": {"vitest": "^4.0.0"}}',
+            encoding="utf-8",
+        )
+        (node_repo / "tsconfig.json").unlink()
+        monkeypatch.setattr(qa_gate, "_WIN", False)
+        real_run = subprocess.run
+        calls = {"n": 0}
+
+        def fake_run(cmd, **kwargs):
+            if cmd[0] == "git":
+                return real_run(cmd, **kwargs)
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return _FakeCompleted(
+                    1,
+                    stdout="Tests  42 passed\n"
+                    "[vitest-pool] Timeout waiting for worker to respond\n",
+                )
+            assert "--maxWorkers=1" in cmd
+            assert "--poolOptions.forks.maxForks=1" not in cmd
+            return _FakeCompleted(0, stdout="Tests  42 passed\n")
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+
+        report = qa_gate.run_gate(cwd=node_repo, write_report=False)
+
+        test_step = next(s for s in report.steps if s.name == "test")
+        assert calls["n"] == 2
+        assert test_step.ok is True
+        assert report.ok
+
+    def test_worker_timeout_retry_skipped_when_vitest_version_unknown(
+        self, node_repo, monkeypatch
+    ) -> None:
+        """#607 H4: with no node_modules and no declared vitest version to
+        read, guessing either flag family risks a hard CLI-parse failure —
+        skip the retry (fail-safe) and stay FAIL rather than gamble."""
+        # node_repo's own package.json is {"scripts": {"test": "vitest run"}}
+        # with no devDependencies entry for vitest at all.
+        (node_repo / "tsconfig.json").unlink()
+        monkeypatch.setattr(qa_gate, "_WIN", False)
+        real_run = subprocess.run
+        recorder: list = []
+
+        def fake_run(cmd, **kwargs):
+            if cmd[0] == "git":
+                return real_run(cmd, **kwargs)
+            recorder.append(cmd)
+            return _FakeCompleted(
+                1,
+                stdout="Tests  42 passed\n[vitest-pool] Timeout waiting for worker to respond\n",
+            )
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+
+        report = qa_gate.run_gate(cwd=node_repo, write_report=False)
+
+        test_step = next(s for s in report.steps if s.name == "test")
+        assert len(recorder) == 1  # no retry attempted — version unknown
+        assert test_step.ok is False
+        assert not report.ok
+
+    def test_mixed_real_failure_and_worker_timeout_stays_fail_no_retry(
+        self, node_repo, monkeypatch, tmp_path
+    ) -> None:
+        """#607 H3: a real assertion failure mixed into the same output as
+        an unrelated worker-timeout signature must never be retried away —
+        the retry's evidence would silently bury the original FAIL. The
+        attempt's own log must also survive untouched (no retry ever ran to
+        overwrite it)."""
+        (node_repo / "package.json").write_text(
+            '{"scripts": {"test": "turbo run test"}}', encoding="utf-8"
+        )
+        (node_repo / "tsconfig.json").unlink()
+        monkeypatch.setattr(qa_gate, "_WIN", False)
+        monkeypatch.setattr(qa_gate, "_runtime_dir", lambda: tmp_path / "data-home" / "runtime")
+        real_run = subprocess.run
+        recorder: list = []
+        mixed_output = (
+            "FAIL authorization.test.ts: expected false to be true\n"
+            "Tests  1 failed | 41 passed (42)\n"
+            "[vitest-pool] Timeout waiting for worker to respond\n"
+        )
+
+        def fake_run(cmd, **kwargs):
+            if cmd[0] == "git":
+                return real_run(cmd, **kwargs)
+            recorder.append(cmd)
+            return _FakeCompleted(1, stdout=mixed_output)
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+
+        report = qa_gate.run_gate(cwd=node_repo, write_report=True)
+
+        test_step = next(s for s in report.steps if s.name == "test")
+        assert len(recorder) == 1  # no retry attempted
+        assert test_step.ok is False
+        assert not report.ok
+        assert test_step.log_path is not None
+        assert test_step.log_path.read_text(encoding="utf-8") == mixed_output
+        attempt1_log = test_step.log_path.with_name(
+            f"{test_step.log_path.stem}.attempt1{test_step.log_path.suffix}"
+        )
+        assert not attempt1_log.exists()  # never created — no retry happened
 
     def test_real_assertion_failure_is_not_retried(self, node_repo, monkeypatch) -> None:
         """A genuine red test (no worker-timeout signature) must stay FAIL

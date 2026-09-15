@@ -228,7 +228,46 @@ def _segment_uses_turbo(segment: str) -> bool:
 _CONCURRENCY_FLAG_RE = re.compile(r"--pool\b|poolOptions|--maxWorkers\b|--concurrency\b")
 
 
-def _direct_runner_concurrency_args(script_value: str) -> list[str]:
+def installed_package_major(cwd: Path, package_name: str) -> int | None:
+    """The installed major version of *package_name* under *cwd*'s
+    node_modules, or None when it can't be determined (not installed, or its
+    package.json has no parseable `version`) — ground truth for what will
+    actually run, when it's there to read."""
+    pkg_path = cwd / "node_modules" / package_name / "package.json"
+    try:
+        data = json.loads(pkg_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    major = str(data.get("version", "")).split(".", 1)[0]
+    return int(major) if major.isdigit() else None
+
+
+_SEMVER_LEADING_DIGIT_RE = re.compile(r"\d+")
+
+
+def vitest_major_version(cwd: Path, pkg: dict) -> int | None:
+    """Best-known major version of vitest for *cwd* — `node_modules` is
+    ground truth when installed (what will actually run); falls back to the
+    leading digit of the declared `dependencies`/`devDependencies` semver
+    spec (e.g. `^2.0.0` → 2) for a project not yet `npm install`-ed. `None`
+    when neither resolves — callers must never guess a flag then (#607 H4:
+    on Vitest 4, `--poolOptions` isn't merely ignored, it fails CLI parsing
+    outright — `CACError: Unknown option --poolOptions` — before a single
+    test runs, turning a healthy project's gate red without a real
+    regression)."""
+    major = installed_package_major(cwd, "vitest")
+    if major is not None:
+        return major
+    for key in ("dependencies", "devDependencies"):
+        deps = pkg.get(key)
+        if isinstance(deps, dict) and "vitest" in deps:
+            m = _SEMVER_LEADING_DIGIT_RE.search(str(deps["vitest"]))
+            if m:
+                return int(m.group())
+    return None
+
+
+def _direct_runner_concurrency_args(cwd: Path, pkg: dict, script_value: str) -> list[str]:
     """Cap parallelism for a `test`/`verify` script that calls vitest/jest
     DIRECTLY (no turbo) — #607's Windows worker-pool timeouts aren't
     turbo-only, a bare `vitest run`/`jest` in a monorepo sub-package hits the
@@ -237,6 +276,12 @@ def _direct_runner_concurrency_args(script_value: str) -> list[str]:
     (`--pool`, `poolOptions`, `--maxWorkers`) — forcing a second, possibly
     conflicting flag onto a runner is worse than doing nothing.
 
+    Vitest 4 dropped `--poolOptions.forks.maxForks` entirely (#607 H4,
+    verified against real Vitest 3.2.4/4.0.0 binaries: `--maxWorkers=N` runs
+    clean on both, `--poolOptions...` only on <4). Version unknown → inject
+    nothing rather than guess; an uncapped run is still a healthy run, a
+    wrong flag is a gate that never starts.
+
     ponytail: recognizes vitest/jest by name in the script text only, same
     as `_detect_node_test_runner` in qa_gate.py — a runner invoked through an
     unrecognized wrapper gets no concurrency args here (still runs, just
@@ -244,13 +289,20 @@ def _direct_runner_concurrency_args(script_value: str) -> list[str]:
     if _CONCURRENCY_FLAG_RE.search(script_value):
         return []
     if "vitest" in script_value:
-        return ["--pool=forks", "--poolOptions.forks.maxForks=2"]
+        major = vitest_major_version(cwd, pkg)
+        if major is None:
+            return []
+        return (
+            ["--maxWorkers=2"] if major >= 4 else ["--pool=forks", "--poolOptions.forks.maxForks=2"]
+        )
     if "jest" in script_value:
         return ["--maxWorkers=50%"]
     return []
 
 
-def _turbo_force_args(script_value: str, *, limit_concurrency: bool = False) -> list[str]:
+def _turbo_force_args(
+    cwd: Path, pkg: dict, script_value: str, *, limit_concurrency: bool = False
+) -> list[str]:
     """A `verify`/`test` script that delegates to turbo can cache-hit and
     replay only a bare `PASS 58.7s` status line — no underlying jest/vitest
     `Tests: N passed` summary, leaving qa-gate's own log with no evidence a
@@ -290,7 +342,7 @@ def _turbo_force_args(script_value: str, *, limit_concurrency: bool = False) -> 
             args.append("--concurrency=1")
         return ["--", *args]
     if limit_concurrency:
-        extra = _direct_runner_concurrency_args(script_value)
+        extra = _direct_runner_concurrency_args(cwd, pkg, script_value)
         if extra:
             return ["--", *extra]
     return []
@@ -318,7 +370,7 @@ def node_checks(cwd: Path, *, limit_concurrency: bool = False) -> list[Check]:
 
     if "verify" in scripts:
         verify_cmd = pm_run(pm, "verify") + _turbo_force_args(
-            str(scripts["verify"]), limit_concurrency=limit_concurrency
+            cwd, pkg, str(scripts["verify"]), limit_concurrency=limit_concurrency
         )
         checks.append(Check(name="verify", cmd=verify_cmd, stack="node"))
     else:
@@ -344,7 +396,7 @@ def node_checks(cwd: Path, *, limit_concurrency: bool = False) -> list[Check]:
                 )
         if "test" in scripts:
             test_cmd = pm_run(pm, "test") + _turbo_force_args(
-                str(scripts["test"]), limit_concurrency=limit_concurrency
+                cwd, pkg, str(scripts["test"]), limit_concurrency=limit_concurrency
             )
             checks.append(Check(name="test", cmd=test_cmd, stack="node"))
 
