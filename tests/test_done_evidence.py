@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import pathlib
+import re
 import time
 from unittest.mock import MagicMock, patch
 
@@ -773,7 +774,7 @@ class TestSuspectCaptureFlagging:
 
         result = Orchestrator._scan_done_evidence("proj", "qa", assign_ts)
 
-        assert "big.png (50.0KB)" in result
+        assert re.search(r"big\.png \(50\.0KB(?: · #[0-9a-f]{8})?\)", result), result
         assert "⚠" not in result
 
     def test_small_file_flagged_suspect(self, orch, tmp_path):
@@ -1123,3 +1124,176 @@ def test_find_evidence_files_excludes_repo_checkouts(tmp_path, monkeypatch):
     assert "walk.png" not in found_paths, f"Should exclude src/*/static/*, got: {found_paths}"
     assert "icon.png" not in found_paths, f"Should exclude vendor/*, got: {found_paths}"
     assert "module.png" not in found_paths, f"Should exclude __pycache__/*, got: {found_paths}"
+
+
+class TestEvidenceDedupGate:
+    """Issue #610: a done-report QA retest cited a screenshot that was
+    byte-identical to a PRE-fix failure screenshot from an earlier report on
+    the same issue — #182's dedup only compares files WITHIN one done()
+    call, so it never caught this. `_evidence_dedup_gate` compares against
+    the previous non-rejected call's evidence too, and actually blocks
+    `done()` from completing rather than just annotating the note."""
+
+    def test_same_batch_duplicate_rejected(self, orch, tmp_path):
+        assign_ts = time.time() - 60
+        shots = _shot_dir(tmp_path, "proj")
+        payload = b"\x89PNG\r\n\x1a\n" + b"\x00" * (20 * 1024)
+        a = shots / "r3-a.png"
+        b = shots / "r3-b.png"
+        a.write_bytes(payload)
+        b.write_bytes(payload)
+        import os
+
+        os.utime(a, (assign_ts + 10, assign_ts + 10))
+        os.utime(b, (assign_ts + 11, assign_ts + 11))
+
+        msg = orch._evidence_dedup_gate("proj", "qa", assign_ts, "done")
+
+        assert msg is not None
+        assert "#610" in msg
+
+    def test_cross_submission_duplicate_rejected(self, orch, tmp_path):
+        """The exact live scenario: an earlier report's screenshot bytes
+        resurface under a new name in a later report — the earlier file is
+        gone from the scan dir by the time the second call happens (a new
+        day's export dir, or simply cleaned up), so only history catches
+        it."""
+        assign_ts = time.time() - 60
+        shots = _shot_dir(tmp_path, "proj")
+        payload = b"\x89PNG\r\n\x1a\n" + b"\x00" * (20 * 1024)
+        first = shots / "A7-delete-rank-inuse-error.png"
+        first.write_bytes(payload)
+        import os
+
+        os.utime(first, (assign_ts + 5, assign_ts + 5))
+
+        msg1 = orch._evidence_dedup_gate("proj", "qa", assign_ts, "first report: fails")
+        assert msg1 is None
+
+        first.unlink()
+        second = shots / "R3-delete-rank-inuse.png"
+        second.write_bytes(payload)  # same bytes, new name
+        os.utime(second, (assign_ts + 20, assign_ts + 20))
+
+        msg2 = orch._evidence_dedup_gate("proj", "qa", assign_ts, "retest: ok 3/3")
+
+        assert msg2 is not None
+        assert "A7-delete-rank-inuse-error.png" in msg2
+        assert "R3-delete-rank-inuse.png" in msg2
+        assert "#610" in msg2
+
+    def test_distinct_new_evidence_across_calls_not_rejected(self, orch, tmp_path):
+        assign_ts = time.time() - 60
+        shots = _shot_dir(tmp_path, "proj")
+        import os
+
+        first = shots / "before.png"
+        _write_real_png(first, extra_bytes=10 * 1024)
+        os.utime(first, (assign_ts + 5, assign_ts + 5))
+        assert orch._evidence_dedup_gate("proj", "qa", assign_ts, "first") is None
+
+        second = shots / "after.png"
+        _write_real_png(second, extra_bytes=20 * 1024)  # genuinely different bytes
+        os.utime(second, (assign_ts + 20, assign_ts + 20))
+        assert orch._evidence_dedup_gate("proj", "qa", assign_ts, "second, actually new") is None
+
+    def test_no_ui_marker_skips_check(self, orch, tmp_path):
+        assign_ts = time.time() - 60
+        shots = _shot_dir(tmp_path, "proj")
+        payload = b"\x89PNG\r\n\x1a\n" + b"\x00" * (20 * 1024)
+        a = shots / "a.png"
+        b = shots / "b.png"
+        a.write_bytes(payload)
+        b.write_bytes(payload)
+        import os
+
+        os.utime(a, (assign_ts + 5, assign_ts + 5))
+        os.utime(b, (assign_ts + 6, assign_ts + 6))
+
+        msg = orch._evidence_dedup_gate("proj", "backend", assign_ts, "no visual change [no-ui]")
+        assert msg is None
+
+    def test_stale_cited_screenshot_rejected(self, orch, tmp_path):
+        assign_ts = time.time() - 60
+        shots = _shot_dir(tmp_path, "proj")
+        stale = shots / "old-shot.png"
+        _write_real_png(stale, extra_bytes=10 * 1024)
+        import os
+
+        os.utime(stale, (assign_ts - 500, assign_ts - 500))  # predates the assign window
+
+        msg = orch._evidence_dedup_gate("proj", "qa", assign_ts, "see old-shot.png for proof")
+
+        assert msg is not None
+        assert "old-shot.png" in msg
+        assert "#610" in msg
+
+    def test_full_done_call_rejects_duplicate_evidence(self, orch, tmp_path, monkeypatch):
+        """End-to-end: orch.done() itself refuses to complete when its
+        evidence batch is a same-file duplicate under two names, and leaves
+        the pane's state untouched (rejected before any teardown)."""
+        monkeypatch.setattr(orch_mod, "active_project", lambda: ("proj", {}))
+        _mock_done(orch)
+        proj = "proj"
+        _register_pane(orch, LEAD.name, proj, _make_alive_session())
+        _register_pane(orch, "qa", proj, _make_alive_session())
+        assign_ts = time.time() - 60
+        orch._pane_state["proj::qa"] = PaneState(assign_ts=assign_ts)
+
+        shots = _shot_dir(tmp_path, "proj")
+        payload = b"\x89PNG\r\n\x1a\n" + b"\x00" * (20 * 1024)
+        a = shots / "R3-delete-rank-inuse.png"
+        b = shots / "A7-delete-rank-inuse-error.png"
+        a.write_bytes(payload)
+        b.write_bytes(payload)
+        import os
+
+        os.utime(a, (assign_ts + 5, assign_ts + 5))
+        os.utime(b, (assign_ts + 6, assign_ts + 6))
+
+        ok, msg = orch.done("qa", note="retest ok 3/3", project=proj)
+
+        assert ok is False
+        assert "#610" in msg
+        assert orch._pane_state.get("proj::qa") is not None
+
+    def test_force_bypasses_dedup_gate(self, orch, tmp_path, monkeypatch):
+        monkeypatch.setattr(orch_mod, "active_project", lambda: ("proj", {}))
+        _mock_done(orch)
+        proj = "proj"
+        _register_pane(orch, LEAD.name, proj, _make_alive_session())
+        _register_pane(orch, "qa", proj, _make_alive_session())
+        assign_ts = time.time() - 60
+        orch._pane_state["proj::qa"] = PaneState(assign_ts=assign_ts)
+
+        shots = _shot_dir(tmp_path, "proj")
+        payload = b"\x89PNG\r\n\x1a\n" + b"\x00" * (20 * 1024)
+        a = shots / "one.png"
+        b = shots / "two.png"
+        a.write_bytes(payload)
+        b.write_bytes(payload)
+        import os
+
+        os.utime(a, (assign_ts + 5, assign_ts + 5))
+        os.utime(b, (assign_ts + 6, assign_ts + 6))
+
+        ok, _msg = orch.done("qa", note="done", project=proj, force=True)
+
+        assert ok is True
+
+    def test_digest_shown_in_scan_done_evidence_output(self, orch, tmp_path):
+        """Checklist item: Lead-facing evidence line carries a short digest
+        per image so a duplicate pair can be eyeballed even outside the
+        reject path (e.g. a `--force`d done)."""
+        assign_ts = time.time() - 60
+        shots = _shot_dir(tmp_path, "proj")
+        path = shots / "shot.png"
+        _write_real_png(path, extra_bytes=10 * 1024)
+        import os
+
+        os.utime(path, (assign_ts + 5, assign_ts + 5))
+
+        result = Orchestrator._scan_done_evidence("proj", "qa", assign_ts)
+
+        assert "shot.png" in result
+        assert re.search(r"#[0-9a-f]{8}\b", result), result
