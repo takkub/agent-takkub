@@ -4470,6 +4470,14 @@ class LeadInboxMixin:
             return
         # Write succeeded — now it is safe to dequeue.
         queue.popleft()
+        # #614: stamp when THIS notice landed in Lead's pane. The
+        # proactive-compact watchdog uses it to keep the idle clock across
+        # the brief not-ready stretch this injection itself causes (Lead
+        # reads + replies to our own notice = not real work) instead of
+        # resetting `idle_since` every time and never compacting an
+        # otherwise-idle Lead. Overwritten per item so a burst keeps the
+        # newest stamp.
+        getattr(self, "_lead_notify_inject_since", {})[project_ns] = time.time()
         delay = _enter_delay_ms(payload)
         # #133: mark the chain in flight BEFORE scheduling it so no other
         # writer (a re-entrant pump, _force_deliver_done_notices) can slip a

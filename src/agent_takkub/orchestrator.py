@@ -309,6 +309,24 @@ PROACTIVE_COMPACT_PENDING_CEILING_S = int(
     os.environ.get("TAKKUB_PROACTIVE_COMPACT_PENDING_CEILING_S", str(10 * 60))
 )
 
+# Issue #614: the cockpit itself injects notices into Lead's pane (done
+# summaries, auto-resume quota resets, system notices — an autonomous Lead
+# gets several an hour). Each one makes Lead go briefly not-ready to read
+# and reply, and the proactive-compact clock below would otherwise treat
+# that like any other "real work" — resetting `proactive_compact_idle_since`
+# at the end of every notice episode, so a mostly-idle Lead with normal
+# notice traffic NEVER accumulates the continuous PROACTIVE_COMPACT_IDLE_AFTER_S
+# needed for `/compact` to fire. This is the window over which a not-ready
+# stretch that STARTED right after a cockpit injection (how long after the
+# stamp a not-ready is still plausibly the notice itself) is held against
+# that reset, exactly like #190's pending window below — a burst this short
+# is a reply-to-our-own-notice, not a task. Once the stretch outlives it
+# (and the PENDING_CEILING_S ceiling), it is treated as real work after all.
+# Overrideable via env like the sibling proactive-compact knobs.
+PROACTIVE_COMPACT_INJECT_HOLD_AFTER_S = int(
+    os.environ.get("TAKKUB_PROACTIVE_COMPACT_INJECT_HOLD_AFTER_S", str(60))
+)
+
 # "Nothing new since the last compact" gate (user report 2026-08-25): the
 # one-per-idle-episode rule above still re-fired `/compact` on the SAME
 # untouched conversation every ~25-45 min all night, because an idle episode
@@ -1690,6 +1708,14 @@ class Orchestrator(
         # force-flush chain. Cleared together with _lead_notify_retry by
         # LeadInboxMixin._reset_lead_notify_backoff.
         self._lead_notify_busy_since: dict[str, float] = {}
+        # #614: wall-clock when the cockpit's most recent successful notice
+        # write into THIS project's Lead landed (per project_ns). Stamped in
+        # `_pump_lead_notify` right after a write hits the PTY, so
+        # `_check_proactive_compact` can tell a not-ready stretch that was
+        # CAUSED by our own injection (keep the idle clock, see
+        # PROACTIVE_COMPACT_INJECT_HOLD_AFTER_S) apart from genuinely new
+        # work (reset it). Absent = no injection recorded for this project.
+        self._lead_notify_inject_since: dict[str, float] = {}
         # #133: project_ns currently has an in-flight _delayed_enter_verified
         # submit-verify chain writing to the Lead session. Both
         # _pump_lead_notify (next queued item) and _force_deliver_done_notices
@@ -5107,7 +5133,26 @@ class Orchestrator(
         from .provider_config import effective_provider_for
         from .provider_spec import normalize_process_name, scaffolding_process_names_for
 
-        provider = effective_provider_for(role_name, project=project_ns)
+        # #619: resolve the provider this pane ACTUALLY spawned with
+        # (pane.model.provider_name, set unconditionally at attach), NOT the
+        # close-time `effective_provider_for`. The latter answers "which CLI
+        # should spawn today" and can be a DIFFERENT provider by the time a
+        # pane closes — #572/#514 quota substitution turns a pane that RAN
+        # codex all turn into "provider=claude" at close, so its confirmed
+        # scaffolding names (codex-code-mode-host.exe etc., which live under
+        # the pane the whole time) would get dropped from the filter and the
+        # close would warn about the codex process tree it is about to kill —
+        # a 100% false positive proven live (Lead, 2026-09-15 11:48:09:
+        # "about to be killed (codex-code-mode-host.exe)"). The pane's own
+        # model is the one truth for which CLI is actually running here.
+        provider = None
+        _pane = self._panes_by_project.get(project_ns, {}).get(role_name)
+        if _pane is not None:
+            _pn = getattr(getattr(_pane, "model", None), "provider_name", None)
+            if isinstance(_pn, str) and _pn:
+                provider = _pn
+        if provider is None:
+            provider = effective_provider_for(role_name, project=project_ns)
         scaffolding = scaffolding_process_names_for(provider)
         procs = []
         for child in children:
@@ -8542,7 +8587,7 @@ class Orchestrator(
                 except OSError:
                     pass
 
-        if _split_shard(role)[0] in ("qa", "critic", "designer"):
+        if _split_shard(role)[0] in _EVIDENCE_WARN_ROLES:
             today = datetime.now().strftime("%Y-%m-%d")
             shot_dir = RUNTIME_DIR / "exports" / today / project_ns / "screenshots"
             try:
@@ -9628,17 +9673,37 @@ class Orchestrator(
                     pass
 
             last_screenshot = ""
-            if _split_shard(pane_role)[0] in ("qa", "critic", "designer"):
+            if _split_shard(pane_role)[0] in _EVIDENCE_WARN_ROLES:
+                # #629: pin the newest screenshot to THIS pane's CURRENT task
+                # window, not the whole shared folder. The shared
+                # `exports/<today>/<project>/screenshots/` dir collects shots
+                # from every browser role (mb MCP writes them all flat into
+                # it) with no per-file role metadata, so the old
+                # newest-mtime-anywhere pick could show critic the screenshot
+                # a DIFFERENT role just took (repro: critic's status showed
+                # frontend/gemini captures). Reuse the same evidence scan the
+                # done-notice path uses: only shots that landed after this
+                # pane's assign_ts count, and a pane with no window (never
+                # assigned, or nothing fresh) simply shows nothing rather
+                # than inheriting someone else's image. `_EVIDENCE_WARN_ROLES`
+                # already covers the reviewer alias alongside qa/critic/
+                # designer.
                 today = datetime.now().strftime("%Y-%m-%d")
                 shot_dir = RUNTIME_DIR / "exports" / today / project_ns / "screenshots"
-                try:
-                    shots = sorted(
-                        shot_dir.iterdir(), key=lambda f: f.stat().st_mtime, reverse=True
+                assign_ts = 0.0
+                _ps_shot = (getattr(self, "_pane_state", {}) or {}).get(
+                    f"{project_ns}::{pane_role}"
+                )
+                if _ps_shot is not None:
+                    assign_ts = _ps_shot.assign_ts
+                if assign_ts > 0:
+                    found = sorted(
+                        self._find_evidence_files(shot_dir, assign_ts, now),
+                        key=lambda t: t[0],
+                        reverse=True,
                     )
-                    if shots:
-                        last_screenshot = str(shots[0])
-                except OSError:
-                    pass
+                    if found:
+                        last_screenshot = str(found[0][1])
 
             done_events: list[str] = []
             sessions_root = RUNTIME_DIR / "sessions"
@@ -11729,6 +11794,15 @@ class Orchestrator(
                         # that window, only once the pane is genuinely idle.
                         or _has_bg_work
                     ):
+                        # #614: note when THIS not-ready stretch began (seeded on
+                        # its first tick, cleared once the pane is observed
+                        # back at ready below), so a notice-induced burst right
+                        # after a cockpit injection into Lead can be told apart
+                        # from real work. Seeded before the pending checks so
+                        # every not-ready reason buys the same attribution
+                        # window.
+                        if ps.proactive_compact_not_ready_since is None:
+                            ps.proactive_compact_not_ready_since = now
                         # #190: don't null out idle_since for the busy stretch
                         # caused by the /compact we ourselves just injected —
                         # only a genuinely new not-ready (pending already
@@ -11738,6 +11812,39 @@ class Orchestrator(
                             <= PROACTIVE_COMPACT_PENDING_CEILING_S
                         ):
                             continue
+                        # #614: a not-ready stretch that began at/right after
+                        # our own notice injection into Lead is that notice's
+                        # read+reply, not a task — hold the idle clock for it.
+                        # Gated to Lead (only Lead receives injections), to a
+                        # stretch that actually STARTED within
+                        # PROACTIVE_COMPACT_INJECT_HOLD_AFTER_S of the stamp,
+                        # and to an idle episode already running when the
+                        # notice landed (stamp postdates idle_since) — a
+                        # notice that triggers a long autonomous turn is real
+                        # work and keeps resetting, as before. Still bounded
+                        # by PENDING_CEILING_S: a stretch that never settles
+                        # is real work regardless.
+                        _inject_hold_ts = (
+                            getattr(self, "_lead_notify_inject_since", {}).get(project_name)
+                            if role == LEAD.name
+                            else None
+                        )
+                        if (
+                            _inject_hold_ts is not None
+                            and ps.proactive_compact_idle_since is not None
+                            and _inject_hold_ts >= ps.proactive_compact_idle_since - 1.0
+                            and ps.proactive_compact_not_ready_since >= _inject_hold_ts - 1.0
+                            and ps.proactive_compact_not_ready_since - _inject_hold_ts
+                            <= PROACTIVE_COMPACT_INJECT_HOLD_AFTER_S
+                        ):
+                            if (
+                                now - ps.proactive_compact_not_ready_since
+                                <= PROACTIVE_COMPACT_PENDING_CEILING_S
+                            ):
+                                continue
+                            _reset_reason = "not-ready-inject-stale"
+                        else:
+                            _reset_reason = "not-ready"
                         # Either pending was never set (ordinary new-work
                         # not-ready), or it's been pending longer than a
                         # /compact could plausibly still be running — see
@@ -11745,10 +11852,23 @@ class Orchestrator(
                         # Either way this is real work now: clear any stale
                         # pending flag and reset idle_since so it starts a
                         # fresh episode once the pane settles.
+                        _was_clocked = ps.proactive_compact_idle_since is not None
                         ps.proactive_compact_pending = False
                         ps.proactive_compact_idle_since = None
                         ps.proactive_compact_skip_logged_bytes = -1
+                        if _was_clocked:
+                            _log_event(
+                                "proactive_idle_compact_clock_reset",
+                                role=role,
+                                project=project_name,
+                                reason=_reset_reason,
+                            )
                         continue
+                    # Back at the ready prompt — any not-ready stretch
+                    # (whether notice-induced or real work) ended here; drop
+                    # the seed so the next stretch starts its own attribution
+                    # window.
+                    ps.proactive_compact_not_ready_since = None
                     if ps.proactive_compact_pending:
                         # Pane is back at its ready prompt for the first time
                         # since we sent /compact — the compact episode is
