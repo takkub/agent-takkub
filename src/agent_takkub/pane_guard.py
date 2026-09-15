@@ -918,10 +918,36 @@ def _is_direct_edit_exempt(file_path: str, cwd: str | None, project: str | None)
     return True  # outside every known root
 
 
-_DEEP_TEST_PATH_EXEMPT = re.compile(
-    r"(?:^|/)(?:tests?|__tests__|[\w-]*-e2e)(?:/|$)|\.(?:spec|test)\.[^./]+$",
-    re.I,
+# #611 M1: a REAL test folder is a trustworthy exemption on its own — the
+# `.spec.`/`.test.` filename SUFFIX alone is not, when a sensitive folder
+# also sits in the path. Confirmed live: `src/auth/verify.spec.ts` (no real
+# test folder, suffix only) let `return verifySignature(value)` become
+# `return true` straight past this exemption, because the old regex treated
+# the suffix as sufficient on its own — a `.spec.ts` file can be imported by
+# a production entrypoint exactly like any other module; the filename
+# proves nothing.
+_DEEP_TEST_FOLDER_EXEMPT = re.compile(
+    r"(?:^|/)(?:tests?|__tests__|e2e|[\w-]*-e2e|spec)(?:/|$)", re.I
 )
+_DEEP_TEST_SUFFIX_EXEMPT = re.compile(r"\.(?:spec|test)\.[^./]+$", re.I)
+_SENSITIVE_PATH_SEGMENTS = frozenset(
+    {"auth", "security", "payment", "payments", "crypto", "token", "tokens"}
+)
+
+
+def _is_deep_test_path(norm_file: str) -> bool:
+    """True when `norm_file` (already lowercased, `/`-separated) is trusted
+    enough to skip the sensitive-keyword PATH leg below (#611/#611-M1) —
+    unconditionally for a real test/e2e folder, or for a bare `.spec.`/
+    `.test.` filename suffix ONLY when no sensitive folder SEGMENT (a whole
+    path component — not a substring of the filename itself, so
+    `src/payments.test.ts`'s filename doesn't count) sits in the path."""
+    if _DEEP_TEST_FOLDER_EXEMPT.search(norm_file):
+        return True
+    if not _DEEP_TEST_SUFFIX_EXEMPT.search(norm_file):
+        return False
+    segments = norm_file.split("/")[:-1]
+    return not any(seg in _SENSITIVE_PATH_SEGMENTS for seg in segments)
 
 
 def _direct_edit_diff_text(tool_name: str, tool_input: dict) -> str:
@@ -1039,8 +1065,15 @@ def evaluate_lead_direct_edit(
         r"\b(?:tokens?|api[_-]?keys?|secrets?)\b",
         r"\b(?:crypto|encryption|bcrypt)\b",
         r"\b(?:payments?|stripe|billing)\b",
+        # #611 M1: camelCase/snake_case identifiers a bland-looking one-line
+        # diff can hide a real bypass behind — `verifySignature`/`isAdmin`
+        # word-parts (not requiring underscores/case, since a diff is
+        # lowercased before this check runs) and a bare `return true`, the
+        # exact shape of the proven bypass (`return verifySignature(value)`
+        # -> `return true`). Content-only: never matched against the path.
+        r"verify\w*signature|is[_]?admin|\bbypass\b|return\s+true\b",
     )
-    is_test_path = bool(_DEEP_TEST_PATH_EXEMPT.search(norm_file))
+    is_test_path = _is_deep_test_path(norm_file)
     diff_text = _direct_edit_diff_text(tool_name, tool_input).lower()
     for pat in sensitive_deep_patterns:
         path_hit = (not is_test_path) and re.search(pat, norm_file)
