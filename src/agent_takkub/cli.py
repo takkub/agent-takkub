@@ -1890,7 +1890,7 @@ def _push_report_to_mobile(
 
 
 def cmd_report(args: argparse.Namespace) -> dict:
-    """`takkub report publish|list|revoke|rotate|relink` (#367 Remote Reports) —
+    """`takkub report publish|list|revoke|rotate|relink|build` (#367 Remote Reports + #626 report builder) —
     direct filesystem I/O against `remote/reports.py`'s store, no IPC to the
     running cockpit: the store lives under `RUNTIME_DIR/exports/<ns>/
     reports/`, and `remote/http_server.py`'s `/r/` route re-reads
@@ -1909,6 +1909,40 @@ def cmd_report(args: argparse.Namespace) -> dict:
     best-effort, and every failure (cockpit not running, remote off, IPC
     error) degrades to printing the plain link with a stated reason rather
     than failing the whole publish."""
+    action = args.report_action
+
+    # Handle build action (doesn't need remote reports)
+    if action == "build":
+        from agent_takkub.report_builder import ReportBuilder
+
+        try:
+            builder = ReportBuilder(args.type, args.content)
+
+            # Lint if requested
+            if args.lint:
+                issues = builder.lint_customer()
+                if issues:
+                    lines = ["Linting issues found:"]
+                    for issue in issues:
+                        lines.append(f"  - {issue}")
+                    return {"ok": False, "msg": "\n".join(lines)}
+
+            # Build report
+            html = builder.build(title=args.title)
+
+            # Output
+            if args.out:
+                Path(args.out).write_text(html, encoding='utf-8')
+                size_kb = round(len(html.encode('utf-8')) / 1024)
+                return {
+                    "ok": True,
+                    "msg": f"Built {args.type} report\nWrote {args.out} ({size_kb} KB)",
+                }
+            else:
+                return {"ok": True, "msg": html}
+        except Exception as e:
+            return {"ok": False, "msg": f"build failed: {e}"}
+
     try:
         reports_mod = _load_remote_reports()
     except ModuleNotFoundError:
@@ -1930,8 +1964,6 @@ def cmd_report(args: argparse.Namespace) -> dict:
         except ValueError:
             return ""
         return reports_mod.build_url(project_ns, name, token)
-
-    action = args.report_action
     status_line = reports_mod.remote_status_text()
     try:
         if action == "publish":
@@ -5410,6 +5442,28 @@ def main(argv: list[str] | None = None) -> int:
     )
     sr_relink.add_argument("--project", default=None)
     sr_relink.set_defaults(func=cmd_report)
+    sr_build = sr_sub.add_parser(
+        "build", help="build a report from content directory (customer/dev/boss types) (#626)"
+    )
+    sr_build.add_argument(
+        "--type",
+        required=True,
+        choices=["customer", "dev", "boss"],
+        help="report type: customer (user manual) / dev (technical) / boss (executive summary)",
+    )
+    sr_build.add_argument(
+        "--content", required=True, help="directory with content.html, images.txt, etc."
+    )
+    sr_build.add_argument(
+        "--out", default=None, help="output HTML file (default: stdout)"
+    )
+    sr_build.add_argument(
+        "--title", default=None, help="HTML page title (default: based on type)"
+    )
+    sr_build.add_argument(
+        "--lint", action="store_true", help="check content for issues before building"
+    )
+    sr_build.set_defaults(func=cmd_report)
 
     # Removal cleanup (docs/plans/remove-openviking-2026-08-24/) — reclaim a
     # leftover managed-runtime install an older Takkub version left behind.
