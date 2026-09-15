@@ -405,7 +405,28 @@ _DISK_SCAN_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
 # `_RTK_PREFIX` lets one optional `rtk [proxy] ` wrapper sit between the
 # anchor and the real verb, exactly like `sudo ` already does.
 _RTK_PREFIX = r"(?:rtk(?:\.(?:exe|cmd|bat|ps1))?(?![\w-])\s+(?:proxy(?![\w-])\s+)?)?"
-_CMD_START = rf"(?:^|[|;&]\s*|\bsudo\s+){_RTK_PREFIX}"
+# #609 round 3: a bare `VAR=value` env-assignment prefix (`GIT_DIR=<path> git
+# stash drop`, no `env` keyword) sat outside every rule's reach the same way
+# an unwrapped shell wrapper once did — `_CMD_START` only ever tolerated an
+# optional `sudo `/`rtk [proxy] ` prefix between the anchor and the real
+# verb, never a raw env-var assignment, so the literal `git` token was never
+# reachable at position 0 (confirmed live: `GIT_DIR=<path> git stash drop`
+# run via git-bash dropped a stash entry belonging to an unrelated repo —
+# `classify` never even recognised `git` was being invoked). Kept
+# independent of `_unwrap_segment`'s existing `env VAR=value` stripping
+# (which DELETES the prefix from `cmd`, losing the value
+# `_git_dir_env_override` below needs) — this only widens where a match can
+# START; the text itself stays intact for that later scan.
+# `env` keyword optional per repetition (not just once overall) so `env
+# FOO=1 GIT_DIR=x git …` and a bare `GIT_DIR=x git …` are both consumed the
+# same way; `_unwrap_segment` already peels an `env VAR=value` prefix off
+# too, but ONLY when a recognised wrapper sits behind it — a plain `env
+# GIT_DIR=x git stash drop` has no wrapper behind the prefix, so
+# `_unwrap_segment` deliberately gives up and returns the segment
+# unchanged (see its docstring), leaving `_CMD_START` as the only place
+# left that can still recognise `git` past this prefix.
+_ENV_ASSIGN_PREFIX = r"(?:(?:env\s+)?[A-Za-z_]\w*=(?:\"[^\"]*\"|'[^']*'|\S*)\s+)*"
+_CMD_START = rf"(?:^|[|;&]\s*|\bsudo\s+){_ENV_ASSIGN_PREFIX}{_RTK_PREFIX}"
 _HOST_DESTRUCTIVE_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     (
         "taskkill-im",
@@ -1325,9 +1346,21 @@ def get_lead_edits_status(
 # either. `git.exe`/`git.cmd` (Windows PATHEXT resolution) is accepted the
 # same way `_RTK_PREFIX` already accepts them for `rtk`.
 _GIT_BIN = r"git(?:\.(?:exe|cmd))?"
+# #609 round 3: the two-token `-C <path>` exception (#466) never covered
+# `--git-dir <path>`/`--work-tree <path>` (identical shape, different flag
+# names) or a bare `--flag=value` long option (`--git-dir=<path>`,
+# `--work-tree=<path>`, …) — either shape left every subcommand pattern
+# below unable to reach past it, the same silent-bypass mechanism #466
+# already fixed for `-C`/`-c` (confirmed live: `git --git-dir=<path>
+# --work-tree=<path> restore .` never matched the `restore` pattern at all
+# — the "restore" token was simply unreachable, so this wasn't even a false
+# ALLOW from a bad ownership check, `classify` never recognised a `restore`
+# invocation was present). `--flag=value` is swallowed generically, not just
+# for git-dir/work-tree, since that's how every git long option is spelled.
 _GIT_SUBCMD_GAP = (
-    r"(?:\s+-C\s+(?:\"[^\"]*\"|'[^']*'|\S+)"
+    r"(?:\s+(?:-C|--git-dir|--work-tree)\s+(?:\"[^\"]*\"|'[^']*'|\S+)"
     r"|\s+-c\s+(?:\"[^\"]*\"|'[^']*'|\S+)"
+    r"|\s+--[\w-]+=(?:\"[^\"]*\"|'[^']*'|\S+)"
     r"|\s+-{1,2}[\w-]+)*\s+"
 )
 
@@ -1407,6 +1440,40 @@ _GIT_LEAD_ONLY_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
         "restore",
         re.compile(rf"{_CMD_START}{_GIT_BIN}(?![\w-]){_GIT_SUBCMD_GAP}restore{_SUBCMD_END}", re.M),
     ),
+    # #609 round 3: `git switch` is the modern alias for `checkout <branch>`
+    # (its `--discard-changes`/`-f`/`--force`/`-C`/`--force-create` are the
+    # equivalent of `checkout -f`) — same blast radius, so it gets the exact
+    # same blanket, unconditional-on-any-flag-shape deny as `checkout` above
+    # (proven live: `git switch --discard-changes <branch>` and `git switch
+    # -f <branch>` both returned `allowed=True` and discarded real
+    # uncommitted work on a shared-tree fixture) and the same worktree
+    # carve-out (`_WORKTREE_SAFE_RULES` below).
+    (
+        "switch",
+        re.compile(rf"{_CMD_START}{_GIT_BIN}(?![\w-]){_GIT_SUBCMD_GAP}switch{_SUBCMD_END}", re.M),
+    ),
+    # #609 round 3: `worktree remove`/`move`/`prune`/`lock`/`unlock` mutate
+    # or delete ANOTHER checkout's directory outright — round 2's own
+    # `_command_targets_worktree`/`_in_worktree` machinery only ever checked
+    # ownership of the CALLER's cwd/explicit target, never the worktree path
+    # actually being removed, so any role could name a DIFFERENT role's
+    # worktree as the argument and still get the carve-out (proven live:
+    # `frontend`, sitting in its own worktree, ran `git -C <repo> worktree
+    # remove --force <backend's worktree>` and backend's uncommitted file
+    # was gone). There is nothing narrower to shape-check here the way
+    # `push`/`merge` are — deliberately NOT added to `_WORKTREE_SAFE_RULES`:
+    # Lead-only unconditionally, regardless of the caller's own cwd or
+    # target (`takkub worktree clean` is the cockpit-managed way to do
+    # this). `worktree add`/`list` stay unaffected — only these five
+    # sub-verbs (`remove`/`move`/`prune`/`lock`/`unlock`) are gated.
+    (
+        "worktree-admin",
+        re.compile(
+            rf"{_CMD_START}{_GIT_BIN}(?![\w-]){_GIT_SUBCMD_GAP}worktree{_SUBCMD_END}{_SAME_CMD}"
+            r"\b(?:remove|move|prune|lock|unlock)\b",
+            re.M,
+        ),
+    ),
     # #609: `-f`/`--force` in any combined short-flag form (`-fd`, `-fdx`, …).
     # A bare `git clean` with no force flag only prints what WOULD be removed
     # (dry-run by default) and stays allowed.
@@ -1477,7 +1544,7 @@ def _git_stash_verdict(cmd: str, in_worktree: bool) -> bool:
 # worktree pane can't safely disown its own copy of, unlike a plain branch
 # reset/switch/delete confined to the checkout itself.
 _WORKTREE_SAFE_RULES = frozenset(
-    {"reset-hard", "checkout", "branch-delete", "restore", "clean-force"}
+    {"reset-hard", "checkout", "branch-delete", "restore", "clean-force", "switch"}
 )
 
 # `git merge` (#385): Lead-only on the shared tree, ALLOWED from inside a
@@ -1553,9 +1620,14 @@ def _command_targets_worktree(cmd: str) -> bool:
 # a relative one (bare `.`, a subdir, …) can't be resolved without cwd, so
 # it stays deferred to the cwd-based checks below.
 _ABS_PATH_RE = re.compile(r"^(?:[A-Za-z]:[\\/]|[\\/])")
+# #609 round 3: `--git-dir`/`--work-tree` take their value either way
+# (`--git-dir=<path>` OR `--git-dir <path>`) — only the `=` form was
+# recognised here before, so the space form silently fell through to the
+# cwd-based checks below instead of being treated as the explicit target it
+# is.
 _EXPLICIT_TARGET_RE = re.compile(
     r"""(?:(?<![\w-])-C\s+(?P<c>"[^"]*"|'[^']*'|\S+)
-        |--(?:git-dir|work-tree)=(?P<gd>"[^"]*"|'[^']*'|\S+)
+        |--(?:git-dir|work-tree)(?:=|\s+)(?P<gd>"[^"]*"|'[^']*'|\S+)
         |(?:^|[|;&]\s*)cd\s+(?P<cd>"[^"]*"|'[^']*'|\S+))""",
     re.I | re.M | re.X,
 )
@@ -1580,6 +1652,46 @@ def _in_worktree(cmd: str, cwd: str | None, role: str | None = None) -> bool:
         return _worktree_role_owns(cwd, role)
     if _command_targets_worktree(cmd):
         return _worktree_role_owns(target or cmd, role)
+    return False
+
+
+# #609 round 3: `GIT_DIR`/`GIT_WORK_TREE`/`GIT_COMMON_DIR`/`GIT_INDEX_FILE`
+# redirect where git actually operates exactly like `--git-dir=`/
+# `--work-tree=` do, but set via a bare prefix (`GIT_DIR=<path> git …`),
+# `env VAR=… git …`, cmd.exe `set VAR=… && git …`, or PowerShell
+# `$env:VAR = …; git …` — none of which `_explicit_git_target`'s flag-only
+# regex ever looked for (confirmed live: `GIT_DIR=<path> git stash drop` run
+# via git-bash dropped a stash entry belonging to a repo with no worktree
+# relationship to the caller at all — worse than the flag form since it
+# doesn't even need a linked worktree to reach; `classify` returned
+# `allowed=True`). Matched with a bare `\bVAR\b` (no anchoring to
+# `_CMD_START`) since `set`/`$env:` sit in their OWN chain segment ahead of
+# `git`, not immediately in front of it. Deliberately conservative the same
+# way an unresolvable `-c core.*` override already is: found-but-not-
+# provably-this-role's-own-worktree (relative, unparseable, or another
+# role's path) disables the worktree carve-out outright rather than
+# silently falling through to a cwd check that has nothing to do with where
+# this override actually points.
+_GIT_ENV_TARGET_RE = re.compile(
+    r"(?:\bset\s+|\$env:)?"
+    r"\b(?P<var>GIT_DIR|GIT_WORK_TREE|GIT_COMMON_DIR|GIT_INDEX_FILE)\b"
+    r"\s*=\s*(?P<val>\"[^\"]*\"|'[^']*'|[^\s&;|\r\n]*)",
+    re.I | re.M,
+)
+
+
+def _git_dir_env_override(raw_cmd: str, role: str | None) -> bool:
+    """True when *raw_cmd* sets any GIT_DIR-family env var whose value isn't
+    provably an absolute path inside this *role*'s own worktree — see
+    `_GIT_ENV_TARGET_RE`'s note above. One matching assignment is enough to
+    force a deny; conservative in the same direction as every other
+    override check in this module. *raw_cmd* must be the PRE-unwrap command
+    text — `_unwrap_segment`'s `env VAR=value` stripping deletes the very
+    prefix this needs to see (see `classify`'s `raw_cmd` capture)."""
+    for m in _GIT_ENV_TARGET_RE.finditer(raw_cmd):
+        val = _strip_matching_quotes(m.group("val"))
+        if not val or not _ABS_PATH_RE.match(val) or not _worktree_role_owns(val, role):
+            return True
     return False
 
 
@@ -1775,6 +1887,7 @@ _KNOWN_GIT_SUBCOMMANDS = frozenset(
         "tag",
         "rebase",
         "checkout",
+        "switch",
         "restore",
         "clean",
         "stash",
@@ -1920,6 +2033,13 @@ def classify(
     cmd = (command or "").strip()
     if not cmd:
         return Verdict(True)
+    # #609 round 3: captured BEFORE unwrapping — `_unwrap_segment`'s existing
+    # `env VAR=value` stripping deletes a `GIT_DIR=`/etc prefix outright, and
+    # `_git_dir_env_override` below needs to see it. Unwrapping/stripping
+    # never ADD a GIT_DIR-family assignment that wasn't already literally
+    # present, so scanning the original text is never less complete than
+    # scanning the unwrapped one.
+    raw_cmd = cmd
     # #609 H2: unwrap `cmd /c ...` / `pwsh -c "..."` / etc so every rule
     # below sees the command that actually runs, not the wrapper spawning it.
     cmd = _unwrap_shell_wrappers(cmd)
@@ -2077,7 +2197,15 @@ def classify(
     git_cmd, git_config_override = _resolve_git_command_aliases(cmd)
     # #609 H2/H1: ownership of the target worktree, not just cwd's raw
     # "/worktrees/" substring — see `_in_worktree`/`_worktree_role_owns`.
-    in_worktree = _in_worktree(cmd, cwd, role) and not git_config_override
+    # #609 round 3: a GIT_DIR-family env override (the flag form is already
+    # folded into `_in_worktree` via `_explicit_git_target`) disables the
+    # carve-out the same way an unresolvable `-c core.*` override does — see
+    # `_git_dir_env_override`.
+    in_worktree = (
+        _in_worktree(cmd, cwd, role)
+        and not git_config_override
+        and not _git_dir_env_override(raw_cmd, role)
+    )
 
     if not in_worktree and _GIT_COMMIT_PATTERN.search(git_cmd):
         return Verdict(
