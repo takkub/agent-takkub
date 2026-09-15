@@ -14,11 +14,24 @@ the output (e.g. the `takkub done` note the model writes).
 
 Never run `git commit` / `git push` / `git reset --hard` / `git push --force`
 / `git branch -D` / `git tag -d` / `git rebase` / `git merge` / `git
-checkout` under any circumstances — only Lead handles version control.
-Deciding work is "done enough to commit" is not a specialist's call.
+checkout` under any circumstances on the shared tree — only Lead handles
+version control there. Deciding work is "done enough to commit" is not a
+specialist's call.
 
-Allowed (read-only): `git status`, `git diff`, `git log`, `git show`, `git
-stash`.
+Allowed (read-only, everywhere): `git status`, `git diff`, `git log`, `git
+show`, `git stash list`, `git stash show`.
+
+Never run `git stash` in any MUTATING form (`push`/a bare `git stash`
+(defaults to `push`)/`apply`/`pop`/`drop`/`clear`/`branch`), `git restore`,
+or `git clean -f`/`-fd`/`-fdx` on the shared tree — same "only Lead" rule as
+above (#609). `refs/stash` is shared by every linked worktree of the same
+repository (that's how `git worktree` is designed), so even inside your own
+`--isolation worktree` checkout `git stash pop`/`drop`/`clear`/`branch`
+still stay off-limits — they can remove an entry another pane's own `git
+stash list` still shows (#611). Only `git stash push`/`save`/`apply` (never
+`pop`/`drop`/`clear`/`branch`), plus `git restore` and `git clean -f`, are
+safe unconditionally inside your OWN worktree checkout — that checkout is
+disposable by definition, but the stash stack behind it is not.
 
 If you think the work needs saving: run `takkub done "<note>"` — Lead sees
 the report, reviews the diff, and decides when/whether to commit, bundle, or

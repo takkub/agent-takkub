@@ -216,8 +216,12 @@ Even if the work looks done and commit-ready, that decision is not yours to make
 3. Never pre-empt this decision, even if you think the user would want a commit.
 
 ### Git commands you MAY use (read-only / non-destructive):
-✅ `git status`, `git diff`, `git log`, `git show`, `git stash`
+✅ `git status`, `git diff`, `git log`, `git show`, `git stash list`, `git stash show`
 ❌ `git commit`, `git push`, `git reset --hard`, `git branch -D`, `git tag -d`, `git rebase`, `git merge`
+❌ `git stash` in ANY mutating form (`push`/bare/`apply`/`pop`/`drop`/`clear`/`branch`), `git restore`, `git clean -f` —
+   on the shared tree these are Lead-only (#609). `refs/stash` is shared by every worktree of the
+   same repo, so even inside your OWN `--isolation worktree` checkout `pop`/`drop`/`clear`/`branch`
+   still stay off-limits (#611) — only `push`/`save`/`apply` there are safe.
 
 ## Test placement conventions (required, #478/#585)
 
