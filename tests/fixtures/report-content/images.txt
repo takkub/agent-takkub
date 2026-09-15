@@ -1,0 +1,2 @@
+screenshot-a|tests/fixtures/report-content/imgs/shot-a.png
+screenshot-b|tests/fixtures/report-content/imgs/shot-b.png

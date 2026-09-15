@@ -1,0 +1,418 @@
+<!doctype html>
+<html lang="th">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>คู่มือระบบโบนัสและกิจกรรม</title>
+<style>
+  :root{
+    --bg:#f5f4f0; --paper:#ffffff; --ink:#1c1b19; --muted:#63615b; --line:#e2dfd6;
+    --accent:#a86a00; --accent-soft:#f6ead2; --admin:#3c5a8a; --admin-soft:#e6ecf5;
+    --member:#2f7a55; --member-soft:#e3f1e9; --shot-bg:#ebe8e0;
+  }
+  @media (prefers-color-scheme: dark){
+    :root:not([data-theme="light"]){
+      --bg:#131311; --paper:#1c1c19; --ink:#eceae4; --muted:#a29f97; --line:#34332e;
+      --accent:#e0a53a; --accent-soft:#3a2d15; --admin:#8fb0e0; --admin-soft:#1e2a3b;
+      --member:#76c79c; --member-soft:#18301f; --shot-bg:#0d0d0c;
+    }
+  }
+  :root[data-theme="dark"]{
+    --bg:#131311; --paper:#1c1c19; --ink:#eceae4; --muted:#a29f97; --line:#34332e;
+    --accent:#e0a53a; --accent-soft:#3a2d15; --admin:#8fb0e0; --admin-soft:#1e2a3b;
+    --member:#76c79c; --member-soft:#18301f; --shot-bg:#0d0d0c;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0}
+  body{background:var(--bg);color:var(--ink);
+    font:16px/1.7 "Noto Sans Thai","Leelawadee UI","Sukhumvit Set",system-ui,sans-serif;
+    padding-inline:clamp(16px,3vw,48px);padding-block:clamp(24px,4vw,56px)}
+  header.top{margin-bottom:clamp(24px,3vw,40px)}
+  header.top h1{font-size:clamp(1.7rem,3.2vw,2.6rem);line-height:1.25;margin:0 0 8px;letter-spacing:-.01em}
+  header.top p{margin:0;color:var(--muted);font-size:1.05rem;max-width:70ch}
+  .where{display:flex;flex-wrap:wrap;gap:10px;margin-top:18px}
+  .where span{background:var(--paper);border:1px solid var(--line);border-radius:999px;padding:6px 14px;font-size:.92rem}
+  .where b{color:var(--accent)}
+
+  /* overview */
+  .overview{background:var(--paper);border:1px solid var(--line);border-radius:18px;padding:clamp(16px,2vw,28px);margin-bottom:clamp(28px,3vw,44px)}
+  .overview h2{margin:0 0 14px;font-size:1.25rem}
+  .table-wrap{overflow-x:auto}
+  table{border-collapse:collapse;width:100%;min-width:640px;font-size:.98rem}
+  th,td{text-align:left;padding:12px 14px;border-bottom:1px solid var(--line);vertical-align:top}
+  th{font-size:.85rem;color:var(--muted);font-weight:600}
+  td:first-child{font-weight:600;white-space:nowrap}
+  td a{color:inherit;text-decoration:none;border-bottom:1px dashed var(--muted)}
+
+  /* sections */
+  section.sys{background:var(--paper);border:1px solid var(--line);border-radius:18px;
+    padding:clamp(18px,2.4vw,36px);margin-bottom:clamp(18px,2vw,28px);
+    display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.25fr);gap:clamp(20px,3vw,48px);align-items:start}
+  section.sys.text-only{grid-template-columns:1fr}
+  .num{display:inline-block;font-weight:700;color:var(--accent);font-size:.95rem;margin-bottom:2px}
+  section.sys h2{margin:0 0 8px;font-size:clamp(1.3rem,2vw,1.7rem);line-height:1.3}
+  .lead{margin:0 0 18px;color:var(--muted);font-size:1.02rem}
+  .role{border-radius:12px;padding:14px 16px;margin-bottom:12px}
+  .role.member{background:var(--member-soft)}
+  .role.admin{background:var(--admin-soft)}
+  .role h3{margin:0 0 6px;font-size:1rem}
+  .role.member h3{color:var(--member)}
+  .role.admin h3{color:var(--admin)}
+  .role ol{margin:0;padding-left:1.3em}
+  .role li{margin:2px 0}
+  .tips{margin:14px 0 0;padding:0;list-style:none}
+  .tips li{position:relative;padding-left:18px;margin:6px 0;font-size:.97rem}
+  .tips li::before{content:"";position:absolute;left:2px;top:.72em;width:7px;height:7px;border-radius:50%;background:var(--accent)}
+  .example{margin-top:14px;background:var(--accent-soft);border-radius:12px;padding:12px 16px;font-size:.97rem}
+  .example b{color:var(--accent)}
+  .btn-label{display:inline-block;background:var(--ink);color:var(--paper);border-radius:6px;padding:0 8px;font-size:.88em;font-weight:600;white-space:nowrap}
+
+  /* screenshots */
+  .shots{display:grid;gap:16px;grid-template-columns:repeat(auto-fit,minmax(260px,1fr))}
+  figure{margin:0;background:var(--shot-bg);border:1px solid var(--line);border-radius:14px;overflow:hidden;display:flex;flex-direction:column}
+  figure button{all:unset;cursor:zoom-in;display:block;flex:1;background:var(--shot-bg)}
+  figure button:focus-visible{outline:3px solid var(--accent);outline-offset:-3px}
+  figure img{display:block;width:100%;height:auto;max-height:620px;object-fit:contain;object-position:top center}
+  figure.wide{grid-column:1/-1}
+  figcaption{padding:9px 12px;font-size:.88rem;color:var(--muted);background:var(--paper);border-top:1px solid var(--line);display:flex;justify-content:space-between;gap:8px}
+  figcaption .tag{font-weight:600;white-space:nowrap}
+  figcaption .tag.m{color:var(--member)} figcaption .tag.a{color:var(--admin)}
+
+  footer{color:var(--muted);font-size:.88rem;margin-top:28px}
+
+  @media (max-width: 900px){
+    section.sys{grid-template-columns:1fr}
+  }
+
+  /* lightbox */
+  .lb{position:fixed;inset:0;z-index:50;background:rgba(10,10,9,.92);display:flex;flex-direction:column}
+  .lb[hidden]{display:none}
+  .lb-bar{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:10px 16px;color:#eceae4;font-size:.95rem}
+  .lb-bar .cap{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .lb-actions{display:flex;gap:8px;flex-shrink:0}
+  .lb-actions button{font:inherit;color:#eceae4;background:rgba(255,255,255,.12);border:1px solid rgba(255,255,255,.2);border-radius:8px;padding:6px 12px;cursor:pointer}
+  .lb-actions button:hover{background:rgba(255,255,255,.22)}
+  .lb-stage{flex:1;overflow:auto;display:flex;align-items:flex-start;justify-content:center;padding:8px 16px 24px;touch-action:pinch-zoom pan-x pan-y}
+  .lb-stage img{display:block;max-width:100%;max-height:calc(100vh - 80px);object-fit:contain;cursor:zoom-in;margin:auto;border-radius:6px}
+  .lb-stage.zoomed{align-items:flex-start;justify-content:flex-start}
+  .lb-stage.zoomed img{max-width:none;max-height:none;width:var(--zw);cursor:zoom-out}
+</style>
+</head>
+<body>
+
+<header class="top">
+  <h1>คู่มือระบบโบนัสและกิจกรรม</h1>
+  <p>สรุปวิธีใช้งานระบบโปรโมชั่นและกิจกรรมทั้งหมดของเว็บ ทั้งฝั่งหลังร้าน (แอดมิน) และสิ่งที่ลูกค้าเห็นบนหน้าเว็บ แตะที่รูปเพื่อเปิดดูภาพขยาย</p>
+  <div class="where">
+    <span>ลูกค้าใช้งานที่เมนู <b>โปรโมชั่น</b> และ <b>แนะนำเพื่อน</b></span>
+    <span>แอดมินตั้งค่าที่ <b>หลังร้าน</b> ตามชื่อเมนูในแต่ละหัวข้อ</span>
+  </div>
+</header>
+
+<div class="overview">
+  <h2>ภาพรวม</h2>
+  <div class="table-wrap">
+  <table>
+    <thead><tr><th>ระบบ</th><th>ลูกค้าได้อะไร</th><th>ได้เมื่อไหร่</th><th>ลูกค้าต้องกดรับไหม</th></tr></thead>
+    <tbody>
+      <tr><td><a href="#promo">โบนัสเงินฝาก</a></td><td>โบนัสเป็น % หรือจำนวนบาท</td><td>ทันทีที่ร้านอนุมัติยอดฝาก</td><td>กด "รับโปรนี้" ก่อนฝาก</td></tr>
+      <tr><td><a href="#turnover">เทิร์นโอเวอร์</a></td><td>เงื่อนไขก่อนถอนเงินโบนัส</td><td>ตั้งให้อัตโนมัติเมื่อได้โบนัส</td><td>ไม่ต้อง</td></tr>
+      <tr><td><a href="#daily">โบนัสยอดฝากสะสมรายวัน</a></td><td>โบนัสเมื่อยอดฝากทั้งวันถึงขั้น</td><td>ทันทีที่ยอดสะสมถึงขั้น</td><td>ไม่ต้อง</td></tr>
+      <tr><td><a href="#checkin">เช็คอินเติมเงิน</a></td><td>รางวัลเมื่อฝากสะสมครบจำนวนวัน</td><td>ทันทีที่เช็คอินครบวันที่กำหนด</td><td>ไม่ต้อง</td></tr>
+      <tr><td><a href="#wheel">วงล้อกิจกรรม</a></td><td>รางวัลสุ่มจากการหมุนวงล้อ</td><td>ทันทีที่หมุน</td><td>กด "หมุนวงล้อ"</td></tr>
+      <tr><td><a href="#vip">ระดับ VIP</a></td><td>ระดับสมาชิกตามยอดฝากสะสม</td><td>ปรับอัตโนมัติ</td><td>ไม่ต้อง</td></tr>
+      <tr><td><a href="#affiliate">แนะนำเพื่อน</a></td><td>ค่าคอมมิชชั่นจากยอดเสียของทีม</td><td>ทุกวันหลังเที่ยงคืน</td><td>กดโยกเข้ากระเป๋าหลัก</td></tr>
+      <tr><td><a href="#cashback">คืนยอดเสีย</a></td><td>เงินคืนเป็น % ของยอดเสีย รายวันหรือรายสัปดาห์</td><td>หลังเที่ยงคืนทุกวัน หรือเช้าวันจันทร์ (รายสัปดาห์)</td><td>กดรับภายในเวลาที่กำหนด</td></tr>
+      <tr><td><a href="#announce">ประกาศ/แบนเนอร์</a></td><td>ข่าวสารและโปรเด่นบนหน้าแรก</td><td>ทันทีที่ร้านเผยแพร่</td><td>ไม่ต้อง</td></tr>
+    </tbody>
+  </table>
+  </div>
+</div>
+
+<section class="sys" id="promo">
+  <div>
+    <span class="num">01</span>
+    <h2>โบนัสเงินฝาก</h2>
+    <p class="lead">โปรโมชั่นที่ลูกค้าเลือกรับก่อนฝาก แล้วได้โบนัสเพิ่มจากยอดฝาก มี 3 แบบ: โบนัสฝากครั้งแรกเป็น %, โบนัสเป็น % ทุกครั้งที่ฝาก และโบนัสเป็นจำนวนบาทคงที่</p>
+    <div class="role member">
+      <h3>ลูกค้า</h3>
+      <ol>
+        <li>เข้าเมนูโปรโมชั่น เลือกโปรแล้วกด <span class="btn-label">รับโปรนี้</span></li>
+        <li>ฝากเงินและแนบสลิปตามปกติ</li>
+        <li>เมื่อร้านอนุมัติยอดฝาก โบนัสจะเข้ากระเป๋าทันที</li>
+      </ol>
+    </div>
+    <div class="role admin">
+      <h3>แอดมิน · เมนูโปรโมชั่น</h3>
+      <ol>
+        <li>กด "เพิ่มโปรโมชั่น" แล้วเลือกประเภท</li>
+        <li>ใส่ % หรือจำนวนบาท, โบนัสสูงสุด, ยอดฝากขั้นต่ำ, ตัวคูณเทิร์น และช่วงเวลา (ถ้ามี)</li>
+        <li>บันทึกและเปิดใช้งาน ลูกค้าจะเห็นโปรทันที</li>
+      </ol>
+    </div>
+    <ul class="tips">
+      <li>ต้องกดรับโปร<b>ก่อน</b>ฝาก การกดรับยังไม่ได้เครดิต เครดิตเข้าตอนร้านอนุมัติยอดฝาก</li>
+      <li>ถือได้ครั้งละ 1 โปร ถ้ากดรับโปรใหม่ โปรเดิมที่ยังไม่ได้ใช้จะถูกยกเลิก</li>
+      <li>ฝากไม่ถึงยอดขั้นต่ำของโปร จะไม่ได้โบนัส</li>
+      <li>โบนัสฝากครั้งแรก ใช้ได้เฉพาะลูกค้าที่ยังไม่เคยฝากสำเร็จ</li>
+      <li>โบนัสคิดตามค่าที่ตั้งไว้ ณ ตอนอนุมัติยอดฝาก ถ้าแก้ % ระหว่างที่ลูกค้ากดรับไว้แล้ว จะใช้ค่าใหม่</li>
+    </ul>
+    <div class="example"><b>ตัวอย่าง</b> · โปรฝากครั้งแรก 50% ฝาก 200 ได้โบนัส 100 · โปร 20% (สูงสุด 100) ฝาก 1,000 ได้โบนัส 100</div>
+  </div>
+  <div class="shots">
+    <figure><button type="button" data-cap="ลูกค้า: การ์ดโปรโมชั่น ปุ่มรับโปร และสถานะรับแล้ว"><img src="{{img:m-promo}}" alt="การ์ดโปรโมชั่นฝั่งลูกค้า"></button><figcaption><span>การ์ดโปรและสถานะ "รับแล้ว รอฝาก"</span><span class="tag m">ลูกค้า</span></figcaption></figure>
+    <figure><button type="button" data-cap="แอดมิน: หน้าเพิ่มโปรโมชั่น"><img src="{{img:a-promo-form}}" alt="ฟอร์มเพิ่มโปรโมชั่น"></button><figcaption><span>ฟอร์มเพิ่มโปรโมชั่น</span><span class="tag a">แอดมิน</span></figcaption></figure>
+  </div>
+</section>
+
+<section class="sys" id="turnover">
+  <div>
+    <span class="num">02</span>
+    <h2>เทิร์นโอเวอร์</h2>
+    <p class="lead">เงื่อนไขยอดเล่นขั้นต่ำก่อนถอนเงิน ระบบตั้งให้อัตโนมัติเมื่อลูกค้าได้โบนัส ตามตัวคูณเทิร์นที่ร้านกำหนดในแต่ละโปร</p>
+    <div class="role member">
+      <h3>ลูกค้า</h3>
+      <ol>
+        <li>ดูความคืบหน้าได้ที่หน้าถอนเงิน เช่น "เทิร์นแล้ว 0 จาก 250 บาท"</li>
+        <li>เมื่อเล่นครบ ถอนเงินได้ตามปกติ</li>
+      </ol>
+    </div>
+    <div class="role admin">
+      <h3>แอดมิน</h3>
+      <ol>
+        <li>กำหนดตัวคูณเทิร์นตอนสร้างโปรหรือกิจกรรม (ใส่ 0 = ถอนได้ทันที ในกิจกรรมที่รองรับ)</li>
+        <li>ดูยอดเทิร์นคงเหลือของลูกค้าแต่ละคนได้ในข้อมูลสมาชิก</li>
+      </ol>
+    </div>
+    <ul class="tips">
+      <li>แต่ละหมวดเกมอาจนับเทิร์นไม่เท่ากัน เช่น สล็อตนับเต็ม แต่เกมไพ่หรือคาสิโนสดนับน้อยกว่าหรือไม่นับ ลูกค้าเห็นรายละเอียดใต้แถบความคืบหน้าเทิร์นในหน้าถอนเงิน</li>
+    </ul>
+  </div>
+  <div class="shots">
+    <figure class="wide"><button type="button" data-cap="ลูกค้า: ความคืบหน้าเทิร์นโอเวอร์ที่หน้าถอนเงิน"><img src="{{img:m-turnover}}" alt="ความคืบหน้าเทิร์นโอเวอร์"></button><figcaption><span>ความคืบหน้าเทิร์นที่หน้าถอนเงิน</span><span class="tag m">ลูกค้า</span></figcaption></figure>
+  </div>
+</section>
+
+<section class="sys" id="daily">
+  <div>
+    <span class="num">03</span>
+    <h2>โบนัสยอดฝากสะสมรายวัน</h2>
+    <p class="lead">ยิ่งฝากสะสมในวันเดียวกันมาก ยิ่งได้โบนัสหลายขั้น ไม่ต้องกดรับ ระบบให้เองอัตโนมัติ</p>
+    <div class="role member">
+      <h3>ลูกค้า</h3>
+      <ol>
+        <li>ฝากเงินตามปกติ ดูยอดสะสมของวันและขั้นถัดไปได้ในเมนูโปรโมชั่น</li>
+        <li>เมื่อยอดสะสมถึงขั้นไหน โบนัสขั้นนั้นเข้ากระเป๋าทันทีที่ร้านอนุมัติยอดฝาก</li>
+      </ol>
+    </div>
+    <div class="role admin">
+      <h3>แอดมิน · เมนูโปรโมชั่น › ยอดฝากสะสมรายวันรับโบนัส</h3>
+      <ol>
+        <li>เปิดใช้งาน และตั้งตัวคูณเทิร์นของโบนัส</li>
+        <li>เพิ่มขั้นบันได: ยอดฝากสะสมขั้นต่ำ และโบนัสที่ได้</li>
+      </ol>
+    </div>
+    <ul class="tips"><li>ยอดสะสมเริ่มนับใหม่ทุกวัน (ตามเวลาไทย)</li></ul>
+    <div class="example"><b>ตัวอย่าง</b> · ตั้งขั้น 500 รับ 30 · ลูกค้าฝากรวมทั้งวันครบ 500 ได้โบนัส 30</div>
+  </div>
+  <div class="shots">
+    <figure><button type="button" data-cap="ลูกค้า: ยอดฝากสะสมรายวันและขั้นที่ได้รับ"><img src="{{img:m-daily}}" alt="ยอดฝากสะสมรายวันฝั่งลูกค้า"></button><figcaption><span>แถบยอดสะสมและขั้นที่ได้รับ</span><span class="tag m">ลูกค้า</span></figcaption></figure>
+    <figure><button type="button" data-cap="แอดมิน: ตั้งค่าโบนัสยอดฝากสะสมรายวัน"><img src="{{img:a-promo-daily}}" alt="ตั้งค่าโบนัสสะสมรายวัน"></button><figcaption><span>ตั้งค่าและขั้นบันไดโบนัส</span><span class="tag a">แอดมิน</span></figcaption></figure>
+  </div>
+</section>
+
+<section class="sys" id="checkin">
+  <div>
+    <span class="num">04</span>
+    <h2>เช็คอินเติมเงิน</h2>
+    <p class="lead">ปฏิทิน 30 วัน วันไหนฝากถึงยอดขั้นต่ำ ได้เครื่องหมายเช็คอิน สะสมครบวันที่ร้านกำหนดรับรางวัลฟรี</p>
+    <div class="role member">
+      <h3>ลูกค้า</h3>
+      <ol>
+        <li>ฝากเงินรวมให้ถึงยอดขั้นต่ำต่อวัน ระบบเช็คอินให้อัตโนมัติ</li>
+        <li>ดูปฏิทินและรางวัลถัดไปได้ในเมนูโปรโมชั่น</li>
+        <li>เช็คอินครบวันที่กำหนด รางวัลเข้ากระเป๋าทันที</li>
+      </ol>
+    </div>
+    <div class="role admin">
+      <h3>แอดมิน · เมนูเช็คอินฝากเงิน</h3>
+      <ol>
+        <li>เปิดใช้งาน ตั้งยอดฝากขั้นต่ำต่อวัน รางวัลครบ 30 วัน และตัวคูณเทิร์น</li>
+        <li>เพิ่มรางวัลระหว่างทาง เช่น เช็คอินครบวันที่ 7 รับ 50</li>
+        <li>ดูประวัติการให้รางวัลได้ในหน้าเดียวกัน</li>
+      </ol>
+    </div>
+  </div>
+  <div class="shots">
+    <figure><button type="button" data-cap="ลูกค้า: ปฏิทินเช็คอินเติมเงิน"><img src="{{img:m-checkin}}" alt="ปฏิทินเช็คอินฝั่งลูกค้า"></button><figcaption><span>ปฏิทินเช็คอิน 30 วัน</span><span class="tag m">ลูกค้า</span></figcaption></figure>
+    <figure><button type="button" data-cap="แอดมิน: ตั้งค่าเช็คอินและรางวัลระหว่างทาง"><img src="{{img:a-checkin}}" alt="ตั้งค่าเช็คอิน"></button><figcaption><span>ตั้งค่าเช็คอินและรางวัล</span><span class="tag a">แอดมิน</span></figcaption></figure>
+  </div>
+</section>
+
+<section class="sys" id="wheel">
+  <div>
+    <span class="num">05</span>
+    <h2>วงล้อกิจกรรม</h2>
+    <p class="lead">ฝากเงินให้ถึงยอดที่กำหนดในวันนั้น รับสิทธิ์หมุนวงล้อลุ้นรางวัล</p>
+    <div class="role member">
+      <h3>ลูกค้า</h3>
+      <ol>
+        <li>ฝากถึงยอดที่กำหนด จะเห็นสิทธิ์หมุนที่เหลือของวันนี้</li>
+        <li>กด <span class="btn-label">หมุนวงล้อ</span> รางวัลเข้ากระเป๋าทันที</li>
+      </ol>
+    </div>
+    <div class="role admin">
+      <h3>แอดมิน · เมนูวงล้อกิจกรรม</h3>
+      <ol>
+        <li>ตั้งช่องรางวัลบนวงล้อ และยอดฝากที่ได้สิทธิ์หมุน</li>
+        <li>ดูประวัติการหมุนของลูกค้าทั้งหมดได้</li>
+      </ol>
+    </div>
+    <ul class="tips"><li>สิทธิ์หมุนนับเป็นรายวัน</li></ul>
+  </div>
+  <div class="shots">
+    <figure><button type="button" data-cap="ลูกค้า: วงล้อกิจกรรม"><img src="{{img:m-wheel}}" alt="วงล้อกิจกรรมฝั่งลูกค้า"></button><figcaption><span>วงล้อและสิทธิ์หมุนที่เหลือ</span><span class="tag m">ลูกค้า</span></figcaption></figure>
+  </div>
+</section>
+
+<section class="sys text-only" id="vip">
+  <div>
+    <span class="num">06</span>
+    <h2>ระดับ VIP</h2>
+    <p class="lead">ระดับสมาชิกคำนวณอัตโนมัติจากยอดฝากสะสมที่สำเร็จ ลูกค้าเห็นระดับปัจจุบันและยอดที่ต้องฝากเพิ่มเพื่อขึ้นระดับถัดไป ร้านไม่ต้องปรับเอง</p>
+  </div>
+</section>
+
+<section class="sys" id="affiliate">
+  <div>
+    <span class="num">07</span>
+    <h2>แนะนำเพื่อน</h2>
+    <p class="lead">ลูกค้าชวนเพื่อนมาสมัครผ่านลิงก์ของตัวเอง แล้วได้ค่าคอมมิชชั่นเป็น % จากยอดเสียสุทธิของทีมทุกวัน</p>
+    <div class="role member">
+      <h3>ลูกค้า · เมนูแนะนำเพื่อน</h3>
+      <ol>
+        <li>คัดลอกลิงก์ แชร์ผ่าน LINE หรือให้เพื่อนสแกน QR code</li>
+        <li>เพื่อนที่สมัครผ่านลิงก์จะอยู่ในทีมอัตโนมัติ</li>
+        <li>ทุกวันหลังเที่ยงคืน ค่าคอมมิชชั่นของเมื่อวานเข้า "กระเป๋าคอมมิชชั่น"</li>
+        <li>กด <span class="btn-label">โยกเข้ากระเป๋าหลัก</span> เพื่อนำไปเล่นหรือถอน (เมื่อถึงยอดขั้นต่ำ)</li>
+      </ol>
+    </div>
+    <div class="role admin">
+      <h3>แอดมิน</h3>
+      <ol>
+        <li>หน้าตั้งค่า แท็บแนะนำเพื่อน: เปิดใช้งานระบบ และตั้ง % ค่าคอมมิชชั่น (กดยืนยันบันทึก)</li>
+        <li>เมนูแนะนำเพื่อน: ดูรายการค่าคอมมิชชั่นของแต่ละคน</li>
+      </ol>
+    </div>
+    <div class="example"><b>ตัวอย่าง</b> · ค่าคอม 5% ทีมเสียสุทธิเมื่อวาน 400 ลูกค้าได้ค่าคอม 20</div>
+  </div>
+  <div class="shots">
+    <figure><button type="button" data-cap="ลูกค้า: ลิงก์แนะนำเพื่อนและกระเป๋าคอมมิชชั่น"><img src="{{img:m-affiliate}}" alt="หน้าแนะนำเพื่อนฝั่งลูกค้า"></button><figcaption><span>ลิงก์ QR และกระเป๋าคอมมิชชั่น</span><span class="tag m">ลูกค้า</span></figcaption></figure>
+  </div>
+</section>
+
+<section class="sys" id="cashback">
+  <div>
+    <span class="num">08</span>
+    <h2>คืนยอดเสีย</h2>
+    <p class="lead">คืนเงินส่วนหนึ่งจากยอดเสียของลูกค้า เลือกได้ว่าจะคืนทุกวันหรือทุกสัปดาห์ ลูกค้ากดรับเองภายในเวลาที่กำหนด</p>
+    <div class="role member">
+      <h3>ลูกค้า · เมนูโปรโมชั่น</h3>
+      <ol>
+        <li>เมื่อถึงรอบ จะเห็นการ์ดคืนยอดเสีย พร้อมยอดที่รับได้ ช่วงวันที่ของรอบ และเวลาที่เหลือ</li>
+        <li>กด <span class="btn-label">กดรับคืนยอดเสีย</span> เงินเข้ากระเป๋าทันที</li>
+        <li>ถ้าร้านเปิดจำกัดยอดถอน หน้าถอนเงินจะแสดง "ถอนได้สูงสุดอีก … บาท"</li>
+      </ol>
+    </div>
+    <div class="role admin">
+      <h3>แอดมิน · เมนูโปรโมชั่น</h3>
+      <ol>
+        <li>เพิ่มโปรประเภทคืนยอดเสีย และตั้ง % ที่คืน (กำหนดยอดขั้นต่ำและเพดานได้)</li>
+        <li>เลือก <b>รอบคืน</b>: รายวัน (คืนหลังเที่ยงคืนทุกวัน) หรือรายสัปดาห์ (รวมจันทร์–อาทิตย์ คืนเช้าวันจันทร์)</li>
+        <li>ตั้งตัวคูณเทิร์น ถ้าต้องการให้ลูกค้าทำเทิร์นก่อนถอน</li>
+        <li>เปิด <b>จำกัดยอดถอนไม่เกินยอดเสียของรอบ</b> ถ้าต้องการคุมยอดถอน</li>
+      </ol>
+    </div>
+    <ul class="tips">
+      <li>ถ้าไม่กดรับภายในเวลาที่แสดง สิทธิ์ของรอบนั้นจะหมดอายุ</li>
+      <li>จำกัดยอดถอน: หลังลูกค้ากดรับเงินคืน ถอนรวมได้ไม่เกินยอดเสียของรอบนั้น จนกว่าจะฝากเงินครั้งถัดไป เงินส่วนที่เกินยังอยู่ในกระเป๋าและเล่นต่อได้</li>
+    </ul>
+    <div class="example"><b>ตัวอย่าง</b> · คืนรายสัปดาห์ 10% ลูกค้าเสียรวมทั้งสัปดาห์ 1,000 ได้เงินคืน 100 และถอนได้ไม่เกิน 1,000 จนกว่าจะฝากครั้งถัดไป</div>
+  </div>
+  <div class="shots">
+    <figure><button type="button" data-cap="ลูกค้า: การ์ดคืนยอดเสียรายสัปดาห์"><img src="{{img:m-cashback}}" alt="การ์ดคืนยอดเสียรายสัปดาห์"></button><figcaption><span>การ์ดคืนยอดเสียรายสัปดาห์</span><span class="tag m">ลูกค้า</span></figcaption></figure>
+    <figure><button type="button" data-cap="ลูกค้า: หน้าถอนเงินที่มีเพดานถอน"><img src="{{img:m-withdraw-cap}}" alt="หน้าถอนเงินที่มีเพดานถอน"></button><figcaption><span>บรรทัด "ถอนได้สูงสุดอีก"</span><span class="tag m">ลูกค้า</span></figcaption></figure>
+    <figure class="wide"><button type="button" data-cap="แอดมิน: ตั้งค่าโปรคืนยอดเสีย รอบคืนและจำกัดยอดถอน"><img src="{{img:a-cashback-form}}" alt="ฟอร์มโปรคืนยอดเสีย"></button><figcaption><span>รอบคืน และสวิตช์จำกัดยอดถอน</span><span class="tag a">แอดมิน</span></figcaption></figure>
+  </div>
+</section>
+
+<section class="sys text-only" id="announce">
+  <div>
+    <span class="num">09</span>
+    <h2>ประกาศ/แบนเนอร์</h2>
+    <p class="lead">ข่าวสาร โปรเด่น หรือกิจกรรมพิเศษ แสดงบนหน้าแรกของลูกค้า</p>
+    <div class="role admin">
+      <h3>แอดมิน · เมนูประกาศ/แบนเนอร์</h3>
+      <ol>
+        <li>เพิ่มประกาศ ใส่หัวข้อ ข้อความหรือรูป และลิงก์ (ถ้ามี)</li>
+        <li>กำหนดช่วงเวลาแสดงและลำดับ แล้วเปิดใช้งาน ลูกค้าเห็นบนหน้าแรกทันที</li>
+      </ol>
+    </div>
+  </div>
+</section>
+
+<footer>อัปเดตล่าสุด 14 กันยายน 2569 · รูปประกอบเป็นหน้าจอตัวอย่าง ข้อมูลและยอดเงินในภาพเป็นตัวอย่างเท่านั้น</footer>
+
+<div class="lb" id="lb" hidden role="dialog" aria-modal="true" aria-label="ภาพขยาย">
+  <div class="lb-bar">
+    <span class="cap" id="lb-cap"></span>
+    <div class="lb-actions">
+      <button type="button" id="lb-zoom">ขยาย</button>
+      <button type="button" id="lb-close" aria-label="ปิด">ปิด ✕</button>
+    </div>
+  </div>
+  <div class="lb-stage" id="lb-stage"><img id="lb-img" alt=""></div>
+</div>
+
+<script>
+(function(){
+  var lb=document.getElementById('lb'), img=document.getElementById('lb-img'),
+      cap=document.getElementById('lb-cap'), stage=document.getElementById('lb-stage'),
+      zoomBtn=document.getElementById('lb-zoom'), lastFocus=null;
+  function setZoom(on){
+    if(on){
+      var w=Math.max(img.naturalWidth*2, Math.min(window.innerWidth*1.8, img.naturalWidth*3));
+      stage.style.setProperty('--zw', w+'px');
+    }
+    stage.classList.toggle('zoomed',on);
+    zoomBtn.textContent=on?'พอดีจอ':'ขยาย';
+  }
+  function open(src,text){
+    lastFocus=document.activeElement;
+    img.src=src; img.alt=text; cap.textContent=text;
+    setZoom(false); lb.hidden=false; document.body.style.overflow='hidden';
+    stage.scrollTop=0; stage.scrollLeft=0;
+    document.getElementById('lb-close').focus();
+  }
+  function close(){
+    lb.hidden=true; document.body.style.overflow=''; img.removeAttribute('src');
+    if(lastFocus) lastFocus.focus();
+  }
+  document.querySelectorAll('figure button').forEach(function(b){
+    b.addEventListener('click',function(){ var i=b.querySelector('img'); open(i.src,b.getAttribute('data-cap')||i.alt); });
+  });
+  img.addEventListener('click',function(e){
+    e.stopPropagation();
+    var on=!stage.classList.contains('zoomed');
+    var rect=img.getBoundingClientRect(), fx=(e.clientX-rect.left)/rect.width, fy=(e.clientY-rect.top)/rect.height;
+    setZoom(on);
+    if(on){ requestAnimationFrame(function(){ stage.scrollLeft=img.scrollWidth*fx-stage.clientWidth/2; stage.scrollTop=img.scrollHeight*fy-stage.clientHeight/2; }); }
+  });
+  zoomBtn.addEventListener('click',function(){ setZoom(!stage.classList.contains('zoomed')); });
+  document.getElementById('lb-close').addEventListener('click',close);
+  stage.addEventListener('click',function(e){ if(e.target===stage) close(); });
+  document.addEventListener('keydown',function(e){ if(!lb.hidden && e.key==='Escape') close(); });
+})();
+</script>
+</body>
+</html>

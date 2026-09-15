@@ -233,8 +233,13 @@ class ReportBuilder:
 
     def _get_template(self) -> str:
         """Get the base template HTML."""
-        # Try to load from _assets first, then from content_dir
-        asset_template = Path(__file__).parent / "_assets" / "report" / "template.html"
+        # Source of truth: repo-root `assets/report/template.html` (dev
+        # checkout) or the packaged `_assets/report/` copy (installed build,
+        # staged by setup.py from the same repo-root source). The per-content
+        # template override and the minimal fallback stay last so a user
+        # explicitly dropping `template.html` into their content dir always
+        # wins over the shipped kit.
+        asset_template = report_asset_root() / "template.html"
         if asset_template.exists():
             return asset_template.read_text(encoding="utf-8")
 
@@ -375,6 +380,24 @@ def check_mobile(html: str, viewports: list[int] | None = None) -> list[str]:
             browser.close()
 
     return issues
+
+
+def report_asset_root() -> Path:
+    """Where the report kit (template + mobile-check scripts) lives.
+
+    Mirrors ``config.ASSETS_ROOT``'s dev-vs-installed split for the other
+    shipped assets (CLAUDE.md, docs/lead/*, skills): a dev checkout reads the
+    committed repo-root source ``assets/report/``, an installed build reads
+    the copy that setup.py stages from it into ``_assets/report/`` at wheel
+    build time (and that pyproject package_data ships). Shipping the template
+    inside the wheel is what stops an installed ``takkub report build`` from
+    silently falling back to the minimal template.
+    """
+    from agent_takkub.config import DATA_HOME, REPO_ROOT
+
+    if DATA_HOME == REPO_ROOT:
+        return REPO_ROOT / "assets" / "report"
+    return Path(__file__).resolve().parent / "_assets" / "report"
 
 
 def build_report(

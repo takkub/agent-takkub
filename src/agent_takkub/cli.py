@@ -1932,8 +1932,8 @@ def cmd_report(args: argparse.Namespace) -> dict:
 
             # Output
             if args.out:
-                Path(args.out).write_text(html, encoding='utf-8')
-                size_kb = round(len(html.encode('utf-8')) / 1024)
+                Path(args.out).write_text(html, encoding="utf-8")
+                size_kb = round(len(html.encode("utf-8")) / 1024)
                 return {
                     "ok": True,
                     "msg": f"Built {args.type} report\nWrote {args.out} ({size_kb} KB)",
@@ -1964,6 +1964,7 @@ def cmd_report(args: argparse.Namespace) -> dict:
         except ValueError:
             return ""
         return reports_mod.build_url(project_ns, name, token)
+
     status_line = reports_mod.remote_status_text()
     try:
         if action == "publish":
@@ -5454,12 +5455,8 @@ def main(argv: list[str] | None = None) -> int:
     sr_build.add_argument(
         "--content", required=True, help="directory with content.html, images.txt, etc."
     )
-    sr_build.add_argument(
-        "--out", default=None, help="output HTML file (default: stdout)"
-    )
-    sr_build.add_argument(
-        "--title", default=None, help="HTML page title (default: based on type)"
-    )
+    sr_build.add_argument("--out", default=None, help="output HTML file (default: stdout)")
+    sr_build.add_argument("--title", default=None, help="HTML page title (default: based on type)")
     sr_build.add_argument(
         "--lint", action="store_true", help="check content for issues before building"
     )
