@@ -1864,3 +1864,46 @@ class TestGitDefaultDenyConfirmedRound5:
     )
     def test_ref_mutating_subcommand_denied_on_shared_tree(self, command: str) -> None:
         assert not pane_guard.classify(command, "backend").allowed, command
+
+
+class TestPythonMAgentTakkubDenied:
+    """#632: Specialist roles must invoke CLI via `takkub <cmd>`, never `python -m agent_takkub`.
+    Running `python -m agent_takkub` boots the GUI cockpit.
+    Submodules (e.g. `python -m agent_takkub.cli`) stay allowed.
+    """
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "python -m agent_takkub report build --type customer",
+            "python -m agent_takkub",
+            "python.exe -m agent_takkub list",
+            "python3 -m agent_takkub done 'finished'",
+            "py -m agent_takkub wait",
+            "cmd /c 'python -m agent_takkub report build'",
+            "cd some/dir && python -m agent_takkub report build",
+        ],
+    )
+    def test_denied_for_specialist(self, command: str) -> None:
+        verdict = pane_guard.classify(command, "backend")
+        assert not verdict.allowed, command
+        assert verdict.rule == "cli_invocation:python_m_agent_takkub"
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "python -m agent_takkub.cli report build",
+            "python -m agent_takkub.headless",
+            "python -m agent_takkub.custom_module",
+            "python -m pytest tests/",
+            "takkub report build --type customer",
+            "takkub done 'finished'",
+        ],
+    )
+    def test_allowed_commands(self, command: str) -> None:
+        assert pane_guard.classify(command, "backend").allowed, command
+
+    def test_allowed_for_lead_and_shell(self) -> None:
+        assert pane_guard.classify("python -m agent_takkub report build", "lead").allowed
+        assert pane_guard.classify("python -m agent_takkub report build", "shell").allowed
+        assert pane_guard.classify("python -m agent_takkub report build", None).allowed

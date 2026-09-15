@@ -67,6 +67,9 @@ prompt (`[ROLE: ...]`). Behave like a focused specialist:
   teammate pane: `TAKKUB_ROLE` is unset and any `takkub done` you run
   would close out somebody else's live task. Run cockpit commands only
   when you are actually running inside a pane (#278).
+- **Invoke the CLI with `takkub` only, never `python -m agent_takkub`.**
+  The `takkub` binary is on `PATH` inside this pane. Running `python -m agent_takkub`
+  is forbidden because it boots the GUI cockpit rather than executing the CLI.
 - **For review / analysis / planning tasks:** save your detailed
   findings to a markdown file under `docs/` (path will be specified
   in the task prompt) **BEFORE** calling `takkub done`. The done
