@@ -1934,20 +1934,14 @@ GENERIC_SCAFFOLDING_PROCESS_NAMES_WIN32: tuple[str, ...] = ("cmd.exe", "conhost.
 # CONSTRUCTION. Warning Lead that the cockpit is about to kill the very
 # call that triggered the warning is pure self-reference, and it is the
 # only child guaranteed to be there on every single done-close.
-# #635: MCP tool children (node MCP servers, Playwright/chromium browsers)
-# that can be safely terminated shouldn't block the done-close. These are
-# helper processes orchestrated by the pane's own work, not real work.
+# #635: Scaffolding processes that are safe to terminate on done-close.
+# Generic node/chrome/chromium/playwright removed — these names catch too
+# much real work (npm test, vitest, jest all run as node; Playwright tests
+# as playwright). MCP helpers are now distinguished by cmdline/ppid via
+# is_mcp_helper_process() instead.
 GENERIC_SCAFFOLDING_PROCESS_NAMES: tuple[str, ...] = (
     "takkub",
     "takkub.exe",
-    "node",
-    "node.exe",
-    "playwright",
-    "playwright.exe",
-    "chrome",
-    "chrome.exe",
-    "chromium",
-    "chromium.exe",
 )
 
 

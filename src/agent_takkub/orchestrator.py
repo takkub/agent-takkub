@@ -5133,6 +5133,59 @@ class Orchestrator(
         from .provider_config import effective_provider_for
         from .provider_spec import normalize_process_name, scaffolding_process_names_for
 
+        def is_mcp_helper_process(child):
+            """Check if a process is an MCP infrastructure helper (not real work).
+
+            Returns True iff the process is an MCP server or browser spawned by one:
+            - node process with cmdline containing @playwright/mcp, mcp-server, or --stdio
+            - chrome/chromium/playwright with cmdline containing MCP markers
+            - chrome/chromium spawned by an MCP helper parent
+
+            Real work processes like `npm test`, `vitest`, or user Playwright tests
+            run as node/playwright WITHOUT these markers and return False.
+
+            Returns False on any error — the default is to assume work is real.
+            """
+            try:
+                child_name = normalize_process_name(child.name())
+            except Exception:
+                return False
+
+            # Only these process types can be MCP helpers
+            if child_name not in ("node", "chrome", "chromium", "playwright"):
+                return False
+
+            # Check cmdline for MCP markers
+            try:
+                cmdline = " ".join(child.cmdline()).lower()
+            except (AttributeError, IndexError, psutil.NoSuchProcess, psutil.AccessDenied):
+                return False
+
+            # MCP servers are started with markers like:
+            # - @playwright/mcp in cmdline (e.g., "node /path/@playwright/mcp/dist/index.js")
+            # - mcp-server or mcp_server in cmdline
+            # - --stdio or --transport stdio (stdio transport for MCP)
+            mcp_markers = (
+                "@playwright/mcp",
+                "mcp-server",
+                "mcp_server",
+                "--stdio",
+                "--transport stdio",
+            )
+            if any(marker in cmdline for marker in mcp_markers):
+                return True
+
+            # Browsers (chrome, chromium) spawned by MCP servers: check parent
+            if child_name in ("chrome", "chromium"):
+                try:
+                    parent = child.parent()
+                    if parent is not None and is_mcp_helper_process(parent):
+                        return True
+                except Exception:
+                    pass
+
+            return False
+
         # #619: resolve the provider this pane ACTUALLY spawned with
         # (pane.model.provider_name, set unconditionally at attach), NOT the
         # close-time `effective_provider_for`. The latter answers "which CLI
@@ -5184,6 +5237,8 @@ class Orchestrator(
             except Exception:
                 continue
             if normalize_process_name(child_name) in scaffolding:
+                continue
+            if is_mcp_helper_process(child):
                 continue
             procs.append(child)
         return procs
@@ -8237,7 +8292,7 @@ class Orchestrator(
         recovers the real target role so a genuinely outside role's
         boot-stall/unconfirmed/stuck notice reaches this interrupt too.
         """
-        for item in self.inbox_report(project=project_ns):
+        for item in self._inbox_report_raw(project=project_ns):
             role = item.get("role")
             body = str(item.get("body", ""))
             if role == "system":
@@ -8278,7 +8333,7 @@ class Orchestrator(
         watched roles, passed by the caller) — a role that already
         resolved this tick doesn't need waking.
         """
-        for item in self.inbox_report(project=project_ns):
+        for item in self._inbox_report_raw(project=project_ns):
             body = str(item.get("body", ""))
             role = _system_marker_role(body)
             if not role or role not in pending_roles:
@@ -8387,41 +8442,15 @@ class Orchestrator(
             return {"reason": reason, "message": message}
         return None
 
-    def inbox_report(self, project: str | None = None, role: str | None = None) -> list[dict]:
-        """Read-only snapshot of every done/FAILED report still sitting
-        somewhere in the outbound-to-Lead pipeline instead of already
-        written into Lead's pane (#231): the digest debounce window, the
-        ready-prompt live-notify queue, and the durable pending store
-        (survives a restart).
+    def _inbox_report_raw(self, project: str | None = None, role: str | None = None) -> list[dict]:
+        """Internal: Read pending inbox items without side effects. Used by
+        wait polling and status checks that shouldn't mark items as "read".
 
-        `takkub status` could only ever say a report was "queued — not yet
-        delivered"; there was no command that read its actual content back
-        out, forcing Lead to Glob `runtime/sessions/**` by hand. This is
-        that command's backing data — `takkub inbox` prints it.
-
-        Returns a list of ``{role, queue, body, origin_confirmed, queued_ts}``,
-        newest first within each queue tier (digest, then live, then
-        durable). ``origin_confirmed`` is `False` when the reporting pane's
-        role slot was respawned since this item was queued (#228 — the same
-        provenance check `_flush_lead_digest`/`_pump_lead_notify` apply at
-        delivery time), `True` when confirmed live, `None` when no origin
-        was recorded to check (system notices, CC relays, combined
-        digests). ``queued_ts`` (#241) is the epoch time the item joined the
-        digest debounce window, or `None` for tiers that don't track it.
-        Optionally filtered to a single *role*.
-
-        As a side effect (#241), every body returned here is fingerprinted
-        into `_inbox_seen[project_ns]` — if the SAME body later flushes out
-        of `_lead_digest_queue` via the normal digest pump, `_flush_lead_digest`
-        collapses it to a one-line reference instead of re-pasting content
-        Lead already read through this call.
+        See `inbox_report` for return value format.
         """
         project_ns = self._resolve_project(project)
         if role is not None:
             role = self.resolve_pane_role(role, project_ns)
-        if not hasattr(self, "_inbox_seen"):
-            self._inbox_seen = {}
-        seen = self._inbox_seen.setdefault(project_ns, set())
 
         def _origin_confirmed(
             item_role: str | None, pane_token: str | None, queued_ts: float | None = None
@@ -8439,7 +8468,6 @@ class Orchestrator(
             item_role = _notice_role_tag(body) or "system"
             if role is not None and item_role != role:
                 continue
-            seen.add(_notice_fingerprint(body))
             items.append(
                 {
                     "role": item_role,
@@ -8502,6 +8530,50 @@ class Orchestrator(
                         "queued_ts": d.created_at,
                     }
                 )
+
+        return items
+
+    def inbox_report(self, project: str | None = None, role: str | None = None) -> list[dict]:
+        """Read-only snapshot of every done/FAILED report still sitting
+        somewhere in the outbound-to-Lead pipeline instead of already
+        written into Lead's pane (#231): the digest debounce window, the
+        ready-prompt live-notify queue, and the durable pending store
+        (survives a restart).
+
+        `takkub status` could only ever say a report was "queued — not yet
+        delivered"; there was no command that read its actual content back
+        out, forcing Lead to Glob `runtime/sessions/**` by hand. This is
+        that command's backing data — `takkub inbox` prints it.
+
+        Returns a list of ``{role, queue, body, origin_confirmed, queued_ts}``,
+        newest first within each queue tier (digest, then live, then
+        durable). ``origin_confirmed`` is `False` when the reporting pane's
+        role slot was respawned since this item was queued (#228 — the same
+        provenance check `_flush_lead_digest`/`_pump_lead_notify` apply at
+        delivery time), `True` when confirmed live, `None` when no origin
+        was recorded to check (system notices, CC relays, combined
+        digests). ``queued_ts`` (#241) is the epoch time the item joined the
+        digest debounce window, or `None` for tiers that don't track it.
+        Optionally filtered to a single *role*.
+
+        As a side effect (#241), every body returned here is fingerprinted
+        into `_inbox_seen[project_ns]` — if the SAME body later flushes out
+        of `_lead_digest_queue` via the normal digest pump, `_flush_lead_digest`
+        collapses it to a one-line reference instead of re-pasting content
+        Lead already read through this call. This side effect ONLY happens
+        when explicitly called via `takkub inbox`, not for internal usage
+        like wait polling or status checks — use `_inbox_report_raw` for those.
+        """
+        items = self._inbox_report_raw(project, role)
+        project_ns = self._resolve_project(project)
+
+        # Mark as seen only when user explicitly calls `takkub inbox`
+        if not hasattr(self, "_inbox_seen"):
+            self._inbox_seen = {}
+        seen = self._inbox_seen.setdefault(project_ns, set())
+        for item in items:
+            body = item.get("body", "")
+            seen.add(_notice_fingerprint(body))
 
         return items
 
