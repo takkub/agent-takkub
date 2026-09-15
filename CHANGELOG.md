@@ -4,14 +4,35 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 
 ## [vNEXT]
 
+## [v2.1.10] - 2026-09-15
+
 ### Added (เพิ่ม)
 
 - **ตัวออกรายงานส่วนกลาง 3 แบบ (#626)** — `takkub report build --type customer|dev|boss --content <dir> [--out]`
   ใช้ได้ทุก provider · template/lightbox/เช็กมือถืออยู่ที่ `assets/report/` แล้ว stage เข้า wheel เป็น `_assets/report/`
   · customer มี lint คำเทคนิค/บั๊ก · ภาพ JPEG ≤1440px ฝัง base64 + กันภาพซ้ำ · กฎเนื้อหาอยู่ใน `docs/lead/report-publish.md`
 
+- **โหมดทีม "ทำเอง" / "คู่" บังคับจริง** — preset solo-lead บอก Lead ว่าไม่ spawn teammate แต่ `can_spawn`
+  ปล่อย role นอก roster (codex/gemini/opencode/kimi/cursor/critic) ผ่านเสมอ · ตอนนี้ solo-lead และ pair
+  บล็อกทุก role ยกเว้น Lead และ `shell` ของ user (pair ยังเปิดตัวตรวจ reviewer) · full/custom/auto เหมือนเดิม
+
 ### Fixed (แก้)
 
+- **guard กันแก้ข้าม cockpit instance (#633)** — ทุก role รวม Lead: ห้ามเขียน/ย้าย/ลบใน DATA_HOME ของ cockpit
+  ตัวอื่น (prod ↔ dev) · ห้าม kill process ของ instance อื่น · ห้ามบูต app/`npm -g` ที่ไม่ได้ชี้ AGENT_TAKKUB_HOME ชั่วคราว
+  · คัดกรองก่อนด้วย regex คำสั่งทั่วไปไม่ช้าลง · ทำงานกับ path POSIX (`/…`, `\` คั่น) และ Windows
+  · เนื้อ heredoc ที่เป็นข้อมูลไม่ถูกอ่านเป็นคำสั่ง แต่สคริปต์ที่ส่งเข้า python ผ่าน heredoc ยังถูกตรวจการเขียนไฟล์
+- **guard ของ Lead บล็อกผิดใน scratchpad (#637/#638)** — ไฟล์ .html/.md นอก project root ที่เนื้อหามีคำ auth/permission
+  หรือชื่อไฟล์มี schema/migration เขียนได้แล้ว · package.json/lockfile ยัง deny ทุกที่
+- **pane ค้างหลังรับงานแล้ว watchdog ไม่แจ้ง + transcript บวม (#627)** — บันทึกเวลาตอนงานถึง pane จริง · tool marker นับ
+  เฉพาะจังหวะที่เพิ่งขึ้น (จอวาดซ้ำไม่นับเป็น progress) · transcript ตัด frame ซ้ำ + เพดาน 32MB พร้อม event
+- **watchdog เตือนผิดตอน pane ใช้ MCP (#617)** — claude pane: การเรียก `mcp__*` บันทึกกิจกรรมแบบเงียบผ่าน hook
+  `takkub _activity` (provider อื่นที่ไม่มี hook = gap ระบุในโค้ด) · opencode: `pwsh` นับเป็น scaffolding
+- **notice ซ้ำ / digest กลืนรายงาน done / screenshot ข้าม role (#635)** — MCP helper แยกจาก cmdline ไม่ใช่ชื่อ process
+  (`npm test`/vitest ยังนับเป็นงานจริง) · wait ภายในไม่ mark รายงานว่าอ่านแล้ว · done-close เหลือข้อความเดียว
+  · status แสดงเฉพาะภาพที่ pane อ้างในบรรทัด evidence
+- **กด Ctrl+C แล้วถูกเปิดเป็น auto-issue และโปรแกรมไม่ปิด (#631)** — KeyboardInterrupt/SystemExit ไม่ auto-capture ·
+  SIGINT/SIGTERM ช่วง boot flow ปิดโปรแกรมเรียบร้อยก่อนสร้างหน้าต่างหลัก
 - **`python -m agent_takkub <คำสั่ง>` บูต cockpit ซ้อนแล้วฆ่า instance ที่รันอยู่ (#632)** — เหตุจริง: pane ใน dev รันด้วย
   Python ที่มี agent-takkub เก่าค้าง → บูตชี้ข้อมูล prod → single-instance auto-kill ฆ่า prod · ตอนนี้ `__main__`
   เปิด app เป็นค่าเริ่มต้นและส่งไป CLI เฉพาะ subcommand ที่ parser รู้จัก · instance ใหม่เช็คว่า owner เดิมยังตอบ
@@ -30,6 +51,10 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 ### Changed (เปลี่ยน)
 
 - ruff 0.16.6 → 0.16.7 ทั้ง pyproject และ pre-commit (#623)
+
+### Tests
+
+- เทส end-to-end ของ #634 (#636): `projects.json` ว่าง, role-agent, ย้ายไฟล์ไม่สำเร็จ, fresh install ผ่าน `apply_pending`
 
 ## [v2.1.9] - 2026-09-15
 
