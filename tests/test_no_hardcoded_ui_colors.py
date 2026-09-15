@@ -30,6 +30,9 @@ _ALLOWLIST: dict[str, str] = {
     "issues.py": "GitHub label colors — external data rendered as-is, not cockpit chrome",
     "design_review_html.py": "generates a standalone HTML artifact viewed in a browser, "
     "not a Qt surface; its palette is self-contained",
+    "report_builder.py": "generates standalone customer/dev/boss HTML reports viewed in a "
+    "browser (#626), not a Qt surface; its light+dark palette is self-contained in the "
+    "report CSS, same as design_review_html.py",
     "settings_management/pages/roles_page.py": "the role-color input's default TEXT value "
     "(identity data typed into a QLineEdit, not chrome styling)",
     "token_meter.py": "_USAGE_FALLBACK — the Qt-free fallback ramp for usage_color(); even a "
