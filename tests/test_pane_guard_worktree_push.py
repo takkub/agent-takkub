@@ -111,19 +111,22 @@ class TestGitDashCUppercaseFlagSeenThrough:
         assert not verdict.allowed, f"should have blocked: {command}"
         assert verdict.rule == "git_lead_only:push"
 
-    @pytest.mark.parametrize(
-        "command",
-        [
-            "git -C . reset --hard HEAD~1",  # #545: carved out inside the pane's own worktree
-            f"git -C {_WT} branch -D main",
-        ],
-    )
-    def test_reset_hard_and_branch_delete_carved_out_with_dash_c(self, command: str) -> None:
-        """#545 flipped this from denied to allowed — but the point this
-        class pins still holds: `-C`'s value must be correctly parsed as
-        part of the in-worktree detection, not swallow the subcommand and
-        "allow" for the wrong reason (a silent bypass, not a real grant)."""
-        assert pane_guard.classify(command, "backend", cwd=self._WT).allowed, command
+    def test_reset_hard_carved_out_with_dash_c(self) -> None:
+        """#545: carved out inside the pane's own worktree — `-C`'s value
+        must be correctly parsed as part of the in-worktree detection, not
+        swallow the subcommand and "allow" for the wrong reason (a silent
+        bypass, not a real grant)."""
+        assert pane_guard.classify("git -C . reset --hard HEAD~1", "backend", cwd=self._WT).allowed
+
+    def test_branch_delete_denied_even_in_worktree_with_dash_c(self) -> None:
+        """#609/#611 round 5: `branch -D`'s worktree carve-out was removed —
+        it names an arbitrary branch by string, not necessarily one scoped
+        to the caller's own worktree. Still must correctly parse `-C`'s
+        value rather than mis-seeing the subcommand (same point the old,
+        now-flipped assertion pinned)."""
+        verdict = pane_guard.classify(f"git -C {self._WT} branch -D main", "backend", cwd=self._WT)
+        assert not verdict.allowed
+        assert verdict.rule == "git_lead_only:branch-delete"
 
     def test_reset_hard_still_denied_with_dash_c_outside_a_worktree(self) -> None:
         """The #466 `-C` parsing fix must still correctly SEE the
