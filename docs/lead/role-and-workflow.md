@@ -21,6 +21,7 @@ Teammates: frontend · backend · mobile · devops · qa · reviewer · critic �
 1. **กี่ไฟล์/กี่บรรทัด?** (นิดเดียว <= 20 บรรทัด / ปกติ 1-5 ไฟล์ / ใหญ่ หลายไฟล์)
 2. **แตะ trust boundary / schema / auth ไหม?** (schema/migration/auth/security/tokens/crypto/payment/lockfile/CI/infra → deep เสมอ)
 3. **ใครจำเป็นจริงบ้าง?** (งานเล็กอย่าเรียกหลาย role เกินจำเป็น)
+4. **ทางพังมีกี่แบบ?** — งาน guard/edge-heavy: หารูให้ครบก่อน แล้วออกกติกาครอบทั้งชุด (default-deny) ใบเดียว · **ห้าม "เจอ 1 แก้ 1"** (#609)
 
 **ทุกแถวใน proposal table ต้องมีคอลัมน์ Scope (`tiny`, `normal`, `deep`) เสมอ!**
 
@@ -48,7 +49,7 @@ Teammates: frontend · backend · mobile · devops · qa · reviewer · critic �
 | feature ใหญ่ (UI + API) | frontend + backend | — |
 | complex approach | primary | **+gemini** (1M) |
 
-**#513 reviewer alias:** `routing_planner.classify()` propose `role="reviewer"` + `mode="code"|"e2e"|"ui"` โดย `resolve_role_alias()` เป็น source of truth (`qa.md`/`critic.md` ยังอยู่พร้อม DEPRECATED ALIAS และ dispatch เบื้องหลัง map ไปตามเดิม)
+**#513 reviewer alias:** `reviewer --mode code|e2e|ui` (source of truth `resolve_role_alias()`; `qa`/`critic` = alias เดิม)
 
 ---
 
@@ -60,7 +61,7 @@ Teammates: frontend · backend · mobile · devops · qa · reviewer · critic �
   2. **ต้องใช้ความรู้ที่มีแต่ user รู้** (business decision / domain knowledge ที่ไม่มีใน repo)
   3. **2 ทางเลือกที่ผลต่างกันมากจริง** (architectural tradeoffs)
 - ถ้าต้องถาม user: **ถาม 1 ข้อ + บอก default** แล้วเดินตาม default ได้เมื่อ user ไม่ตอบ (ยกเว้นกรณี irreversible ที่ต้องรอ confirm)
-- Notice ที่ไม่ได้ขออะไรจาก user ห้ามส่งถึง user (ลง audit log/digest อย่างเดียว #464)
+- Notice ที่ไม่ขออะไรจาก user → audit log/digest เท่านั้น (#464)
 
 ### Proposal template (เฉพาะ 3 กรณีข้างบน)
 - **Format:** ตาราง `| Role | Scope | Task | cwd |` (ทุก row ต้องมี Scope tiny/normal/deep และ cwd ห้าม blank) + note (parallel/sequential) + คำถาม confirm พร้อม default
@@ -73,7 +74,7 @@ Teammates: frontend · backend · mobile · devops · qa · reviewer · critic �
 ### Long-run mode (ระบบเดินเองยาวๆ ไม่สะดุดทุกก้าว)
 1. **auto-chain เป็น default สำหรับ scope tiny/normal**: done → verify/fix hop ถัดไปยิงเองทันที ไม่ต้อง propose (deep ยังคง propose เฉพาะกรณี irreversible)
 2. **fix loop อัตโนมัติ**: tiny/normal ที่ FAILED → ยิงกลับ role เดิม (หรือตาม signature) เองได้เลย
-   **เพดานกันวน: เรื่องเดียวกันล้มได้ไม่เกิน 2 รอบ** รอบที่ 3 หยุดแล้วถาม user 1 คำถามสั้นๆ (เพดานสำคัญ — ห้ามวน loop ไม่จบกินเครื่อง/โควตา)
+   **เพดานกันวน: เรื่องเดียวกัน (รวม fix จาก review) ไม่เกิน 2 รอบ** — รอบ 3 = ship ที่ผ่านแล้ว + เปิด issue ที่เหลือ · re-verify แค่ยืนยัน finding เดิม ห้ามสั่ง reviewer "เจาะเพิ่ม"
 3. **สรุปถึง user ครั้งเดียวตอนจบ batch**: done ระหว่างทางลง digest/audit log ไม่เด้งหา user ทุกใบ (#464)
 4. **Quota-hit reroute (#514) ทำงานจริง**: pane ตันเพราะโควตา orchestrator ย้าย provider ให้เอง ไม่ต้องรอ user
 5. **Lead ห้ามหยุดรอแบบ block** (กฎ #287/#242): ใช้ `takkub wait` เท่านั้น จบ turn ให้ระบบ delivery ปลุก
