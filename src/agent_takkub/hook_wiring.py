@@ -40,6 +40,13 @@ from . import config
 HOOK_COMMAND = "takkub _hook"
 SESSION_REPORT_COMMAND = "takkub session-report"
 GUARD_COMMAND = "takkub _guard"
+# #617: wired as Pre+PostToolUse for `mcp__*` so a pane driving an MCP tool
+# (e.g. a long Playwright session) counts as real activity even though such
+# calls never render a screen-scrapeable tool-call marker. Fires once per
+# tool invocation (Pre = in-flight protection for a genuinely-long call,
+# Post = completion), never per watchdog tick, so it cannot re-prime the
+# idle clock like the #570 marquee did.
+ACTIVITY_COMMAND = "takkub _activity"
 
 # #318 token-diet wave 4: the built-in "Concise" output style (CC 2.1.237 —
 # "Claude leads with results and skips preamble and narration, while doing
@@ -155,6 +162,19 @@ def guard_hook_fragment(matcher: str = "Bash") -> dict:
     }
 
 
+def activity_hook_fragment(matcher: str = "mcp__*") -> dict:
+    """The `PreToolUse`/`PostToolUse` entry that runs `takkub _activity` —
+    a fail-silent, always-exit-0 progress stamp for tool activity that renders
+    no observable marker (#617). Matches `mcp__*` so every MCP tool call the
+    pane makes (server-side browser drives, long-running e2e, etc.) counts as
+    real progress for the idle-no-progress watchdog. A fresh dict each call so
+    a caller can't mutate shared state."""
+    return {
+        "matcher": matcher,
+        "hooks": [{"type": "command", "command": ACTIVITY_COMMAND}],
+    }
+
+
 def _rendered_settings(*, concise: bool = False, remote_control: bool = True) -> dict:
     """The hook settings for this spawn: the static Stop/Notification/
     SessionStart wiring, the always-on PreToolUse Bash/Edit/Write guards, plus rtk's
@@ -185,6 +205,9 @@ def _rendered_settings(*, concise: bool = False, remote_control: bool = True) ->
         guard_hook_fragment("Bash"),
         guard_hook_fragment("Edit"),
         guard_hook_fragment("Write"),
+        # #617: MCP-tool activity stamp — BEFORE the call so a genuinely-long
+        # in-flight MCP tool is protected, not just its completion.
+        activity_hook_fragment("mcp__*"),
     ]
     try:
         from . import rtk_helper
@@ -196,6 +219,9 @@ def _rendered_settings(*, concise: bool = False, remote_control: bool = True) ->
         # authoritative pane-state hook wiring (or the guard).
         pass
     settings["hooks"]["PreToolUse"] = pre_tool_use
+    # #617: completion stamp — PostToolUse hooks may not block, so this runs
+    # after the tool result lands (still per-invocation, never per-tick).
+    settings["hooks"]["PostToolUse"] = [activity_hook_fragment("mcp__*")]
     if concise:
         settings["outputStyle"] = _CONCISE_OUTPUT_STYLE
     settings["remoteControlAtStartup"] = remote_control

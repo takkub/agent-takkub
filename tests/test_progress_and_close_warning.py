@@ -252,6 +252,80 @@ class TestProgressCli:
         assert rc == 1
 
 
+class TestActivityCli:
+    """#617: `takkub _activity` is the fail-silent hook command wired to
+    claude's mcp__* Pre/PostToolUse hooks. It must send the tiny `activity`
+    payload, keep stdout clean (hook stdout gets re-parsed by the agent), and
+    exit 0 even when the cockpit is unreachable — a PreToolUse hook that
+    raised would delay/brick every MCP tool call."""
+
+    def test_teammate_can_stamp_activity(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        sent: list[dict] = []
+        monkeypatch.setattr(
+            cli,
+            "_hook_request",
+            lambda p: sent.append(p) or {"ok": True, "msg": "activity stamped"},
+        )
+        monkeypatch.setenv("TAKKUB_ROLE", "devops")
+        rc = cli.main(["_activity"])
+        assert rc == 0
+        assert sent[-1]["cmd"] == "activity"
+        assert sent[-1]["from"] == "devops"
+        assert "note" not in sent[-1], "activity is silent — it must not carry a note"
+
+    def test_cockpit_unreachable_still_exits_zero_and_prints_nothing(
+        self, monkeypatch: pytest.MonkeyPatch, capsys
+    ) -> None:
+        monkeypatch.setattr(cli, "_hook_request", lambda p: None)
+        monkeypatch.setenv("TAKKUB_ROLE", "devops")
+        rc = cli.main(["_activity"])
+        assert rc == 0
+        assert capsys.readouterr().out == "", "a hook must never print to the agent's stdout"
+
+    def test_manual_invocation_without_role_is_a_noop(
+        self, monkeypatch: pytest.MonkeyPatch, capsys
+    ) -> None:
+        captured: list[dict] = []
+        monkeypatch.setattr(cli, "_hook_request", lambda p: captured.append(p))
+        rc = cli.main(["_activity"])
+        assert rc == 0
+        assert captured == [], "no TAKKUB_ROLE → no request, no side effect"
+        assert capsys.readouterr().out == ""
+
+
+class TestStampActivity:
+    """#617: `stamp_activity` counts as REAL progress for the idle watchdog
+    (it bumps the same `last_send_ts` evidence `_real_progress_ts` reads)
+    but must NOT send Lead a message — that is the entire difference from
+    `progress()`; a chatty pane hammering an MCP tool would otherwise spam
+    Lead on every tool call."""
+
+    def test_unknown_role_rejected(self, orch: Orchestrator) -> None:
+        ok, _msg = orch.stamp_activity("backend", project=PROJECT)
+        assert ok is False
+
+    def test_stamps_idle_anchor_without_lead_notice(self, orch: Orchestrator) -> None:
+        import time as _time
+
+        _register(orch, LEAD.name, _make_alive_session())
+        _register(orch, "devops", _make_alive_session())
+        before = _time.time()
+        with (
+            patch("agent_takkub.orchestrator.QTimer.singleShot"),
+            patch.object(orch, "_notify_lead", return_value=None) as notify,
+        ):
+            ok, _msg = orch.stamp_activity("devops", project=PROJECT)
+        assert ok is True
+        ps = orch._ps(f"{PROJECT}::devops")
+        assert ps.last_send_ts >= before, "the stamp must advance last_send_ts"
+        notify.assert_not_called(), "stamp_activity must stay silent — no Lead notice"
+
+    def test_missing_pane_rejected(self, orch: Orchestrator) -> None:
+        _register(orch, LEAD.name, _make_alive_session())
+        ok, _msg = orch.stamp_activity("nobody", project=PROJECT)
+        assert ok is False
+
+
 class TestCliServerProgressDispatch:
     @pytest.fixture
     def srv_sock(self, qapp):
@@ -297,6 +371,64 @@ class TestCliServerProgressDispatch:
         req = {"cmd": "progress", "from": "lead", "note": "x"}
         srv._dispatch(sock, req)
         mock_orch.progress.assert_not_called()
+
+
+class TestCliServerActivityDispatch:
+    """#617: `takkub _activity` (wired to claude's mcp__* Pre/PostToolUse
+    hooks) must go through the exact same token gate as `progress` — a
+    role/project derived from the server's token registry, never from the
+    caller — then land on `Orchestrator.stamp_activity`."""
+
+    @pytest.fixture
+    def srv_sock(self, qapp):
+        from agent_takkub.cli_server import CliServer
+
+        mock_orch = MagicMock()
+        mock_orch._lead_token = "leadtok"
+        mock_orch._pane_tokens = {"panetok": (PROJECT, "devops")}
+        mock_orch.stamp_activity.return_value = (True, "activity stamped")
+        srv = CliServer(mock_orch)
+
+        class _FakeSock:
+            def __init__(self) -> None:
+                self._buf = b""
+
+            def write(self, data: bytes) -> None:
+                self._buf += data
+
+            def flush(self) -> None:
+                pass
+
+        yield srv, _FakeSock(), mock_orch
+        srv.shutdown_timers()
+
+    def test_requires_a_valid_pane_token(self, srv_sock) -> None:
+        srv, sock, mock_orch = srv_sock
+        req = {"cmd": "activity", "from": "devops"}
+        srv._dispatch(sock, req)
+        mock_orch.stamp_activity.assert_not_called()
+
+    def test_valid_token_derives_role_and_calls_orch(self, srv_sock) -> None:
+        srv, sock, mock_orch = srv_sock
+        req = {"cmd": "activity", "from": "devops", "auth": "panetok"}
+        srv._dispatch(sock, req)
+        mock_orch.stamp_activity.assert_called_once()
+        assert mock_orch.stamp_activity.call_args.args[0] == "devops"
+
+    def test_lead_role_rejected_before_reaching_orch(self, srv_sock) -> None:
+        srv, sock, mock_orch = srv_sock
+        req = {"cmd": "activity", "from": "lead"}
+        srv._dispatch(sock, req)
+        mock_orch.stamp_activity.assert_not_called()
+
+    def test_valid_token_projects_to_token_s_registry(self, srv_sock) -> None:
+        """A caller that spoofs a different role must be overridden by the
+        server's token → (project, role) binding — same trust rule as every
+        other gated IPC command."""
+        srv, sock, mock_orch = srv_sock
+        req = {"cmd": "activity", "from": "frontend", "auth": "panetok"}
+        srv._dispatch(sock, req)
+        assert mock_orch.stamp_activity.call_args.args[0] == "devops"
 
 
 class TestWarnIfLiveChildren:
@@ -537,6 +669,104 @@ class TestWarnIfLiveChildren:
 
         lead = orch._panes_by_project[PROJECT][LEAD.name]
         lead.session.write.assert_not_called()
+
+    def test_opencode_own_cli_scaffolding_stays_silent(
+        self, orch: Orchestrator, monkeypatch
+    ) -> None:
+        """#619: the opencode CLI's own process sits in this pane's tree at
+        every close by construction (same self-reference as #286/takkub and
+        #619/codex) — the npm shim resolves to `node` on top of the ConPTY
+        console pair (#272), and the CLI itself surfaces as `opencode.exe`.
+        Warning about it would be a warning about nothing: prod events.log
+        2026-09-15 shows exactly children=["opencode.exe"] on the two real
+        (`done_close_deferred_live_children` + "about to be killed") false
+        negatives this fixes."""
+        _register(orch, LEAD.name, _make_alive_session())
+        monkeypatch.setattr(sys, "platform", "win32")
+        monkeypatch.setattr(
+            "agent_takkub.provider_config.effective_provider_for",
+            lambda role, project=None: "opencode",
+        )
+        children = []
+        for name in ("cmd.exe", "conhost.exe", "node.exe", "opencode.exe"):
+            c = MagicMock()
+            c.name.return_value = name
+            children.append(c)
+        fake_proc = MagicMock()
+        fake_proc.children.return_value = children
+        monkeypatch.setattr("psutil.Process", lambda pid: fake_proc)
+
+        with patch("agent_takkub.orchestrator.QTimer.singleShot"):
+            orch._warn_if_live_children(PROJECT, "reviewer", _make_alive_session())
+
+        lead = orch._panes_by_project[PROJECT][LEAD.name]
+        lead.session.write.assert_not_called()
+
+    @pytest.mark.parametrize("shell_name", ["pwsh.exe", "powershell.exe", "pwsh", "powershell"])
+    def test_opencode_powershell_shell_host_stays_silent(
+        self, orch: Orchestrator, monkeypatch, shell_name: str
+    ) -> None:
+        """#627: on Windows opencode runs every shell/Bash tool through
+        PowerShell, and the shell host outlives each tool call — the exact
+        #286 shape codex already had. It stands under an opencode pane for the
+        WHOLE session, so it must be scaffolding, not live-child evidence:
+        this is the same mechanism that produced the real 12:47 false
+        idle-no-progress suppression (#619) — the watchdog saw "a live
+        subprocess", skipped the ⏳ notice, and the pane idled quietly for 38
+        minutes. Covers both the pwsh and powershell fallback spellings, and
+        the unsuffixed POSIX-parity forms `normalize_process_name` maps them
+        to."""
+        _register(orch, LEAD.name, _make_alive_session())
+        monkeypatch.setattr(sys, "platform", "win32")
+        monkeypatch.setattr(
+            "agent_takkub.provider_config.effective_provider_for",
+            lambda role, project=None: "opencode",
+        )
+        child = MagicMock()
+        child.name.return_value = shell_name
+        fake_proc = MagicMock()
+        fake_proc.children.return_value = [child]
+        monkeypatch.setattr("psutil.Process", lambda pid: fake_proc)
+
+        with patch("agent_takkub.orchestrator.QTimer.singleShot"):
+            orch._warn_if_live_children(PROJECT, "reviewer", _make_alive_session())
+
+        lead = orch._panes_by_project[PROJECT][LEAD.name]
+        lead.session.write.assert_not_called()
+
+    def test_opencode_real_work_beside_scaffolding_still_warns(
+        self, orch: Orchestrator, monkeypatch
+    ) -> None:
+        """#627: the pwsh/own-CLI subtraction must stay a subtraction — an
+        opencode pane closing on a live `docker` build beside its own pwsh
+        scaffolding still reports the build, as #234 intended."""
+        _register(orch, LEAD.name, _make_alive_session())
+        monkeypatch.setattr(sys, "platform", "win32")
+        monkeypatch.setattr(
+            "agent_takkub.provider_config.effective_provider_for",
+            lambda role, project=None: "opencode",
+        )
+        children = []
+        for name in ("pwsh.exe", "opencode.exe", "node.exe", "docker.exe"):
+            c = MagicMock()
+            c.name.return_value = name
+            children.append(c)
+        fake_proc = MagicMock()
+        fake_proc.children.return_value = children
+        monkeypatch.setattr("psutil.Process", lambda pid: fake_proc)
+
+        with patch("agent_takkub.orchestrator.QTimer.singleShot"):
+            orch._warn_if_live_children(PROJECT, "reviewer", _make_alive_session())
+
+        lead = orch._panes_by_project[PROJECT][LEAD.name]
+        written = "".join(
+            c.args[0].decode() if isinstance(c.args[0], bytes) else str(c.args[0])
+            for c in lead.session.write.call_args_list
+        )
+        assert "reviewer closing" in written
+        assert "1 subprocess" in written
+        assert "docker.exe" in written
+        assert "pwsh" not in written
 
     def test_kimi_python_scaffolding_stays_silent(self, orch: Orchestrator, monkeypatch) -> None:
         _register(orch, LEAD.name, _make_alive_session())

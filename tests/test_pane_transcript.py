@@ -137,6 +137,113 @@ class TestOnBytesTranscriptTee:
         assert session._transcript is None
 
 
+class TestTranscriptDedupAndCap:
+    """#627: the transcript tee must not persist re-painted frames byte-for-
+    byte (a repaint loop re-emits the same frame many times a second, so the
+    file would grow to repaint size instead of content size) and must hard-
+    cap each file so a runaway frame bus can't balloon the disk."""
+
+    def _make_session(self, tmp_path: pathlib.Path):
+        import threading
+
+        from agent_takkub.pty_session import PtySession
+
+        session = PtySession.__new__(PtySession)
+        log = tmp_path / "tee.transcript.log"
+        session._transcript = log.open("wb")
+        session._screen_lock = threading.Lock()
+        session.bytesIn = MagicMock()
+        session.bytesIn.emit = MagicMock()
+        session.outputUpdated = MagicMock()
+        session.outputUpdated.emit = MagicMock()
+        session.stream = MagicMock()
+        return session, log
+
+    def test_repeated_identical_frames_are_written_once(self, tmp_path: pathlib.Path) -> None:
+        """A repaint loop re-sends the SAME bytes many times a second — only
+        the first copy must land in the file."""
+        import agent_takkub.pty_session as pty_session_mod
+
+        session, log = self._make_session(tmp_path)
+        captured = []
+        monkeypatch = pytest.MonkeyPatch()
+        monkeypatch.setattr(
+            pty_session_mod, "_transcript_event", lambda ev, **kw: captured.append((ev, kw))
+        )
+        try:
+            session._feed_and_log(b"frame A")
+            session._feed_and_log(b"frame A")  # identical repaint
+            session._feed_and_log(b"frame A")  # and again
+            session._feed_and_log(b"frame B")
+            session._feed_and_log(b"frame B")
+            session._transcript.flush()
+        finally:
+            monkeypatch.undo()
+
+        assert log.read_bytes() == b"frame Aframe B", (
+            f"repeated frames must be deduped; bytes: {log.read_bytes()!r}"
+        )
+        assert captured == [], "dedup is not a cap event — event must not fire"
+
+    def test_size_cap_fires_once_locks_file_at_ceiling(
+        self, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Crossing the per-file ceiling must fire `transcript_size_capped`
+        exactly once and stop writing at the ceiling — even a NEW unique frame
+        after the cap must not be appended (the file stays at the ceiling)."""
+        import agent_takkub.pty_session as pty_session_mod
+
+        session, log = self._make_session(tmp_path)
+        monkeypatch.setattr(pty_session_mod, "_TRANSCRIPT_MAX_BYTES", 10)
+        captured = []
+        monkeypatch.setattr(
+            pty_session_mod, "_transcript_event", lambda ev, **kw: captured.append((ev, kw))
+        )
+
+        session._feed_and_log(b"0123456789")  # exactly the ceiling
+        session._transcript.flush()
+        assert session.__dict__.get("_transcript_capped") is not True, (
+            "cap is edge-triggered on the first frame AT/OVER the ceiling"
+        )
+        assert log.read_bytes() == b"0123456789"
+
+        session._feed_and_log(b"AAAA")  # over the ceiling — fires the cap
+        session._transcript.flush()
+        assert len(captured) == 1
+        event, details = captured[0]
+        assert event == "transcript_size_capped"
+        assert details["max_bytes"] == 10
+
+        session._feed_and_log(b"BBBB")  # after the cap: still nothing
+        session._transcript.flush()
+        assert log.read_bytes() == b"0123456789", "file must stay locked at the ceiling"
+        assert len(captured) == 1, "cap event must fire exactly once"
+
+    def test_dedup_window_catches_alternating_repaint(self, tmp_path: pathlib.Path) -> None:
+        """A short A-B-A-B alternation (a refresh loop bouncing between two
+        renderings) must also collapse — the cap event is unrelated."""
+        import agent_takkub.pty_session as pty_session_mod
+
+        session, log = self._make_session(tmp_path)
+        captured = []
+        monkeypatch = pytest.MonkeyPatch()
+        monkeypatch.setattr(
+            pty_session_mod, "_transcript_event", lambda ev, **kw: captured.append((ev, kw))
+        )
+        try:
+            session._feed_and_log(b"A")
+            session._feed_and_log(b"B")
+            session._feed_and_log(b"A")  # within the window → skip
+            session._feed_and_log(b"B")  # equals last frame → skip
+            session._feed_and_log(b"C")  # genuinely new content
+            session._transcript.flush()
+        finally:
+            monkeypatch.undo()
+
+        assert log.read_bytes() == b"ABC"
+        assert captured == []
+
+
 class TestTerminateClosesTranscript:
     """terminate() closes and clears the transcript file handle."""
 

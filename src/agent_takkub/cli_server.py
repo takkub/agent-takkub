@@ -592,6 +592,7 @@ class CliServer(QObject):
         _token_gated_cmds = (
             "done",
             "progress",
+            "activity",  # #617: MCP-tool progress stamp from the pane's own hook
             "spawn-service",  # #429: identity of the starting pane is recorded
             "service-list",
             "send",
@@ -1144,6 +1145,14 @@ class CliServer(QObject):
                 ok, msg = self._orch.progress(
                     req.get("from") or "",
                     note=req.get("note", ""),
+                    project=from_project,
+                )
+            elif cmd == "activity":
+                # #617: MCP-tool activity stamp — silent (no Lead notice),
+                # the same `_real_progress_ts` clock a pane's own
+                # `takkub progress()` primes, minus the notification.
+                ok, msg = self._orch.stamp_activity(
+                    req.get("from") or "",
                     project=from_project,
                 )
             elif cmd == "hook":

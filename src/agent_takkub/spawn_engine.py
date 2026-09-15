@@ -824,6 +824,12 @@ class PaneState:
     # as the narrower, harder-to-fake evidence the idle-no-progress watchdog
     # (`_check_stuck_panes`) needs.
     last_tool_marker_seen_ts: float = 0.0
+    # #627: edge-trigger latch for the tool-marker stamp above — the watchdog
+    # only stamps `last_tool_marker_seen_ts` on the no-marker → marker
+    # transition, so a pane whose screen PERSISTENTLY renders a tool-call
+    # banner (a stuck marquee / repaint loop) can't keep the clock fresh
+    # forever (see `_check_stuck_panes`).
+    _tool_marker_was_active: bool = False
     # _last_spawn_resumed: True when the last spawn used --resume (not --session-id)
     last_spawn_resumed: bool = False
     # throughput watchdog (issue #35) — snapshot of pane._tp_total_bytes taken

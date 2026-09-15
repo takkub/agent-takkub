@@ -1447,6 +1447,20 @@ class LeadInboxMixin:
                 )
                 return
             manager.mark_written(delivery.delivery_id)
+            # #627: the task has NOW actually been written into the pane's PTY —
+            # the single most important anchor for the idle-no-progress
+            # watchdog. `_real_progress_ts` falls back to `last_send_ts` when
+            # no screen-scraped tool-marker / peer-send signal exists, so a
+            # pane that receives a task but then produces NO tool-call marker
+            # and NO progress() (e.g. a provider whose CLI never renders a
+            # tool-call banner, or a pane that just sits on a paginated view)
+            # must have the delivery itself stamped here — otherwise the clock
+            # starts from pane spawn and a 10-minute `assign` → delivery →
+            # stall window accumulates into a false no-progress notice.
+            try:
+                self._ps(f"{project_ns}::{role_name}").last_send_ts = time.time()
+            except Exception:
+                pass
             manager.begin_submit(delivery.delivery_id, generation)
             if "_last_delivery_ids" not in self.__dict__:
                 self._last_delivery_ids = {}
