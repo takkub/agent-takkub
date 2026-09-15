@@ -1511,3 +1511,100 @@ def test_apply_pending_counts_skipped_valid_domain_steps_in_validate_reports(tmp
     )
     # Should have validated at least some domain steps
     assert validate_count > 0
+
+
+# ---------------------------------------------------------------------------
+# #634: quarantine stray V1 sources
+# ---------------------------------------------------------------------------
+
+
+def test_quarantine_stray_v1_sources_from_registry_copy_step(tmp_path):
+    """#634: V1 source files that re-appeared after migration are moved to
+    quarantine, not left in place where they could corrupt re-apply."""
+
+    from agent_takkub.core.migration.engine import _quarantine_stray_sources
+    from agent_takkub.core.migration.registry_copy_step import RegistryCopyStep, RegistryMapping
+
+    data_home = tmp_path / "data"
+    data_home.mkdir()
+    backups_dir = tmp_path / "backups"
+    backups_dir.mkdir()
+
+    # Create V1 source and V2 target
+    v1_source = data_home / "v1_registry.json"
+    v1_source.write_text('{"old": "data"}', encoding="utf-8")
+
+    v2_target = data_home / "v2" / "registry.json"
+    v2_target.parent.mkdir(parents=True)
+    v2_target.write_text(
+        '{"schema": 1, "migrated_at": 1234.5, "data": {"new": "data"}}', encoding="utf-8"
+    )
+
+    # Create step with one mapping (source -> target)
+    # Use "capability" which is in _ARCHIVED_SOURCE_STEP_IDS
+    mapping = RegistryMapping("test", v1_source, v2_target)
+    step = RegistryCopyStep(
+        step_id="capability",
+        mappings=(mapping,),
+        backups=BackupManager(backups_dir),
+    )
+
+    # Verify stray_source_paths detects it (source exists + target has data)
+    stray = step.stray_source_paths()
+    assert stray == [v1_source]
+
+    # Quarantine it
+    journal = MigrationJournal(JsonlStore(tmp_path / "journal.jsonl"))
+    ok = _quarantine_stray_sources(step, step.step_id, journal, step.backups)
+    assert ok is True
+
+    # Verify source was moved (not copied)
+    assert not v1_source.exists(), "source should be moved, not left in place"
+
+    # Verify it's in quarantine
+    quarantine_dir = backups_dir / "stray-v1-sources"
+    assert quarantine_dir.is_dir()
+    # Find the quarantine subdirectory (timestamp-based)
+    timestamp_dirs = list(quarantine_dir.iterdir())
+    assert len(timestamp_dirs) == 1
+    quarantine_file = timestamp_dirs[0] / v1_source.name
+    assert quarantine_file.exists()
+    assert quarantine_file.read_text(encoding="utf-8") == '{"old": "data"}'
+
+    # Verify journal has the quarantine event
+    entries = journal.all_entries()
+    quarantine_entries = [e for e in entries if e.action == "quarantine"]
+    assert len(quarantine_entries) == 1
+    assert quarantine_entries[0].ok is True
+    assert "stray" in quarantine_entries[0].detail.lower()
+
+
+def test_quarantine_stray_v1_sources_skip_if_no_strays(tmp_path):
+    """#634: If there are no stray sources, quarantine succeeds silently."""
+    from agent_takkub.core.migration.engine import _quarantine_stray_sources
+    from agent_takkub.core.migration.registry_copy_step import RegistryCopyStep, RegistryMapping
+
+    data_home = tmp_path / "data"
+    data_home.mkdir()
+    backups_dir = tmp_path / "backups"
+    backups_dir.mkdir()
+
+    v1_source = data_home / "v1_registry.json"  # doesn't exist
+    v2_target = data_home / "v2" / "registry.json"
+    v2_target.parent.mkdir(parents=True)
+    v2_target.write_text('{"schema": 1, "data": {}}', encoding="utf-8")
+
+    mapping = RegistryMapping("test", v1_source, v2_target)
+    step = RegistryCopyStep(
+        step_id="capability",
+        mappings=(mapping,),
+        backups=BackupManager(backups_dir),
+    )
+
+    # No stray sources
+    stray = step.stray_source_paths()
+    assert stray == []
+
+    # Quarantine returns True (nothing to do)
+    ok = _quarantine_stray_sources(step, step.step_id, None, step.backups)
+    assert ok is True

@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import time
 from collections.abc import Callable, Iterable, Sequence
 from pathlib import Path
 
@@ -77,6 +78,11 @@ def _remove_if_empty_dir(path: Path) -> None:
 _ARCHIVED_SOURCE_STEP_IDS = frozenset(
     {"readonly-registries", "role-agent", "capability", "project", "state"}
 )
+
+# Quarantine subdirectory under backups for stray V1 source files that
+# re-appear after migration (#634) — not deleted, but moved aside so they
+# can't be used as sources for re-apply
+_STRAY_SOURCE_QUARANTINE = "stray-v1-sources"
 
 
 # Every domain target's required top-level key(s), by which accessor
@@ -173,6 +179,73 @@ def _source_retired(step: object, step_id: str, *, v1_retired: bool) -> bool:
         return False  # swallow-ok: a failed probe just means "not proven
         # retired yet" — the caller falls back to the normal, safe
         # (re-read-and-compare) path, never a false "safe to skip".
+
+
+def _quarantine_stray_sources(
+    step: object, step_id: str, journal: MigrationJournal | None, backups: BackupManager | None
+) -> bool:
+    """If *step* (one of `_ARCHIVED_SOURCE_STEP_IDS`) has V1 source file(s)
+    that re-appeared after migration (#634), move them to quarantine instead
+    of allowing them to be used as sources for re-apply. This handles the
+    case where a file appears in DATA_HOME (either empty or stray) after
+    being successfully archived — using it would overwrite V2 target data
+    with garbage or empty defaults. Quarantine them under backups so they're
+    not lost but can't silently corrupt the migration.
+
+    Returns True if no stray sources found, or if move succeeded.
+    Returns False if stray sources found but move FAILED — the step should NOT
+    be re-applied in this case, as we can't guarantee file integrity."""
+    if step_id not in _ARCHIVED_SOURCE_STEP_IDS or backups is None:
+        return True
+    probe = getattr(step, "stray_source_paths", None)
+    if not callable(probe):
+        return True  # step doesn't support stray detection
+    try:
+        stray_paths = probe()
+    except Exception:
+        return True  # probe failed, swallow and continue
+
+    if not stray_paths:
+        return True  # no stray sources
+
+    # Found stray sources — try to move them to quarantine
+    try:
+        ts_str = str(time.time()).replace(".", "_")
+        quarantine_dir = backups.root / _STRAY_SOURCE_QUARANTINE / ts_str
+        quarantine_dir.mkdir(parents=True, exist_ok=True)
+
+        failed_paths: list[str] = []
+        for source_path in stray_paths:
+            if not source_path.exists():
+                continue
+            try:
+                dest = quarantine_dir / source_path.name
+                if dest.exists():
+                    # Avoid overwriting if something is already there
+                    dest_unique = dest.with_stem(f"{dest.stem}_{int(time.time())}")
+                    dest = dest_unique
+                shutil.move(str(source_path), str(dest))
+            except Exception as e:
+                failed_paths.append(f"{source_path.name}: {e}")
+
+        if failed_paths:
+            detail = (
+                f"failed to quarantine stray V1 sources for {step_id}: {', '.join(failed_paths)}"
+            )
+            if journal is not None:
+                journal.record(step_id, "quarantine", False, detail)
+            return False  # Move failed — don't re-apply
+
+        # Move succeeded — log it
+        detail = f"quarantined {len(stray_paths)} stray V1 source file(s) under {quarantine_dir.relative_to(backups.root)}"
+        if journal is not None:
+            journal.record(step_id, "quarantine", True, detail)
+        return True
+    except Exception as e:
+        # Unexpected error in quarantine setup itself
+        if journal is not None:
+            journal.record(step_id, "quarantine", False, f"quarantine setup failed: {e}")
+        return False
 
 
 class MigrationEngine:
@@ -490,9 +563,27 @@ class MigrationEngine:
             except Exception:
                 promote_has_pending_work = True  # fail open: never suppress on a probe error
         skipped_valid_steps: list[tuple[MigrationStep, str, StepReport]] = []
+
+        # #634: before processing archived steps, quarantine any stray V1
+        # source files that re-appeared after migration — they must not be
+        # used as sources that would overwrite V2 target data.
+        # Track which steps had quarantine failures so we skip them.
+        quarantine_failed_steps: set[str] = set()
+        for s in self._steps:
+            step_id = getattr(s, "step_id", "")
+            if step_id in applied_before and step_id in _ARCHIVED_SOURCE_STEP_IDS:
+                backups = getattr(s, "backups", None)
+                ok = _quarantine_stray_sources(s, step_id, self._journal, backups)
+                if not ok:
+                    quarantine_failed_steps.add(step_id)
+
         for s in self._steps:
             step_id = getattr(s, "step_id", "")
             if step_id in skip:
+                continue
+            if step_id in quarantine_failed_steps:
+                # #634: quarantine failed for this step — don't re-apply
+                # (can't safely guarantee file integrity)
                 continue
             if step_id in applied_before:
                 if _source_retired(s, step_id, v1_retired=v1_retired):
