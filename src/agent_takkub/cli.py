@@ -4354,9 +4354,11 @@ def cmd_guard(_: argparse.Namespace) -> dict:
         from .pane_guard import normalise_role
 
         # #633: Instance Guard (Protected DATA_HOME, cross-instance kill, app boot)
-        # Requirement 5: guard error ของหมวดนี้ fail-closed! Default-deny ทุก role รวม Lead
+        # Requirement 5 & #633 Point 3: guard error fail-closed เฉพาะเมื่อเข้าข่ายหมวดนี้
+        is_inst_candidate = False
         try:
             if tool_name in ("Edit", "Write"):
+                is_inst_candidate = True
                 file_path = (
                     str(tool_input.get("file_path") or "").strip()
                     if isinstance(tool_input, dict)
@@ -4380,26 +4382,30 @@ def cmd_guard(_: argparse.Namespace) -> dict:
                         _notify_lead_of_guard_block(role, verdict)
                         return {"ok": True, "msg": "", "exit_code": 2}
             elif tool_name == "Bash" or not tool_name:
-                from .pane_guard import evaluate_instance_guard
+                from .pane_guard import evaluate_instance_guard, is_instance_guard_candidate
 
-                inst_verdict = evaluate_instance_guard(command, role, cwd=cwd)
-                if inst_verdict and not inst_verdict.allowed:
-                    print(
-                        f"[takkub guard: {inst_verdict.rule}] {inst_verdict.reason}",
-                        file=sys.stderr,
-                    )
-                    _log_guard_denied(role, command, inst_verdict)
-                    _notify_lead_of_guard_block(role, inst_verdict)
-                    return {"ok": True, "msg": "", "exit_code": 2}
+                is_inst_candidate = is_instance_guard_candidate(command)
+                if is_inst_candidate:
+                    inst_verdict = evaluate_instance_guard(command, role, cwd=cwd)
+                    if inst_verdict and not inst_verdict.allowed:
+                        print(
+                            f"[takkub guard: {inst_verdict.rule}] {inst_verdict.reason}",
+                            file=sys.stderr,
+                        )
+                        _log_guard_denied(role, command, inst_verdict)
+                        _notify_lead_of_guard_block(role, inst_verdict)
+                        return {"ok": True, "msg": "", "exit_code": 2}
         except Exception as exc:
-            # #633 Requirement 5: Guard errors in the instance protection category MUST fail-closed!
+            # #633 Point 3: fail-closed เฉพาะเมื่อคำสั่งเข้าข่ายหมวดนี้แล้ว probe error
+            # คำสั่งที่ไม่เข้าข่ายห้ามถูก deny เพราะ probe error
             _log_guard_error(role, _from_project(), tool_name, exc)
-            reason = (
-                f"guard ตรวจสอบ instance ล้มเหลว ({type(exc).__name__}: {exc}) "
-                "— ปฏิเสธไว้ก่อนเพื่อความปลอดภัย (#633)"
-            )
-            print(f"[takkub guard: instance_guard:guard_error] {reason}", file=sys.stderr)
-            return {"ok": True, "msg": "", "exit_code": 2}
+            if is_inst_candidate:
+                reason = (
+                    f"guard ตรวจสอบ instance ล้มเหลว ({type(exc).__name__}: {exc}) "
+                    "— ปฏิเสธไว้ก่อนเพื่อความปลอดภัย (#633)"
+                )
+                print(f"[takkub guard: instance_guard:guard_error] {reason}", file=sys.stderr)
+                return {"ok": True, "msg": "", "exit_code": 2}
 
         if normalise_role(role) == "lead" and tool_name in ("Edit", "Write"):
             project = _from_project()

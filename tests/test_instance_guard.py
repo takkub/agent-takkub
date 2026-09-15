@@ -168,6 +168,65 @@ class TestProtectedDataHomeMutation633:
         verdict = pane_guard.classify(cmd, "lead", cwd=str(own_home))
         assert verdict.allowed, f"Should allow read or own file: {cmd}: {verdict.reason}"
 
+    def test_path_under_own_home_and_worktrees_not_protected(
+        self, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """#633 Point 2: Path under own home (including worktrees/** of own home)
+        must NOT be protected, allowing panes to write in their own worktree."""
+        own_home = (tmp_path / "repo").resolve()
+        own_worktree = (own_home / "worktrees" / "repo" / "gemini-1789452890").resolve()
+        own_worktree.mkdir(parents=True)
+
+        monkeypatch.setenv("TAKKUB_STORAGE_ROOT", str(own_home / "v2"))
+        monkeypatch.delenv("TAKKUB_PROTECTED_DATA_HOMES", raising=False)
+
+        # 1. Direct check: worktree must not be in protected_data_homes
+        protected = pane_guard.get_protected_data_homes(own_home=own_home)
+        assert own_worktree not in protected
+        assert not any(
+            own_worktree == p or str(own_worktree).lower().startswith(str(p).lower() + "/")
+            for p in protected
+        )
+
+        # 2. Files inside own worktree must be allowed to write/modify
+        verdict = pane_guard.classify(
+            f"echo 'test' > '{own_worktree}/file.txt'", "gemini", cwd=str(own_worktree)
+        )
+        assert verdict.allowed, f"Writing in own worktree must be allowed: {verdict.reason}"
+
+        # 3. is_in_protected_data_home must return False for path inside worktree
+        in_prot, prot_home = pane_guard.is_in_protected_data_home(
+            own_worktree / "src" / "foo.py", own_home=own_home
+        )
+        assert not in_prot
+        assert prot_home is None
+
+    def test_git_worktree_of_same_repo_not_protected(
+        self, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """#633 Point 2: Candidate that is a git worktree of the same repo as own home
+        (via common .git dir or worktrees/<project>/ pattern) must NOT be protected."""
+        main_repo = (tmp_path / "agent-takkub").resolve()
+        wt_repo = (tmp_path / "worktrees" / "agent-takkub" / "wt-test").resolve()
+        main_repo.mkdir(parents=True)
+        wt_repo.mkdir(parents=True)
+
+        # Setup git repo and worktree .git pointer
+        main_git = main_repo / ".git"
+        main_git.mkdir()
+        wt_git = wt_repo / ".git"
+        wt_git.write_text(f"gitdir: {main_git.as_posix()}/worktrees/wt-test\n", encoding="utf-8")
+
+        monkeypatch.setenv("TAKKUB_STORAGE_ROOT", str(main_repo / "v2"))
+
+        # Candidate is own or worktree in both directions
+        assert pane_guard._is_candidate_own_or_worktree(wt_repo, main_repo)
+        assert pane_guard._is_candidate_own_or_worktree(main_repo, wt_repo)
+
+        protected = pane_guard.get_protected_data_homes(own_home=main_repo)
+        assert wt_repo not in protected
+        assert main_repo not in protected
+
 
 class TestCrossInstanceProcessKill633:
     """Requirement 3: Deny killing processes of another cockpit instance or its children."""
@@ -265,9 +324,9 @@ class TestDirectEditToolGuard633:
 
 
 class TestCmdGuardFailClosed633:
-    """Requirement 5: Instance guard errors must fail-closed."""
+    """Requirement 5 & #633 Point 3: Instance guard errors fail-closed ONLY for candidate commands."""
 
-    def test_evaluator_crash_fails_closed(
+    def test_evaluator_crash_fails_closed_when_candidate(
         self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
     ) -> None:
         def boom(*_a, **_kw):
@@ -275,11 +334,90 @@ class TestCmdGuardFailClosed633:
 
         monkeypatch.setattr(pane_guard, "evaluate_instance_guard", boom)
 
-        resp = _run_guard(monkeypatch, _bash_payload("echo hi"), TAKKUB_ROLE="backend")
-        assert resp["exit_code"] == 2, "Must fail closed on instance evaluator exception"
+        resp = _run_guard(
+            monkeypatch, _bash_payload("rm /foreign/projects.json"), TAKKUB_ROLE="backend"
+        )
+        assert resp["exit_code"] == 2, "Must fail closed on candidate command evaluator exception"
         err = capsys.readouterr().err
         assert "instance_guard:guard_error" in err
         assert "disk read failure" in err
+
+    def test_evaluator_crash_fails_closed_for_edit_tool(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+    ) -> None:
+        def boom(*_a, **_kw):
+            raise RuntimeError("protected home resolution error")
+
+        monkeypatch.setattr(pane_guard, "is_in_protected_data_home", boom)
+
+        payload = _edit_payload("Edit", "/some/path/file.json", "{}")
+        resp = _run_guard(monkeypatch, payload, TAKKUB_ROLE="lead")
+        assert resp["exit_code"] == 2, "Must fail closed on edit tool instance check failure"
+        err = capsys.readouterr().err
+        assert "instance_guard:guard_error" in err
+
+    def test_non_candidate_does_not_fail_closed_on_probe_error(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """#633 Point 3: Non-candidate commands (e.g. echo hi, git status, takkub list)
+        must NOT be denied because of an instance guard probe error."""
+
+        def boom(*_a, **_kw):
+            raise RuntimeError("socket probe connection timeout")
+
+        monkeypatch.setattr(pane_guard, "get_protected_data_homes", boom)
+        monkeypatch.setattr(pane_guard, "get_foreign_cockpit_pids", boom)
+
+        # Non-candidate commands must NOT be denied (exit_code != 2)
+        resp_echo = _run_guard(monkeypatch, _bash_payload("echo hi"), TAKKUB_ROLE="backend")
+        assert resp_echo.get("exit_code", 0) == 0, "Non-candidate echo hi must not be denied"
+
+        resp_git = _run_guard(monkeypatch, _bash_payload("git status"), TAKKUB_ROLE="lead")
+        assert resp_git.get("exit_code", 0) == 0, "Non-candidate git status must not be denied"
+
+
+class TestFastPreFilterPerformance633:
+    """#633 Point 1: Pre-filter regex fast path (< 20ms overhead target)."""
+
+    @pytest.mark.parametrize(
+        "cmd,expected_candidate",
+        [
+            ("git status", False),
+            ("takkub list", False),
+            ("pytest tests/", False),
+            ("echo hi", False),
+            ("npm test", False),
+            ("git log -n 5", False),
+            ("python tools/gen_import_graph.py", False),
+            ("python -m agent_takkub report build", True),
+            ("agent-takkub", True),
+            ("npm i -g agent-takkub", True),
+            ("taskkill /pid 1234", True),
+            ("Stop-Process -Id 1234", True),
+            ("kill -9 1234", True),
+            ("rm ./file.txt", True),
+            ("del ./file.txt", True),
+            ("Remove-Item ./file.txt", True),
+            ("echo 'data' > ./file.txt", True),
+            ("git -C /other clean -fd", True),
+            ("python -c \"open('file', 'w').write('x')\"", True),
+        ],
+    )
+    def test_candidate_detection(self, cmd: str, expected_candidate: bool) -> None:
+        assert pane_guard.is_instance_guard_candidate(cmd) == expected_candidate
+
+    def test_non_candidate_overhead_under_20ms(self) -> None:
+        import time
+
+        for cmd in ("git status", "takkub list", "pytest", "echo hi"):
+            t0 = time.perf_counter()
+            for _ in range(100):
+                v = pane_guard.evaluate_instance_guard(cmd, "lead")
+                assert v is None
+            elapsed_ms = (time.perf_counter() - t0) * 1000 / 100
+            assert elapsed_ms < 20.0, (
+                f"Overhead for '{cmd}' ({elapsed_ms:.4f}ms) exceeded 20ms limit"
+            )
 
 
 class TestEndToEndSimulatedSecondInstanceProbe633:
