@@ -732,6 +732,9 @@ class PaneState:
     # own _from_auto_respawn=True respawns — same split as
     # stuck_recover_attempts immediately above.
     no_content_recover_attempts: int = 0
+    # #630: announce auth recovery once the replacement accepts the task.
+    # (original provider, auth reason); never announce success at close time.
+    pending_auth_recovery: tuple[str, str] | None = None
     # #404: consecutive count of "delivered, then the pane's own account-
     # pending banner (e.g. gemini/agy 'Verifying your account...') came back
     # up right after" — proof the paste was swallowed by the gate rather than

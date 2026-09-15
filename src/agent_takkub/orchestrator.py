@@ -5313,6 +5313,9 @@ class Orchestrator(
         role_name = self.resolve_pane_role(role_name, project)
         role_name = role_name.lower().strip()
         project_ns = self._resolve_project(project)
+        # #630: internal close+respawn callers already carry this lifecycle
+        # contract. Their task/worktree continues in the replacement pane.
+        recovery_close = suppress_pipeline and suppress_auto_chain and keep_queue
         pane = self._project_panes(project_ns).get(role_name)
         if pane is None:
             # #409: a `role#N` target still parked behind the resource
@@ -5467,15 +5470,16 @@ class Orchestrator(
             _dropped_queue_close = getattr(self, "_pending_assignments", {}).pop(key, None)
         if _task_undelivered_close:
             _log_event("close_kept_undelivered_task", role=role_name, project=project_ns)
-            self._notify_lead(
-                project_ns,
-                f"⚠️ [close-undelivered] {role_name} ถูก close ทั้งที่ task ล่าสุดยังไม่เคย "
-                f"ถึงมือ pane เลย (ค้างอยู่ก่อน close, ไม่ใช่ทำเสร็จแล้วปิด) — text กู้คืนได้ด้วย "
-                f"`takkub task show --role {role_name}` ก่อน assign ใหม่ (issue #484)",
-                from_role=role_name,
-                note="close_undelivered",
-                kind="close-undelivered",
-            )
+            if not recovery_close:
+                self._notify_lead(
+                    project_ns,
+                    f"⚠️ [close-undelivered] {role_name} ถูก close ทั้งที่ task ล่าสุดยังไม่เคย "
+                    f"ถึงมือ pane เลย (ค้างอยู่ก่อน close, ไม่ใช่ทำเสร็จแล้วปิด) — text กู้คืนได้ด้วย "
+                    f"`takkub task show --role {role_name}` ก่อน assign ใหม่ (issue #484)",
+                    from_role=role_name,
+                    note="close_undelivered",
+                    kind="close-undelivered",
+                )
         elif _dropped_queue_close:
             _dropped_n = len(_dropped_queue_close)
             _dropped_ids = ", ".join(
@@ -5504,7 +5508,7 @@ class Orchestrator(
             getattr(self, "_pane_state", {}).pop(key, None)
         getattr(self, "_last_done_task_ids", {}).pop(key, None)
 
-        if had_worktree_close:
+        if had_worktree_close and not recovery_close:
             self._snapshot_dirty_worktree_if_needed(
                 project_ns, role_name, had_worktree_close, "close"
             )

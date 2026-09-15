@@ -1521,7 +1521,14 @@ class LeadInboxMixin:
                     if _prompt_block_reason(_task_sess):
                         accepted = False
                 if accepted:
-                    manager.mark_accepted(delivery.delivery_id)
+                    confirmed = manager.mark_accepted(delivery.delivery_id)
+                    ps_accepted = getattr(self, "_pane_state", {}).get(
+                        _exit_key(project_ns, role_name)
+                    )
+                    auth_recovery = getattr(ps_accepted, "pending_auth_recovery", None)
+                    if confirmed and auth_recovery:
+                        ps_accepted.pending_auth_recovery = None
+                        self._warn_lead_auth_failure_degrade(role_name, project_ns, *auth_recovery)
                 elif _swallowed_by_account_pending:
                     # #404: the settle wait above (post_boot_settle_s) still
                     # wasn't enough this once — the pane looked ready, the
@@ -1971,7 +1978,6 @@ class LeadInboxMixin:
                             provider=_provider,
                             reason=_auth_reason,
                         )
-                        self._warn_lead_auth_failure(role_name, project, _provider, _auth_reason)
                         # #269: blind-pasting into a CLI that just told us it
                         # isn't signed in only loses the task — unlike the
                         # no-content watchdog's timeout (which can be a slow
@@ -3032,13 +3038,7 @@ class LeadInboxMixin:
     def _warn_lead_auth_failure_degrade(
         self, role_name: str, project: str | None, provider: str, reason: str
     ) -> None:
-        """Second Lead notice for an auth-failure recovery (#269), fired
-        right after `_warn_lead_auth_failure` above (which names the
-        provider/reason/login-hint) — tells Lead the pane is ALSO being
-        degraded to claude and respawned, mirroring `_warn_lead_no_content`'s
-        degrade message below for the no-content path. Split out the same
-        way that one is, so the message can be asserted on independently of
-        the close→respawn side effect."""
+        """#630: one auth/degrade notice, after replacement task acceptance."""
         if role_name == LEAD.name:
             return
         project_ns = self._resolve_project(project)
@@ -3049,23 +3049,14 @@ class LeadInboxMixin:
 
         spec = PROVIDER_REGISTRY.get(provider)
         display = (spec.display_name if spec is not None else "") or provider.capitalize()
+        ps = self._ps(_exit_key(project_ns, role_name))
+        target = ps.provider_override or "claude"
         msg = (
-            f"⚠️ [auth-failure-degrade] {role_name} pane ({display}) ยัง auth ไม่ผ่าน "
-            f'("{reason}") — degrade เป็น claude substitute แล้ว spawn ใหม่ (#269); '
+            f"🔀 [auth-failure-degrade] {role_name} login ไม่ผ่าน → ย้ายไป {target} แล้ว "
+            f'งานส่งต่อให้แล้ว ({display}: "{reason}"); '
             f"ถ้าต้องการใช้ {display} ต่อ ให้ login แล้วสั่งงานใหม่อีกครั้ง"
         )
-        # #280: the auth failure itself already fired immediately (Lead cannot
-        # log a provider in from a report at close). This second notice only
-        # says what the cockpit did about it automatically — that rides along
-        # with the pane's report.
-        if self._record_pane_health(
-            project_ns,
-            role_name,
-            "auth-failure-degrade",
-            f"{display} auth ไม่ผ่าน → degrade เป็น claude แล้ว spawn ใหม่",
-            live_body=msg,
-        ):
-            self._notify_lead(project_ns, msg, kind="auth-failure-degrade")
+        self._notify_lead(project_ns, msg, kind="auth-failure-degrade")
         _log_event(
             "auth_failure_degrade_warned",
             role=role_name,
@@ -3229,8 +3220,11 @@ class LeadInboxMixin:
         content), so the no-content branch's `_no_content` check never
         fires and this path never engaged, leaving that role permanently
         stuck reassigning into the same broken login every time (#269)."""
-        self._warn_lead_auth_failure_degrade(
-            role_name, self._resolve_project(project), provider, reason
+        if role_name == LEAD.name:
+            return
+        self._ps(_exit_key(self._resolve_project(project), role_name)).pending_auth_recovery = (
+            provider,
+            reason,
         )
         self._recover_broken_pane(role_name, project, pane, task, degrade=True, kind="auth_failure")
 
@@ -3319,6 +3313,9 @@ class LeadInboxMixin:
         # no-content check on this same pane degrade sooner, never later).
         _ps_snap = getattr(self, "_pane_state", {}).get(key)
         snap_attempts = _ps_snap.no_content_recover_attempts if _ps_snap is not None else 0
+        snap_auth_recovery = (
+            getattr(_ps_snap, "pending_auth_recovery", None) if _ps_snap is not None else None
+        )
         # #422: closed-enum reason + bounded snapshot + recovery_id shared
         # with the `{kind}_pane_respawned` event below (see
         # orchestrator_text.RECOVERY_REASONS).
@@ -3370,6 +3367,7 @@ class LeadInboxMixin:
             ps.no_content_recover_attempts = snap_attempts + 1
             if degrade:
                 ps.provider_override = "claude"
+            ps.pending_auth_recovery = snap_auth_recovery
             ok, msg = self.spawn(role_name, cwd=cwd, project=project_ns, _from_auto_respawn=True)
             _log_event(
                 f"{kind}_pane_respawned",
@@ -3383,6 +3381,13 @@ class LeadInboxMixin:
             )
             if ok and task:
                 self._send_when_ready(role_name, task, project=project_ns)
+            elif not ok:
+                ps.pending_auth_recovery = None
+                detail = msg
+                if snap_auth_recovery:
+                    provider, auth_reason = snap_auth_recovery
+                    detail = f"{provider} login ไม่ผ่าน ({auth_reason}); respawn ไม่สำเร็จ: {msg}"
+                self._warn_lead_spawn_failed(role_name, project_ns, detail)
 
         QTimer.singleShot(2_000, _do_respawn)
 
