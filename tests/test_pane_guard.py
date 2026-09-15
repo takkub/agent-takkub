@@ -634,7 +634,8 @@ class TestGitStashRestoreCleanDenied:
         "command",
         [
             "git stash",
-            "git stash pop",
+            "git stash push",
+            "git stash apply",
             "git restore .",
             "git clean -fd",
         ],
@@ -644,6 +645,18 @@ class TestGitStashRestoreCleanDenied:
         assert pane_guard.classify(command, "devops", cwd=wt).allowed, (
             f"should be allowed from the pane's own worktree cwd: {command}"
         )
+
+    @pytest.mark.parametrize("command", ["git stash pop", "git stash drop", "git stash clear"])
+    def test_shared_ref_stash_still_denied_from_own_worktree_cwd(self, command: str) -> None:
+        """#609/#611 H1: `pop`/`drop`/`clear` remove an entry from
+        `refs/stash`, which every linked worktree of the same repository
+        shares — not private to this pane's own checkout, unlike
+        `push`/`apply` above. Proven live: a `clear` run from one worktree
+        deleted a stash a sibling worktree had pushed
+        (`ART/stash-cross-worktree.json`)."""
+        wt = r"C:\Users\dev\.agent-takkub\worktrees\myproj\devops-1789429492"
+        verdict = pane_guard.classify(command, "devops", cwd=wt)
+        assert not verdict.allowed, f"must stay Lead-only even in-worktree: {command}"
 
     def test_denied_from_shared_tree_cwd(self) -> None:
         shared = r"C:\Users\dev\my-project"

@@ -118,6 +118,26 @@ class TestCodexAgentsMdGitGuard:
 
         assert "commit when explicitly asked" not in CODEX_AGENTS_MD
 
+    def test_template_does_not_allow_bare_stash(self) -> None:
+        """#609/#611 M4: the generated AGENTS.md must not list a bare `git
+        stash` in the allowed/read-only section — only `list`/`show` are
+        read-only; every other form mutates state the hook-less providers
+        this file targets have no PreToolUse guard to catch."""
+        from agent_takkub.codex_agents_md import CODEX_AGENTS_MD
+
+        assert "`git stash`\n" not in CODEX_AGENTS_MD
+        assert "git stash list" in CODEX_AGENTS_MD
+        assert "git stash show" in CODEX_AGENTS_MD
+
+    def test_template_forbids_mutating_stash_restore_clean(self) -> None:
+        """#609/#611 M4: the template must actually say these are
+        forbidden, not just omit the old blanket allowance."""
+        from agent_takkub.codex_agents_md import CODEX_AGENTS_MD
+
+        assert "git restore" in CODEX_AGENTS_MD
+        assert "git clean -f" in CODEX_AGENTS_MD
+        assert "pop" in CODEX_AGENTS_MD and "drop" in CODEX_AGENTS_MD and "clear" in CODEX_AGENTS_MD
+
 
 class TestEnsureAgentsMdExtra:
     """`extra` (#103 phase 4) bridges Skill Matrix content into AGENTS.md."""

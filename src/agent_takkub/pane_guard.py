@@ -918,10 +918,36 @@ def _is_direct_edit_exempt(file_path: str, cwd: str | None, project: str | None)
     return True  # outside every known root
 
 
-_DEEP_TEST_PATH_EXEMPT = re.compile(
-    r"(?:^|/)(?:tests?|__tests__|[\w-]*-e2e)(?:/|$)|\.(?:spec|test)\.[^./]+$",
-    re.I,
+# #611 M1: a REAL test folder is a trustworthy exemption on its own — the
+# `.spec.`/`.test.` filename SUFFIX alone is not, when a sensitive folder
+# also sits in the path. Confirmed live: `src/auth/verify.spec.ts` (no real
+# test folder, suffix only) let `return verifySignature(value)` become
+# `return true` straight past this exemption, because the old regex treated
+# the suffix as sufficient on its own — a `.spec.ts` file can be imported by
+# a production entrypoint exactly like any other module; the filename
+# proves nothing.
+_DEEP_TEST_FOLDER_EXEMPT = re.compile(
+    r"(?:^|/)(?:tests?|__tests__|e2e|[\w-]*-e2e|spec)(?:/|$)", re.I
 )
+_DEEP_TEST_SUFFIX_EXEMPT = re.compile(r"\.(?:spec|test)\.[^./]+$", re.I)
+_SENSITIVE_PATH_SEGMENTS = frozenset(
+    {"auth", "security", "payment", "payments", "crypto", "token", "tokens"}
+)
+
+
+def _is_deep_test_path(norm_file: str) -> bool:
+    """True when `norm_file` (already lowercased, `/`-separated) is trusted
+    enough to skip the sensitive-keyword PATH leg below (#611/#611-M1) —
+    unconditionally for a real test/e2e folder, or for a bare `.spec.`/
+    `.test.` filename suffix ONLY when no sensitive folder SEGMENT (a whole
+    path component — not a substring of the filename itself, so
+    `src/payments.test.ts`'s filename doesn't count) sits in the path."""
+    if _DEEP_TEST_FOLDER_EXEMPT.search(norm_file):
+        return True
+    if not _DEEP_TEST_SUFFIX_EXEMPT.search(norm_file):
+        return False
+    segments = norm_file.split("/")[:-1]
+    return not any(seg in _SENSITIVE_PATH_SEGMENTS for seg in segments)
 
 
 def _direct_edit_diff_text(tool_name: str, tool_input: dict) -> str:
@@ -1039,8 +1065,15 @@ def evaluate_lead_direct_edit(
         r"\b(?:tokens?|api[_-]?keys?|secrets?)\b",
         r"\b(?:crypto|encryption|bcrypt)\b",
         r"\b(?:payments?|stripe|billing)\b",
+        # #611 M1: camelCase/snake_case identifiers a bland-looking one-line
+        # diff can hide a real bypass behind — `verifySignature`/`isAdmin`
+        # word-parts (not requiring underscores/case, since a diff is
+        # lowercased before this check runs) and a bare `return true`, the
+        # exact shape of the proven bypass (`return verifySignature(value)`
+        # -> `return true`). Content-only: never matched against the path.
+        r"verify\w*signature|is[_]?admin|\bbypass\b|return\s+true\b",
     )
-    is_test_path = bool(_DEEP_TEST_PATH_EXEMPT.search(norm_file))
+    is_test_path = _is_deep_test_path(norm_file)
     diff_text = _direct_edit_diff_text(tool_name, tool_input).lower()
     for pat in sensitive_deep_patterns:
         path_hit = (not is_test_path) and re.search(pat, norm_file)
@@ -1282,7 +1315,29 @@ def get_lead_edits_status(
 # `git -C . push -u origin wt/...` case was "passing" only because the
 # guard couldn't see `push` at all, not because it validated the branch —
 # `git -C . push origin main --force` was equally allowed until this fix).
-_GIT_SUBCMD_GAP = r"(?:\s+-C\s+\S+|\s+-{1,2}[\w-]+)*\s+"
+#
+# #609 H2 round 2: the gap also has to swallow a quoted `-C "path with
+# spaces"` (previously `\S+` stopped at the first space, leaving the rest of
+# the quoted path sitting where the subcommand was expected — silent
+# bypass, not a false deny) and a `-c <key>=<value>` config override (two
+# tokens, value containing `.`/`=` that the old bare-flag alternative could
+# never swallow) so the literal subcommand token is still reachable past
+# either. `git.exe`/`git.cmd` (Windows PATHEXT resolution) is accepted the
+# same way `_RTK_PREFIX` already accepts them for `rtk`.
+_GIT_BIN = r"git(?:\.(?:exe|cmd))?"
+_GIT_SUBCMD_GAP = (
+    r"(?:\s+-C\s+(?:\"[^\"]*\"|'[^']*'|\S+)"
+    r"|\s+-c\s+(?:\"[^\"]*\"|'[^']*'|\S+)"
+    r"|\s+-{1,2}[\w-]+)*\s+"
+)
+
+
+def _strip_matching_quotes(s: str) -> str:
+    s = s.strip()
+    if len(s) >= 2 and s[0] == s[-1] and s[0] in ('"', "'"):
+        return s[1:-1]
+    return s
+
 
 # `git commit` alone is the one carve-out for a worktree-isolated pane (see
 # module docstring) — kept separate from the no-exception rules below so
@@ -1295,7 +1350,7 @@ _GIT_SUBCMD_GAP = r"(?:\s+-C\s+\S+|\s+-{1,2}[\w-]+)*\s+"
 # `commit-tree`, `commit-graph`) is a different command and never a hit.
 _SUBCMD_END = r"(?![\w-])"
 _GIT_COMMIT_PATTERN = re.compile(
-    rf"{_CMD_START}git(?![\w-]){_GIT_SUBCMD_GAP}commit{_SUBCMD_END}", re.M
+    rf"{_CMD_START}{_GIT_BIN}(?![\w-]){_GIT_SUBCMD_GAP}commit{_SUBCMD_END}", re.M
 )
 
 # tag -d/rebase stay Lead-only with NO exception even from an isolated
@@ -1312,39 +1367,45 @@ _GIT_COMMIT_PATTERN = re.compile(
 # verdict for the carved-out rules when the exception actually applies, so
 # this list itself needs no per-rule cwd branching.
 _GIT_LEAD_ONLY_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
-    ("push", re.compile(rf"{_CMD_START}git(?![\w-]){_GIT_SUBCMD_GAP}push{_SUBCMD_END}", re.M)),
+    (
+        "push",
+        re.compile(rf"{_CMD_START}{_GIT_BIN}(?![\w-]){_GIT_SUBCMD_GAP}push{_SUBCMD_END}", re.M),
+    ),
     (
         "reset-hard",
         re.compile(
-            rf"{_CMD_START}git(?![\w-]){_GIT_SUBCMD_GAP}reset{_SUBCMD_END}{_SAME_CMD}--hard\b", re.M
+            rf"{_CMD_START}{_GIT_BIN}(?![\w-]){_GIT_SUBCMD_GAP}reset{_SUBCMD_END}{_SAME_CMD}--hard\b",
+            re.M,
         ),
     ),
     (
         "branch-delete",
         re.compile(
-            rf"{_CMD_START}git(?![\w-]){_GIT_SUBCMD_GAP}branch{_SUBCMD_END}{_SAME_CMD}-D\b", re.M
+            rf"{_CMD_START}{_GIT_BIN}(?![\w-]){_GIT_SUBCMD_GAP}branch{_SUBCMD_END}{_SAME_CMD}-D\b",
+            re.M,
         ),
     ),
     (
         "tag-delete",
         re.compile(
-            rf"{_CMD_START}git(?![\w-]){_GIT_SUBCMD_GAP}tag{_SUBCMD_END}{_SAME_CMD}-d\b", re.M
+            rf"{_CMD_START}{_GIT_BIN}(?![\w-]){_GIT_SUBCMD_GAP}tag{_SUBCMD_END}{_SAME_CMD}-d\b",
+            re.M,
         ),
     ),
     (
         "rebase",
-        re.compile(rf"{_CMD_START}git(?![\w-]){_GIT_SUBCMD_GAP}rebase{_SUBCMD_END}", re.M),
+        re.compile(rf"{_CMD_START}{_GIT_BIN}(?![\w-]){_GIT_SUBCMD_GAP}rebase{_SUBCMD_END}", re.M),
     ),
     (
         "checkout",
-        re.compile(rf"{_CMD_START}git(?![\w-]){_GIT_SUBCMD_GAP}checkout{_SUBCMD_END}", re.M),
+        re.compile(rf"{_CMD_START}{_GIT_BIN}(?![\w-]){_GIT_SUBCMD_GAP}checkout{_SUBCMD_END}", re.M),
     ),
     # #609: `git restore` is the modern alias for `checkout -- <path>` — same
     # blast radius (overwrites working-tree files from HEAD/index), same
     # worktree carve-out as `checkout` below.
     (
         "restore",
-        re.compile(rf"{_CMD_START}git(?![\w-]){_GIT_SUBCMD_GAP}restore{_SUBCMD_END}", re.M),
+        re.compile(rf"{_CMD_START}{_GIT_BIN}(?![\w-]){_GIT_SUBCMD_GAP}restore{_SUBCMD_END}", re.M),
     ),
     # #609: `-f`/`--force` in any combined short-flag form (`-fd`, `-fdx`, …).
     # A bare `git clean` with no force flag only prints what WOULD be removed
@@ -1352,7 +1413,7 @@ _GIT_LEAD_ONLY_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     (
         "clean-force",
         re.compile(
-            rf"{_CMD_START}git(?![\w-]){_GIT_SUBCMD_GAP}clean{_SUBCMD_END}{_SAME_CMD}"
+            rf"{_CMD_START}{_GIT_BIN}(?![\w-]){_GIT_SUBCMD_GAP}clean{_SUBCMD_END}{_SAME_CMD}"
             rf"(?:--force\b|-[A-Za-z]*f[A-Za-z]*\b)",
             re.M,
         ),
@@ -1365,22 +1426,43 @@ _GIT_LEAD_ONLY_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
 # `commit`/`merge` above it) because the read-only carve-out needs the
 # matched tail, not just a yes/no `.search()`.
 _GIT_STASH_PATTERN = re.compile(
-    rf"{_CMD_START}git(?![\w-]){_GIT_SUBCMD_GAP}stash{_SUBCMD_END}(?P<tail>[^\n|;&]*)", re.M
+    rf"{_CMD_START}{_GIT_BIN}(?![\w-]){_GIT_SUBCMD_GAP}stash{_SUBCMD_END}(?P<tail>[^\n|;&]*)", re.M
 )
 
+# #609/#611 H1: `refs/stash` is ONE stack shared by every linked worktree of
+# the same repository (that's how `git worktree` is designed — it is not
+# private state a pane's own checkout owns). `push`/`save` (and a bare
+# `git stash`, which defaults to `push`) only ADD an entry — safe from any
+# worktree. `apply` copies an entry's content into the CALLER's own working
+# tree without removing it from the stack — also safe from any worktree.
+# `pop` (= apply + drop), `drop`, `clear`, and `branch` (= apply + drop on
+# success) all REMOVE an entry other panes/checkouts can still see in their
+# own `git stash list` — repo-wide destructive, so these stay Lead-only
+# EVEN inside the pane's own worktree (proven live: #609's own worktree
+# carve-out let a `clear` from one worktree delete a stash pushed from a
+# sibling checkout — `ART/stash_probe.py`, `ART/stash-cross-worktree.json`).
+_STASH_SHARED_REF_MUTATING = frozenset({"pop", "drop", "clear", "branch"})
+_STASH_WORKTREE_SAFE = frozenset({"push", "save", "apply"})
 
-def _git_stash_is_readonly(cmd: str) -> bool:
-    """True only when EVERY `git stash` invocation in *cmd* is `list` or
-    `show` (#609) — a mixed command with even one mutating stash call denies
-    the whole thing, same conservative direction as every other rule here."""
-    hits = list(_GIT_STASH_PATTERN.finditer(cmd))
-    if not hits:
-        return True
-    for m in hits:
+
+def _git_stash_verdict(cmd: str, in_worktree: bool) -> bool:
+    """True when *cmd* contains a `git stash` call that must be denied —
+    conservative: a single denied call denies the whole command, same
+    direction as every other rule here. `list`/`show` stay read-only-allowed
+    everywhere; `push`/`save`/`apply` are worktree-safe (see
+    `_STASH_WORKTREE_SAFE`); everything else (including an unrecognised
+    future subcommand — fail closed) is Lead-only unconditionally."""
+    for m in _GIT_STASH_PATTERN.finditer(cmd):
         first_tok = m.group("tail").split()[:1]
-        if not first_tok or first_tok[0].lower() not in ("list", "show"):
-            return False
-    return True
+        sub = first_tok[0].lower() if first_tok else "push"
+        if sub in ("list", "show"):
+            continue
+        if sub in _STASH_WORKTREE_SAFE:
+            if not in_worktree:
+                return True
+            continue
+        return True  # _STASH_SHARED_REF_MUTATING or unrecognised — always denied
+    return False
 
 
 # #545: unlike `push`/`merge` (each shape-checked to a narrow safe form),
@@ -1405,7 +1487,7 @@ _WORKTREE_SAFE_RULES = frozenset(
 # every sync (the report's bottleneck). Merging the pane's branch INTO base
 # happens on the shared tree, which this carve-out never covers.
 _GIT_MERGE_PATTERN = re.compile(
-    rf"{_CMD_START}git(?![\w-]){_GIT_SUBCMD_GAP}merge{_SUBCMD_END}", re.M
+    rf"{_CMD_START}{_GIT_BIN}(?![\w-]){_GIT_SUBCMD_GAP}merge{_SUBCMD_END}", re.M
 )
 
 # A cockpit-managed `--isolation worktree` checkout always lives under
@@ -1422,6 +1504,29 @@ def _is_worktree_cwd(cwd: str | None) -> bool:
     """True when *cwd* looks like an `--isolation worktree` checkout (#81),
     the one place a non-Lead role legitimately commits on its own branch."""
     return bool(cwd) and bool(_WORKTREE_CWD.search(cwd))
+
+
+# #609 H2: a path merely containing "/worktrees/" isn't enough — every
+# role's checkout lives under the same `<project>/` parent, so a `cwd`/`-C`
+# that happens to sit inside a DIFFERENT role's worktree must not grant
+# THIS role's carve-out (proven live: `frontend` with cwd inside
+# `backend-123`'s checkout got the worktree exception outright). The
+# `<role>-<ts>` (or sharded `<role>-<n>-<ts>`) path segment must start with
+# *this* role's own slug.
+def _worktree_role_owns(path: str | None, role: str | None) -> bool:
+    if not path or not _WORKTREE_CWD.search(path):
+        return False
+    # Base role, shard suffix stripped: the worktree DIRECTORY is one
+    # checkout per base role (`backend-<ts>`), not one per shard — a shard's
+    # `wt/<role>-<n>-<ts>` BRANCH name (`_role_slug`) is a different thing
+    # from the checkout directory it lives in, confirmed by the existing
+    # `backend#3` fixture sharing the plain `backend-<ts>` worktree path.
+    base = normalise_role(role)
+    if not base:
+        return False
+    prefix = f"{base}-"
+    norm = path.replace("\\", "/")
+    return any(seg == base or seg.startswith(prefix) for seg in norm.split("/") if seg)
 
 
 # #438 case 2: the hook payload's cwd is the pane's *session* cwd. A pane
@@ -1441,8 +1546,41 @@ def _command_targets_worktree(cmd: str) -> bool:
     return bool(_WORKTREE_TARGET.search(cmd))
 
 
-def _in_worktree(cmd: str, cwd: str | None) -> bool:
-    return _is_worktree_cwd(cwd) or _command_targets_worktree(cmd)
+# #609 H2: the ONE explicit `-C`/`--git-dir`/`--work-tree`/`cd` target a
+# command names — not just whether it happens to mention a worktree path.
+# An ABSOLUTE target is authoritative over cwd (a worktree cwd must not
+# launder a command that plainly names a different, shared-tree location);
+# a relative one (bare `.`, a subdir, …) can't be resolved without cwd, so
+# it stays deferred to the cwd-based checks below.
+_ABS_PATH_RE = re.compile(r"^(?:[A-Za-z]:[\\/]|[\\/])")
+_EXPLICIT_TARGET_RE = re.compile(
+    r"""(?:(?<![\w-])-C\s+(?P<c>"[^"]*"|'[^']*'|\S+)
+        |--(?:git-dir|work-tree)=(?P<gd>"[^"]*"|'[^']*'|\S+)
+        |(?:^|[|;&]\s*)cd\s+(?P<cd>"[^"]*"|'[^']*'|\S+))""",
+    re.I | re.M | re.X,
+)
+
+
+def _explicit_git_target(cmd: str) -> str | None:
+    """The LAST explicit `-C`/`--git-dir`/`--work-tree`/`cd` path named in
+    *cmd*, quotes stripped — or `None` if the command names no target."""
+    last: str | None = None
+    for m in _EXPLICIT_TARGET_RE.finditer(cmd):
+        path = m.group("c") or m.group("gd") or m.group("cd")
+        if path:
+            last = _strip_matching_quotes(path)
+    return last
+
+
+def _in_worktree(cmd: str, cwd: str | None, role: str | None = None) -> bool:
+    target = _explicit_git_target(cmd)
+    if target and _ABS_PATH_RE.match(target):
+        return _worktree_role_owns(target, role)
+    if _is_worktree_cwd(cwd):
+        return _worktree_role_owns(cwd, role)
+    if _command_targets_worktree(cmd):
+        return _worktree_role_owns(target or cmd, role)
+    return False
 
 
 # #438 case 1: a worktree pane may push ITS OWN `wt/<role>-<ts>` branch so CI
@@ -1452,7 +1590,7 @@ def _in_worktree(cmd: str, cwd: str | None) -> bool:
 # must carry the pane's own role slug, and force/delete/mirror/all forms are
 # never allowed. Everything else about `push` stays Lead-only.
 _GIT_PUSH_TAIL = re.compile(
-    rf"{_CMD_START}git(?![\w-]){_GIT_SUBCMD_GAP}push{_SUBCMD_END}(?P<tail>[^\n|;&]*)", re.M
+    rf"{_CMD_START}{_GIT_BIN}(?![\w-]){_GIT_SUBCMD_GAP}push{_SUBCMD_END}(?P<tail>[^\n|;&]*)", re.M
 )
 _PUSH_FORBIDDEN_FLAGS = frozenset(
     {
@@ -1512,6 +1650,208 @@ def _push_is_own_worktree_branch(cmd: str, role: str | None) -> bool:
             if not wm or wm.group(1) != slug:
                 return False
     return True
+
+
+# #609 H2: `cmd /c <inner>` / `pwsh -c "<inner>"` / `powershell -Command
+# "<inner>"` / `bash -c '<inner>'` / `sh -c "<inner>"` run *inner* exactly
+# as if it had been typed directly — every `_CMD_START`-anchored rule in
+# this module only ever recognised a command at true start-of-string, right
+# after a shell separator, or right after `sudo `/the `rtk` prefix, so a
+# destructive command spelled behind one of these shell wrappers sailed
+# straight through unrecognised (confirmed live: `cmd /c git restore .` and
+# `pwsh -c "git restore ."` both bypassed the restore guard outright).
+_SHELL_WRAPPER_RE = re.compile(
+    r"^\s*(?:cmd(?:\.exe)?(?:\s+/[A-Za-z]+)*\s+/c\s+"
+    r"|pwsh(?:\.exe)?(?:\s+-[\w-]+)*\s+(?:-c|-Command)\s+"
+    r"|powershell(?:\.exe)?(?:\s+-[\w-]+)*\s+(?:-c|-Command)\s+"
+    r"|bash(?:\s+-[\w-]+)*\s+-c\s+"
+    r"|sh(?:\s+-[\w-]+)*\s+-c\s+)(?P<body>.+)$",
+    re.I | re.S,
+)
+
+# #609 H2 round 2: the wrapper regex above was only ever applied to the
+# WHOLE raw command, so `foo && cmd /c git restore .` and `rtk proxy cmd /c
+# git stash` sailed through unrecognised — the wrapper never sat at true
+# start-of-string, it sat after a chain separator or the `rtk`/`rtk proxy`
+# prefix (proven live: `pane_guard.classify` on both shapes still ALLOWed a
+# shared-tree `git restore`/`git stash`). Every rule below already tolerates
+# a wrapper anywhere a *segment* can start (`_CMD_START` = start-of-string,
+# after `&&`/`||`/`;`/`|`/newline, or after `sudo `) — this now unwraps at
+# each of those positions too, not just position zero of the whole string.
+_SEG_RTK_PREFIX_RE = re.compile(
+    r"^\s*rtk(?:\.(?:exe|cmd|bat|ps1))?(?![\w-])\s+(?:proxy(?![\w-])\s+)?", re.I
+)
+_SEG_SUDO_PREFIX_RE = re.compile(r"^\s*sudo\s+", re.I)
+_SEG_TIME_PREFIX_RE = re.compile(r"^\s*time\s+", re.I)
+_SEG_ENV_PREFIX_RE = re.compile(r"^\s*env\s+(?:[A-Za-z_]\w*=(?:\"[^\"]*\"|'[^']*'|\S*)\s+)*", re.I)
+_SEG_PREFIX_PATTERNS = (
+    _SEG_RTK_PREFIX_RE,
+    _SEG_SUDO_PREFIX_RE,
+    _SEG_TIME_PREFIX_RE,
+    _SEG_ENV_PREFIX_RE,
+)
+
+# Quote-aware split of a command into chain segments on top-level
+# `&&`/`||`/`;`/`|`/newline — the alternatives before the `sep` group consume
+# a whole quoted string atomically so a separator CHARACTER inside a quoted
+# argument (`echo "cmd /c git restore ."`, no chain operator at all here,
+# but the same machinery would also protect `echo "a && b" && cmd /c ...`)
+# is never mistaken for a split point.
+_CHAIN_SEP_RE = re.compile(r'"(?:[^"\\]|\\.)*"' r"|'[^']*'" r"|(?P<sep>\r\n|\n|\|\||&&|[;|&])")
+
+
+def _split_chain_segments(cmd: str) -> list[str]:
+    """Split *cmd* into `[seg0, sep0, seg1, sep1, ..., segN]` — always starts
+    and ends with a (possibly empty) segment, separators verbatim so
+    rejoining with `"".join(...)` reproduces *cmd* unchanged."""
+    parts: list[str] = []
+    pos = 0
+    for m in _CHAIN_SEP_RE.finditer(cmd):
+        sep = m.group("sep")
+        if sep is None:
+            continue  # matched a quoted string, not a split point
+        parts.append(cmd[pos : m.start()])
+        parts.append(sep)
+        pos = m.end()
+    parts.append(cmd[pos:])
+    return parts
+
+
+def _unwrap_segment(segment: str, _depth: int = 0) -> str:
+    """Peel off up to 4 layers of `rtk [proxy]`/`sudo`/`time`/`env VAR=x`
+    prefix plus one recognised shell/interpreter wrapper from a single chain
+    segment, recursively (#609 H2). Returns *segment* unchanged when no
+    wrapper is present — losing a plain prefix on an unwrapped segment is
+    harmless since `_CMD_START` already treats the prefix as optional."""
+    if _depth >= 4:
+        return segment
+    stripped = segment
+    while True:
+        for pattern in _SEG_PREFIX_PATTERNS:
+            m = pattern.match(stripped)
+            if m and m.end() > 0:
+                stripped = stripped[m.end() :]
+                break
+        else:
+            break
+    m = _SHELL_WRAPPER_RE.match(stripped)
+    if not m:
+        return segment
+    inner = _strip_matching_quotes(m.group("body"))
+    return _unwrap_segment(inner, _depth + 1)
+
+
+def _unwrap_shell_wrappers(cmd: str) -> str:
+    """Unwrap a recognised shell/interpreter wrapper in EVERY chain segment
+    of *cmd* (#609 H2), not just at position zero of the whole string."""
+    parts = _split_chain_segments(cmd)
+    for i in range(0, len(parts), 2):
+        parts[i] = _unwrap_segment(parts[i])
+    return "".join(parts)
+
+
+# #609 H2: `-c alias.<name>=<value>` defines a git alias inline, on the same
+# command line — `git -c alias.discard=restore discard .` runs `restore`
+# even though the literal subcommand token is `discard`, which matches none
+# of the deny patterns above (they only know real git verb names, not
+# arbitrary user-chosen alias names). `-c core.*` doesn't rename anything
+# but CAN redirect where git actually operates (`core.worktree`, …), which
+# this module has no way to verify from text alone — treated conservatively
+# below (disables the worktree carve-out, never widens it).
+_GIT_CONFIG_KV = re.compile(
+    r"-c\s+(?P<key>alias\.[\w-]+|core\.[\w.-]+)=(?P<val>\"[^\"]*\"|'[^']*'|\S+)",
+    re.I,
+)
+_GIT_SUBCMD_TOKEN = re.compile(rf"{_CMD_START}{_GIT_BIN}(?![\w-]){_GIT_SUBCMD_GAP}(?P<sub>[\w-]+)")
+# Real git verbs a locally-defined alias must never be allowed to shadow —
+# if the subcommand-position token is already a known verb, it IS that verb
+# regardless of any same-named `-c alias.<verb>=…` on the same line.
+_KNOWN_GIT_SUBCOMMANDS = frozenset(
+    {
+        "commit",
+        "push",
+        "reset",
+        "branch",
+        "tag",
+        "rebase",
+        "checkout",
+        "restore",
+        "clean",
+        "stash",
+        "merge",
+        "status",
+        "diff",
+        "log",
+        "show",
+        "fetch",
+        "pull",
+        "add",
+        "config",
+        "init",
+        "clone",
+        "remote",
+        "merge-base",
+        "merge-tree",
+        "commit-tree",
+        "checkout-index",
+        "rev-parse",
+        "worktree",
+        "cherry-pick",
+        "revert",
+        "blame",
+        "describe",
+        "shortlog",
+    }
+)
+
+
+def _resolve_git_command_aliases(cmd: str) -> tuple[str, bool]:
+    """Best-effort inline alias resolution (#609 H2): returns
+    `(normalized_cmd, config_override)` where *normalized_cmd* has every
+    subcommand-position token that matches a `-c alias.<name>=<value>`
+    defined earlier in the SAME command replaced with *value*'s first word
+    — so every existing literal-subcommand deny pattern sees the real verb
+    git would actually run. *config_override* is True when a `-c core.*`
+    override, or an alias this function could not resolve (a `!shell`
+    alias, or one with no value), is present anywhere in *cmd* — the caller
+    uses it to refuse the worktree carve-out for that invocation, since an
+    unresolvable config override could be redirecting where git operates."""
+    alias_map: dict[str, str] = {}
+    unresolved = False
+    core_override = False
+    for m in _GIT_CONFIG_KV.finditer(cmd):
+        key = m.group("key")
+        val = _strip_matching_quotes(m.group("val"))
+        if key.lower().startswith("alias."):
+            name = key.split(".", 1)[1].lower()
+            words = val.lstrip("!").split()
+            if val.strip().startswith("!") or not words:
+                unresolved = True
+            else:
+                alias_map[name] = words[0].lower()
+        else:
+            core_override = True
+
+    if not alias_map:
+        return cmd, (core_override or unresolved)
+
+    pieces: list[str] = []
+    pos = 0
+    changed = False
+    for m in _GIT_SUBCMD_TOKEN.finditer(cmd):
+        sub = m.group("sub").lower()
+        if sub in _KNOWN_GIT_SUBCOMMANDS:
+            continue  # a real subcommand shadows any same-named alias
+        resolved = alias_map.get(sub)
+        if resolved is None:
+            continue
+        start, end = m.span("sub")
+        pieces.append(cmd[pos:start])
+        pieces.append(resolved)
+        pos = end
+        changed = True
+    pieces.append(cmd[pos:])
+    return ("".join(pieces) if changed else cmd), (core_override or unresolved)
 
 
 # mini-browser's client is fixed to CDP 9222. A qa/critic/designer shard may
@@ -1580,6 +1920,9 @@ def classify(
     cmd = (command or "").strip()
     if not cmd:
         return Verdict(True)
+    # #609 H2: unwrap `cmd /c ...` / `pwsh -c "..."` / etc so every rule
+    # below sees the command that actually runs, not the wrapper spawning it.
+    cmd = _unwrap_shell_wrappers(cmd)
 
     name = normalise_role(role)
 
@@ -1726,43 +2069,53 @@ def classify(
                 ),
             )
 
-    in_worktree = _in_worktree(cmd, cwd)
+    # #609 H2: resolve inline `-c alias.X=Y` before matching any deny
+    # pattern by literal subcommand name (`git_cmd`), and refuse the
+    # worktree carve-out outright whenever an unresolvable/`core.*` config
+    # override is present (`effective_in_worktree`) — see
+    # `_resolve_git_command_aliases`'s docstring.
+    git_cmd, git_config_override = _resolve_git_command_aliases(cmd)
+    # #609 H2/H1: ownership of the target worktree, not just cwd's raw
+    # "/worktrees/" substring — see `_in_worktree`/`_worktree_role_owns`.
+    in_worktree = _in_worktree(cmd, cwd, role) and not git_config_override
 
-    if not in_worktree and _GIT_COMMIT_PATTERN.search(cmd):
+    if not in_worktree and _GIT_COMMIT_PATTERN.search(git_cmd):
         return Verdict(
             False,
             rule="git_lead_only:commit",
             reason=(f"role `{name}` commit เองไม่ได้ (นโยบาย cockpit). {GIT_LEAD_ONLY_RULE_TEXT}"),
         )
 
-    if not in_worktree and _GIT_MERGE_PATTERN.search(cmd):
+    if not in_worktree and _GIT_MERGE_PATTERN.search(git_cmd):
         return Verdict(
             False,
             rule="git_lead_only:merge",
             reason=(f"role `{name}` ใช้คำสั่งนี้ไม่ได้ (นโยบาย cockpit). {GIT_LEAD_ONLY_RULE_TEXT}"),
         )
 
-    # #609: shared-tree `git stash` (mutating forms) — safe unconditionally
-    # inside the pane's own worktree, same as reset-hard/checkout/branch-delete
-    # (see `_WORKTREE_SAFE_RULES`); `list`/`show` stay read-only-allowed
-    # everywhere.
-    if not in_worktree and _GIT_STASH_PATTERN.search(cmd) and not _git_stash_is_readonly(cmd):
+    # #609/#611 H1: `push`/`save`/`apply` are safe inside the pane's own
+    # (correctly-owned) worktree; `pop`/`drop`/`clear`/`branch` mutate the
+    # shared `refs/stash` stack and stay Lead-only EVEN there — see
+    # `_git_stash_verdict`'s docstring.
+    if _git_stash_verdict(git_cmd, in_worktree):
         return Verdict(
             False,
             rule="git_lead_only:stash",
             reason=(
-                f"role `{name}` ใช้ `git stash` บน shared tree ไม่ได้ (#609 — เคยเปลี่ยน mtime "
-                "ไฟล์ dirty ของ pane อื่นทั้งหมด เสี่ยงงานที่ยังไม่ commit ของคนอื่นหาย). "
-                f"{GIT_LEAD_ONLY_RULE_TEXT} อ่านอย่างเดียวใช้ได้: `git stash list` / `git stash show`."
+                f"role `{name}` ใช้ `git stash` แบบนี้ไม่ได้ (#609/#611 — `refs/stash` ใช้ร่วมกันทุก "
+                "worktree ของ repo เดียวกัน `pop`/`drop`/`clear`/`branch` ลบ entry ที่ pane อื่นเห็นอยู่ "
+                "ได้แม้รันจาก worktree ของตัวเอง). "
+                f"{GIT_LEAD_ONLY_RULE_TEXT} ใน worktree ของตัวเอง ใช้ได้: `git stash push`/`save`/`apply`. "
+                "อ่านอย่างเดียวใช้ได้ทุกที่: `git stash list` / `git stash show`."
             ),
         )
 
     for rule, pattern in _GIT_LEAD_ONLY_PATTERNS:
-        if rule == "push" and in_worktree and _push_is_own_worktree_branch(cmd, role):
+        if rule == "push" and in_worktree and _push_is_own_worktree_branch(git_cmd, role):
             continue  # #438: own wt/<role>-<ts> branch, named explicitly, no force
         if rule in _WORKTREE_SAFE_RULES and in_worktree:
             continue  # #545: pane's own disposable worktree checkout
-        if pattern.search(cmd):
+        if pattern.search(git_cmd):
             if rule == "push" and in_worktree:
                 # #466 point 3: a push that's already inside the pane's own
                 # worktree is the ONE `git_lead_only` case with a real carve-out
