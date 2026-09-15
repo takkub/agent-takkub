@@ -21,6 +21,19 @@ specialist's call.
 Allowed (read-only, everywhere): `git status`, `git diff`, `git log`, `git
 show`, `git stash list`, `git stash show`.
 
+On the shared tree (#609 round 4), `git` is **default-deny**: only an
+explicit allow-list passes — reads (`status`/`diff`/`log`/`show`/`blame`/
+`rev-parse`/`ls-files`/`cat-file`/`grep`/`describe`/`merge-base`/`shortlog`/
+`reflog show`), `fetch`, `add`/`mv`/`rm <path>` (not `--cached`/`-r`),
+`branch`/`tag`/`config`/`clean` (their own destructive flags are still
+denied separately — `-D`, `-d`, a value-setting `config`, `-f*`), `remote
+[-v|show|get-url]`, `worktree list`, `update-index --refresh`, `notes show`,
+`bisect log|view`. Everything else — `apply`, `read-tree`, `cherry-pick`,
+`revert`, `pull`, `am`, `submodule`, `sparse-checkout`, `prune`, `worktree
+add`, any future/unlisted verb — is denied outright, not just the ones
+already known to be dangerous. Use `--isolation worktree` for anything wider,
+or ask Lead.
+
 Never run `git stash` in any MUTATING form (`push`/a bare `git stash`
 (defaults to `push`)/`apply`/`pop`/`drop`/`clear`/`branch`), `git restore`,
 or `git clean -f`/`-fd`/`-fdx` on the shared tree — same "only Lead" rule as

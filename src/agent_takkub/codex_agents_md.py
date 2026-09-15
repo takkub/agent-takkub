@@ -223,6 +223,16 @@ Even if the work looks done and commit-ready, that decision is not yours to make
    same repo, so even inside your OWN `--isolation worktree` checkout `pop`/`drop`/`clear`/`branch`
    still stay off-limits (#611) — only `push`/`save`/`apply` there are safe.
 
+**On the shared tree, git is default-deny (#609 round 4)**: only reads
+(`status`/`diff`/`log`/`show`/`blame`/`rev-parse`/`ls-files`/`cat-file`/`grep`/
+`describe`/`merge-base`/`shortlog`/`reflog show`), `fetch`, `add`/`mv`/`rm <path>`
+(not `--cached`/`-r`), `branch`/`tag`/`config`/`clean`, `remote -v|show|get-url`,
+`worktree list`, `update-index --refresh`, `notes show`, `bisect log|view` are
+allowed — every other subcommand (`apply`, `read-tree`, `cherry-pick`, `revert`,
+`pull`, `am`, `submodule`, `sparse-checkout`, `prune`, `worktree add`, anything
+not on this list) is denied outright, not just the ones already known to be
+dangerous. Use `--isolation worktree` for anything wider, or ask Lead.
+
 ## Test placement conventions (required, #478/#585)
 
 (ก) **Every task must be verified with real testing before done** — run it for real, inspect it visually, or invoke the modified function directly, and report what was verified and observed in your note.
