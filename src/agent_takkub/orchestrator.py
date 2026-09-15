@@ -5133,6 +5133,59 @@ class Orchestrator(
         from .provider_config import effective_provider_for
         from .provider_spec import normalize_process_name, scaffolding_process_names_for
 
+        def is_mcp_helper_process(child):
+            """Check if a process is an MCP infrastructure helper (not real work).
+
+            Returns True iff the process is an MCP server or browser spawned by one:
+            - node process with cmdline containing @playwright/mcp, mcp-server, or --stdio
+            - chrome/chromium/playwright with cmdline containing MCP markers
+            - chrome/chromium spawned by an MCP helper parent
+
+            Real work processes like `npm test`, `vitest`, or user Playwright tests
+            run as node/playwright WITHOUT these markers and return False.
+
+            Returns False on any error — the default is to assume work is real.
+            """
+            try:
+                child_name = normalize_process_name(child.name())
+            except Exception:
+                return False
+
+            # Only these process types can be MCP helpers
+            if child_name not in ("node", "chrome", "chromium", "playwright"):
+                return False
+
+            # Check cmdline for MCP markers
+            try:
+                cmdline = " ".join(child.cmdline()).lower()
+            except (AttributeError, IndexError, psutil.NoSuchProcess, psutil.AccessDenied):
+                return False
+
+            # MCP servers are started with markers like:
+            # - @playwright/mcp in cmdline (e.g., "node /path/@playwright/mcp/dist/index.js")
+            # - mcp-server or mcp_server in cmdline
+            # - --stdio or --transport stdio (stdio transport for MCP)
+            mcp_markers = (
+                "@playwright/mcp",
+                "mcp-server",
+                "mcp_server",
+                "--stdio",
+                "--transport stdio",
+            )
+            if any(marker in cmdline for marker in mcp_markers):
+                return True
+
+            # Browsers (chrome, chromium) spawned by MCP servers: check parent
+            if child_name in ("chrome", "chromium"):
+                try:
+                    parent = child.parent()
+                    if parent is not None and is_mcp_helper_process(parent):
+                        return True
+                except Exception:
+                    pass
+
+            return False
+
         # #619: resolve the provider this pane ACTUALLY spawned with
         # (pane.model.provider_name, set unconditionally at attach), NOT the
         # close-time `effective_provider_for`. The latter answers "which CLI
@@ -5184,6 +5237,8 @@ class Orchestrator(
             except Exception:
                 continue
             if normalize_process_name(child_name) in scaffolding:
+                continue
+            if is_mcp_helper_process(child):
                 continue
             procs.append(child)
         return procs
@@ -7090,6 +7145,7 @@ class Orchestrator(
         session_md_path = self._save_decision_note(
             note_project, from_role, note, now=now, transcript_path=transcript_path, failed=failed
         )
+        _note_path = session_md_path  # Item 2 (#635): store for deferred-close append
 
         # Core V2 Conversation hook (#309 Phase 6) — flag OFF (default) short-
         # circuits before any import, so done() stays byte-identical; flag ON
@@ -7510,6 +7566,9 @@ class Orchestrator(
         # (however brief) always restarts the idle clock.
         _idle_activity: dict[int, float] | None = None
         _idle_since: float | None = None
+        # Item 2 (#635): store the note path so deferred-close info can be
+        # appended to the saved file (to be set after _save_decision_note).
+        _note_path: str | None = None
 
         def _close_if_same_session(_deferred_since: float | None = None) -> None:
             nonlocal _idle_activity, _idle_since
@@ -7614,16 +7673,25 @@ class Orchestrator(
                             count=len(names),
                             children=names[:10],
                         )
-                        self._notify_lead(
-                            project_ns,
-                            f"⏳ [{from_role} done] ยังมี {len(names)} subprocess ทำงานอยู่ใต้ "
-                            f"pane ({', '.join(names[:5])}) — เลื่อนการปิด pane ออกไปจนกว่าจะ"
-                            f"เสร็จ (สูงสุด {int(DONE_CLOSE_LIVE_CHILD_GRACE_S / 60)} นาที) แทนที่"
-                            "จะฆ่าทิ้งทันที",
-                            from_role=from_role,
-                            note="done_close_deferred",
-                            kind="done-close-deferred",
+                        # Item 2 (#635): do not send separate _notify_lead() message.
+                        # Instead, append deferred-close info to the saved note
+                        # (one message per lifecycle, merged with the done entry).
+                        deferred_line = (
+                            f"\n⏳ deferred close: {len(names)} subprocess "
+                            f"({', '.join(names[:5])}{'…' if len(names) > 5 else ''}) "
+                            f"max {int(DONE_CLOSE_LIVE_CHILD_GRACE_S / 60)} min"
                         )
+                        if _note_path:
+                            try:
+                                from pathlib import Path
+
+                                path = Path(_note_path)
+                                if path.exists():
+                                    content = path.read_text(encoding="utf-8")
+                                    if deferred_line not in content:
+                                        path.write_text(content + deferred_line, encoding="utf-8")
+                            except Exception:
+                                pass
                     QTimer.singleShot(
                         DONE_CLOSE_LIVE_CHILD_POLL_MS,
                         lambda: _close_if_same_session(since),
@@ -8237,7 +8305,7 @@ class Orchestrator(
         recovers the real target role so a genuinely outside role's
         boot-stall/unconfirmed/stuck notice reaches this interrupt too.
         """
-        for item in self.inbox_report(project=project_ns):
+        for item in self._inbox_report_raw(project=project_ns):
             role = item.get("role")
             body = str(item.get("body", ""))
             if role == "system":
@@ -8278,7 +8346,7 @@ class Orchestrator(
         watched roles, passed by the caller) — a role that already
         resolved this tick doesn't need waking.
         """
-        for item in self.inbox_report(project=project_ns):
+        for item in self._inbox_report_raw(project=project_ns):
             body = str(item.get("body", ""))
             role = _system_marker_role(body)
             if not role or role not in pending_roles:
@@ -8387,41 +8455,15 @@ class Orchestrator(
             return {"reason": reason, "message": message}
         return None
 
-    def inbox_report(self, project: str | None = None, role: str | None = None) -> list[dict]:
-        """Read-only snapshot of every done/FAILED report still sitting
-        somewhere in the outbound-to-Lead pipeline instead of already
-        written into Lead's pane (#231): the digest debounce window, the
-        ready-prompt live-notify queue, and the durable pending store
-        (survives a restart).
+    def _inbox_report_raw(self, project: str | None = None, role: str | None = None) -> list[dict]:
+        """Internal: Read pending inbox items without side effects. Used by
+        wait polling and status checks that shouldn't mark items as "read".
 
-        `takkub status` could only ever say a report was "queued — not yet
-        delivered"; there was no command that read its actual content back
-        out, forcing Lead to Glob `runtime/sessions/**` by hand. This is
-        that command's backing data — `takkub inbox` prints it.
-
-        Returns a list of ``{role, queue, body, origin_confirmed, queued_ts}``,
-        newest first within each queue tier (digest, then live, then
-        durable). ``origin_confirmed`` is `False` when the reporting pane's
-        role slot was respawned since this item was queued (#228 — the same
-        provenance check `_flush_lead_digest`/`_pump_lead_notify` apply at
-        delivery time), `True` when confirmed live, `None` when no origin
-        was recorded to check (system notices, CC relays, combined
-        digests). ``queued_ts`` (#241) is the epoch time the item joined the
-        digest debounce window, or `None` for tiers that don't track it.
-        Optionally filtered to a single *role*.
-
-        As a side effect (#241), every body returned here is fingerprinted
-        into `_inbox_seen[project_ns]` — if the SAME body later flushes out
-        of `_lead_digest_queue` via the normal digest pump, `_flush_lead_digest`
-        collapses it to a one-line reference instead of re-pasting content
-        Lead already read through this call.
+        See `inbox_report` for return value format.
         """
         project_ns = self._resolve_project(project)
         if role is not None:
             role = self.resolve_pane_role(role, project_ns)
-        if not hasattr(self, "_inbox_seen"):
-            self._inbox_seen = {}
-        seen = self._inbox_seen.setdefault(project_ns, set())
 
         def _origin_confirmed(
             item_role: str | None, pane_token: str | None, queued_ts: float | None = None
@@ -8439,7 +8481,6 @@ class Orchestrator(
             item_role = _notice_role_tag(body) or "system"
             if role is not None and item_role != role:
                 continue
-            seen.add(_notice_fingerprint(body))
             items.append(
                 {
                     "role": item_role,
@@ -8502,6 +8543,50 @@ class Orchestrator(
                         "queued_ts": d.created_at,
                     }
                 )
+
+        return items
+
+    def inbox_report(self, project: str | None = None, role: str | None = None) -> list[dict]:
+        """Read-only snapshot of every done/FAILED report still sitting
+        somewhere in the outbound-to-Lead pipeline instead of already
+        written into Lead's pane (#231): the digest debounce window, the
+        ready-prompt live-notify queue, and the durable pending store
+        (survives a restart).
+
+        `takkub status` could only ever say a report was "queued — not yet
+        delivered"; there was no command that read its actual content back
+        out, forcing Lead to Glob `runtime/sessions/**` by hand. This is
+        that command's backing data — `takkub inbox` prints it.
+
+        Returns a list of ``{role, queue, body, origin_confirmed, queued_ts}``,
+        newest first within each queue tier (digest, then live, then
+        durable). ``origin_confirmed`` is `False` when the reporting pane's
+        role slot was respawned since this item was queued (#228 — the same
+        provenance check `_flush_lead_digest`/`_pump_lead_notify` apply at
+        delivery time), `True` when confirmed live, `None` when no origin
+        was recorded to check (system notices, CC relays, combined
+        digests). ``queued_ts`` (#241) is the epoch time the item joined the
+        digest debounce window, or `None` for tiers that don't track it.
+        Optionally filtered to a single *role*.
+
+        As a side effect (#241), every body returned here is fingerprinted
+        into `_inbox_seen[project_ns]` — if the SAME body later flushes out
+        of `_lead_digest_queue` via the normal digest pump, `_flush_lead_digest`
+        collapses it to a one-line reference instead of re-pasting content
+        Lead already read through this call. This side effect ONLY happens
+        when explicitly called via `takkub inbox`, not for internal usage
+        like wait polling or status checks — use `_inbox_report_raw` for those.
+        """
+        items = self._inbox_report_raw(project, role)
+        project_ns = self._resolve_project(project)
+
+        # Mark as seen only when user explicitly calls `takkub inbox`
+        if not hasattr(self, "_inbox_seen"):
+            self._inbox_seen = {}
+        seen = self._inbox_seen.setdefault(project_ns, set())
+        for item in items:
+            body = item.get("body", "")
+            seen.add(_notice_fingerprint(body))
 
         return items
 
@@ -9678,36 +9763,62 @@ class Orchestrator(
 
             last_screenshot = ""
             if _split_shard(pane_role)[0] in _EVIDENCE_WARN_ROLES:
-                # #629: pin the newest screenshot to THIS pane's CURRENT task
-                # window, not the whole shared folder. The shared
-                # `exports/<today>/<project>/screenshots/` dir collects shots
-                # from every browser role (mb MCP writes them all flat into
-                # it) with no per-file role metadata, so the old
-                # newest-mtime-anywhere pick could show critic the screenshot
-                # a DIFFERENT role just took (repro: critic's status showed
-                # frontend/gemini captures). Reuse the same evidence scan the
-                # done-notice path uses: only shots that landed after this
-                # pane's assign_ts count, and a pane with no window (never
-                # assigned, or nothing fresh) simply shows nothing rather
-                # than inheriting someone else's image. `_EVIDENCE_WARN_ROLES`
-                # already covers the reviewer alias alongside qa/critic/
-                # designer.
-                today = datetime.now().strftime("%Y-%m-%d")
-                shot_dir = RUNTIME_DIR / "exports" / today / project_ns / "screenshots"
+                # Item 4 (#635): show only screenshots CITED in done/progress notes,
+                # not all files in the window. Read notes for current task and extract
+                # image filenames from evidence lines ("📸 evidence: a.png, b.png").
                 assign_ts = 0.0
                 _ps_shot = (getattr(self, "_pane_state", {}) or {}).get(
                     f"{project_ns}::{pane_role}"
                 )
                 if _ps_shot is not None:
                     assign_ts = _ps_shot.assign_ts
+
+                cited_screenshots = set()
+                # Scan done notes for this pane's current task and extract cited filenames
                 if assign_ts > 0:
-                    found = sorted(
-                        self._find_evidence_files(shot_dir, assign_ts, now),
-                        key=lambda t: t[0],
-                        reverse=True,
-                    )
-                    if found:
-                        last_screenshot = str(found[0][1])
+                    try:
+                        sessions_root = RUNTIME_DIR / "sessions"
+                        if sessions_root.is_dir():
+                            for day_dir in sorted(sessions_root.iterdir(), reverse=True):
+                                if not day_dir.is_dir():
+                                    continue
+                                proj_dir = day_dir / project_ns
+                                if not proj_dir.is_dir():
+                                    continue
+                                for f in sorted(proj_dir.iterdir(), reverse=True):
+                                    if f.suffix != ".md" or not f.name.startswith(f"{pane_role}-"):
+                                        continue
+                                    try:
+                                        # Only read notes that were written after assign_ts
+                                        if f.stat().st_mtime < assign_ts:
+                                            continue
+                                        content = f.read_text(encoding="utf-8")
+                                        # Extract filenames from "📸 evidence: a.png, b.png, ..."
+                                        import re
+
+                                        match = re.search(r"📸\s+evidence:\s*([^🔗\n]+)", content)
+                                        if match:
+                                            filenames_str = match.group(1)
+                                            # Parse "a.png (10KB), b.jpg (20KB), ..." etc
+                                            for part in filenames_str.split(","):
+                                                # Extract just the filename before any annotation
+                                                filename = part.strip().split()[0].strip()
+                                                if filename:
+                                                    cited_screenshots.add(filename)
+                                    except (OSError, ValueError):
+                                        pass
+                    except Exception:
+                        pass
+
+                # Show first cited screenshot if any exist in the directory
+                if cited_screenshots:
+                    today = datetime.now().strftime("%Y-%m-%d")
+                    shot_dir = RUNTIME_DIR / "exports" / today / project_ns / "screenshots"
+                    if shot_dir.exists():
+                        for shot_file in shot_dir.iterdir():
+                            if shot_file.name in cited_screenshots:
+                                last_screenshot = str(shot_file)
+                                break
 
             done_events: list[str] = []
             sessions_root = RUNTIME_DIR / "sessions"
