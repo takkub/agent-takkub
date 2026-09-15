@@ -481,7 +481,6 @@ class TestGitLeadOnlyDenied:
             "git branch --merged",
             "git config merge.ff false",
             "git commit-tree HEAD^{tree} -m x",
-            "git checkout-index -a -f",
             # reading/mentioning must never trip the guard
             "grep -rn 'git commit' docs/",
             "echo 'only Lead runs git commit'",
@@ -490,6 +489,17 @@ class TestGitLeadOnlyDenied:
     )
     def test_unrelated_git_commands_allowed(self, command: str) -> None:
         assert pane_guard.classify(command, "backend").allowed, f"false positive: {command}"
+
+    def test_checkout_index_denied_on_shared_tree(self) -> None:
+        """#609 round 4: `checkout-index -a -f` overwrites tracked files in
+        the CALLER's working directory from the index — on the shared tree
+        that IS another pane's working tree too. Moved out of
+        `test_unrelated_git_commands_allowed` (was allowed pre-round-4,
+        before the shared-tree default-deny existed) rather than added to the
+        allow-list, since it writes shared state."""
+        verdict = pane_guard.classify("git checkout-index -a -f", "backend")
+        assert not verdict.allowed
+        assert verdict.rule == "git_shared_default_deny:checkout-index"
 
     def test_lead_and_shell_exempt(self) -> None:
         assert pane_guard.classify('git commit -m "x"', "lead").allowed

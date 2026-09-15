@@ -173,6 +173,46 @@ A hard block here would fight that already-shipped, intentional workflow
 detection is a plain cwd substring match, not an import of
 `worktree_manager` — this module stays a stdlib-only leaf (see top of this
 docstring); `cli.cmd_guard` passes the hook payload's `cwd` field through.
+
+A tenth rule, ``git_shared_default_deny`` (#609 round 4), flips the shared-
+tree posture from deny-list to default-deny. Rounds 1-3 each closed a real
+bypass by adding one more subcommand to `_GIT_LEAD_ONLY_PATTERNS` — round 3's
+own re-verify (`docs/audit/2026-09-15-batch-2.1.9-review.md`, "Round 3")
+found three more (`git apply`/`apply -R`, `git read-tree --reset -u`, a
+directory junction planted INSIDE a pane's own worktree pointing at the
+shared tree) in the same shape: a subcommand nobody had thought to deny yet.
+Chasing individual subcommands is an unbounded list. Instead, once a git
+invocation's effective target resolves to somewhere this role's worktree
+does NOT own (`in_worktree` is False — the shared tree, or another role's
+worktree), only an explicit allow-list of subcommands that provably never
+mutate another pane's working tree/index/refs is permitted — see
+`_GIT_SHARED_TREE_ALLOW_PLAIN`/`_GIT_SHARED_TREE_RESTRICTED_CHECKS` and
+`_git_shared_tree_deny_rule`. Everything else (`apply`, `read-tree`,
+`write-tree`, `checkout-index`, `cherry-pick`, `revert`, `pull`, `am`,
+`submodule`, `sparse-checkout`, `prune`, an unrecognised future verb, ...) is
+denied by default rather than waiting for its own incident. `commit`/`push`/
+`merge`/`stash`/`checkout`/`restore`/`switch`/`rebase` are skipped here
+(`_GIT_SHARED_TREE_HANDLED_ELSEWHERE`) since each already has its own
+carve-out-aware verdict earlier in `classify()` — this rule never
+second-guesses those. A few subcommands the existing deny-list only
+partially covered (`branch`, `tag`, `clean`, `config`, plumbing reads like
+`commit-tree`/`merge-tree`) are kept fully permissive here, matching their
+pre-round-4 behavior exactly, because `tests/test_pane_guard.py` already
+pins them allowed and none of them mutates another pane's working tree
+(`branch -D`/`tag -d`/`clean -f*` stay denied unconditionally by their own
+existing, more specific patterns above, which run first).
+
+Ownership itself also got more careful this round: `_worktree_role_owns`
+used to check the CALLER-given path's text for a `<role>-<ts>` segment
+without ever resolving where that path actually leads on disk. A directory
+junction (`mklink /J`, no admin required on Windows) planted inside a pane's
+own worktree but pointing at the shared tree — or at a sibling role's
+worktree — has the right text (it lives under `.../worktrees/<role>-<ts>/…`)
+while actually landing somewhere this role does not own; the pre-round-4
+check granted the carve-out anyway. Every path fed to `_worktree_role_owns`
+now goes through `_safe_realpath` first (`os.path.realpath`, which resolves
+symlinks *and* Windows junctions since Python 3.8), so ownership is judged
+on where the path actually leads, not its literal spelling.
 """
 
 from __future__ import annotations
@@ -1573,6 +1613,26 @@ def _is_worktree_cwd(cwd: str | None) -> bool:
     return bool(cwd) and bool(_WORKTREE_CWD.search(cwd))
 
 
+# #609 round 4 R3-H1: `os.path.realpath` resolves symlinks AND (Python >=
+# 3.8) Windows directory junctions — `mklink /J` needs no admin rights, so a
+# pane can plant one INSIDE its own worktree pointing at the shared tree (or
+# a sibling role's worktree) and have `_worktree_role_owns` see only the
+# junction's own, correctly-owned-looking path text. Resolving to the real
+# target first closes that. Falls back to the input unresolved on any OSError
+# (a malformed path, or one containing characters the OS rejects) — same
+# conservative "can't verify, don't widen" posture as every other override
+# check in this module; the caller still runs `_worktree_role_owns` on
+# *something*, and an unresolved junction path won't spuriously match this
+# role's `<role>-<ts>` segment any more than a resolved one would.
+def _safe_realpath(path: str | None) -> str | None:
+    if not path:
+        return path
+    try:
+        return os.path.realpath(path)
+    except OSError:
+        return path
+
+
 # #609 H2: a path merely containing "/worktrees/" isn't enough — every
 # role's checkout lives under the same `<project>/` parent, so a `cwd`/`-C`
 # that happens to sit inside a DIFFERENT role's worktree must not grant
@@ -1661,14 +1721,21 @@ def _in_worktree(cmd: str, cwd: str | None, role: str | None = None) -> bool:
         # check granted the carve-out outright).
         resolved = target if _ABS_PATH_RE.match(target) else _resolve_relative_target(target, cwd)
         if resolved is not None:
-            return _worktree_role_owns(os.path.normpath(resolved), role)
+            # #609 round 4 R3-H1: resolve symlinks/junctions before judging
+            # ownership — see `_safe_realpath`'s docstring.
+            return _worktree_role_owns(_safe_realpath(os.path.normpath(resolved)), role)
         # Relative target, no cwd to resolve it against: unresolvable, so
         # fall through to the cwd-based checks below rather than guessing —
         # same conservative posture as the config-override/GIT_DIR checks.
     if _is_worktree_cwd(cwd):
-        return _worktree_role_owns(cwd, role)
+        return _worktree_role_owns(_safe_realpath(cwd), role)
     if _command_targets_worktree(cmd):
-        return _worktree_role_owns(target or cmd, role)
+        # `target` is always None here (the explicit-target branch above
+        # already returned when it wasn't) — this is the legacy fallback
+        # that matches a worktree path embedded anywhere in `cmd`'s text, not
+        # an actual filesystem path, so there's nothing for `_safe_realpath`
+        # to resolve.
+        return _worktree_role_owns(cmd, role)
     return False
 
 
@@ -1993,6 +2060,155 @@ def _resolve_git_command_aliases(cmd: str) -> tuple[str, bool]:
     return ("".join(pieces) if changed else cmd), (core_override or unresolved)
 
 
+# ── #609 round 4: default-deny for git on the shared tree ──────────────────
+# See the module docstring's "tenth rule" for why this replaced growing
+# `_GIT_LEAD_ONLY_PATTERNS` one subcommand at a time. Generic invocation
+# finder — same shape as `_GIT_PUSH_TAIL`/`_GIT_STASH_PATTERN` above, just not
+# anchored to one literal subcommand name.
+_GIT_INVOCATION_RE = re.compile(
+    rf"{_CMD_START}{_GIT_BIN}(?![\w-]){_GIT_SUBCMD_GAP}(?P<sub>[\w-]+){_SUBCMD_END}"
+    r"(?P<tail>[^\n|;&]*)",
+    re.M,
+)
+
+_GIT_SHARED_TREE_DENY_TEXT = (
+    "บน shared tree pane ใช้ได้เฉพาะคำสั่ง git อ่าน/เพิ่ม — ใช้ `--isolation worktree` หรือให้ Lead ทำ"
+)
+
+# Subcommands already given their own carve-out-aware verdict earlier in
+# `classify()` (commit/merge/push/stash each check `in_worktree` themselves;
+# checkout/restore/switch/rebase are unconditional-subcommand denies with no
+# flag shape to re-check) — skipped here so this default-deny pass never
+# re-litigates a verdict `classify()` already returned.
+_GIT_SHARED_TREE_HANDLED_ELSEWHERE = frozenset(
+    {"commit", "merge", "push", "stash", "checkout", "restore", "switch", "rebase"}
+)
+
+# Fully permissive regardless of flags — either provably read-only, or
+# additive-only (creates a loose object/ref-free commit without moving any
+# ref or touching the working tree: `add`, `commit-tree`, `merge-tree`).
+# `branch`/`tag`/`clean`/`config` are ALSO kept fully permissive here rather
+# than flag-restricted per the original round-4 spec: `tests/test_pane_
+# guard.py` already pins `git branch -d <x>` (safe delete, distinct from the
+# `-D` force-delete `_GIT_LEAD_ONLY_PATTERNS` already denies unconditionally),
+# `git tag -l`, `git branch --merged`, and `git config merge.ff false`
+# allowed on the shared tree — none of them writes another pane's working
+# tree, and `-D`/`-d` (tag)/`-f*` (clean) are already denied unconditionally
+# by their own existing, more specific patterns which run before this check
+# ever does. Least-behavior-change per this round's own instructions: widen
+# the allow-list rather than break a pinned regression test.
+_GIT_SHARED_TREE_ALLOW_PLAIN = frozenset(
+    {
+        "status",
+        "diff",
+        "log",
+        "show",
+        "blame",
+        "rev-parse",
+        "rev-list",
+        "ls-files",
+        "ls-tree",
+        "cat-file",
+        "grep",
+        "describe",
+        "name-rev",
+        "merge-base",
+        "merge-tree",
+        "shortlog",
+        "fetch",
+        "help",
+        "version",
+        "add",
+        "mv",
+        "check-ignore",
+        "count-objects",
+        "commit-tree",
+        "branch",
+        "tag",
+        "clean",
+        "config",
+    }
+)
+
+
+def _remote_tail_allowed(tail_tokens: list[str]) -> bool:
+    """Bare `git remote` (lists remotes), `-v`/`--verbose`, `show`, and
+    `get-url` are read-only; `add`/`remove`/`set-url`/`rename`/... mutate
+    shared repo config."""
+    if not tail_tokens:
+        return True
+    return tail_tokens[0] in ("-v", "--verbose", "show", "get-url")
+
+
+def _worktree_tail_allowed(tail_tokens: list[str]) -> bool:
+    """Only `list` — `add`/the admin sub-verbs (already unconditionally
+    Lead-only via `_GIT_LEAD_ONLY_PATTERNS`) never reach this check."""
+    return bool(tail_tokens) and tail_tokens[0] == "list"
+
+
+def _rm_tail_allowed(tail_tokens: list[str]) -> bool:
+    """Deny `--cached` (untracks without deleting — silently drops a file
+    from everyone's next `status`/`diff`) and any `-r`/recursive short flag."""
+    for tok in tail_tokens:
+        if tok == "--cached":
+            return False
+        if tok.startswith("-") and not tok.startswith("--") and "r" in tok[1:].lower():
+            return False
+    return True
+
+
+def _update_index_tail_allowed(tail_tokens: list[str]) -> bool:
+    """Only `--refresh` (re-stats tracked files, no content change)."""
+    return "--refresh" in tail_tokens
+
+
+def _notes_tail_allowed(tail_tokens: list[str]) -> bool:
+    return bool(tail_tokens) and tail_tokens[0] == "show"
+
+
+def _bisect_tail_allowed(tail_tokens: list[str]) -> bool:
+    return bool(tail_tokens) and tail_tokens[0] in ("log", "view")
+
+
+def _reflog_tail_allowed(tail_tokens: list[str]) -> bool:
+    """Bare `git reflog` defaults to `show`; `expire`/`delete` rewrite a ref's
+    reflog other worktrees sharing it can still see."""
+    if not tail_tokens:
+        return True
+    return tail_tokens[0] in ("show", "list")
+
+
+# Subcommands allowed only when their tail matches a narrower safe shape —
+# checked with the invocation's already-split tail tokens.
+_GIT_SHARED_TREE_RESTRICTED_CHECKS: dict[str, Callable[[list[str]], bool]] = {
+    "remote": _remote_tail_allowed,
+    "worktree": _worktree_tail_allowed,
+    "rm": _rm_tail_allowed,
+    "update-index": _update_index_tail_allowed,
+    "notes": _notes_tail_allowed,
+    "bisect": _bisect_tail_allowed,
+    "reflog": _reflog_tail_allowed,
+}
+
+
+def _git_shared_tree_deny_rule(git_cmd: str) -> str | None:
+    """The offending subcommand name to deny with, or `None` when every git
+    invocation in *git_cmd* is on the shared-tree allow-list. Only meaningful
+    when the caller has already established `in_worktree` is False — see the
+    module docstring's "tenth rule"."""
+    for m in _GIT_INVOCATION_RE.finditer(git_cmd):
+        sub = m.group("sub").lower()
+        if sub in _GIT_SHARED_TREE_HANDLED_ELSEWHERE:
+            continue
+        if sub in _GIT_SHARED_TREE_ALLOW_PLAIN:
+            continue
+        checker = _GIT_SHARED_TREE_RESTRICTED_CHECKS.get(sub)
+        if checker is not None and checker(m.group("tail").split()):
+            continue
+        return sub
+    return None
+
+
 # mini-browser's client is fixed to CDP 9222. A qa/critic/designer shard may
 # still use its isolated Playwright MCP, but must never drive mb's one shared
 # Chrome session (#92).
@@ -2296,6 +2512,21 @@ def classify(
                 False,
                 rule=f"git_lead_only:{rule}",
                 reason=(f"role `{name}` ใช้คำสั่งนี้ไม่ได้ (นโยบาย cockpit). {GIT_LEAD_ONLY_RULE_TEXT}"),
+            )
+
+    # #609 round 4: default-deny for every OTHER git subcommand once the
+    # target resolves outside this role's own worktree — see the module
+    # docstring's "tenth rule" and `_git_shared_tree_deny_rule`.
+    if not in_worktree:
+        deny_sub = _git_shared_tree_deny_rule(git_cmd)
+        if deny_sub is not None:
+            return Verdict(
+                False,
+                rule=f"git_shared_default_deny:{deny_sub}",
+                reason=(
+                    f"role `{name}` ใช้ `git {deny_sub}` แบบนี้บน shared tree ไม่ได้. "
+                    f"{_GIT_SHARED_TREE_DENY_TEXT}"
+                ),
             )
 
     for rule, pattern in _DISK_SCAN_PATTERNS:

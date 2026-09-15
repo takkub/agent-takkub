@@ -4,6 +4,10 @@ These assert the required boundary, so failures on the reviewed revision are
 intentional evidence for the fix loop. No production code is modified.
 """
 
+import os
+import subprocess
+import sys
+
 import pytest
 
 from agent_takkub import pane_guard, qa_gate
@@ -175,6 +179,121 @@ def test_worktree_admin_subcommands_are_always_lead_only(command):
 def test_read_only_worktree_list_and_unrelated_env_prefix_stay_allowed(command):
     verdict = pane_guard.classify(command, "frontend", cwd="C:/data/worktrees/proj/frontend-123")
     assert verdict.allowed, command
+
+
+# #609 round 4: default-deny for git on the shared tree — see pane_guard's
+# module docstring "tenth rule". Subcommands round 1-3's deny-list never
+# named at all (`apply`, `read-tree`, `rm --cached`, plain `reset` with no
+# `--hard`) are now denied by the generic allow-list check rather than
+# needing their own pattern.
+@pytest.mark.parametrize(
+    "command",
+    [
+        "git apply patch.diff",
+        "git apply -R patch.diff",
+        "git read-tree --reset -u HEAD",
+        "git rm -r --cached secrets/",
+        "git rm --cached config.env",
+        "git reset",
+        "git reset --merge",
+        "git reset --keep",
+        "git reset HEAD~1",
+        "git cherry-pick abc123",
+        "git revert abc123",
+        "git pull",
+        "git pull origin main",
+        "git am patch.mbox",
+        "git submodule update --init",
+        "git sparse-checkout set src",
+        "git worktree add ../other main",
+        "git prune",
+    ],
+)
+def test_shared_tree_default_deny_for_unlisted_subcommands(command):
+    verdict = pane_guard.classify(command, "backend")
+    assert not verdict.allowed, command
+    assert verdict.rule.startswith("git_shared_default_deny:"), verdict.rule
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "git status",
+        "git diff",
+        "git log -5",
+        "git show HEAD",
+        "git blame src/x.py",
+        "git rev-parse HEAD",
+        "git ls-files",
+        "git cat-file -p HEAD",
+        "git grep TODO",
+        "git describe --tags",
+        "git merge-base HEAD main",
+        "git shortlog -sn",
+        "git fetch",
+        "git add .",
+        "git remote -v",
+        "git worktree list",
+        "git config --get user.email",
+        "git rm secrets.txt",
+        "git reflog show",
+    ],
+)
+def test_shared_tree_allowlisted_subcommands_stay_allowed(command):
+    verdict = pane_guard.classify(command, "backend")
+    assert verdict.allowed, f"{command}: {verdict.reason}"
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "git apply patch.diff",
+        "git reset --hard HEAD~1",  # already covered by the older specific rule
+    ],
+)
+def test_default_deny_still_carves_out_own_worktree(command):
+    wt = "C:/data/worktrees/proj/backend-123"
+    verdict = pane_guard.classify(command, "backend", cwd=wt)
+    assert verdict.allowed, f"{command}: {verdict.reason}"
+
+
+def _make_junction(link: str, target: str) -> bool:
+    """Best-effort Windows directory junction (`mklink /J`, no admin rights
+    needed) — returns False (and the test should skip) when unsupported."""
+    if sys.platform != "win32":
+        return False
+    result = subprocess.run(
+        ["cmd", "/c", "mklink", "/J", link, target],
+        capture_output=True,
+        text=True,
+    )
+    return result.returncode == 0
+
+
+def test_junction_inside_own_worktree_pointing_at_shared_tree_is_denied(tmp_path):
+    """#609 round 4 R3-H1: a junction planted INSIDE the pane's own worktree
+    but pointing at the shared tree must not launder the worktree carve-out
+    — ownership has to be judged on the REAL target, not the junction's own,
+    correctly-owned-looking path text."""
+    shared = tmp_path / "shared-repo"
+    shared.mkdir()
+    wt_parent = tmp_path / "worktrees" / "proj"
+    wt_parent.mkdir(parents=True)
+    own_wt = wt_parent / "backend-123"
+    own_wt.mkdir()
+    junction = own_wt / "escape"
+    if not _make_junction(str(junction), str(shared)):
+        pytest.skip("directory junction not supported in this environment")
+    try:
+        verdict = pane_guard.classify(
+            f'git -C "{junction}" reset --hard', "backend", cwd=str(own_wt)
+        )
+        assert not verdict.allowed, "junction to the shared tree must not grant the carve-out"
+    finally:
+        try:
+            os.rmdir(junction)
+        except OSError:
+            pass
 
 
 def test_sensitive_production_module_cannot_opt_out_by_spec_suffix(tmp_path):
