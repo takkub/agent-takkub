@@ -133,12 +133,12 @@ class TestDoneCloseDefersForLiveChildren:
 
             close_mock.assert_not_called()
             poll_cb = next(cb for ms, cb in poll_timers if ms == DONE_CLOSE_LIVE_CHILD_POLL_MS)
-            assert notify_mock.call_count == 1
-            assert notify_mock.call_args.kwargs.get("note") == "done_close_deferred"
-            assert "เลื่อนการปิด" in notify_mock.call_args.args[1]
+            # Item 2 (#635): do NOT send separate _notify_lead message for deferred close
+            # (info is appended to the saved note instead, merged into digest)
+            assert notify_mock.call_count == 0
 
             # A second poll tick with children still alive must NOT close and
-            # must NOT re-notify Lead (one notice per deferral episode).
+            # must NOT send any notification (deferred info already in note from first tick).
             poll_timers2: list = []
             with patch(
                 "agent_takkub.orchestrator.QTimer.singleShot",
@@ -147,7 +147,7 @@ class TestDoneCloseDefersForLiveChildren:
                 poll_cb()
 
             close_mock.assert_not_called()
-            assert notify_mock.call_count == 1
+            assert notify_mock.call_count == 0
             assert any(ms == DONE_CLOSE_LIVE_CHILD_POLL_MS for ms, _cb in poll_timers2)
 
     def test_close_proceeds_once_children_clear(self, orch: Orchestrator) -> None:

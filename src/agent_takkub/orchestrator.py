@@ -7145,6 +7145,7 @@ class Orchestrator(
         session_md_path = self._save_decision_note(
             note_project, from_role, note, now=now, transcript_path=transcript_path, failed=failed
         )
+        _note_path = session_md_path  # Item 2 (#635): store for deferred-close append
 
         # Core V2 Conversation hook (#309 Phase 6) — flag OFF (default) short-
         # circuits before any import, so done() stays byte-identical; flag ON
@@ -7565,6 +7566,9 @@ class Orchestrator(
         # (however brief) always restarts the idle clock.
         _idle_activity: dict[int, float] | None = None
         _idle_since: float | None = None
+        # Item 2 (#635): store the note path so deferred-close info can be
+        # appended to the saved file (to be set after _save_decision_note).
+        _note_path: str | None = None
 
         def _close_if_same_session(_deferred_since: float | None = None) -> None:
             nonlocal _idle_activity, _idle_since
@@ -7669,16 +7673,25 @@ class Orchestrator(
                             count=len(names),
                             children=names[:10],
                         )
-                        self._notify_lead(
-                            project_ns,
-                            f"⏳ [{from_role} done] ยังมี {len(names)} subprocess ทำงานอยู่ใต้ "
-                            f"pane ({', '.join(names[:5])}) — เลื่อนการปิด pane ออกไปจนกว่าจะ"
-                            f"เสร็จ (สูงสุด {int(DONE_CLOSE_LIVE_CHILD_GRACE_S / 60)} นาที) แทนที่"
-                            "จะฆ่าทิ้งทันที",
-                            from_role=from_role,
-                            note="done_close_deferred",
-                            kind="done-close-deferred",
+                        # Item 2 (#635): do not send separate _notify_lead() message.
+                        # Instead, append deferred-close info to the saved note
+                        # (one message per lifecycle, merged with the done entry).
+                        deferred_line = (
+                            f"\n⏳ deferred close: {len(names)} subprocess "
+                            f"({', '.join(names[:5])}{'…' if len(names) > 5 else ''}) "
+                            f"max {int(DONE_CLOSE_LIVE_CHILD_GRACE_S / 60)} min"
                         )
+                        if _note_path:
+                            try:
+                                from pathlib import Path
+
+                                path = Path(_note_path)
+                                if path.exists():
+                                    content = path.read_text(encoding="utf-8")
+                                    if deferred_line not in content:
+                                        path.write_text(content + deferred_line, encoding="utf-8")
+                            except Exception:
+                                pass
                     QTimer.singleShot(
                         DONE_CLOSE_LIVE_CHILD_POLL_MS,
                         lambda: _close_if_same_session(since),
@@ -9750,36 +9763,62 @@ class Orchestrator(
 
             last_screenshot = ""
             if _split_shard(pane_role)[0] in _EVIDENCE_WARN_ROLES:
-                # #629: pin the newest screenshot to THIS pane's CURRENT task
-                # window, not the whole shared folder. The shared
-                # `exports/<today>/<project>/screenshots/` dir collects shots
-                # from every browser role (mb MCP writes them all flat into
-                # it) with no per-file role metadata, so the old
-                # newest-mtime-anywhere pick could show critic the screenshot
-                # a DIFFERENT role just took (repro: critic's status showed
-                # frontend/gemini captures). Reuse the same evidence scan the
-                # done-notice path uses: only shots that landed after this
-                # pane's assign_ts count, and a pane with no window (never
-                # assigned, or nothing fresh) simply shows nothing rather
-                # than inheriting someone else's image. `_EVIDENCE_WARN_ROLES`
-                # already covers the reviewer alias alongside qa/critic/
-                # designer.
-                today = datetime.now().strftime("%Y-%m-%d")
-                shot_dir = RUNTIME_DIR / "exports" / today / project_ns / "screenshots"
+                # Item 4 (#635): show only screenshots CITED in done/progress notes,
+                # not all files in the window. Read notes for current task and extract
+                # image filenames from evidence lines ("📸 evidence: a.png, b.png").
                 assign_ts = 0.0
                 _ps_shot = (getattr(self, "_pane_state", {}) or {}).get(
                     f"{project_ns}::{pane_role}"
                 )
                 if _ps_shot is not None:
                     assign_ts = _ps_shot.assign_ts
+
+                cited_screenshots = set()
+                # Scan done notes for this pane's current task and extract cited filenames
                 if assign_ts > 0:
-                    found = sorted(
-                        self._find_evidence_files(shot_dir, assign_ts, now),
-                        key=lambda t: t[0],
-                        reverse=True,
-                    )
-                    if found:
-                        last_screenshot = str(found[0][1])
+                    try:
+                        sessions_root = RUNTIME_DIR / "sessions"
+                        if sessions_root.is_dir():
+                            for day_dir in sorted(sessions_root.iterdir(), reverse=True):
+                                if not day_dir.is_dir():
+                                    continue
+                                proj_dir = day_dir / project_ns
+                                if not proj_dir.is_dir():
+                                    continue
+                                for f in sorted(proj_dir.iterdir(), reverse=True):
+                                    if f.suffix != ".md" or not f.name.startswith(f"{pane_role}-"):
+                                        continue
+                                    try:
+                                        # Only read notes that were written after assign_ts
+                                        if f.stat().st_mtime < assign_ts:
+                                            continue
+                                        content = f.read_text(encoding="utf-8")
+                                        # Extract filenames from "📸 evidence: a.png, b.png, ..."
+                                        import re
+
+                                        match = re.search(r"📸\s+evidence:\s*([^🔗\n]+)", content)
+                                        if match:
+                                            filenames_str = match.group(1)
+                                            # Parse "a.png (10KB), b.jpg (20KB), ..." etc
+                                            for part in filenames_str.split(","):
+                                                # Extract just the filename before any annotation
+                                                filename = part.strip().split()[0].strip()
+                                                if filename:
+                                                    cited_screenshots.add(filename)
+                                    except (OSError, ValueError):
+                                        pass
+                    except Exception:
+                        pass
+
+                # Show first cited screenshot if any exist in the directory
+                if cited_screenshots:
+                    today = datetime.now().strftime("%Y-%m-%d")
+                    shot_dir = RUNTIME_DIR / "exports" / today / project_ns / "screenshots"
+                    if shot_dir.exists():
+                        for shot_file in shot_dir.iterdir():
+                            if shot_file.name in cited_screenshots:
+                                last_screenshot = str(shot_file)
+                                break
 
             done_events: list[str] = []
             sessions_root = RUNTIME_DIR / "sessions"
