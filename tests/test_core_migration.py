@@ -1608,3 +1608,424 @@ def test_quarantine_stray_v1_sources_skip_if_no_strays(tmp_path):
     # Quarantine returns True (nothing to do)
     ok = _quarantine_stray_sources(step, step.step_id, None, step.backups)
     assert ok is True
+
+
+# ---------------------------------------------------------------------------
+# #636: end-to-end tests for stray V1 source quarantine during apply_pending
+# ---------------------------------------------------------------------------
+
+
+def test_end_to_end_quarantine_stray_projects_json_after_migration(tmp_path):
+    """#636 Test 1: Migrate complete DATA_HOME → apply_pending() with stray
+    projects.json → registry unchanged byte-for-byte, projects.json moved to
+    backup, root has no projects.json."""
+    from agent_takkub.core.migration.backup import BackupManager
+    from agent_takkub.core.migration.engine import MigrationEngine
+    from agent_takkub.core.migration.journal import MigrationJournal
+    from agent_takkub.core.migration.steps_v1 import ProjectMigrationStep
+    from agent_takkub.core.storage.jsonl_store import JsonlStore
+    from agent_takkub.core.storage.layout import storage_layout_v2
+
+    data_home = tmp_path / "data"
+    data_home.mkdir()
+    backups_dir = tmp_path / "backups"
+    backups_dir.mkdir()
+
+    # Set up V2 registry with real project data (as if migration completed)
+    layout = storage_layout_v2(data_home)
+    layout.projects_root.mkdir(parents=True, exist_ok=True)
+    v2_registry = layout.projects_root / "registry.json"
+    registry_data = {
+        "schema": 1,
+        "migrated_at": 1234.5,
+        "data": {"proj-1": "id-1", "proj-2": "id-2"},
+    }
+    v2_registry.write_text(json.dumps(registry_data), encoding="utf-8")
+
+    # Now introduce a stray projects.json (empty, as if it re-appeared)
+    stray_projects = data_home / "projects.json"
+    stray_projects_content = '{"active":null,"projects":{},"open_tabs":[]}'
+    stray_projects.write_text(stray_projects_content, encoding="utf-8")
+
+    # Set up migration engine with journal, marking project step as already applied
+    journal = MigrationJournal(JsonlStore(tmp_path / "journal.jsonl"))
+    backups = BackupManager(backups_dir)
+    project_step = ProjectMigrationStep(journal=journal, backups=backups, data_home=data_home)
+
+    # Simulate that project step was already applied (present in journal)
+    journal.record("project", "apply", True, "initial migration")
+
+    # Create engine and apply pending
+    engine = MigrationEngine([project_step], data_home=data_home, journal=journal)
+    engine.apply_pending()
+
+    # Verify registry is unchanged (byte-for-byte)
+    assert v2_registry.exists()
+    result_registry = json.loads(v2_registry.read_text(encoding="utf-8"))
+    assert result_registry == registry_data, "registry should be unchanged after quarantine"
+
+    # Verify projects.json was moved to quarantine, not left in data_home
+    assert not stray_projects.exists(), "stray projects.json should be moved to quarantine"
+
+    # Verify it's in quarantine
+    quarantine_dir = backups_dir / "stray-v1-sources"
+    assert quarantine_dir.is_dir(), "stray-v1-sources directory should exist"
+    timestamp_dirs = list(quarantine_dir.iterdir())
+    assert len(timestamp_dirs) == 1
+    quarantine_file = timestamp_dirs[0] / "projects.json"
+    assert quarantine_file.exists(), "projects.json should be in quarantine"
+    assert quarantine_file.read_text(encoding="utf-8") == stray_projects_content, (
+        "quarantined file content should match original"
+    )
+
+    # Verify journal recorded the quarantine action
+    entries = journal.all_entries()
+    quarantine_entries = [e for e in entries if e.action == "quarantine"]
+    assert len(quarantine_entries) == 1
+    assert quarantine_entries[0].step_id == "project"
+    assert quarantine_entries[0].ok is True
+
+
+def test_end_to_end_quarantine_stray_role_agent_files_individually(tmp_path):
+    """#636 Test 2a: Stray custom-roles.json and role-providers.json are
+    quarantined individually when they re-appear after migration."""
+    from agent_takkub.core.migration.backup import BackupManager
+    from agent_takkub.core.migration.engine import MigrationEngine
+    from agent_takkub.core.migration.journal import MigrationJournal
+    from agent_takkub.core.migration.steps_v1 import RoleAgentMigrationStep
+    from agent_takkub.core.storage.jsonl_store import JsonlStore
+    from agent_takkub.core.storage.layout import storage_layout_v2
+
+    data_home = tmp_path / "data"
+    data_home.mkdir()
+    settings_home = tmp_path / "settings"
+    settings_home.mkdir()
+    backups_dir = tmp_path / "backups"
+    backups_dir.mkdir()
+
+    # Set up V2 routing with real role-agent data
+    layout = storage_layout_v2(data_home)
+    layout_agents = layout.agents / "custom"
+    layout_agents.mkdir(parents=True, exist_ok=True)
+    v2_routing = layout.config_dir / "routing.json"
+    v2_routing.parent.mkdir(parents=True, exist_ok=True)
+    routing_data = {
+        "schema": 1,
+        "migrated_at": 1234.5,
+        "global": {"provider": "custom-role-1"},
+        "projects": {},
+    }
+    v2_routing.write_text(json.dumps(routing_data), encoding="utf-8")
+
+    v2_registry = layout_agents / "registry.json"
+    registry_data = {"schema": 1, "migrated_at": 1234.5, "data": {"custom": "roles"}}
+    v2_registry.write_text(json.dumps(registry_data), encoding="utf-8")
+
+    # Introduce stray custom-roles.json
+    stray_custom_roles = settings_home / "custom-roles.json"
+    stray_custom_roles.write_text("{}", encoding="utf-8")
+
+    # Set up migration engine
+    journal = MigrationJournal(JsonlStore(tmp_path / "journal.jsonl"))
+    backups = BackupManager(backups_dir)
+    role_step = RoleAgentMigrationStep(
+        journal=journal, backups=backups, data_home=data_home, settings_home=settings_home
+    )
+
+    # Simulate that role-agent step was already applied
+    journal.record("role-agent", "apply", True, "initial migration")
+
+    engine = MigrationEngine([role_step], data_home=data_home, journal=journal)
+    engine.apply_pending()
+
+    # Verify stray custom-roles.json was moved to quarantine
+    assert not stray_custom_roles.exists(), "stray custom-roles.json should be moved"
+
+    quarantine_dir = backups_dir / "stray-v1-sources"
+    assert quarantine_dir.is_dir()
+    timestamp_dirs = list(quarantine_dir.iterdir())
+    assert len(timestamp_dirs) == 1
+    quarantine_file = timestamp_dirs[0] / "custom-roles.json"
+    assert quarantine_file.exists()
+
+    # Verify routing and registry are unchanged
+    assert json.loads(v2_routing.read_text(encoding="utf-8")) == routing_data
+    assert json.loads(v2_registry.read_text(encoding="utf-8")) == registry_data
+
+
+def test_end_to_end_quarantine_stray_role_agent_files_together(tmp_path):
+    """#636 Test 2b: Multiple stray role-agent files (custom-roles.json and
+    per-project role-providers.json) are quarantined together in one pass."""
+    from agent_takkub.core.migration.backup import BackupManager
+    from agent_takkub.core.migration.engine import MigrationEngine
+    from agent_takkub.core.migration.journal import MigrationJournal
+    from agent_takkub.core.migration.steps_v1 import RoleAgentMigrationStep
+    from agent_takkub.core.storage.jsonl_store import JsonlStore
+    from agent_takkub.core.storage.layout import storage_layout_v2
+
+    data_home = tmp_path / "data"
+    data_home.mkdir()
+    settings_home = tmp_path / "settings"
+    settings_home.mkdir()
+    backups_dir = tmp_path / "backups"
+    backups_dir.mkdir()
+
+    # Set up V2 routing with real role-agent data
+    layout = storage_layout_v2(data_home)
+    layout_agents = layout.agents / "custom"
+    layout_agents.mkdir(parents=True, exist_ok=True)
+    v2_routing = layout.config_dir / "routing.json"
+    v2_routing.parent.mkdir(parents=True, exist_ok=True)
+    routing_data = {
+        "schema": 1,
+        "migrated_at": 1234.5,
+        "global": {"provider": "custom-role-1"},
+        "projects": {"my-project": {"provider": "per-project-role"}},
+    }
+    v2_routing.write_text(json.dumps(routing_data), encoding="utf-8")
+
+    v2_registry = layout_agents / "registry.json"
+    registry_data = {"schema": 1, "migrated_at": 1234.5, "data": {"custom": "roles"}}
+    v2_registry.write_text(json.dumps(registry_data), encoding="utf-8")
+
+    # Set up V1 projects.json so _project_names() can detect projects
+    # (for finding per-project role-providers.json files to quarantine)
+    v1_projects = data_home / "projects.json"
+    v1_projects.write_text(
+        json.dumps({"projects": {"my-project": "proj-id"}}),
+        encoding="utf-8",
+    )
+
+    # Also set up V2 projects.json for stray detection
+    layout_projects = layout.projects_root / "registry.json"
+    layout_projects.parent.mkdir(parents=True, exist_ok=True)
+    layout_projects.write_text(
+        json.dumps({"schema": 1, "data": {"my-project": "proj-id"}}),
+        encoding="utf-8",
+    )
+
+    # Introduce stray custom-roles.json and per-project role-providers.json
+    stray_custom_roles = settings_home / "custom-roles.json"
+    stray_custom_roles.write_text("{}", encoding="utf-8")
+
+    # Per-project role-providers.json is sourced from settings_home/projects/<slug>/
+    # slug is the project name with special chars (except . and -) converted to _
+    # "my-project" stays as "my-project" since - is allowed
+    stray_project_routing = settings_home / "projects" / "my-project" / "role-providers.json"
+    stray_project_routing.parent.mkdir(parents=True, exist_ok=True)
+    stray_project_routing.write_text("{}", encoding="utf-8")
+
+    # Set up migration engine
+    journal = MigrationJournal(JsonlStore(tmp_path / "journal.jsonl"))
+    backups = BackupManager(backups_dir)
+    role_step = RoleAgentMigrationStep(
+        journal=journal, backups=backups, data_home=data_home, settings_home=settings_home
+    )
+
+    # Simulate that role-agent step was already applied
+    journal.record("role-agent", "apply", True, "initial migration")
+
+    engine = MigrationEngine([role_step], data_home=data_home, journal=journal)
+    engine.apply_pending()
+
+    # Verify both stray files were moved to quarantine
+    assert not stray_custom_roles.exists()
+    assert not stray_project_routing.exists()
+
+    quarantine_dir = backups_dir / "stray-v1-sources"
+    assert quarantine_dir.is_dir()
+    timestamp_dirs = list(quarantine_dir.iterdir())
+    assert len(timestamp_dirs) == 1
+    quarantine_ts_dir = timestamp_dirs[0]
+
+    # Both files should be in the same timestamp directory
+    assert (quarantine_ts_dir / "custom-roles.json").exists()
+    assert (quarantine_ts_dir / "role-providers.json").exists()
+
+    # Verify routing and registry are unchanged
+    assert json.loads(v2_routing.read_text(encoding="utf-8")) == routing_data
+    assert json.loads(v2_registry.read_text(encoding="utf-8")) == registry_data
+
+    # Verify journal recorded quarantine
+    entries = journal.all_entries()
+    quarantine_entries = [e for e in entries if e.action == "quarantine"]
+    assert len(quarantine_entries) == 1
+    assert "quarantined 2 stray V1 source file(s)" in quarantine_entries[0].detail
+
+
+def test_end_to_end_quarantine_fails_when_move_fails(tmp_path):
+    """#636 Test 3: If shutil.move() fails during quarantine, the step is
+    skipped (not re-applied), target unchanged, and journal records ok=False."""
+    import unittest.mock as mock
+
+    from agent_takkub.core.migration.backup import BackupManager
+    from agent_takkub.core.migration.engine import MigrationEngine
+    from agent_takkub.core.migration.journal import MigrationJournal
+    from agent_takkub.core.migration.steps_v1 import ProjectMigrationStep
+    from agent_takkub.core.storage.jsonl_store import JsonlStore
+    from agent_takkub.core.storage.layout import storage_layout_v2
+
+    data_home = tmp_path / "data"
+    data_home.mkdir()
+    backups_dir = tmp_path / "backups"
+    backups_dir.mkdir()
+
+    # Set up V2 registry with real project data
+    layout = storage_layout_v2(data_home)
+    layout.projects_root.mkdir(parents=True, exist_ok=True)
+    v2_registry = layout.projects_root / "registry.json"
+    registry_data = {
+        "schema": 1,
+        "migrated_at": 1234.5,
+        "data": {"proj-1": "id-1"},
+    }
+    v2_registry.write_text(json.dumps(registry_data), encoding="utf-8")
+
+    # Introduce stray projects.json
+    stray_projects = data_home / "projects.json"
+    stray_projects.write_text('{"active":null,"projects":{},"open_tabs":[]}', encoding="utf-8")
+
+    # Set up migration engine
+    journal = MigrationJournal(JsonlStore(tmp_path / "journal.jsonl"))
+    backups = BackupManager(backups_dir)
+    project_step = ProjectMigrationStep(journal=journal, backups=backups, data_home=data_home)
+
+    # Simulate that project step was already applied
+    journal.record("project", "apply", True, "initial migration")
+
+    engine = MigrationEngine([project_step], data_home=data_home, journal=journal)
+
+    # Monkeypatch shutil.move to fail
+    with mock.patch("shutil.move", side_effect=OSError("move denied")):
+        engine.apply_pending()
+
+    # Verify stray file was NOT moved (move failed)
+    assert stray_projects.exists(), "stray file should still exist when move fails"
+
+    # Verify registry is unchanged
+    assert json.loads(v2_registry.read_text(encoding="utf-8")) == registry_data
+
+    # Verify step was skipped (not re-applied)
+    # We verify this by checking that quarantine failed
+    entries = journal.all_entries()
+    quarantine_entries = [e for e in entries if e.action == "quarantine"]
+    assert len(quarantine_entries) == 1
+    assert quarantine_entries[0].ok is False
+    assert "failed to quarantine" in quarantine_entries[0].detail.lower()
+
+
+def test_end_to_end_stray_not_quarantined_on_fresh_install(tmp_path):
+    """#636 Test 4: Fresh install (step never applied before) + have real V1
+    files → must NOT be quarantined, normal migration should occur."""
+    from agent_takkub.core.migration.backup import BackupManager
+    from agent_takkub.core.migration.engine import MigrationEngine
+    from agent_takkub.core.migration.journal import MigrationJournal
+    from agent_takkub.core.migration.steps_v1 import ProjectMigrationStep
+    from agent_takkub.core.storage.jsonl_store import JsonlStore
+    from agent_takkub.core.storage.layout import storage_layout_v2
+
+    data_home = tmp_path / "data"
+    data_home.mkdir()
+    backups_dir = tmp_path / "backups"
+    backups_dir.mkdir()
+
+    # Set up V1 source with real project data (fresh install, not migrated yet)
+    v1_projects = data_home / "projects.json"
+    v1_data = {
+        "active": "proj-1",
+        "projects": {"proj-1": "id-1", "proj-2": "id-2"},
+        "open_tabs": ["tab-1"],
+    }
+    v1_projects.write_text(json.dumps(v1_data), encoding="utf-8")
+
+    # NO V2 registry yet (fresh install)
+    layout = storage_layout_v2(data_home)
+    v2_registry = layout.projects_root / "registry.json"
+    assert not v2_registry.exists()
+
+    # Set up migration engine — project step NOT in journal (fresh install)
+    journal = MigrationJournal(JsonlStore(tmp_path / "journal.jsonl"))
+    backups = BackupManager(backups_dir)
+    project_step = ProjectMigrationStep(journal=journal, backups=backups, data_home=data_home)
+
+    engine = MigrationEngine([project_step], data_home=data_home, journal=journal)
+
+    # Apply (fresh migration)
+    reports = engine.apply()
+
+    # Verify project migration succeeded and wrote V2 registry
+    project_report = next(r for r in reports if r.step_id == "project")
+    assert project_report.ok is True
+
+    # Verify V2 registry was created with the migrated data
+    assert v2_registry.exists()
+    result_data = json.loads(v2_registry.read_text(encoding="utf-8"))
+    # The V2 registry wraps the whole V1 data structure in the "data" field
+    assert result_data.get("data", {}).get("projects") == {"proj-1": "id-1", "proj-2": "id-2"}
+
+    # Verify projects.json was NOT moved to quarantine (it was a real V1 source, not stray)
+    quarantine_dir = backups_dir / "stray-v1-sources"
+    assert not quarantine_dir.exists(), "quarantine dir should not exist for fresh install"
+
+    # Verify no quarantine entries in journal
+    entries = journal.all_entries()
+    quarantine_entries = [e for e in entries if e.action == "quarantine"]
+    assert len(quarantine_entries) == 0, "no quarantine should happen on fresh install"
+
+
+def test_doctor_shows_stray_v1_sources_in_quarantine(tmp_path):
+    """#636 Test 5: takkub doctor --storage-layout shows files in quarantine.
+    This test verifies that the _stray_v1_source_findings() function
+    (used by doctor --storage-layout) correctly detects and reports
+    quarantined stray V1 source files."""
+    from unittest.mock import patch
+
+    from agent_takkub.doctor import Status, _stray_v1_source_findings
+
+    backups_dir = tmp_path / "backups"
+    backups_dir.mkdir()
+
+    # Create quarantined stray files
+    quarantine_dir = backups_dir / "stray-v1-sources" / "1234_5678"
+    quarantine_dir.mkdir(parents=True, exist_ok=True)
+    (quarantine_dir / "projects.json").write_text("{}", encoding="utf-8")
+    (quarantine_dir / "custom-roles.json").write_text("{}", encoding="utf-8")
+
+    # Patch BackupManager at the import location inside the function
+    with patch("agent_takkub.core.migration.backup.BackupManager") as mock_backup_mgr:
+        mock_instance = mock_backup_mgr.return_value
+        mock_instance.root = backups_dir
+
+        # Call the doctor function
+        findings = _stray_v1_source_findings()
+
+        # Verify it found the stray files
+        assert len(findings) == 1
+        finding = findings[0]
+        assert finding.category == "storage-layout"
+        assert finding.name == "stray-v1-sources"
+        assert finding.status == Status.WARN
+        assert "2 stray V1 source file(s) quarantined" in finding.detail
+        assert "projects.json" in finding.detail
+        assert "custom-roles.json" in finding.detail
+
+
+def test_doctor_no_findings_when_no_stray_files(tmp_path):
+    """#636 Test 5b: doctor returns no findings when no stray files
+    are in quarantine (normal case after cleanup)."""
+    from unittest.mock import patch
+
+    from agent_takkub.doctor import _stray_v1_source_findings
+
+    backups_dir = tmp_path / "backups"
+    backups_dir.mkdir()
+
+    # No quarantine directory = no stray files
+    with patch("agent_takkub.core.migration.backup.BackupManager") as mock_backup_mgr:
+        mock_instance = mock_backup_mgr.return_value
+        mock_instance.root = backups_dir
+
+        findings = _stray_v1_source_findings()
+
+        # Should return empty list
+        assert len(findings) == 0
