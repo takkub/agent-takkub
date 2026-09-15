@@ -94,15 +94,34 @@ class TestAssignRejectsPresetGovernedRole:
             ok, _ = orch.assign("reviewer", cwd="/web", task="review", project=TEST_PROJECT)
         assert ok is True
 
-    def test_providers_and_shell_never_blocked(self, orch: Orchestrator) -> None:
+    def test_solo_lead_blocks_providers_and_critic_but_not_shell(self, orch: Orchestrator) -> None:
+        """solo-lead ("ทำเอง") spawns no teammate: providers and critic are
+        rejected at assign() too, only the user's own `shell` passes."""
         team_preset.set_current("solo-lead", TEST_PROJECT)
+        with (
+            patch.object(orch, "spawn", return_value=(True, "spawned")),
+            patch.object(orch, "_send_when_ready"),
+        ):
+            ok, _ = orch.assign("shell", cwd="/web", task="x", project=TEST_PROJECT)
+        assert ok is True, "shell is the user's terminal, never gated"
+        for role in ("codex", "gemini", "critic"):
+            with (
+                patch.object(orch, "spawn", return_value=(True, "spawned")),
+                patch.object(orch, "_send_when_ready"),
+            ):
+                ok, msg = orch.assign(role, cwd="/web", task="x", project=TEST_PROJECT)
+            assert ok is False, f"{role} must be gated under solo-lead"
+            assert "team preset" in msg
+
+    def test_providers_and_shell_allowed_under_full(self, orch: Orchestrator) -> None:
+        team_preset.set_current("full", TEST_PROJECT)
         for role in ("codex", "gemini", "shell", "critic"):
             with (
                 patch.object(orch, "spawn", return_value=(True, "spawned")),
                 patch.object(orch, "_send_when_ready"),
             ):
                 ok, _ = orch.assign(role, cwd="/web", task="x", project=TEST_PROJECT)
-            assert ok is True, f"{role} should never be gated by team preset"
+            assert ok is True, f"{role} should not be gated under the full preset"
 
 
 class TestAssignTeamOverride:
