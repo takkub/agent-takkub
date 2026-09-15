@@ -1592,7 +1592,9 @@ def _worktree_role_owns(path: str | None, role: str | None) -> bool:
     if not base:
         return False
     prefix = f"{base}-"
-    norm = path.replace("\\", "/")
+    # Case-insensitive: Windows paths can reach here in either case even
+    # though `base` (from `normalise_role`) is always lowercased already.
+    norm = path.replace("\\", "/").lower()
     return any(seg == base or seg.startswith(prefix) for seg in norm.split("/") if seg)
 
 
@@ -1646,13 +1648,37 @@ def _explicit_git_target(cmd: str) -> str | None:
 
 def _in_worktree(cmd: str, cwd: str | None, role: str | None = None) -> bool:
     target = _explicit_git_target(cmd)
-    if target and _ABS_PATH_RE.match(target):
-        return _worktree_role_owns(target, role)
+    if target:
+        # #609 round 3b: a RELATIVE target (bare `.`, `..`, `../sibling`, a
+        # subdir, …) can't be judged against its own text — `-C ..` and
+        # `-C .` both look "relative" but land in very different places.
+        # Resolve it against cwd the same way the shell/git would, THEN
+        # check ownership of the resolved path — not the raw cwd, which
+        # would silently ignore a `..` that walks the target back OUT of
+        # this role's checkout (proven live: `git -C .. restore .` from a
+        # worktree cwd reached the shared parent `worktrees/<project>/`
+        # dir — every role's checkouts live under it — while the old cwd
+        # check granted the carve-out outright).
+        resolved = target if _ABS_PATH_RE.match(target) else _resolve_relative_target(target, cwd)
+        if resolved is not None:
+            return _worktree_role_owns(os.path.normpath(resolved), role)
+        # Relative target, no cwd to resolve it against: unresolvable, so
+        # fall through to the cwd-based checks below rather than guessing —
+        # same conservative posture as the config-override/GIT_DIR checks.
     if _is_worktree_cwd(cwd):
         return _worktree_role_owns(cwd, role)
     if _command_targets_worktree(cmd):
         return _worktree_role_owns(target or cmd, role)
     return False
+
+
+def _resolve_relative_target(target: str, cwd: str | None) -> str | None:
+    """Resolve a RELATIVE `-C`/`--git-dir`/`--work-tree`/`cd` *target*
+    against *cwd*, collapsing `.`/`..` — `None` when *cwd* is unknown and
+    the target can't be resolved. See `_in_worktree`."""
+    if not cwd:
+        return None
+    return os.path.normpath(os.path.join(cwd, target))
 
 
 # #609 round 3: `GIT_DIR`/`GIT_WORK_TREE`/`GIT_COMMON_DIR`/`GIT_INDEX_FILE`

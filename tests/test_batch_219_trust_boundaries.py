@@ -77,6 +77,36 @@ def test_git_dir_work_tree_flags_do_not_bypass_restore(command):
     assert not verdict.allowed, command
 
 
+# #609 round 3b: a RELATIVE `-C` target used to be judged against the
+# caller's raw cwd, ignoring how far the target itself walks away from it —
+# `git -C .. restore .` from inside `frontend-123`'s own worktree lands in
+# the shared parent `worktrees/proj/` dir (every role's checkouts live
+# under it) but used to get the worktree carve-out outright because cwd
+# alone looked owned; the `..` in the target was never resolved.
+@pytest.mark.parametrize(
+    "command",
+    [
+        "git -C .. restore .",
+        "git -C ../backend-123 restore .",
+    ],
+)
+def test_relative_dash_c_walking_outside_own_worktree_is_denied(command):
+    verdict = pane_guard.classify(command, "frontend", cwd="C:/data/worktrees/proj/frontend-123")
+    assert not verdict.allowed, command
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "git -C . restore .",
+        "git -C ./sub restore .",
+    ],
+)
+def test_relative_dash_c_staying_inside_own_worktree_is_allowed(command):
+    verdict = pane_guard.classify(command, "frontend", cwd="C:/data/worktrees/proj/frontend-123")
+    assert verdict.allowed, command
+
+
 # #609 round 3: a `GIT_DIR=`/`GIT_WORK_TREE=`/etc override — via a bare
 # prefix, `env`, cmd.exe `set`, or PowerShell `$env:` — points git at a
 # different repo entirely, but the caller's cwd (its own, correctly-owned
