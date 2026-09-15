@@ -4,6 +4,33 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 
 ## [vNEXT]
 
+### Added (เพิ่ม)
+
+- **ตัวออกรายงานส่วนกลาง 3 แบบ (#626)** — `takkub report build --type customer|dev|boss --content <dir> [--out]`
+  ใช้ได้ทุก provider · template/lightbox/เช็กมือถืออยู่ที่ `assets/report/` แล้ว stage เข้า wheel เป็น `_assets/report/`
+  · customer มี lint คำเทคนิค/บั๊ก · ภาพ JPEG ≤1440px ฝัง base64 + กันภาพซ้ำ · กฎเนื้อหาอยู่ใน `docs/lead/report-publish.md`
+
+### Fixed (แก้)
+
+- **`python -m agent_takkub <คำสั่ง>` บูต cockpit ซ้อนแล้วฆ่า instance ที่รันอยู่ (#632)** — เหตุจริง: pane ใน dev รันด้วย
+  Python ที่มี agent-takkub เก่าค้าง → บูตชี้ข้อมูล prod → single-instance auto-kill ฆ่า prod · ตอนนี้ `__main__`
+  เปิด app เป็นค่าเริ่มต้นและส่งไป CLI เฉพาะ subcommand ที่ parser รู้จัก · instance ใหม่เช็คว่า owner เดิมยังตอบ
+  ping ก่อน auto-kill/เขียน port file (ยังตอบ = ปฏิเสธการบูต) · specialist ถูก guard ห้ามรัน `python -m agent_takkub`
+- **migrate เอาไฟล์ V1 ว่างที่โผล่มาทีหลังไปทับ V2 registry/routing ได้ (#634)** — ไฟล์ V1 ที่กลับมาหลัง archive ถูกย้าย
+  เข้า `backups/stray-v1-sources/` + บันทึก journal · ย้ายไม่สำเร็จ = ไม่ re-apply step นั้น
+- **Lead guard (#628/#625)** — ชื่อแบบ snake_case/camelCase/kebab (`check_auth_token`, `isAdminUser`) ถูกจัดเป็น deep ถูกต้อง
+  · ไฟล์นอก project root (scratchpad/temp) ไม่ถูก deny เพราะคำในเนื้อหา · lockfile/manifest ยัง deny ทุกที่
+- **notice ผิดตอนระบบปิด-เปิด pane เอง (#630)** — auth-degrade/recovery ไม่ยิง `close-undelivered` และ "done แต่ไม่มี commit"
+  อีก · แจ้ง Lead ข้อความเดียวหลัง pane ใหม่รับงานแล้ว
+- **ปิด pane หลัง done เจอ "ยังมี subprocess" ทุกครั้ง (#619)** — process ของ CLI เอง (claude/codex+codex-code-mode-host/
+  agy/opencode/kimi/cursor) นับเป็น scaffolding · ใช้ provider ที่ pane spawn จริงแทนค่าตอนปิด
+- **idle `/compact` ไม่เคยทำงานเพราะ notice ของ cockpit รีเซ็ตนาฬิกา (#614)** · **`takkub status` แสดง screenshot ของ role อื่น (#629)**
+  — นับเฉพาะภาพหลังเวลา assign ของ pane นั้น
+
+### Changed (เปลี่ยน)
+
+- ruff 0.16.6 → 0.16.7 ทั้ง pyproject และ pre-commit (#623)
+
 ## [v2.1.9] - 2026-09-15
 
 ### Added (เพิ่ม)
