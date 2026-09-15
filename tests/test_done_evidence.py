@@ -1136,7 +1136,7 @@ class TestEvidenceDedupGate:
 
     def test_same_batch_duplicate_rejected(self, orch, tmp_path):
         assign_ts = time.time() - 60
-        shots = _shot_dir(tmp_path, "proj")
+        shots = _shot_dir(tmp_path, "proj", sub="qa")
         payload = b"\x89PNG\r\n\x1a\n" + b"\x00" * (20 * 1024)
         a = shots / "r3-a.png"
         b = shots / "r3-b.png"
@@ -1159,7 +1159,7 @@ class TestEvidenceDedupGate:
         day's export dir, or simply cleaned up), so only history catches
         it."""
         assign_ts = time.time() - 60
-        shots = _shot_dir(tmp_path, "proj")
+        shots = _shot_dir(tmp_path, "proj", sub="qa")
         payload = b"\x89PNG\r\n\x1a\n" + b"\x00" * (20 * 1024)
         first = shots / "A7-delete-rank-inuse-error.png"
         first.write_bytes(payload)
@@ -1184,7 +1184,7 @@ class TestEvidenceDedupGate:
 
     def test_distinct_new_evidence_across_calls_not_rejected(self, orch, tmp_path):
         assign_ts = time.time() - 60
-        shots = _shot_dir(tmp_path, "proj")
+        shots = _shot_dir(tmp_path, "proj", sub="qa")
         import os
 
         first = shots / "before.png"
@@ -1215,7 +1215,7 @@ class TestEvidenceDedupGate:
 
     def test_stale_cited_screenshot_rejected(self, orch, tmp_path):
         assign_ts = time.time() - 60
-        shots = _shot_dir(tmp_path, "proj")
+        shots = _shot_dir(tmp_path, "proj", sub="qa")
         stale = shots / "old-shot.png"
         _write_real_png(stale, extra_bytes=10 * 1024)
         import os
@@ -1240,7 +1240,7 @@ class TestEvidenceDedupGate:
         assign_ts = time.time() - 60
         orch._pane_state["proj::qa"] = PaneState(assign_ts=assign_ts)
 
-        shots = _shot_dir(tmp_path, "proj")
+        shots = _shot_dir(tmp_path, "proj", sub="qa")
         payload = b"\x89PNG\r\n\x1a\n" + b"\x00" * (20 * 1024)
         a = shots / "R3-delete-rank-inuse.png"
         b = shots / "A7-delete-rank-inuse-error.png"
@@ -1266,7 +1266,7 @@ class TestEvidenceDedupGate:
         assign_ts = time.time() - 60
         orch._pane_state["proj::qa"] = PaneState(assign_ts=assign_ts)
 
-        shots = _shot_dir(tmp_path, "proj")
+        shots = _shot_dir(tmp_path, "proj", sub="qa")
         payload = b"\x89PNG\r\n\x1a\n" + b"\x00" * (20 * 1024)
         a = shots / "one.png"
         b = shots / "two.png"
@@ -1280,6 +1280,109 @@ class TestEvidenceDedupGate:
         ok, _msg = orch.done("qa", note="done", project=proj, force=True)
 
         assert ok is True
+
+    def test_shard_pane_does_not_inherit_base_role_history(self, orch, tmp_path):
+        """#610 fix-loop (M2/a): a bare `(project, base_role)` history key
+        stripped the shard, so qa#2's confirmation shot got rejected as
+        'reuse' of plain qa's completely separate history. The history key
+        must include the role AS GIVEN (shard included) and the task's
+        assign_ts, so a different shard/task never sees a stranger's prior
+        digests."""
+        shots = _shot_dir(tmp_path, "proj", sub="qa")  # qa/qa#2 share one dir
+        payload = b"\x89PNG\r\n\x1a\n" + b"\x00" * (20 * 1024)
+        import os
+
+        assign_ts_qa = time.time() - 200
+        old = shots / "qa-old.png"
+        old.write_bytes(payload)
+        os.utime(old, (assign_ts_qa + 5, assign_ts_qa + 5))
+        assert orch._evidence_dedup_gate("proj", "qa", assign_ts_qa, "first") is None
+
+        assign_ts_qa2 = time.time() - 60
+        new = shots / "qa2-confirm.png"  # same bytes, different name, later task
+        new.write_bytes(payload)
+        os.utime(new, (assign_ts_qa2 + 5, assign_ts_qa2 + 5))
+
+        msg = orch._evidence_dedup_gate("proj", "qa#2", assign_ts_qa2, "confirm unchanged")
+        assert msg is None
+
+    def test_failed_report_never_rejected_but_still_recorded(self, orch, tmp_path):
+        """#610 fix-loop (issue #593): a FAILED/BLOCKED report must never be
+        eaten by this gate — its whole point is surfacing a problem. The
+        would-be rejection becomes a warning, and the evidence is still
+        hashed/recorded so a LATER legitimate done() (allow_reject=True) can
+        still catch real reuse against it."""
+        assign_ts = time.time() - 60
+        shots = _shot_dir(tmp_path, "proj", sub="qa")
+        payload = b"\x89PNG\r\n\x1a\n" + b"\x00" * (20 * 1024)
+        a = shots / "r3-a.png"
+        b = shots / "r3-b.png"
+        a.write_bytes(payload)
+        b.write_bytes(payload)
+        import os
+
+        os.utime(a, (assign_ts + 10, assign_ts + 10))
+        os.utime(b, (assign_ts + 11, assign_ts + 11))
+
+        msg = orch._evidence_dedup_gate("proj", "qa", assign_ts, "bug found", allow_reject=False)
+
+        assert msg is None
+        assert orch._last_evidence_dedup_warning is not None
+        assert "#610" in orch._last_evidence_dedup_warning
+
+    def test_done_fail_with_duplicate_evidence_is_not_rejected(self, orch, tmp_path, monkeypatch):
+        """End-to-end: `done(failed=True, ...)` completes even when its
+        evidence is a same-batch duplicate — the report reaches Lead instead
+        of being silently rejected (#593)."""
+        monkeypatch.setattr(orch_mod, "active_project", lambda: ("proj", {}))
+        _mock_done(orch)
+        proj = "proj"
+        _register_pane(orch, LEAD.name, proj, _make_alive_session())
+        _register_pane(orch, "qa", proj, _make_alive_session())
+        assign_ts = time.time() - 60
+        orch._pane_state["proj::qa"] = PaneState(assign_ts=assign_ts)
+
+        shots = _shot_dir(tmp_path, "proj", sub="qa")
+        payload = b"\x89PNG\r\n\x1a\n" + b"\x00" * (20 * 1024)
+        a = shots / "R3-delete-rank-inuse.png"
+        b = shots / "A7-delete-rank-inuse-error.png"
+        a.write_bytes(payload)
+        b.write_bytes(payload)
+        import os
+
+        os.utime(a, (assign_ts + 5, assign_ts + 5))
+        os.utime(b, (assign_ts + 6, assign_ts + 6))
+
+        ok, _msg = orch.done("qa", note="bug repros", project=proj, failed=True)
+
+        assert ok is True
+        # The would-be rejection was folded into the note and consumed, not
+        # left dangling on the instance for the next unrelated done() call.
+        assert orch._last_evidence_dedup_warning is None
+
+    def test_uncited_other_role_own_subdir_never_rejects(self, orch, tmp_path):
+        """#610 fix-loop (M2/b): the gate never falls back to a whole-project
+        scan — only this pane's own role subdir, or files the note cites by
+        name. Another role's fresh duplicate screenshots must never bleed
+        into this role's dedup check just because the assign windows
+        overlapped (a reviewer with nothing of its own was rejected over
+        QA's dup)."""
+        assign_ts = time.time() - 60
+        qa_shots = _shot_dir(tmp_path, "proj", sub="qa")
+        payload = b"\x89PNG\r\n\x1a\n" + b"\x00" * (20 * 1024)
+        a = qa_shots / "qa-a.png"
+        b = qa_shots / "qa-b.png"
+        a.write_bytes(payload)
+        b.write_bytes(payload)
+        import os
+
+        os.utime(a, (assign_ts + 5, assign_ts + 5))
+        os.utime(b, (assign_ts + 6, assign_ts + 6))
+
+        msg = orch._evidence_dedup_gate(
+            "proj", "reviewer", assign_ts, "Reviewed Python logic; targeted tests passed"
+        )
+        assert msg is None
 
     def test_digest_shown_in_scan_done_evidence_output(self, orch, tmp_path):
         """Checklist item: Lead-facing evidence line carries a short digest

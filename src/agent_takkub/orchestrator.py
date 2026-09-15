@@ -6036,21 +6036,51 @@ class Orchestrator(
         return "⚠ no evidence cited"
 
     def _evidence_dedup_gate(
-        self, project_ns: str, from_role: str, assign_ts: float, note: str
+        self,
+        project_ns: str,
+        from_role: str,
+        assign_ts: float,
+        note: str,
+        allow_reject: bool = True,
     ) -> str | None:
         """Reject `done()` when its evidence reuses image bytes done() has
-        already seen for this (project, role) — issue #610. A live incident:
-        QA's retest `done()` cited a screenshot that was byte-identical to a
-        PRE-fix failure screenshot from an earlier report on the same task,
-        and Lead only caught it by manually diffing md5 sums. #182's dedup
-        only compares files WITHIN one done() call; this compares against
-        the previous call's evidence too, and actually blocks completion
-        rather than just annotating the note. Uses sha256 (not #182's
-        display-only md5) since this result gates whether the report is
-        accepted at all. Returns a Thai rejection message, or None to let
-        done() proceed. `[no-ui]` in the note opts out exactly like
-        `ui_evidence_gate` (#433) — no screenshots expected, nothing to
-        dedup."""
+        already seen for THIS SAME TASK (project, role-with-shard, assign_ts)
+        — issue #610. A live incident: QA's retest `done()` cited a
+        screenshot that was byte-identical to a PRE-fix failure screenshot
+        from an earlier report on the same task, and Lead only caught it by
+        manually diffing md5 sums. #182's dedup only compares files WITHIN
+        one done() call; this compares against the previous call's evidence
+        too, and actually blocks completion rather than just annotating the
+        note. Uses sha256 (not #182's display-only md5) since this result
+        gates whether the report is accepted at all. Returns a Thai
+        rejection message, or None to let done() proceed. `[no-ui]` in the
+        note opts out exactly like `ui_evidence_gate` (#433) — no
+        screenshots expected, nothing to dedup.
+
+        `allow_reject=False` (#610 fix-loop, issue #593) downgrades every
+        would-be rejection to a warning left on `self._last_evidence_dedup_warning`
+        for the caller to fold into the note instead — used for FAILED/BLOCKED
+        reports, whose whole point is surfacing a problem: a report that
+        found a bug must never itself get eaten by this gate. Evidence is
+        still hashed and recorded either way, so a later legitimate `done()`
+        can still be compared against a failed report's screenshot (the
+        original #610 incident was exactly that pairing).
+
+        #610 fix-loop (M2): the scan is scoped to this pane's OWN role
+        subdir only (`<artifacts_dir>/<base_role>/`) — never the
+        whole-project fallback `_scan_done_evidence` uses for *display*. A
+        reviewer with an empty subdir must never be rejected over another
+        role's (e.g. QA's) fresh duplicate screenshots just because the
+        assign windows overlapped; only files the note itself cites, or
+        files this pane wrote into its own subdir, are ever compared.
+
+        A digest match against a DIFFERENT task's history (same role, older
+        assign_ts) is never a hard reject — a genuinely re-rendered
+        "nothing changed" screenshot can land on the exact same bytes as a
+        prior task's capture by coincidence, and that is legitimate
+        evidence. It is folded into `_last_evidence_dedup_warning` instead so
+        Lead can eyeball whether it was actually retaken."""
+        self._last_evidence_dedup_warning = None
         if UI_NO_UI_MARKER in (note or "").lower():
             return None
         if assign_ts <= 0:
@@ -6062,43 +6092,70 @@ class Orchestrator(
         now = time.time()
         today = datetime.now().strftime("%Y-%m-%d")
         artifacts_dir = RUNTIME_DIR / "exports" / today / project_ns
+        role_dir = artifacts_dir / base_role
 
-        fresh = self._find_evidence_files(artifacts_dir / base_role, assign_ts, now)
-        shared = False
-        if not fresh and base_role in _EVIDENCE_WARN_ROLES:
-            fresh = self._find_evidence_files(artifacts_dir, assign_ts, now)
-            shared = True
+        warnings: list[str] = []
+
+        def reject_or_warn(msg: str) -> str | None:
+            if allow_reject:
+                return msg
+            warnings.append(msg.replace("ปฏิเสธ done: ", "⚠ ", 1))
+            return None
+
+        fresh = self._find_evidence_files(role_dir, assign_ts, now)
 
         # Note cites a screenshot by name but the actual file on disk
         # predates this task's assign_ts (a copy of an old capture, mtime
         # untouched) — reject with a specific reason rather than letting it
         # silently fall through to the generic "no evidence cited" warning.
+        # Scoped to this pane's own subdir only, same as `fresh` above.
         cited = screenshot_paths_in_note(note)
         if cited:
             fresh_names = {p.name for _, p, _ in fresh}
-            stale_all = self._find_evidence_files(artifacts_dir / base_role, 0.0, now)
-            if not stale_all and shared:
-                stale_all = self._find_evidence_files(artifacts_dir, 0.0, now)
+            stale_all = self._find_evidence_files(role_dir, 0.0, now)
             stale_by_name = {p.name: mt for mt, p, _ in stale_all if mt < assign_ts}
             for token in cited:
                 base = pathlib.PurePosixPath(token.replace("\\", "/")).name
                 if base in fresh_names or base not in stale_by_name:
                     continue
-                return (
+                result = reject_or_warn(
                     f"ปฏิเสธ done: หลักฐานที่อ้างถึง '{base}' เป็นไฟล์ที่มี mtime "
                     "**ก่อน**เวลา assign งานนี้ (ไฟล์เก่ากว่างาน ไม่ใช่ภาพที่ถ่ายใหม่สำหรับ "
                     "task นี้) — ถ่ายภาพใหม่แล้วอ้างไฟล์ใหม่ (issue #610)"
                 )
+                if result:
+                    return result
 
         if not fresh:
+            if warnings:
+                self._last_evidence_dedup_warning = "\n".join(warnings)
             return None
 
         history = getattr(self, "_evidence_digest_history", None)
         if not isinstance(history, dict):
             history = {}
             self._evidence_digest_history = history
-        hist_key = (project_ns, base_role)
+        # M2/a (#610 fix-loop): key on the role AS GIVEN — shard included,
+        # so qa#2 never inherits qa#1's history — and on `assign_ts`, which
+        # `_assign_dispatch` bumps on every fresh assignment. A bare
+        # `(project, base_role)` key (the pre-fix-loop shape) let qa#2 get
+        # rejected over qa#1's evidence, and never reset across a task
+        # boundary so a still-valid "unchanged" screenshot re-cited in a
+        # brand-new task read as reuse of the old one.
+        hist_key = (project_ns, from_role, assign_ts)
         prior = history.get(hist_key) or {}
+
+        role_history = getattr(self, "_evidence_role_history", None)
+        if not isinstance(role_history, dict):
+            role_history = {}
+            self._evidence_role_history = role_history
+        role_key = (project_ns, from_role)
+        prev_task = role_history.get(role_key)
+        cross_task_prior = (
+            prev_task["digests"]
+            if prev_task is not None and prev_task.get("assign_ts") != assign_ts
+            else {}
+        )
 
         seen: dict[str, pathlib.Path] = {}
         for _, p, size in fresh:
@@ -6107,11 +6164,14 @@ class Orchestrator(
                 continue
             earlier_in_batch = seen.get(digest)
             if earlier_in_batch is not None:
-                return (
+                result = reject_or_warn(
                     f"ปฏิเสธ done: หลักฐาน '{p.name}' เหมือนกับ '{earlier_in_batch.name}' "
                     f"ทุกไบต์ (sha256 #{digest[:8]}) ในชุดเดียวกัน — ไม่ใช่ภาพคนละสถานะจริง "
                     "ถ่ายใหม่ให้ต่างกัน (issue #610)"
                 )
+                if result:
+                    return result
+                continue
             seen[digest] = p
             prior_name = prior.get(digest)
             # Only a DIFFERENT filename reusing these bytes is suspect — the
@@ -6120,16 +6180,31 @@ class Orchestrator(
             # calls (e.g. a --fail then a later real done citing the same
             # unchanged shot) is the same valid evidence, not reuse.
             if prior_name is not None and prior_name != p.name:
-                return (
+                result = reject_or_warn(
                     f"ปฏิเสธ done: หลักฐาน '{p.name}' (sha256 #{digest[:8]}) เหมือนทุกไบต์กับ "
                     f"'{prior_name}' ที่เคยแนบใน done/progress ก่อนหน้าของงานนี้ — ถ้าแก้จริงแล้ว "
                     "ต้องถ่ายภาพใหม่ ไม่ใช่ส่งไฟล์เดิมซ้ำ (issue #610)"
                 )
+                if result:
+                    return result
+                continue
+            cross_name = cross_task_prior.get(digest)
+            if cross_name is not None and cross_name != p.name:
+                warnings.append(
+                    f"⚠ หลักฐาน '{p.name}' (sha256 #{digest[:8]}) เหมือนทุกไบต์กับ "
+                    f"'{cross_name}' จาก task ก่อนหน้าของ role นี้ — ตรวจว่าถ่ายใหม่จริง "
+                    "(issue #610)"
+                )
 
         # No reject — remember this batch's digests so the NEXT done()/
-        # progress() on this (project, role) can be compared against it.
-        # "ล่าสุด" per the issue: replace, don't accumulate forever.
+        # progress() on this (project, role, assign_ts) can be compared
+        # against it, and as this role's "last task" snapshot for the
+        # cross-task warning above. "ล่าสุด" per the issue: replace, don't
+        # accumulate forever.
         history[hist_key] = {h: p.name for h, p in seen.items()}
+        role_history[role_key] = {"assign_ts": assign_ts, "digests": dict(history[hist_key])}
+        if warnings:
+            self._last_evidence_dedup_warning = "\n".join(warnings)
         return None
 
     @staticmethod
@@ -6745,18 +6820,29 @@ class Orchestrator(
                 return False, _gate_msg
 
         # #610: reject a report whose evidence reuses image bytes done()
-        # already saw for this (project, role) — a same-batch duplicate
-        # filed under two names, a stale copy of an old failure screenshot,
-        # or a note citing a screenshot that predates this task's assign_ts.
-        # Runs for failed/blocked reports too (misleading evidence is
-        # misleading regardless of outcome) — `--force` is the one escape
-        # hatch, same as every other done() gate above.
+        # already saw for this (project, role, task) — a same-batch
+        # duplicate filed under two names, a stale copy of an old failure
+        # screenshot, or a note citing a screenshot that predates this
+        # task's assign_ts. `--force` is one escape hatch, same as every
+        # other done() gate above. #610 fix-loop (issue #593): a
+        # failed/blocked report is never rejected here — its whole point is
+        # surfacing a problem, and this gate blocking it silently ate the
+        # bug report and broke queue forwarding. Evidence is still hashed
+        # and recorded (`allow_reject=False`) so a later legitimate done()
+        # can still be compared against it; any would-be rejection is
+        # folded into the note as a warning instead.
         if not force:
             _dedup_assign_ts = getattr(_ps_done, "assign_ts", 0.0) or 0.0
-            _dedup_msg = self._evidence_dedup_gate(project_ns, from_role, _dedup_assign_ts, note)
+            _dedup_msg = self._evidence_dedup_gate(
+                project_ns, from_role, _dedup_assign_ts, note, allow_reject=not (failed or blocked)
+            )
             if _dedup_msg:
                 _log_event("done_rejected_evidence_dedup", role=from_role, project=project_ns)
                 return False, _dedup_msg
+            _dedup_warn = getattr(self, "_last_evidence_dedup_warning", None)
+            if _dedup_warn:
+                self._last_evidence_dedup_warning = None
+                note = f"{note}\n{_dedup_warn}" if note else _dedup_warn
 
         # #278/#276: refuse a report about an assignment that never reached
         # this pane — see `_pane_reports_undelivered_task`. `--force` stays
