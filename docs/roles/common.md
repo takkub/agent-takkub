@@ -24,15 +24,33 @@ show`, `git stash list`, `git stash show`.
 On the shared tree (#609 round 4), `git` is **default-deny**: only an
 explicit allow-list passes — reads (`status`/`diff`/`log`/`show`/`blame`/
 `rev-parse`/`ls-files`/`cat-file`/`grep`/`describe`/`merge-base`/`shortlog`/
-`reflog show`), `fetch`, `add`/`mv`/`rm <path>` (not `--cached`/`-r`),
-`branch`/`tag`/`config`/`clean` (their own destructive flags are still
-denied separately — `-D`, `-d`, a value-setting `config`, `-f*`), `remote
-[-v|show|get-url]`, `worktree list`, `update-index --refresh`, `notes show`,
-`bisect log|view`. Everything else — `apply`, `read-tree`, `cherry-pick`,
-`revert`, `pull`, `am`, `submodule`, `sparse-checkout`, `prune`, `worktree
-add`, any future/unlisted verb — is denied outright, not just the ones
+`reflog show`), `add`/`mv`/`rm <path>` (not `--cached`/`-r`/`-f`), `clean`
+(own `-f*` denied separately), a narrow `fetch [--prune] [<remote>]
+[<branch>]` (no refspec/`:`/`+`/`--refmap`/`--force`), `branch <new-name>`
+(not `-f`/`-d`/`-m`/`-u`/`--set-upstream-to`), `tag`/`tag -l` (not
+`-f`/`-a`/`tag <new-name>`), `remote [-v|show|get-url]`, `worktree list`,
+`update-index --refresh`, `notes show`, `bisect log|view`. Everything else —
+`apply`, `read-tree`, `cherry-pick`, `revert`, `pull`, `am`, `submodule`,
+`sparse-checkout`, `prune`, `worktree add`, `update-ref`, `symbolic-ref`,
+`replace`, any future/unlisted verb — is denied outright, not just the ones
 already known to be dangerous. Use `--isolation worktree` for anything wider,
 or ask Lead.
+
+`git -c <key>=<value>` / `--config-env` / `git config <key> <value>` and
+`GIT_SSH_COMMAND`/`GIT_EDITOR`/`GIT_SEQUENCE_EDITOR`/`GIT_EXTERNAL_DIFF`/
+`GIT_CONFIG_PARAMETERS`/`GIT_CONFIG_COUNT`+`GIT_CONFIG_KEY_n`/`_VALUE_n`/
+`GIT_TEMPLATE_DIR`/`GIT_EXEC_PATH`/`GIT_PAGER` (non-`cat`/`less`/`more`) are
+**denied on every cwd, including your own `--isolation worktree`** (#609/#611
+round 5) — a dangerous key (`diff.external`, `core.sshCommand`,
+`core.hooksPath`, `alias.<name>=!<shell>`, `merge.*.driver`, `filter.*`, …)
+runs an arbitrary subprocess, and linked worktrees share one `.git/config`
+by default so a write from your own worktree isn't scoped to it either. Only
+display-only keys are safe: `color.*`, `core.quotepath`,
+`core.pager=cat|less|more`, `log.*`, `diff.renames`, `diff.algorithm`,
+`status.*`, `advice.*`, `i18n.*`, `safe.directory`, plus `user.name`/
+`user.email` set locally from your own worktree. `git init`/`clone
+--template=<dir>` is denied unconditionally too (seeds `.git/hooks` with
+code that fires on a later ordinary command).
 
 Never run `git stash` in any MUTATING form (`push`/a bare `git stash`
 (defaults to `push`)/`apply`/`pop`/`drop`/`clear`/`branch`), `git restore`,

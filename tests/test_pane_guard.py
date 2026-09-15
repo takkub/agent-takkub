@@ -470,7 +470,6 @@ class TestGitLeadOnlyDenied:
             "git stash list",
             "git stash show",
             "git stash show -p",
-            "git branch -d merged-branch",  # lowercase -d: safe delete, not -D
             "git tag -l",
             # #385: hyphenated longer subcommands are different (read-only)
             # commands — `merge\b` used to match `merge-base`.
@@ -479,7 +478,11 @@ class TestGitLeadOnlyDenied:
             "git merge-tree --write-tree master HEAD",
             "git log --merges --oneline -5",
             "git branch --merged",
-            "git config merge.ff false",
+            # #609/#611 round 5: `merge.ff` isn't on the round-5 config
+            # key-safe-list — see `TestGitConfigInjectionRound5` below for the
+            # write-form deny this now gets. `core.quotepath` IS safe.
+            "git config core.quotepath true",
+            "git config --get user.name",
             "git commit-tree HEAD^{tree} -m x",
             # reading/mentioning must never trip the guard
             "grep -rn 'git commit' docs/",
@@ -538,12 +541,9 @@ class TestGitLeadOnlyWorktreeCarveOut:
             "git checkout -b new-branch",
             "git reset --hard",
             "git reset --hard HEAD~1",
-            "git branch -D feature-x",
         ],
     )
-    def test_checkout_reset_branchdelete_allowed_from_worktree_cwd(
-        self, command: str, cwd: str
-    ) -> None:
+    def test_checkout_reset_allowed_from_worktree_cwd(self, command: str, cwd: str) -> None:
         """#545: the checkout is disposable by definition — blocking these
         protected nothing and forced worse workarounds in practice (`merge`
         used in place of `reset --hard`, `git archive | tar -x` used in
@@ -551,6 +551,21 @@ class TestGitLeadOnlyWorktreeCarveOut:
         assert pane_guard.classify(command, "backend", cwd=cwd).allowed, (
             f"should now be allowed from the pane's own worktree cwd: {command}"
         )
+
+    @pytest.mark.parametrize("cwd", [_WT_CWD, _WT_CWD_POSIX])
+    @pytest.mark.parametrize("command", ["git branch -D feature-x", "git branch -f feature-x HEAD"])
+    def test_branch_force_forms_denied_even_from_worktree_cwd(self, command: str, cwd: str) -> None:
+        """#609/#611 round 5: `-D`/`-f`/`-M` name an arbitrary branch by
+        string, not necessarily one scoped to the caller's own worktree (the
+        same cross-role blast radius R3 found for `worktree remove`) — no
+        worktree carve-out any more, unlike the disposable-checkout ops
+        above."""
+        verdict = pane_guard.classify(command, "backend", cwd=cwd)
+        assert not verdict.allowed, f"should still block even from a worktree cwd: {command}"
+
+    @pytest.mark.parametrize("cwd", [_WT_CWD, _WT_CWD_POSIX])
+    def test_branch_create_allowed_from_worktree_cwd(self, cwd: str) -> None:
+        assert pane_guard.classify("git branch new-feature", "backend", cwd=cwd).allowed
 
     @pytest.mark.parametrize(
         "command",
@@ -1599,3 +1614,253 @@ class TestDeepCategoryOutranksRootExemption:
             state_file=state_file,
         )
         assert verdict.allowed
+
+
+class TestGitConfigInjectionRound5:
+    """#609/#611 round 5: `git -c <key>=<value>`/`--config-env` config
+    injection is a code-execution vector (`diff.external`, `core.sshCommand`,
+    `core.hooksPath`, `alias.<name>=!<shell>`, …) — unconditional, no
+    worktree carve-out, since the subprocess spawns under the caller's own
+    account regardless of who owns the checkout. `GIT_*`-family env vars are
+    the same class of injection via a different spelling."""
+
+    _WT_CWD = r"C:\Users\dev\agent-takkub\worktrees\myproj\backend-3-1700000000"
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "git -c diff.external=/tmp/evil.sh diff",
+            "git -c core.sshCommand=/tmp/evil.sh fetch",
+            "git -c core.hooksPath=/tmp/evil-hooks status",
+            "git -c alias.discard=!rm status",
+            "git -c merge.ours.driver=/tmp/evil.sh status",
+            "git -c filter.lfs.smudge=/tmp/evil.sh status",
+            "git --config-env=diff.external=EVIL_VAR diff",
+            "git --config-env diff.external=EVIL_VAR diff",
+            "git -c core.pager=/tmp/evil.sh log",
+            "git -c credential.helper=/tmp/evil.sh status",
+            "git -c protocol.ext.allow=always status",
+        ],
+    )
+    def test_dangerous_dash_c_denied(self, command: str) -> None:
+        verdict = pane_guard.classify(command, "backend")
+        assert not verdict.allowed, command
+        assert verdict.rule == "git_config_injection:dash_c"
+
+    @pytest.mark.parametrize("cwd", [_WT_CWD, None])
+    def test_dangerous_dash_c_denied_even_in_own_worktree(self, cwd: str | None) -> None:
+        """RCE doesn't care whether the invocation happens to be inside the
+        role's own worktree — no carve-out at all, unlike `commit`/`merge`."""
+        verdict = pane_guard.classify("git -c diff.external=/tmp/evil.sh diff", "backend", cwd=cwd)
+        assert not verdict.allowed
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "git -c color.ui=always status",
+            "git -c core.quotepath=true status",
+            "git -c core.pager=cat log",
+            "git -c core.pager=less log",
+            "git -c log.date=relative log",
+            "git -c diff.renames=true diff",
+            "git -c diff.algorithm=histogram diff",
+            "git -c status.short=true status",
+            "git -c advice.detachedHead=false status",
+            "git -c i18n.commitEncoding=utf-8 log",
+            "git -c safe.directory=* status",
+            "git -c credential.helper= status",
+        ],
+    )
+    def test_safe_dash_c_keys_allowed(self, command: str) -> None:
+        assert pane_guard.classify(command, "backend").allowed, command
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "GIT_SSH_COMMAND=/tmp/evil.sh git fetch origin",
+            "GIT_EXTERNAL_DIFF=/tmp/evil.sh git diff",
+            "GIT_EDITOR=/tmp/evil.sh git commit",
+            "GIT_SEQUENCE_EDITOR=/tmp/evil.sh git rebase -i HEAD~2",
+            "GIT_CONFIG_PARAMETERS=\"'diff.external=/tmp/evil.sh'\" git diff",
+            "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=diff.external GIT_CONFIG_VALUE_0=/tmp/evil.sh git diff",
+            "GIT_TEMPLATE_DIR=/tmp/evil-template git init",
+            "GIT_EXEC_PATH=/tmp/evil-bin git status",
+            "GIT_PAGER=/tmp/evil.sh git log",
+        ],
+    )
+    def test_dangerous_env_var_denied(self, command: str) -> None:
+        verdict = pane_guard.classify(command, "backend")
+        assert not verdict.allowed, command
+        assert verdict.rule == "git_config_injection:env_var"
+
+    def test_git_pager_safe_value_allowed(self) -> None:
+        assert pane_guard.classify("GIT_PAGER=cat git log", "backend").allowed
+
+
+class TestGitConfigSubcommandRound5:
+    """#609/#611 round 5: `git config` writes the repo's SHARED
+    `.git/config` from any linked worktree by default — a write is denied on
+    every cwd except a safe-listed key, or `user.name`/`user.email` set
+    locally from the role's own worktree."""
+
+    _WT_CWD = r"C:\Users\dev\agent-takkub\worktrees\myproj\backend-3-1700000000"
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "git config --get user.name",
+            "git config --get-all user.name",
+            "git config --list",
+            "git config -l",
+            "git config --show-origin --get user.name",
+            "git config merge.ff",  # bare key = read
+        ],
+    )
+    def test_read_forms_always_allowed(self, command: str) -> None:
+        assert pane_guard.classify(command, "backend").allowed, command
+        assert pane_guard.classify(command, "backend", cwd=self._WT_CWD).allowed, command
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "git config merge.ff false",
+            "git config diff.external /tmp/evil.sh",
+            "git config core.hooksPath /tmp/evil-hooks",
+            "git config --add remote.origin.fetch +refs/*:refs/*",
+            "git config --unset merge.ff",
+            "git config --replace-all user.name test",
+            "git config --rename-section a b",
+            "git config --edit",
+            "git config --global user.name test",
+            "git config --file /tmp/x.cfg user.name test",
+        ],
+    )
+    def test_write_forms_denied_on_shared_tree(self, command: str) -> None:
+        verdict = pane_guard.classify(command, "backend")
+        assert not verdict.allowed, command
+        assert verdict.rule == "git_lead_only:config"
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "git config diff.external /tmp/evil.sh",
+            "git config core.hooksPath /tmp/evil-hooks",
+            "git config --global user.name test",
+        ],
+    )
+    def test_write_forms_denied_even_from_own_worktree(self, command: str) -> None:
+        """Linked worktrees share one `.git/config` by default — no
+        ownership carve-out for a dangerous key or a non-local scope."""
+        assert not pane_guard.classify(command, "backend", cwd=self._WT_CWD).allowed
+
+    @pytest.mark.parametrize(
+        "command", ["git config core.quotepath true", "git config status.short true"]
+    )
+    def test_safe_key_write_allowed_on_any_cwd(self, command: str) -> None:
+        assert pane_guard.classify(command, "backend").allowed, command
+        assert pane_guard.classify(command, "backend", cwd=self._WT_CWD).allowed, command
+
+    @pytest.mark.parametrize("key", ["user.name", "user.email"])
+    def test_user_identity_write_allowed_local_in_own_worktree(self, key: str) -> None:
+        assert pane_guard.classify(f"git config {key} test", "backend", cwd=self._WT_CWD).allowed
+
+    @pytest.mark.parametrize("key", ["user.name", "user.email"])
+    def test_user_identity_write_denied_on_shared_tree(self, key: str) -> None:
+        assert not pane_guard.classify(f"git config {key} test", "backend").allowed
+
+
+class TestGitBranchTagFetchMvRmRound5:
+    """#609/#611 round 5: ref-overwrite and shared-file-overwrite forms of
+    `branch`/`tag`/`fetch`/`mv`/`rm` that #609 round 4's "fully permissive"
+    allow-list missed."""
+
+    _WT_CWD = r"C:\Users\dev\agent-takkub\worktrees\myproj\backend-3-1700000000"
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "git branch -d merged-branch",
+            "git branch -m old new",
+            "git branch -u origin/main",
+            "git branch --set-upstream-to=origin/main",
+        ],
+    )
+    def test_branch_mutating_flags_denied_on_shared_tree(self, command: str) -> None:
+        verdict = pane_guard.classify(command, "backend")
+        assert not verdict.allowed, command
+        assert verdict.rule == "git_shared_default_deny:branch"
+
+    def test_branch_create_allowed_on_shared_tree(self) -> None:
+        assert pane_guard.classify("git branch new-feature", "backend").allowed
+
+    @pytest.mark.parametrize(
+        "command",
+        ["git tag v1.0.0", "git tag -a v1.0.0 -m x", "git tag -f v1.0.0", "git tag -s v1.0.0"],
+    )
+    def test_tag_create_or_force_denied_on_shared_tree(self, command: str) -> None:
+        verdict = pane_guard.classify(command, "backend")
+        assert not verdict.allowed, command
+        assert verdict.rule == "git_shared_default_deny:tag"
+
+    @pytest.mark.parametrize("command", ["git tag", "git tag -l", "git tag --merged"])
+    def test_tag_list_allowed_on_shared_tree(self, command: str) -> None:
+        assert pane_guard.classify(command, "backend").allowed, command
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "git fetch origin +refs/heads/*:refs/remotes/origin/*",
+            "git fetch origin refs/heads/main:refs/heads/main",
+            "git fetch --force origin",
+            "git fetch --refmap=refs/heads/*:refs/remotes/origin/* origin",
+            "git fetch --update-head-ok origin",
+        ],
+    )
+    def test_fetch_refspec_or_force_denied_on_shared_tree(self, command: str) -> None:
+        verdict = pane_guard.classify(command, "backend")
+        assert not verdict.allowed, command
+        assert verdict.rule == "git_shared_default_deny:fetch"
+
+    @pytest.mark.parametrize(
+        "command", ["git fetch", "git fetch origin", "git fetch origin main", "git fetch --prune"]
+    )
+    def test_plain_fetch_allowed_on_shared_tree(self, command: str) -> None:
+        assert pane_guard.classify(command, "backend").allowed, command
+
+    @pytest.mark.parametrize("command", ["git mv -f a b", "git rm -f a"])
+    def test_mv_rm_force_denied_on_shared_tree(self, command: str) -> None:
+        assert not pane_guard.classify(command, "backend").allowed, command
+
+    @pytest.mark.parametrize("command", ["git mv a b", "git rm a"])
+    def test_mv_rm_plain_allowed_on_shared_tree(self, command: str) -> None:
+        assert pane_guard.classify(command, "backend").allowed, command
+
+    @pytest.mark.parametrize(
+        "command", ["git init --template=/tmp/evil", "git clone --template=/tmp/evil https://x/y"]
+    )
+    def test_init_clone_template_denied_unconditionally(self, command: str) -> None:
+        verdict = pane_guard.classify(command, "backend")
+        assert not verdict.allowed, command
+        assert verdict.rule == "git_lead_only:init-clone-template"
+        assert not pane_guard.classify(command, "backend", cwd=self._WT_CWD).allowed
+
+
+class TestGitDefaultDenyConfirmedRound5:
+    """#609/#611 round 5 item 4: confirm the round-4 shared-tree default-deny
+    already catches these ref-mutating subcommands nobody explicitly
+    allow-listed — one line each, per Lead's instruction."""
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "git reflog expire --expire=now --all",
+            "git reflog delete HEAD@{0}",
+            "git update-ref refs/heads/main HEAD~1",
+            "git symbolic-ref HEAD refs/heads/other",
+            "git replace HEAD~1 HEAD~2",
+            "git notes add -m x HEAD",
+            "git notes remove HEAD",
+        ],
+    )
+    def test_ref_mutating_subcommand_denied_on_shared_tree(self, command: str) -> None:
+        assert not pane_guard.classify(command, "backend").allowed, command

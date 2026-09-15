@@ -1397,12 +1397,19 @@ _GIT_BIN = r"git(?:\.(?:exe|cmd))?"
 # ALLOW from a bad ownership check, `classify` never recognised a `restore`
 # invocation was present). `--flag=value` is swallowed generically, not just
 # for git-dir/work-tree, since that's how every git long option is spelled.
-_GIT_SUBCMD_GAP = (
-    r"(?:\s+(?:-C|--git-dir|--work-tree)\s+(?:\"[^\"]*\"|'[^']*'|\S+)"
+# Split out as its own name (no trailing `\s+`) so `_GIT_INVOCATION_RE` below
+# can wrap it in a capturing group and recover the raw flags text for the
+# `-c`/`--config-env` key-safety scan (#609/#611 round 5) without touching
+# any of the ~15 other patterns built from `_GIT_SUBCMD_GAP` — the
+# concatenation is byte-identical to the old single constant, so none of
+# them change behavior.
+_GIT_SUBCMD_GAP_FLAGS = (
+    r"(?:\s+(?:-C|--git-dir|--work-tree|--config-env)\s+(?:\"[^\"]*\"|'[^']*'|\S+)"
     r"|\s+-c\s+(?:\"[^\"]*\"|'[^']*'|\S+)"
     r"|\s+--[\w-]+=(?:\"[^\"]*\"|'[^']*'|\S+)"
-    r"|\s+-{1,2}[\w-]+)*\s+"
+    r"|\s+-{1,2}[\w-]+)*"
 )
+_GIT_SUBCMD_GAP = _GIT_SUBCMD_GAP_FLAGS + r"\s+"
 
 
 def _strip_matching_quotes(s: str) -> str:
@@ -1451,6 +1458,10 @@ _GIT_LEAD_ONLY_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
             re.M,
         ),
     ),
+    # Round 5: no longer in `_WORKTREE_SAFE_RULES` — `-D` names ANY branch by
+    # string, not necessarily one scoped to the caller's own worktree (the
+    # same cross-role blast radius R3 already found for `worktree remove`),
+    # so it is now Lead-only unconditionally, same as `-f`/`-M` below.
     (
         "branch-delete",
         re.compile(
@@ -1458,10 +1469,48 @@ _GIT_LEAD_ONLY_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
             re.M,
         ),
     ),
+    # Round 5: `-f`/`--force` force-creates/resets a branch to a new tip
+    # (silently overwriting wherever it pointed before) and `-M` force-
+    # renames over an existing destination — both are the "ref overwrite"
+    # analogue of `-D`, unconditional for the same reason.
+    # `(?<!\S)` anchors the flag to a real token start (preceded by
+    # whitespace or nothing) — without it, `_SAME_CMD`'s lazy `.*?` let the
+    # flag alternation match mid-word (proven live: `git branch new-feature`
+    # false-positived on the "-feature" substring, since `-[A-Za-z]*f[A-Za-z]
+    # *\b` doesn't care what comes before the `-`).
+    (
+        "branch-force",
+        re.compile(
+            rf"{_CMD_START}{_GIT_BIN}(?![\w-]){_GIT_SUBCMD_GAP}branch{_SUBCMD_END}{_SAME_CMD}"
+            r"(?<!\S)(?:--force\b|-[A-Za-z]*f[A-Za-z]*\b)",
+            re.M,
+        ),
+    ),
+    (
+        "branch-force-rename",
+        re.compile(
+            rf"{_CMD_START}{_GIT_BIN}(?![\w-]){_GIT_SUBCMD_GAP}branch{_SUBCMD_END}{_SAME_CMD}-M\b",
+            re.M,
+        ),
+    ),
     (
         "tag-delete",
         re.compile(
             rf"{_CMD_START}{_GIT_BIN}(?![\w-]){_GIT_SUBCMD_GAP}tag{_SUBCMD_END}{_SAME_CMD}-d\b",
+            re.M,
+        ),
+    ),
+    # Round 5: `--template=<dir>` (init or clone) seeds the new repo's
+    # `.git/hooks` from that directory's `hooks/` subfolder — hook scripts
+    # that fire on the NEXT ordinary `commit`/`checkout`/etc in that repo,
+    # a persistent code-execution vector no different in kind from
+    # `diff.external`. Unconditional — a worktree pane cloning/init-ing a
+    # nested repo has no legitimate need for a custom template dir either.
+    (
+        "init-clone-template",
+        re.compile(
+            rf"{_CMD_START}{_GIT_BIN}(?![\w-]){_GIT_SUBCMD_GAP}(?:init|clone){_SUBCMD_END}"
+            rf"{_SAME_CMD}--template\b",
             re.M,
         ),
     ),
@@ -1572,6 +1621,79 @@ def _git_stash_verdict(cmd: str, in_worktree: bool) -> bool:
     return False
 
 
+# #609/#611 round 5: `git config` writes to the repo's SHARED `.git/config`
+# by default — every linked worktree of one repo reads that same file unless
+# `extensions.worktreeConfig` + `--worktree` scope is explicitly used, which
+# nothing in this codebase does — so a config write from inside a role's own
+# worktree is exactly as repo-wide as one from the shared tree (same class
+# of bug as #609/#611 H1's shared `refs/stash`). Combined with a dangerous
+# key (`diff.external`, `core.hooksPath`, `alias.<name>=!<shell>`, …) this is
+# also how `-c`'s RCE persists PAST the one invocation that set it — a
+# `diff.external` written to config fires on every future `git diff` ANY
+# pane runs against this checkout. Denied unconditionally (no worktree
+# carve-out) except the same key safe-list `-c` uses, plus `user.name`/
+# `user.email` set locally from a role's own worktree (needed for that
+# pane's own commit authorship; narrow enough that even if it did leak to
+# the shared file, it's not a code-execution or ref-redirection vector).
+_GIT_CONFIG_PATTERN = re.compile(
+    rf"{_CMD_START}{_GIT_BIN}(?![\w-]){_GIT_SUBCMD_GAP}config{_SUBCMD_END}(?P<tail>[^\n|;&]*)", re.M
+)
+_CONFIG_READ_FLAGS = frozenset(
+    {"--get", "--get-all", "--get-regexp", "--list", "-l", "--show-origin", "--show-scope"}
+)
+_CONFIG_WRITE_ONLY_FLAGS = frozenset(
+    {
+        "--add",
+        "--unset",
+        "--unset-all",
+        "--replace-all",
+        "--rename-section",
+        "--remove-section",
+        "--edit",
+        "-e",
+    }
+)
+_CONFIG_SCOPE_OR_FILE_FLAG_PREFIXES = (
+    "--file",
+    "-f",
+    "--blob",
+    "--global",
+    "--system",
+    "--worktree",
+)
+_CONFIG_WORKTREE_LOCAL_KEYS = frozenset({"user.name", "user.email"})
+
+
+def _git_config_verdict(cmd: str, in_worktree: bool) -> bool:
+    """True when *cmd* contains a `git config` call that must be denied. Read
+    forms are always allowed everywhere. A plain `config <key> <value>`
+    write is allowed only for a key `_config_key_value_safe` already trusts,
+    or (in a role's own worktree only) `user.name`/`user.email`. Every other
+    write shape (`--add`/`--unset*`/`--replace-all`/`--rename-section`/
+    `--remove-section`/`--edit`/any explicit scope or `--file`/`--blob`
+    target) is denied unconditionally, fail-closed for an unrecognised
+    shape too."""
+    for m in _GIT_CONFIG_PATTERN.finditer(cmd):
+        tokens = m.group("tail").split()
+        if any(t in _CONFIG_READ_FLAGS for t in tokens):
+            continue
+        if any(
+            t in _CONFIG_WRITE_ONLY_FLAGS or t.startswith(_CONFIG_SCOPE_OR_FILE_FLAG_PREFIXES)
+            for t in tokens
+        ):
+            return True
+        positionals = [t for t in tokens if not t.startswith("-")]
+        if len(positionals) <= 1:
+            continue  # bare `config` or `config <key>` alone = read form
+        key, value = positionals[0], positionals[1]
+        if in_worktree and key.lower() in _CONFIG_WORKTREE_LOCAL_KEYS:
+            continue
+        if _config_key_value_safe(key, value):
+            continue
+        return True
+    return False
+
+
 # #545: unlike `push`/`merge` (each shape-checked to a narrow safe form),
 # these three are safe UNCONDITIONALLY inside the pane's own worktree
 # checkout — there is nothing left to rewrite that isn't already scoped to
@@ -1582,10 +1704,11 @@ def _git_stash_verdict(cmd: str, in_worktree: bool) -> bool:
 # used in place of `checkout` to materialize a different ref's files.
 # `tag-delete`/`rebase` are deliberately excluded — both act on refs a
 # worktree pane can't safely disown its own copy of, unlike a plain branch
-# reset/switch/delete confined to the checkout itself.
-_WORKTREE_SAFE_RULES = frozenset(
-    {"reset-hard", "checkout", "branch-delete", "restore", "clean-force", "switch"}
-)
+# reset/switch/delete confined to the checkout itself. Round 5: `branch-
+# delete` (`-D`) removed from this set — see its own comment above
+# `_GIT_LEAD_ONLY_PATTERNS` — it names an arbitrary branch by string, not
+# necessarily one scoped to the caller's own worktree.
+_WORKTREE_SAFE_RULES = frozenset({"reset-hard", "checkout", "restore", "clean-force", "switch"})
 
 # `git merge` (#385): Lead-only on the shared tree, ALLOWED from inside a
 # pane's own `--isolation worktree` checkout. There the pane's branch is the
@@ -1955,6 +2078,132 @@ def _unwrap_shell_wrappers(cmd: str) -> str:
     return "".join(parts)
 
 
+# ── #609/#611 round 5: `-c <key>=<value>`/`--config-env` config injection ──
+# `git -c diff.external=<script> diff` runs *<script>* as a subprocess —
+# proven live (reviewer, round 5) to execute arbitrary commands regardless
+# of which subcommand follows, and regardless of worktree ownership (the
+# process spawns under the caller's own account either way). The pre-round-5
+# `_GIT_CONFIG_KV`/`_resolve_git_command_aliases` machinery below only ever
+# looked at `alias.*`/`core.*` keys (for alias-shadowing/carve-out-disabling
+# purposes) — a `diff.external`/`core.sshCommand`/`core.pager`/`merge.*.
+# driver`/`filter.*`/etc key sailed straight through unexamined. This is a
+# SEPARATE, unconditional (no cwd/worktree carve-out — RCE doesn't care who
+# owns the checkout) key-safe-list gate, checked before that machinery runs.
+_GIT_SAFE_CONFIG_KEY_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"^color\.", re.I),
+    re.compile(r"^core\.quotepath$", re.I),
+    re.compile(r"^log\.", re.I),
+    re.compile(r"^diff\.renames$", re.I),
+    re.compile(r"^diff\.algorithm$", re.I),
+    re.compile(r"^status\.", re.I),
+    re.compile(r"^advice\.", re.I),
+    re.compile(r"^i18n\.", re.I),
+    re.compile(r"^safe\.directory$", re.I),
+)
+# `core.pager`/`GIT_PAGER` are safe ONLY as one of these three bare viewer
+# names — no shell metacharacters, no arguments, so there is nothing for git
+# to pass through to a shell.
+_SAFE_PAGER_VALUES = frozenset({"cat", "less", "more"})
+
+
+def _core_pager_value_safe(value: str | None) -> bool:
+    return value is not None and _strip_matching_quotes(value) in _SAFE_PAGER_VALUES
+
+
+def _config_key_value_safe(key: str, value: str | None) -> bool:
+    """Whether setting *key* to *value* via `-c`/`--config-env`/`git config`
+    is safe regardless of who runs it — read/display-only settings that
+    can't redirect where git operates or spawn a subprocess. `value=None`
+    means "unknown/not literally on the command line" (e.g. `--config-env`'s
+    value is an env var NAME, not the actual value) — `core.pager`/
+    `credential.helper` need a known-safe literal value, so an unknown value
+    for those two is NOT safe; every other safe-listed key doesn't care what
+    the value is (`log.date=relative`, `status.short=true`, … can't do harm)."""
+    k = key.strip().lower()
+    if k == "core.pager":
+        return _core_pager_value_safe(value)
+    if k == "credential.helper":
+        return value is not None and _strip_matching_quotes(value) == ""
+    return any(p.match(k) for p in _GIT_SAFE_CONFIG_KEY_PATTERNS)
+
+
+# Case-SENSITIVE on purpose: `-c` (lowercase, config override) and `-C`
+# (uppercase, "run as if started in <path>" — an entirely different flag,
+# already handled by `_explicit_git_target`/`_in_worktree`) are distinct
+# git flags. An earlier `re.I` here matched `-C <path>` as if it were a
+# `-c` config pair too, false-positive-denying every `-C`-carrying command
+# on this codebase's own test suite.
+_DASH_C_KV_RE = re.compile(r"(?<![A-Za-z-])-c\s+(?:\"([^\"]*)\"|'([^']*)'|(\S+))")
+_CONFIG_ENV_KV_RE = re.compile(r"--config-env(?:=|\s+)(?:\"([^\"]*)\"|'([^']*)'|(\S+))")
+
+
+def _extract_dash_c_pairs(flags_text: str) -> list[tuple[str, str | None]]:
+    """Every `-c <key>=<value>`/`--config-env[=]<key>=<envvar>` pair found in
+    *flags_text* (the raw text `_GIT_INVOCATION_RE` captured between the git
+    binary and its subcommand). No `=` in the token (a malformed/truncated
+    `-c`) is treated as `(token, None)` — unknown value, fails closed via
+    `_config_key_value_safe`."""
+    pairs: list[tuple[str, str | None]] = []
+    for rx in (_DASH_C_KV_RE, _CONFIG_ENV_KV_RE):
+        for m in rx.finditer(flags_text):
+            raw = next(g for g in m.groups() if g is not None)
+            if "=" in raw:
+                key, val = raw.split("=", 1)
+            else:
+                key, val = raw, None
+            pairs.append((key, val))
+    return pairs
+
+
+def _git_dash_c_deny_key(cmd: str) -> str | None:
+    """The first unsafe `-c`/`--config-env` key found in any git invocation
+    in *cmd*, or `None` when every one (if any) is safe-listed. Checked
+    unconditionally in `classify()` — before role/worktree/subcommand
+    checks — since this is a code-execution/behavior-injection vector, not a
+    shared-tree ownership one."""
+    for m in _GIT_INVOCATION_RE.finditer(cmd):
+        for key, val in _extract_dash_c_pairs(m.group("flags")):
+            if not _config_key_value_safe(key, val):
+                return key
+    return None
+
+
+# Same class of injection, via environment variable instead of a `-c` flag —
+# `GIT_SSH_COMMAND=<script> git fetch …`, `GIT_EDITOR=<script> git commit`,
+# `GIT_EXTERNAL_DIFF=<script> git diff`, `GIT_CONFIG_PARAMETERS`/
+# `GIT_CONFIG_COUNT`+`GIT_CONFIG_KEY_n`+`GIT_CONFIG_VALUE_n` (the env-var
+# equivalent of a whole `-c` list), `GIT_TEMPLATE_DIR`/`GIT_EXEC_PATH`
+# (redirect what git treats as trusted hook/helper code). Matched the same
+# unanchored way as `_GIT_ENV_TARGET_RE` (GIT_DIR-family) above — `set
+# VAR=…`/`$env:VAR = …` sit in their own chain segment ahead of `git`, not
+# immediately in front of it. No "provably safe path" concept applies here
+# (unlike GIT_DIR) — these vars inject BEHAVIOR, not a redirect target — so
+# any value is unsafe except `GIT_PAGER` naming one of the three safe
+# viewers, matching `core.pager` above.
+_DANGEROUS_GIT_ENV_VAR_RE = re.compile(
+    r"(?:\bset\s+|\$env:)?"
+    r"\b(?P<var>GIT_CONFIG_PARAMETERS|GIT_CONFIG_COUNT|GIT_CONFIG_KEY_\d+|"
+    r"GIT_CONFIG_VALUE_\d+|GIT_EXTERNAL_DIFF|GIT_SSH_COMMAND|GIT_EDITOR|"
+    r"GIT_SEQUENCE_EDITOR|GIT_TEMPLATE_DIR|GIT_EXEC_PATH|GIT_PAGER)\b"
+    r"\s*=\s*(?P<val>\"[^\"]*\"|'[^']*'|[^\s&;|\r\n]*)",
+    re.I | re.M,
+)
+
+
+def _dangerous_git_env_var(raw_cmd: str) -> str | None:
+    """The first dangerous GIT_*-family env-var assignment in *raw_cmd*
+    (PRE-unwrap — see `_git_dir_env_override`'s note on why), or `None`.
+    Unconditional, same as `_git_dash_c_deny_key` — an exported var changes
+    behavior for every git invocation in the rest of the command line, not
+    just one scoped to a role's own worktree."""
+    for m in _DANGEROUS_GIT_ENV_VAR_RE.finditer(raw_cmd):
+        var = m.group("var").upper()
+        if var == "GIT_PAGER" and _core_pager_value_safe(m.group("val")):
+            continue
+        return var
+    return None
+
+
 # #609 H2: `-c alias.<name>=<value>` defines a git alias inline, on the same
 # command line — `git -c alias.discard=restore discard .` runs `restore`
 # even though the literal subcommand token is `discard`, which matches none
@@ -2064,10 +2313,14 @@ def _resolve_git_command_aliases(cmd: str) -> tuple[str, bool]:
 # See the module docstring's "tenth rule" for why this replaced growing
 # `_GIT_LEAD_ONLY_PATTERNS` one subcommand at a time. Generic invocation
 # finder — same shape as `_GIT_PUSH_TAIL`/`_GIT_STASH_PATTERN` above, just not
-# anchored to one literal subcommand name.
+# anchored to one literal subcommand name. `flags` (round 5) captures the raw
+# text between the git binary and the subcommand — everything
+# `_GIT_SUBCMD_GAP_FLAGS` swallowed (`-c ...`, `--config-env ...`, `-C ...`,
+# …) — so `_git_dash_c_deny_key` can re-scan it for unsafe `-c`/
+# `--config-env` keys without a second traversal of *cmd*.
 _GIT_INVOCATION_RE = re.compile(
-    rf"{_CMD_START}{_GIT_BIN}(?![\w-]){_GIT_SUBCMD_GAP}(?P<sub>[\w-]+){_SUBCMD_END}"
-    r"(?P<tail>[^\n|;&]*)",
+    rf"{_CMD_START}{_GIT_BIN}(?![\w-])(?P<flags>{_GIT_SUBCMD_GAP_FLAGS})\s+"
+    rf"(?P<sub>[\w-]+){_SUBCMD_END}(?P<tail>[^\n|;&]*)",
     re.M,
 )
 
@@ -2076,27 +2329,26 @@ _GIT_SHARED_TREE_DENY_TEXT = (
 )
 
 # Subcommands already given their own carve-out-aware verdict earlier in
-# `classify()` (commit/merge/push/stash each check `in_worktree` themselves;
-# checkout/restore/switch/rebase are unconditional-subcommand denies with no
-# flag shape to re-check) — skipped here so this default-deny pass never
-# re-litigates a verdict `classify()` already returned.
+# `classify()` (commit/merge/push/stash/config each check `in_worktree`
+# themselves; checkout/restore/switch/rebase are unconditional-subcommand
+# denies with no flag shape to re-check) — skipped here so this default-deny
+# pass never re-litigates a verdict `classify()` already returned.
 _GIT_SHARED_TREE_HANDLED_ELSEWHERE = frozenset(
-    {"commit", "merge", "push", "stash", "checkout", "restore", "switch", "rebase"}
+    {"commit", "merge", "push", "stash", "config", "checkout", "restore", "switch", "rebase"}
 )
 
 # Fully permissive regardless of flags — either provably read-only, or
 # additive-only (creates a loose object/ref-free commit without moving any
 # ref or touching the working tree: `add`, `commit-tree`, `merge-tree`).
-# `branch`/`tag`/`clean`/`config` are ALSO kept fully permissive here rather
-# than flag-restricted per the original round-4 spec: `tests/test_pane_
-# guard.py` already pins `git branch -d <x>` (safe delete, distinct from the
-# `-D` force-delete `_GIT_LEAD_ONLY_PATTERNS` already denies unconditionally),
-# `git tag -l`, `git branch --merged`, and `git config merge.ff false`
-# allowed on the shared tree — none of them writes another pane's working
-# tree, and `-D`/`-d` (tag)/`-f*` (clean) are already denied unconditionally
-# by their own existing, more specific patterns which run before this check
-# ever does. Least-behavior-change per this round's own instructions: widen
-# the allow-list rather than break a pinned regression test.
+# `clean` stays here — its own `-f*` is already denied unconditionally by
+# `_GIT_LEAD_ONLY_PATTERNS` ("clean-force") before this check ever runs.
+# `branch`/`tag`/`fetch`/`mv`/`config` moved OUT to
+# `_GIT_SHARED_TREE_RESTRICTED_CHECKS`/their own gate in round 5 — see
+# `_branch_tail_allowed`/`_tag_tail_allowed`/`_fetch_tail_allowed`/
+# `_mv_tail_allowed`/`_git_config_verdict`: each can still overwrite/mutate
+# a ref or file another pane relies on (`branch -f`/`-M`, `tag -a`/`tag
+# <name>`, `fetch <refspec>`, `mv -f`), which the pre-round-5 "none of them
+# writes another pane's working tree" reasoning missed.
 _GIT_SHARED_TREE_ALLOW_PLAIN = frozenset(
     {
         "status",
@@ -2115,18 +2367,13 @@ _GIT_SHARED_TREE_ALLOW_PLAIN = frozenset(
         "merge-base",
         "merge-tree",
         "shortlog",
-        "fetch",
         "help",
         "version",
         "add",
-        "mv",
         "check-ignore",
         "count-objects",
         "commit-tree",
-        "branch",
-        "tag",
         "clean",
-        "config",
     }
 )
 
@@ -2148,13 +2395,102 @@ def _worktree_tail_allowed(tail_tokens: list[str]) -> bool:
 
 def _rm_tail_allowed(tail_tokens: list[str]) -> bool:
     """Deny `--cached` (untracks without deleting — silently drops a file
-    from everyone's next `status`/`diff`) and any `-r`/recursive short flag."""
+    from everyone's next `status`/`diff`), any `-r`/recursive short flag, and
+    (round 5) `-f`/`--force` (bypasses the up-to-date-in-index safety check,
+    silently deleting a file another pane hasn't committed its edit to)."""
     for tok in tail_tokens:
-        if tok == "--cached":
+        if tok in ("--cached", "--force"):
             return False
         if tok.startswith("-") and not tok.startswith("--") and "r" in tok[1:].lower():
             return False
+        if tok.startswith("-") and not tok.startswith("--") and "f" in tok[1:].lower():
+            return False
     return True
+
+
+def _mv_tail_allowed(tail_tokens: list[str]) -> bool:
+    """Round 5: deny `-f`/`--force` (silently overwrites an existing
+    destination path — another pane's file — instead of erroring)."""
+    for tok in tail_tokens:
+        if tok == "--force":
+            return False
+        if tok.startswith("-") and not tok.startswith("--") and "f" in tok[1:].lower():
+            return False
+    return True
+
+
+# Round 5: `-f`/`--force`/`-M` are handled unconditionally (no worktree
+# carve-out either — see `_GIT_LEAD_ONLY_PATTERNS` "branch-force"/
+# "branch-force-rename") since they overwrite a ref regardless of who owns
+# the checkout running them. What's left to gate HERE (shared-tree only) is
+# every other ref-mutating form: safe delete (`-d`), safe rename (`-m`), and
+# upstream-tracking changes (`-u`/`--set-upstream-to`) — a `git branch
+# <name>` with no such flag just creates a new, non-colliding branch and
+# stays allowed (matches the module's "creating new refs in a worktree is
+# fine, overwriting/deleting a shared one is not" stance).
+_BRANCH_DENY_BARE_FLAGS = frozenset({"-d", "-m", "-u"})
+
+
+def _branch_tail_allowed(tail_tokens: list[str]) -> bool:
+    for tok in tail_tokens:
+        base = tok.split("=", 1)[0]
+        if base in _BRANCH_DENY_BARE_FLAGS or base == "--set-upstream-to":
+            return False
+    return True
+
+
+# Round 5: bare `git tag`/`tag -l ...`/`tag --list ...`/`tag --merged ...`
+# etc list or query existing tags — read-only. Anything else on the tail
+# either creates/overwrites a tag (`tag <name>`, `-f`/`--force`, `-a`/
+# `--annotate`, `-s`/`--sign` — a NEW tag another pane's `git fetch --tags`
+# would then see) or is an unrecognised shape, denied the same fail-closed
+# direction as everywhere else in this module. `-d` (delete) is already
+# unconditionally Lead-only via `_GIT_LEAD_ONLY_PATTERNS` ("tag-delete") and
+# never reaches this check.
+_TAG_LIST_ONLY_FLAGS = frozenset(
+    {
+        "-l",
+        "--list",
+        "-n",
+        "--contains",
+        "--no-contains",
+        "--merged",
+        "--no-merged",
+        "--points-at",
+    }
+)
+
+
+def _tag_tail_allowed(tail_tokens: list[str]) -> bool:
+    if not tail_tokens:
+        return True
+    first = tail_tokens[0].split("=", 1)[0]
+    return first in _TAG_LIST_ONLY_FLAGS or first == "--sort"
+
+
+# Round 5: only a plain `fetch [--prune] [<remote>] [<branch>]` — no refspec
+# (`:`), no forced-update refspec (`+`), no `--refmap`/`--update-head-ok`
+# (both exist specifically to let a fetch move/create a ref another pane's
+# fetch wouldn't expect), no `-f`/`--force`. Everything else denied.
+_FETCH_SAFE_FLAGS = frozenset({"--prune", "-p"})
+_FETCH_DENY_FLAG_PREFIXES = ("--refmap", "--update-head-ok", "--force")
+
+
+def _fetch_tail_allowed(tail_tokens: list[str]) -> bool:
+    positionals: list[str] = []
+    for tok in tail_tokens:
+        if tok == "-f":
+            return False
+        if tok in _FETCH_SAFE_FLAGS:
+            continue
+        if tok.startswith(_FETCH_DENY_FLAG_PREFIXES):
+            return False
+        if tok.startswith("-"):
+            return False  # unrecognised flag — fail closed
+        positionals.append(tok)
+    if len(positionals) > 2:
+        return False
+    return not any(":" in p or p.startswith("+") for p in positionals)
 
 
 def _update_index_tail_allowed(tail_tokens: list[str]) -> bool:
@@ -2184,6 +2520,10 @@ _GIT_SHARED_TREE_RESTRICTED_CHECKS: dict[str, Callable[[list[str]], bool]] = {
     "remote": _remote_tail_allowed,
     "worktree": _worktree_tail_allowed,
     "rm": _rm_tail_allowed,
+    "mv": _mv_tail_allowed,
+    "branch": _branch_tail_allowed,
+    "tag": _tag_tail_allowed,
+    "fetch": _fetch_tail_allowed,
     "update-index": _update_index_tail_allowed,
     "notes": _notes_tail_allowed,
     "bisect": _bisect_tail_allowed,
@@ -2431,6 +2771,38 @@ def classify(
                 ),
             )
 
+    # #609/#611 round 5: config-injection RCE (`git -c diff.external=<script>
+    # diff`, `GIT_SSH_COMMAND=<script> git fetch`, …) doesn't care whether
+    # the invocation happens to be inside this role's own worktree — the
+    # subprocess still spawns under the caller's own account either way.
+    # Checked unconditionally, before alias resolution/worktree carve-outs.
+    dash_c_key = _git_dash_c_deny_key(cmd)
+    if dash_c_key is not None:
+        return Verdict(
+            False,
+            rule="git_config_injection:dash_c",
+            reason=(
+                f"role `{name}` ใช้ `git -c {dash_c_key}=...`/`--config-env` แบบนี้ไม่ได้ "
+                "(#609/#611 round 5 — key นี้ redirect พฤติกรรม git ไปรัน subprocess ได้ เช่น "
+                "diff.external/core.sshCommand/core.hooksPath/alias.*, ไม่เกี่ยวกับ worktree "
+                "ของใครเป็นเจ้าของ). ใช้ได้เฉพาะ key อ่าน/แสดงผลอย่างเดียว เช่น `color.*`, "
+                "`core.pager=cat|less|more`, `log.*`, `status.*`, `advice.*`, `i18n.*`, "
+                "`diff.renames`, `diff.algorithm`, `safe.directory`."
+            ),
+        )
+
+    dangerous_env_var = _dangerous_git_env_var(raw_cmd)
+    if dangerous_env_var is not None:
+        return Verdict(
+            False,
+            rule="git_config_injection:env_var",
+            reason=(
+                f"role `{name}` ตั้งค่า `{dangerous_env_var}` ก่อนรัน git แบบนี้ไม่ได้ "
+                "(#609/#611 round 5 — ตัวแปรนี้ redirect พฤติกรรม git ไปรัน subprocess/hook "
+                "ได้เหมือน `-c`, ไม่เกี่ยวกับ worktree ของใครเป็นเจ้าของ)."
+            ),
+        )
+
     # #609 H2: resolve inline `-c alias.X=Y` before matching any deny
     # pattern by literal subcommand name (`git_cmd`), and refuse the
     # worktree carve-out outright whenever an unresolvable/`core.*` config
@@ -2477,6 +2849,23 @@ def classify(
                 "ได้แม้รันจาก worktree ของตัวเอง). "
                 f"{GIT_LEAD_ONLY_RULE_TEXT} ใน worktree ของตัวเอง ใช้ได้: `git stash push`/`save`/`apply`. "
                 "อ่านอย่างเดียวใช้ได้ทุกที่: `git stash list` / `git stash show`."
+            ),
+        )
+
+    # #609/#611 round 5: `git config` writes the SHARED main `.git/config`
+    # from any linked worktree by default — see `_git_config_verdict`'s
+    # docstring.
+    if _git_config_verdict(git_cmd, in_worktree):
+        return Verdict(
+            False,
+            rule="git_lead_only:config",
+            reason=(
+                f"role `{name}` เขียน `git config` แบบนี้ไม่ได้ (#609/#611 round 5 — worktree ที่ "
+                "link กันใช้ `.git/config` ไฟล์เดียวกันโดย default). อ่านได้เสมอ (`--get`/`--get-all`/"
+                "`--list`/`-l`/`config <key>` เฉยๆ). เขียนได้เฉพาะ key ปลอดภัย (`color.*`, "
+                "`core.quotepath`, `log.*`, `status.*`, `advice.*`, `i18n.*`, `diff.renames`, "
+                "`diff.algorithm`, `safe.directory`) หรือ `user.name`/`user.email` local ใน "
+                f"worktree ของตัวเอง. {GIT_LEAD_ONLY_RULE_TEXT}"
             ),
         )
 
