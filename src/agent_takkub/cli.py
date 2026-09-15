@@ -4199,7 +4199,7 @@ def cmd_session_report(_: argparse.Namespace) -> dict:
         return {"ok": True, "msg": ""}
 
 
-_GUARD_NOTIFY_LEAD_RULE_PREFIXES = ("host_network:", "git_lead_only:commit")
+_GUARD_NOTIFY_LEAD_RULE_PREFIXES = ("host_network:", "git_lead_only:commit", "instance_guard:")
 
 
 def _log_guard_denied(role: str, command: str, verdict: object) -> None:
@@ -4352,6 +4352,54 @@ def cmd_guard(_: argparse.Namespace) -> dict:
             pass
         tool_name = str(payload.get("tool_name") or "")
         from .pane_guard import normalise_role
+
+        # #633: Instance Guard (Protected DATA_HOME, cross-instance kill, app boot)
+        # Requirement 5: guard error ของหมวดนี้ fail-closed! Default-deny ทุก role รวม Lead
+        try:
+            if tool_name in ("Edit", "Write"):
+                file_path = (
+                    str(tool_input.get("file_path") or "").strip()
+                    if isinstance(tool_input, dict)
+                    else ""
+                )
+                if file_path:
+                    from .pane_guard import Verdict, is_in_protected_data_home
+
+                    in_prot, prot_home = is_in_protected_data_home(file_path, cwd=cwd)
+                    if in_prot:
+                        verdict = Verdict(
+                            False,
+                            rule="instance_guard:protected_data_home",
+                            reason=(
+                                f"ไฟล์ {file_path} อยู่ใน Protected DATA_HOME ของ cockpit instance อื่น "
+                                f"({prot_home}) — ห้ามทุก role แก้ไข ย้าย หรือลบ เพื่อป้องกันข้อมูลเสียหาย (#633)"
+                            ),
+                        )
+                        print(f"[takkub guard: {verdict.rule}] {verdict.reason}", file=sys.stderr)
+                        _log_guard_denied(role, f"{tool_name} {file_path}", verdict)
+                        _notify_lead_of_guard_block(role, verdict)
+                        return {"ok": True, "msg": "", "exit_code": 2}
+            elif tool_name == "Bash" or not tool_name:
+                from .pane_guard import evaluate_instance_guard
+
+                inst_verdict = evaluate_instance_guard(command, role, cwd=cwd)
+                if inst_verdict and not inst_verdict.allowed:
+                    print(
+                        f"[takkub guard: {inst_verdict.rule}] {inst_verdict.reason}",
+                        file=sys.stderr,
+                    )
+                    _log_guard_denied(role, command, inst_verdict)
+                    _notify_lead_of_guard_block(role, inst_verdict)
+                    return {"ok": True, "msg": "", "exit_code": 2}
+        except Exception as exc:
+            # #633 Requirement 5: Guard errors in the instance protection category MUST fail-closed!
+            _log_guard_error(role, _from_project(), tool_name, exc)
+            reason = (
+                f"guard ตรวจสอบ instance ล้มเหลว ({type(exc).__name__}: {exc}) "
+                "— ปฏิเสธไว้ก่อนเพื่อความปลอดภัย (#633)"
+            )
+            print(f"[takkub guard: instance_guard:guard_error] {reason}", file=sys.stderr)
+            return {"ok": True, "msg": "", "exit_code": 2}
 
         if normalise_role(role) == "lead" and tool_name in ("Edit", "Write"):
             project = _from_project()

@@ -2121,7 +2121,13 @@ class TestPythonMAgentTakkubDenied:
     def test_allowed_commands(self, command: str) -> None:
         assert pane_guard.classify(command, "backend").allowed, command
 
-    def test_allowed_for_lead_and_shell(self) -> None:
-        assert pane_guard.classify("python -m agent_takkub report build", "lead").allowed
-        assert pane_guard.classify("python -m agent_takkub report build", "shell").allowed
+    def test_app_boot_guard_for_lead_and_shell(self) -> None:
+        # #633: bare python -m agent_takkub is denied for all roles including lead and shell
+        assert not pane_guard.classify("python -m agent_takkub report build", "lead").allowed
+        assert not pane_guard.classify("python -m agent_takkub report build", "shell").allowed
+        # Allowed with temp AGENT_TAKKUB_HOME
+        assert pane_guard.classify(
+            "AGENT_TAKKUB_HOME=/tmp/test python -m agent_takkub report build", "lead"
+        ).allowed
+        # Allowed for human outside cockpit (role is None)
         assert pane_guard.classify("python -m agent_takkub report build", None).allowed
