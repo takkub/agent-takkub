@@ -61,6 +61,122 @@ def test_own_worktree_cannot_delete_repository_shared_stashes(command):
     assert not verdict.allowed
 
 
+# #609 round 3: `--git-dir=`/`--work-tree=` (either flag form) broke
+# `_GIT_SUBCMD_GAP`'s subcommand match outright — `restore` was never even
+# recognised as present, so the caller's OWN correctly-owned worktree cwd
+# never got a chance to matter; the command sailed through unrecognised.
+@pytest.mark.parametrize(
+    "command",
+    [
+        'git --git-dir="C:/shared/other/.git" --work-tree="C:/shared/other" restore .',
+        "git --git-dir C:/shared/other/.git --work-tree C:/shared/other restore .",
+    ],
+)
+def test_git_dir_work_tree_flags_do_not_bypass_restore(command):
+    verdict = pane_guard.classify(command, "frontend", cwd="C:/data/worktrees/proj/frontend-123")
+    assert not verdict.allowed, command
+
+
+# #609 round 3b: a RELATIVE `-C` target used to be judged against the
+# caller's raw cwd, ignoring how far the target itself walks away from it —
+# `git -C .. restore .` from inside `frontend-123`'s own worktree lands in
+# the shared parent `worktrees/proj/` dir (every role's checkouts live
+# under it) but used to get the worktree carve-out outright because cwd
+# alone looked owned; the `..` in the target was never resolved.
+@pytest.mark.parametrize(
+    "command",
+    [
+        "git -C .. restore .",
+        "git -C ../backend-123 restore .",
+    ],
+)
+def test_relative_dash_c_walking_outside_own_worktree_is_denied(command):
+    verdict = pane_guard.classify(command, "frontend", cwd="C:/data/worktrees/proj/frontend-123")
+    assert not verdict.allowed, command
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "git -C . restore .",
+        "git -C ./sub restore .",
+    ],
+)
+def test_relative_dash_c_staying_inside_own_worktree_is_allowed(command):
+    verdict = pane_guard.classify(command, "frontend", cwd="C:/data/worktrees/proj/frontend-123")
+    assert verdict.allowed, command
+
+
+# #609 round 3: a `GIT_DIR=`/`GIT_WORK_TREE=`/etc override — via a bare
+# prefix, `env`, cmd.exe `set`, or PowerShell `$env:` — points git at a
+# different repo entirely, but the caller's cwd (its own, correctly-owned
+# worktree) used to be the ONLY thing `_in_worktree` ever looked at, so the
+# carve-out applied anyway even though the override redirects where the
+# stash drop actually lands.
+@pytest.mark.parametrize(
+    "command",
+    [
+        "GIT_DIR=C:/shared/other/.git git stash drop",
+        "env GIT_DIR=C:/shared/other/.git git stash drop",
+        "set GIT_DIR=C:/shared/other/.git && git stash drop",
+        '$env:GIT_DIR="C:/shared/other/.git"; git stash drop',
+    ],
+)
+def test_git_dir_env_prefix_does_not_bypass_stash_drop(command):
+    verdict = pane_guard.classify(command, "frontend", cwd="C:/data/worktrees/proj/frontend-123")
+    assert not verdict.allowed, command
+
+
+# #609 round 3: `git switch` is the modern alias for `checkout <branch>` —
+# same blast radius, same blanket shared-tree deny regardless of which
+# destructive-looking flag (or none at all) is used.
+@pytest.mark.parametrize(
+    "command",
+    [
+        "git switch --discard-changes main",
+        "git switch -f main",
+        "git switch -C wip main",
+    ],
+)
+def test_switch_discard_variants_are_denied_on_shared_tree(command):
+    verdict = pane_guard.classify(command, "frontend", cwd="C:/shared project")
+    assert not verdict.allowed, command
+
+
+# #609 round 3: `worktree remove`/`move`/`prune`/`lock`/`unlock` used to only
+# check the CALLER's own cwd/target, never the worktree actually being
+# mutated — Lead-only unconditionally now, regardless of the caller sitting
+# inside its own correctly-owned worktree.
+@pytest.mark.parametrize(
+    "command",
+    [
+        "git worktree remove --force C:/data/worktrees/proj/backend-123",
+        "git worktree remove C:/data/worktrees/proj/backend-123",
+        "git worktree move C:/data/worktrees/proj/backend-123 C:/tmp/x",
+        "git worktree prune",
+        "git worktree lock C:/data/worktrees/proj/backend-123",
+        "git worktree unlock C:/data/worktrees/proj/backend-123",
+    ],
+)
+def test_worktree_admin_subcommands_are_always_lead_only(command):
+    verdict = pane_guard.classify(command, "frontend", cwd="C:/data/worktrees/proj/frontend-123")
+    assert not verdict.allowed, command
+
+
+# Read-only `worktree list` and an unrelated env-var prefix must not be
+# swept up by the round-3 hardening above.
+@pytest.mark.parametrize(
+    "command",
+    [
+        "git worktree list",
+        "GIT_PAGER=cat git log -1",
+    ],
+)
+def test_read_only_worktree_list_and_unrelated_env_prefix_stay_allowed(command):
+    verdict = pane_guard.classify(command, "frontend", cwd="C:/data/worktrees/proj/frontend-123")
+    assert verdict.allowed, command
+
+
 def test_sensitive_production_module_cannot_opt_out_by_spec_suffix(tmp_path):
     # A .spec.ts suffix does not prevent a production entrypoint importing it.
     verdict = pane_guard.evaluate_lead_direct_edit(
