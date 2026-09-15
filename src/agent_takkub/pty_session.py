@@ -63,6 +63,38 @@ TRANSCRIPT_FLUSH_MS = max(25, int(os.environ.get("TAKKUB_TRANSCRIPT_FLUSH_MS", "
 TRANSCRIPT_FLUSH_BYTES = max(
     4096, int(os.environ.get("TAKKUB_TRANSCRIPT_FLUSH_BYTES", str(64 * 1024)))
 )
+# #627: per-transcript-file ceiling (bytes actually persisted). A pane wedged
+# in a screen repaint loop (a provider re-drawing the same static frame, or a
+# spinner that never settles) would otherwise balloon `*.transcript.log` for
+# hours/days until disk_usage's prune catches it by age. Once the ceiling is
+# reached the writer stops persisting further frames and fires one
+# `transcript_size_capped` event; the file is left readable for `takkub tail`
+# and `_extract_transcript_lines`. Best-effort against a runaway only — a
+# genuinely chatty (but sane) session stays far below this.
+_TRANSCRIPT_MAX_BYTES = max(
+    1 << 20, int(os.environ.get("TAKKUB_TRANSCRIPT_MAX_BYTES", str(32 * 1024 * 1024)))
+)
+# #627: how many of the most-recent frame fingerprints to keep for duplicate
+# detection. A repaint loop re-emits the same *frame* (identical bytes) many
+# times a second — cutting byte-identical repeats within this window is what
+# keeps the file at content size instead of repaint size. 8 is small enough
+# to be branch-cheap and catch both a straight repaint and a short
+# A-B-A-B alternation.
+_TRANSCRIPT_DEDUP_FRAMES = max(2, int(os.environ.get("TAKKUB_TRANSCRIPT_DEDUP_FRAMES", "8")))
+
+
+def _transcript_event(event: str, **details) -> None:
+    """Fire an audit `events.log` line from the transcript writer (reader
+    thread, best-effort — never raises so a cap event can't kill the PTY
+    reader). Lazy-imports orchestrator_text so this low-level module stays
+    importable standalone (tests build sessions via __new__ without ever
+    loading the orchestrator)."""
+    try:
+        from .orchestrator_text import _log_event
+
+        _log_event(event, **details)
+    except Exception:
+        pass
 
 
 def _safe_screen_display(screen: pyte.Screen) -> list[str]:
@@ -1939,7 +1971,45 @@ class PtySession(QObject):
             self.__dict__["_output_rate_window_started"] = now
         if self._transcript is not None:
             try:
-                self._transcript.write(data)
+                # #627: dedupe re-painted frames + enforce the per-file ceiling.
+                # Both pass through the __dict__ idiom the rate-window fields
+                # below use, because tests build this session via __new__.
+                last_data = self.__dict__.get("_transcript_last_data", b"")
+                cap_hit = bool(self.__dict__.get("_transcript_capped", False))
+                bytes_written = int(self.__dict__.get("_transcript_bytes_written", 0))
+                if not cap_hit:
+                    if bytes_written >= _TRANSCRIPT_MAX_BYTES:
+                        # The ceiling is a HARD per-file bound: fire the cap
+                        # event once and swallow from here on — the frame that
+                        # would have crossed the line is exactly the one to
+                        # drop first, so the file never overshoots by a frame.
+                        cap_hit = True
+                        self.__dict__["_transcript_capped"] = True
+                        _transcript_event(
+                            "transcript_size_capped",
+                            path=getattr(self._transcript, "name", "") or "",
+                            max_bytes=_TRANSCRIPT_MAX_BYTES,
+                        )
+                    else:
+                        skip = False
+                        if data and data == last_data:
+                            skip = True
+                        else:
+                            window = self.__dict__.get("_transcript_dedup_window", ())
+                            if data and data in window:
+                                skip = True
+                        if skip:
+                            # A re-painted frame: the screen still changed for
+                            # `_last_output_ts` purposes below (pyte still feeds
+                            # it), only the persisted transcript skips the repeat.
+                            data = b""
+                        elif data:
+                            self._transcript.write(data)
+                            bytes_written += len(data)
+                            self.__dict__["_transcript_bytes_written"] = bytes_written
+                            self.__dict__["_transcript_last_data"] = data
+                            window = (last_data, *window)[:_TRANSCRIPT_DEDUP_FRAMES]
+                            self.__dict__["_transcript_dedup_window"] = window
                 pending_bytes = int(self.__dict__.get("_transcript_pending_bytes", 0)) + len(data)
                 last_flush = float(self.__dict__.get("_transcript_last_flush", now))
                 self._transcript_pending_bytes = pending_bytes

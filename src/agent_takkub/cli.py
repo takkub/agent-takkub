@@ -4183,6 +4183,27 @@ def cmd_hook(_: argparse.Namespace) -> dict:
         return {"ok": True, "msg": ""}
 
 
+def cmd_activity(_: argparse.Namespace) -> dict:
+    """Internal command wired as the `PreToolUse`/`PostToolUse` `mcp__*` hook
+    for every cockpit-spawned claude pane (#617; see hook_wiring.py). Stamps
+    the calling pane's idle-progress clock as "real activity" WITHOUT sending
+    Lead a message — MCP tool calls render no screen-scrapeable tool-call
+    marker and spawn no live child, so the idle-no-progress watchdog used to
+    fire a false ⏳ notice mid-run. This is exactly what a pane's own
+    `takkub progress()` does to the same clock, minus the Lead notification.
+
+    Never raises and always exits 0 — a hook failure must never break the
+    pane's turn or delay an MCP tool (PreToolUse must never block)."""
+    try:
+        role = _from_role()
+        if not role:
+            return {"ok": True, "msg": ""}  # manual / non-cockpit invocation
+        _hook_request(_with_project({"cmd": "activity", "from": role}))
+    except Exception:
+        pass
+    return {"ok": True, "msg": ""}
+
+
 def cmd_session_report(_: argparse.Namespace) -> dict:
     """Internal command wired as the `SessionStart` hook `command` for every
     cockpit-spawned claude pane (see hook_wiring.py). Fires on every session
@@ -5592,6 +5613,9 @@ def build_parser() -> argparse.ArgumentParser:
     # whole disk. Hidden from --help; fires on every Bash call.
     sgd = sub.add_parser("_guard", help=argparse.SUPPRESS)
     sgd.set_defaults(func=cmd_guard)
+
+    sa = sub.add_parser("_activity", help=argparse.SUPPRESS)
+    sa.set_defaults(func=cmd_activity)
 
     smf = sub.add_parser(
         "mcp-fallback",

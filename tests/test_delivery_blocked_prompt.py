@@ -341,3 +341,32 @@ class TestNeverBlindPasteIntoModal:
         s4.is_at_trust_prompt.return_value = False
         s4.is_blocked_on_permission_prompt.return_value = "1. Yes"
         assert _prompt_block_reason(s4) == "permission"
+
+
+class TestDeliveryStampsIdleAnchor:
+    """#627: the moment a task is actually written into the pane's PTY is the
+    single most important anchor for the idle-no-progress watchdog — a pane
+    that receives a task but whose provider never renders a tool-call marker
+    and never calls progress() would otherwise look idle from SPAWN time (the
+    whole assign→delivery→stall window accumulating into a false notice).
+    `_deliver` must stamp `last_send_ts` right at the write."""
+
+    def test_delivery_stamps_last_send_ts(self, orch: Orchestrator, monkeypatch) -> None:
+        import time as _time
+
+        lead = _pane(_live_session())
+        backend = _pane(_live_session())
+        backend.session.is_at_trust_prompt.return_value = False
+        backend.session.is_at_ready_prompt.return_value = True
+        backend.session.seconds_since_output.return_value = 1.0
+        orch._panes_by_project["P"] = {"lead": lead, "backend": backend}
+        monkeypatch.setattr(orch_mod.QTimer, "singleShot", staticmethod(lambda _ms, fn: fn()))
+
+        before = _time.time()
+        with patch("agent_takkub.lead_inbox._log_event"):
+            orch._send_when_ready("backend", "run smoke", max_wait_ms=100_000, project="P")
+
+        assert backend.session.write.called, "delivery must actually write into the PTY"
+        stamped = orch._pane_state["P::backend"].last_send_ts
+        assert stamped >= before, "delivery must stamp the idle-clock anchor at write time"
+        assert stamped <= _time.time() + 1

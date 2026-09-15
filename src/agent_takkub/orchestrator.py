@@ -7763,6 +7763,36 @@ class Orchestrator(
         _msg += self._language_nudge_suffix(project_ns, from_role, note, _ps_self.task_id)
         return True, _msg
 
+    def stamp_activity(self, from_role: str, project: str | None = None) -> tuple[bool, str]:
+        """#617: silently stamp a pane's idle-no-progress clock as "real
+        activity" WITHOUT the Lead notification `progress()` sends.
+
+        Wired to claude's `PreToolUse`/`PostToolUse` `mcp__*` hooks
+        (`hook_wiring.ACTIVITY_COMMAND` → `takkub _activity`) — an MCP tool
+        call renders no screen-scrapeable tool-call marker and (when driven
+        server-side) spawns no live child, so the idle-no-progress watchdog
+        would otherwise fire a false ⏳ notice mid-run. The stamp lands on
+        the SAME evidence `_real_progress_ts` reads (`last_send_ts`), i.e.
+        exactly what a pane's own `takkub progress()` call primes — minus
+        the notice, so a chatty pane hammering an MCP tool never spams Lead.
+
+        Provider gap: only claude panes get these per-call hooks today
+        (`scaffolding_process_names`/hook wiring is claude-only). Any other
+        provider that renders an on-screen tool-call banner keeps the
+        existing `tool_running_marker` scrape (#308); providers that render
+        NO marker AND spawn no child for MCP work stay a documented gap until
+        their CLI exposes an equivalent hook surface."""
+        if not from_role:
+            return False, "activity requires a role"
+        project_ns = self._resolve_project(project)
+        pane = self._project_panes(project_ns).get(from_role)
+        if pane is None:
+            return False, "no pane for role"
+        _ps_self = self._ps(f"{project_ns}::{from_role}")
+        _ps_self.last_send_ts = time.time()
+        _log_event("pane_tool_activity", role=from_role, project=project_ns)
+        return True, "activity stamped"
+
     def consume_pane_hook(
         self,
         from_role: str,
@@ -12288,8 +12318,28 @@ class Orchestrator(
 
                         _provider_np = _eff_provider(role, project=project_name)
                         _marker_np = pane.session.tool_running_marker(_provider_np)
-                        if isinstance(_marker_np, str) and _marker_np:
-                            ps_ck.last_tool_marker_seen_ts = now
+                        _marker_active = isinstance(_marker_np, str) and bool(_marker_np)
+                        # #627: EDGE-triggered — stamp only on the no-marker →
+                        # marker transition, never while the marker stays up. A
+                        # provider stuck re-rendering a persistent tool-call
+                        # banner ("Running command..." + a chunk that keeps
+                        # arriving, or codex repainting a static prompt that
+                        # still carries a tool-call line) would otherwise
+                        # re-stamp `last_tool_marker_seen_ts` every tick and
+                        # `_real_progress_ts` would read as fresh forever — the
+                        # exact #570 marquee failure this signal exists to
+                        # resist. A genuinely-long tool call stays protected
+                        # from a FALSE notice by the heavier
+                        # `_idle_no_progress_real_activity` pass (#599), which
+                        # checks live children / file writes right before a
+                        # notice would actually fire.
+                        _marker_was_active = getattr(ps_ck, "_tool_marker_was_active", False)
+                        if _marker_active:
+                            if not _marker_was_active:
+                                ps_ck.last_tool_marker_seen_ts = now
+                            ps_ck._tool_marker_was_active = True
+                        else:
+                            ps_ck._tool_marker_was_active = False
                     except Exception:
                         pass
                     try:

@@ -1264,11 +1264,26 @@ opencode_spec = ProviderSpec(
     # children=["opencode.exe"], notice "ยังมี 1 subprocess (opencode.exe)
     # เลื่อนปิดสูงสุด 15 นาที", then "about to be killed (opencode.exe)" —
     # two false negatives for zero real unfinished work.
+    #
+    # #627: on Windows opencode runs every shell/Bash tool through PowerShell,
+    # exactly like #286 showed for codex — the shell host outlives each tool
+    # call and stands under the pane for the whole session. A pane mid-task is
+    # CONSTANTLY under a live `pwsh.exe`; the real 12:47 false-suppression case
+    # (#619) is the same mechanism — the idle-no-progress watchdog sees "a live
+    # subprocess" and suppresses the ⏳ notice while the pane genuinely idles
+    # for 38 minutes. `pwsh.exe` must be scaffolding, not live-child evidence,
+    # on the same constancy grounds as `codex-code-mode-host` above; the
+    # `normalize_process_name` filter below strips `.exe` and lowercases, so
+    # `pwsh` is listed explicitly for POSIX parity with the other entries.
     scaffolding_process_names=(
         "node.exe",
         "node",
         "opencode.exe",
         "opencode",
+        "pwsh.exe",
+        "pwsh",
+        "powershell.exe",
+        "powershell",
     ),
 )
 

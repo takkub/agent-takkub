@@ -1398,3 +1398,61 @@ class TestIdleNoProgressWatchdog:
         _check(fake, now)
         assert fake.notify_calls == [], "a sighted tool-call marker must count as real progress"
         assert ps.last_tool_marker_seen_ts == now
+
+    def test_persistent_tool_marker_must_not_reprime_the_idle_clock(self) -> None:
+        """#627: the tool-marker stamp is EDGE-triggered. A provider that keeps
+        a tool-call banner re-rendered every tick (same "Running command..."
+        line, respawned each frame) must NOT be treated as fresh activity each
+        tick — that is exactly the #570 marquee failure this signal exists to
+        resist. It stamps once at the no-marker → marker transition, then the
+        idle clock runs against that single stamp, so an eternally re-rendered
+        banner cannot cover an actually-idle pane."""
+        now0 = 1_000_000.0
+        fake, pane, ps = self._pane_with_progress(now0, last_send_ts=0.0)
+        pane.session.tool_running_marker.return_value = "Running command..."
+        _check(fake, now0)
+        assert ps.last_tool_marker_seen_ts == now0, "transition must stamp once"
+        assert fake.notify_calls == []
+
+        # Marker STILL up next tick — the stamp must NOT advance.
+        now1 = now0 + 10
+        pane._last_output_ts = now1 - 5
+        ps.last_content_change_ts = now1
+        _check(fake, now1)
+        assert ps.last_tool_marker_seen_ts == now0, "persistent banner must not re-stamp"
+        assert fake.notify_calls == [], "10s is far inside the notice window"
+
+        # Far past the notice threshold with the banner STILL up → the notice
+        # must fire: the persistent banner earned no freshness, the clock ran
+        # from the single transition stamp.
+        now2 = now0 + IDLE_NO_PROGRESS_NOTICE_S + 5
+        pane._last_output_ts = now2 - 5
+        ps.last_content_change_ts = now2
+        _check(fake, now2)
+        idle_notices = [c for c in fake.notify_calls if c[2] == "backend"]
+        assert len(idle_notices) == 1, "an eternally re-rendered marker is not progress"
+        assert fake.close_calls == [], "notice only — still inside the escalate threshold"
+
+    def test_tool_marker_drop_then_resight_stamps_a_fresh_edge(self) -> None:
+        """#627: when the banner clears, a NEW sighting is a NEW edge and must
+        re-stamp — this is what thickens the clock for a genuinely long
+        multi-step tool sequence where each new call re-renders the banner."""
+        now = 1_000_000.0
+        fake, pane, ps = self._pane_with_progress(now, last_send_ts=0.0)
+        values = iter(["Running command...", "", "Running command..."])
+        pane.session.tool_running_marker.side_effect = lambda _provider: next(values)
+        _check(fake, now)  # sight → stamp
+        assert ps.last_tool_marker_seen_ts == now
+
+        now1 = now + 60
+        pane._last_output_ts = now1 - 5
+        ps.last_content_change_ts = now1
+        _check(fake, now1)  # cleared → no stamp change
+        assert ps.last_tool_marker_seen_ts == now
+
+        now2 = now1 + 60
+        pane._last_output_ts = now2 - 5
+        ps.last_content_change_ts = now2
+        _check(fake, now2)  # re-sight → fresh edge → re-stamp
+        assert ps.last_tool_marker_seen_ts == now2
+        assert fake.notify_calls == []

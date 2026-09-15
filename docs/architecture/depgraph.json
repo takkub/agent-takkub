@@ -3323,11 +3323,12 @@
         "agent_takkub.lead_wait",
         "agent_takkub.limit_autoresume",
         "agent_takkub.orchestrator",
+        "agent_takkub.pty_session",
         "agent_takkub.remote.notify",
         "agent_takkub.settings_window",
         "agent_takkub.spawn_engine"
       ],
-      "fan_in": 17,
+      "fan_in": 18,
       "fan_out": 10
     },
     {
@@ -3920,6 +3921,7 @@
         "agent_takkub._pty_backend",
         "agent_takkub._win_console",
         "agent_takkub.job_object_manager",
+        "agent_takkub.orchestrator_text",
         "agent_takkub.provider_spec"
       ],
       "imported_by": [
@@ -3935,7 +3937,7 @@
         "agent_takkub.spawn_engine"
       ],
       "fan_in": 10,
-      "fan_out": 4
+      "fan_out": 5
     },
     {
       "module": "agent_takkub.qa_gate",
