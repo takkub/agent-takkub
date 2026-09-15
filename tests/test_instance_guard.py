@@ -501,3 +501,80 @@ class TestEndToEndSimulatedSecondInstanceProbe633:
 
         # 6. Verify content of second instance was untouched throughout probe
         assert second_projects.read_text(encoding="utf-8") == '{"projects": ["prod-alpha"]}'
+
+
+class TestHeredocDataVsCommand:
+    """Validate that heredoc bodies containing dangerous command strings as DATA
+    are not falsely denied by instance guard, while actual commands and protected
+    redirections remain strictly denied (#633 follow-up)."""
+
+    @pytest.mark.parametrize(
+        "cmd",
+        [
+            '"$PY" - <<\'PY\'\nimport os\ntest = "npm i -g agent-takkub"\nPY',
+            "python - <<'PY'\nimport sys\ncmd = \"python -m agent_takkub\"\nPY",
+            "python3 - <<'PY'\nlauncher = \"agent-takkub\"\nPY",
+            "cat <<'EOF'\nnpm install -g agent-takkub\nEOF",
+            "cat <<'EOF'\nrm -rf /tmp/foreign_posix_test\nEOF",
+            "cat <<'EOF'\ndel /F /Q C:/foreign_win_test/projects.json\nEOF",
+            "cat <<EOF > ./safe_output.txt\npython -m agent_takkub\nEOF",
+        ],
+    )
+    def test_heredoc_data_allowed(self, cmd: str) -> None:
+        """Dangerous commands inside heredoc data bodies are stripped and allowed."""
+        verdict = pane_guard.classify(cmd, "lead")
+        assert verdict.allowed, f"Heredoc data should be allowed: {cmd}"
+
+    @pytest.mark.parametrize(
+        "cmd",
+        [
+            "npm i -g agent-takkub",
+            "npm install -g agent-takkub",
+            "python -m agent_takkub",
+            "agent-takkub",
+        ],
+    )
+    def test_same_commands_outside_heredoc_denied(self, cmd: str) -> None:
+        """The same commands outside heredoc remain denied."""
+        verdict = pane_guard.classify(cmd, "lead")
+        assert not verdict.allowed
+
+    @pytest.mark.parametrize(
+        "cmd",
+        [
+            "npm i -g agent-takkub\ncat <<'EOF'\nplain text\nEOF",
+            "cat <<'EOF'\nplain text\nEOF\npython -m agent_takkub",
+            "echo 'before'\ncat <<'EOF'\nplain text\nEOF\nagent-takkub",
+            "bash <<'EOF'\nnpm i -g agent-takkub\nEOF",
+            "bash -c 'npm i -g agent-takkub'",
+            "sh -c 'python -m agent_takkub'",
+        ],
+    )
+    def test_real_commands_near_or_in_shell_heredoc_denied(self, cmd: str) -> None:
+        """Real commands before/after heredocs, or fed to shell sinks, remain denied."""
+        verdict = pane_guard.classify(cmd, "lead")
+        assert not verdict.allowed
+
+    @pytest.mark.parametrize(
+        "target_path",
+        [
+            "/tmp/foreign_posix_test/projects.json",
+            "C:/foreign_win_test/projects.json",
+        ],
+    )
+    def test_heredoc_redirection_to_protected_data_home_denied(
+        self, monkeypatch: pytest.MonkeyPatch, target_path: str
+    ) -> None:
+        """Redirecting heredoc output to protected DATA_HOME (POSIX and Windows) must be denied."""
+        prot = pathlib.Path(target_path).parent.resolve()
+        monkeypatch.setenv("TAKKUB_PROTECTED_DATA_HOMES", str(prot))
+
+        cmd1 = f"cat <<EOF > {target_path}\nhello\nEOF"
+        v1 = pane_guard.classify(cmd1, "lead")
+        assert not v1.allowed, f"Should deny redirect after delimiter: {cmd1}"
+        assert v1.rule == "instance_guard:protected_data_home"
+
+        cmd2 = f"cat > {target_path} <<EOF\nhello\nEOF"
+        v2 = pane_guard.classify(cmd2, "lead")
+        assert not v2.allowed, f"Should deny redirect before delimiter: {cmd2}"
+        assert v2.rule == "instance_guard:protected_data_home"

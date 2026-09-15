@@ -617,10 +617,13 @@ _PYTHON_M_AGENT_TAKKUB = re.compile(
 # The exception is a heredoc fed to a shell (`bash <<'EOF' … EOF`), where the
 # body genuinely IS executed — stripping that would be a one-line bypass of
 # the whole rule, so those keep their body.
-_HEREDOC = re.compile(r"<<-?\s*(['\"]?)(\w+)\1(?P<body>.*?)^\s*\2\s*$", re.S | re.M)
+_HEREDOC = re.compile(
+    r"<<-?\s*(['\"]?)(\w+)\1(?P<trailer>[^\r\n]*(?:\r\n|\n))(?P<body>.*?)^\s*\2\s*$",
+    re.S | re.M,
+)
 _HEREDOC_SHELL_SINK = re.compile(
-    r"(?<![\w-])(?:ba|z|k|da)?sh(?![\w-])|(?<![\w-])pwsh(?![\w-])"
-    r"|(?<![\w-])python3?(?![\w-])|(?<![\w-])(?:eval|source)(?![\w-])",
+    r"(?<![\w-])(?:ba|z|k|da)?sh(?![\w-])|(?<![\w-])(?:pwsh|powershell)(?![\w-])"
+    r"|(?<![\w-])(?:eval|source)(?![\w-])",
     re.I,
 )
 
@@ -630,6 +633,8 @@ def _strip_heredoc_bodies(cmd: str) -> str:
 
     The interpreter check looks at the text from the start of the heredoc's
     own line up to the `<<`, which is where the sink command sits.
+    The trailer on the delimiter line (e.g. `> /path/to/file` or redirects/pipes)
+    is preserved so that destination/redirection guard checks still see it.
     """
 
     def _replace(match: re.Match[str]) -> str:
@@ -637,7 +642,10 @@ def _strip_heredoc_bodies(cmd: str) -> str:
         introducer = cmd[line_start : match.start()]
         if _HEREDOC_SHELL_SINK.search(introducer):
             return match.group(0)
-        return match.group(0).replace(match.group("body"), "\n")
+        full = match.group(0)
+        b_start = match.start("body") - match.start(0)
+        b_end = match.end("body") - match.start(0)
+        return full[:b_start] + full[b_end:]
 
     return _HEREDOC.sub(_replace, cmd)
 
@@ -917,8 +925,11 @@ def _is_note_exempt(file_path: str) -> bool:
     """#587 A2: a `*.md`/`*.txt` note is never counted toward, or denied by,
     Lead's direct-edit caps (carve-out #474 already allows these in prose;
     this makes the guard agree instead of pushing Lead to write them
-    through Bash to dodge `lines_per_call`)."""
+    through Bash to dodge `lines_per_call`).
+    Requirements manifests (`requirements.txt`) are dependencies, not notes."""
     lower = file_path.replace("\\", "/").rstrip("/").lower()
+    if lower.endswith("requirements.txt"):
+        return False
     return lower.endswith(".md") or lower.endswith(".txt")
 
 
@@ -1004,6 +1015,38 @@ _DEEP_TEST_FOLDER_EXEMPT = re.compile(
 _DEEP_TEST_SUFFIX_EXEMPT = re.compile(r"\.(?:spec|test)\.[^./]+$", re.I)
 _SENSITIVE_PATH_SEGMENTS = frozenset(
     {"auth", "security", "payment", "payments", "crypto", "token", "tokens"}
+)
+_SOURCE_CONFIG_EXTENSIONS = frozenset(
+    {
+        ".py",
+        ".ts",
+        ".tsx",
+        ".js",
+        ".jsx",
+        ".mjs",
+        ".cjs",
+        ".sql",
+        ".prisma",
+        ".yml",
+        ".yaml",
+        ".toml",
+        ".json",
+        ".ini",
+        ".cfg",
+        ".sh",
+        ".bash",
+        ".zsh",
+        ".ps1",
+        ".go",
+        ".rs",
+        ".java",
+        ".c",
+        ".cpp",
+        ".h",
+        ".hpp",
+        ".rb",
+        ".php",
+    }
 )
 
 
@@ -1134,20 +1177,12 @@ def evaluate_lead_direct_edit(
     # exemption below (#587 F3), see docstring.
     norm_file = file_path.replace("\\", "/").lower()
 
-    # Structural deep categories: deep because of WHERE the file lives, not
-    # because of a word that can appear in an unrelated directory name — path
-    # is the only signal that makes sense here, and there's no legitimate
-    # "test version" of a lockfile/migration/CI workflow to exempt. Unchanged
-    # by #611 below.
-    structural_deep_patterns = (
-        r"\b(?:schema|prisma)\b|schemas?/",
-        r"\bmigrations?\b",
+    # Package manifests and lockfiles: denied EVERYWHERE, including scratchpad (#587 F3).
+    manifest_and_lockfile_patterns = (
         r"(?:package\.json|requirements\.txt|pyproject\.toml|go\.mod|cargo\.toml)$",
         r"(?:package-lock\.json|pnpm-lock\.yaml|yarn\.lock|uv\.lock|poetry\.lock|bun\.lock)$",
-        r"\.github/(?:workflows|actions)",
-        r"(?:dockerfile|docker-compose.*\.ya?ml)$",
     )
-    for pat in structural_deep_patterns:
+    for pat in manifest_and_lockfile_patterns:
         if re.search(pat, norm_file):
             return Verdict(
                 False,
@@ -1155,11 +1190,37 @@ def evaluate_lead_direct_edit(
                 reason=f"ไฟล์ {file_path} อยู่ในหมวด deep ({pat}) — ห้าม Lead แก้เอง ต้อง delegate ผ่าน takkub assign --role <role>",
             )
 
+    is_exempt_location = _is_direct_edit_exempt(file_path, cwd, project)
+
+    # Structural deep categories: word-based checks (schema, prisma, migration, .github workflows, dockerfile).
+    # Applied to files under project root/BLOCKED_DIRS, or files outside project root that
+    # have source/config extensions. Non-source files (.html, .md, .txt, .png, .jpg, .csv)
+    # outside project root (scratchpad / runtime / exports) are allowed.
+    structural_word_patterns = (
+        r"\b(?:schema|prisma)\b|schemas?/",
+        r"\bmigrations?\b",
+        r"\.github/(?:workflows|actions)",
+        r"(?:dockerfile|docker-compose.*\.ya?ml)$",
+    )
+    file_ext = pathlib.Path(norm_file).suffix.lower()
+    file_name = pathlib.Path(norm_file).name.lower()
+    is_source_or_config = file_ext in _SOURCE_CONFIG_EXTENSIONS or file_name.startswith(
+        "dockerfile"
+    )
+    if not is_exempt_location or is_source_or_config:
+        for pat in structural_word_patterns:
+            if re.search(pat, norm_file):
+                return Verdict(
+                    False,
+                    rule="lead_direct_edit:deep_category",
+                    reason=f"ไฟล์ {file_path} อยู่ในหมวด deep ({pat}) — ห้าม Lead แก้เอง ต้อง delegate ผ่าน takkub assign --role <role>",
+                )
+
     # #625: files outside project root (scratchpad in %TEMP%, memory files,
     # cockpit runtime) are exempt from direct-edit caps and sensitive content
     # checks (#587 F3 preserved: structural deep files like package.json/lockfile
     # above are still denied everywhere).
-    if _is_direct_edit_exempt(file_path, cwd, project):
+    if is_exempt_location:
         return Verdict(True)
 
     # #611: these are word-based, and a word alone can sit in a path that
@@ -2670,7 +2731,7 @@ def is_instance_guard_candidate(command: str) -> bool:
     Commands that return False bypass all instance guard overhead (< 20 microseconds)."""
     if not command or not command.strip():
         return False
-    cmd = command.strip()
+    cmd = _strip_heredoc_bodies(command).strip()
     return bool(
         _CANDIDATE_BOOT_RE.search(cmd)
         or _CANDIDATE_KILL_RE.search(cmd)
@@ -2710,6 +2771,8 @@ def evaluate_instance_guard(
     cmd = (command or "").strip()
     if not cmd:
         return None
+
+    cmd = _strip_heredoc_bodies(cmd)
 
     # Fast pre-filter: Non-candidate commands bypass instance guard completely (< 20 us)
     if not is_instance_guard_candidate(cmd):
