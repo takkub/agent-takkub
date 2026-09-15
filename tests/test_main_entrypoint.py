@@ -68,6 +68,89 @@ class TestMainEntrypointDispatch:
         mock_app.assert_called_once_with([flag, "offscreen"])
         mock_cli.assert_not_called()
 
+    @pytest.mark.parametrize("psn_arg", ["-psn_0_123", "-psn_0_9876543"])
+    def test_macos_psn_arg_calls_app_main(
+        self, psn_arg: str, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        mock_cli = MagicMock(return_value=0)
+        mock_app = MagicMock(return_value=0)
+
+        import agent_takkub.app
+        import agent_takkub.cli
+
+        monkeypatch.setattr(agent_takkub.cli, "main", mock_cli)
+        monkeypatch.setattr(agent_takkub.app, "main", mock_app)
+
+        ret = main_entrypoint.main([psn_arg])
+        assert ret == 0
+        mock_app.assert_called_once_with([psn_arg])
+        mock_cli.assert_not_called()
+
+    @pytest.mark.parametrize(
+        "arbitrary_args",
+        [["arg_mua"], ["unknown_command", "foo"], ["--unknown-flag"]],
+    )
+    def test_arbitrary_unknown_args_call_app_main(
+        self, arbitrary_args: list[str], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        mock_cli = MagicMock(return_value=0)
+        mock_app = MagicMock(return_value=0)
+
+        import agent_takkub.app
+        import agent_takkub.cli
+
+        monkeypatch.setattr(agent_takkub.cli, "main", mock_cli)
+        monkeypatch.setattr(agent_takkub.app, "main", mock_app)
+
+        ret = main_entrypoint.main(arbitrary_args)
+        assert ret == 0
+        mock_app.assert_called_once_with(arbitrary_args)
+        mock_cli.assert_not_called()
+
+    def test_report_build_calls_cli_main(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        mock_cli = MagicMock(return_value=0)
+        mock_app = MagicMock(return_value=0)
+
+        import agent_takkub.app
+        import agent_takkub.cli
+
+        monkeypatch.setattr(agent_takkub.cli, "main", mock_cli)
+        monkeypatch.setattr(agent_takkub.app, "main", mock_app)
+
+        ret = main_entrypoint.main(["report", "build"])
+        assert ret == 0
+        mock_cli.assert_called_once_with(["report", "build"])
+        mock_app.assert_not_called()
+
+    @pytest.mark.parametrize("flag", ["-h", "--help"])
+    def test_help_flags_forward_to_cli_main(
+        self, flag: str, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        mock_cli = MagicMock(return_value=0)
+        mock_app = MagicMock(return_value=0)
+
+        import agent_takkub.app
+        import agent_takkub.cli
+
+        monkeypatch.setattr(agent_takkub.cli, "main", mock_cli)
+        monkeypatch.setattr(agent_takkub.app, "main", mock_app)
+
+        ret = main_entrypoint.main([flag])
+        assert ret == 0
+        mock_cli.assert_called_once_with([flag])
+        mock_app.assert_not_called()
+
+    def test_get_subcommand_names_extracts_from_parser(self) -> None:
+        from agent_takkub.cli import get_subcommand_names
+
+        subs = get_subcommand_names()
+        assert isinstance(subs, frozenset)
+        assert "report" in subs
+        assert "assign" in subs
+        assert "spawn" in subs
+        assert "send" in subs
+        assert "done" in subs
+
 
 class _FakeSock:
     def __init__(self) -> None:

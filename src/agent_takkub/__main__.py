@@ -16,17 +16,28 @@ _QT_APP_FLAGS = frozenset(
         "-session",
     }
 )
+_HELP_FLAGS = frozenset({"-h", "--help"})
 
 
 def main(argv: list[str] | None = None) -> int:
     args = sys.argv[1:] if argv is None else argv
-    if not args or (args and args[0] in _QT_APP_FLAGS):
-        from .app import main as app_main
+    if args:
+        first = args[0]
+        if first in _HELP_FLAGS:
+            from .cli import main as cli_main
 
-        return app_main(argv)
-    from .cli import main as cli_main
+            return cli_main(args)
 
-    return cli_main(args)
+        from .cli import get_subcommand_names
+
+        if first in get_subcommand_names():
+            from .cli import main as cli_main
+
+            return cli_main(args)
+
+    from .app import main as app_main
+
+    return app_main(argv)
 
 
 if __name__ == "__main__":

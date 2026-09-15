@@ -16,6 +16,7 @@ Output is human readable on stdout. Exit 0 on success, 1 on error.
 from __future__ import annotations
 
 import argparse
+import functools
 import hashlib
 import json
 import os
@@ -4804,8 +4805,7 @@ def cmd_lead_edits(args: argparse.Namespace) -> dict:
     return {"ok": True, "msg": msg, "data": status}
 
 
-def main(argv: list[str] | None = None) -> int:
-    _ensure_utf8_stdio()
+def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="takkub", description="agent-takkub cockpit CLI")
     sub = p.add_subparsers(dest="command", required=True)
 
@@ -6396,7 +6396,21 @@ def main(argv: list[str] | None = None) -> int:
         help="project name (defaults to current project)",
     )
     sled.set_defaults(func=cmd_lead_edits)
+    return p
 
+
+@functools.lru_cache(maxsize=1)
+def get_subcommand_names() -> frozenset[str]:
+    p = build_parser()
+    for action in p._actions:
+        if isinstance(action, argparse._SubParsersAction):
+            return frozenset(action.choices.keys())
+    return frozenset()
+
+
+def main(argv: list[str] | None = None) -> int:
+    _ensure_utf8_stdio()
+    p = build_parser()
     args = p.parse_args(argv)
 
     gate_err = _enforce_role_gate(args.command)
