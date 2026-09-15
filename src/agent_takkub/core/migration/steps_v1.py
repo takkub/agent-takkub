@@ -336,6 +336,27 @@ class RoleAgentMigrationStep:
         already has data" matters just as much as "source gone"."""
         return self._registry_retired() and self._routing_retired()
 
+    def stray_source_paths(self) -> list[Path]:
+        """V1 source files that re-appeared after migration (#634) — if
+        either custom-roles.json or the routing file(s) exist but their V2
+        targets already have data, they're stray files that should be
+        quarantined, not used as sources."""
+        sources = []
+        custom_roles = self._custom_roles_source()
+        if custom_roles.exists() and _has_data(self._custom_roles_target(), "data"):
+            sources.append(custom_roles)
+        routing = self._global_routing_source()
+        if routing.exists() and _has_data(self._routing_target(), "global"):
+            sources.append(routing)
+        # #634: per-project role-providers.json are now sourced from
+        # projects/<slug>/role-providers.json, not from root root-providers.json
+        # Add them to stray detection so they're quarantined if re-appear
+        for name in self._project_names():
+            proj_routing = self._project_routing_source(name)
+            if proj_routing.exists() and _has_data(self._routing_target(), "projects"):
+                sources.append(proj_routing)
+        return sources
+
     def apply(self) -> StepReport:
         # #605: guard each target independently — the registry and routing
         # targets have their own separate V1 sources, so one can be
@@ -536,6 +557,16 @@ class ProjectMigrationStep:
         reported as retired before its own `apply()` ever had a chance to
         write its (empty but valid) registry."""
         return not self._projects_json().exists() and _has_data(self._registry_target(), "data")
+
+    def stray_source_paths(self) -> list[Path]:
+        """V1 source files that re-appeared after migration (#634) — if
+        `projects.json` exists but the V2 target already has data, it's a
+        stray file that should be quarantined, not used as a source."""
+        sources = []
+        projects_json = self._projects_json()
+        if projects_json.exists() and _has_data(self._registry_target(), "data"):
+            sources.append(projects_json)
+        return sources
 
     def apply(self) -> StepReport:
         if self.source_retired():

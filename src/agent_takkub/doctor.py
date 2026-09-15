@@ -3613,6 +3613,7 @@ def check_storage_layout_state() -> list[Finding]:
             )
     findings.extend(_auto_migrate_boot_findings())
     findings.extend(_pending_duplicate_findings())
+    findings.extend(_stray_v1_source_findings())
     return findings
 
 
@@ -3686,6 +3687,44 @@ def _pending_duplicate_findings() -> list[Finding]:
             _duplicate_entries_in_manifest(manifest_path, "archive", "archived", data_home)
         )
     return findings
+
+
+def _stray_v1_source_findings() -> list[Finding]:
+    """[storage-layout/stray-v1-sources] — #634: V1 source files that
+    re-appeared in DATA_HOME after migration, sitting in the quarantine
+    directory under backups because they must not be used as sources for
+    re-apply (would overwrite V2 target data). Not an error by itself —
+    they're safely stored — but worth surfacing so a user can clean them
+    up if they know where they came from."""
+    try:
+        from .core.migration.backup import BackupManager
+    except Exception:
+        return []
+    backups = BackupManager()
+    quarantine_dir = backups.root / "stray-v1-sources"
+    if not quarantine_dir.is_dir():
+        return []
+    stray_files = []
+    try:
+        for timestamp_dir in quarantine_dir.iterdir():
+            if not timestamp_dir.is_dir():
+                continue
+            for stray_file in timestamp_dir.iterdir():
+                stray_files.append(stray_file.name)
+    except OSError:
+        return []  # swallow-ok: read-only probe for diagnostics
+    if not stray_files:
+        return []
+    return [
+        Finding(
+            "storage-layout",
+            "stray-v1-sources",
+            Status.WARN,
+            f"{len(stray_files)} stray V1 source file(s) quarantined (#634) — they re-appeared after "
+            "migration but won't be used as sources for re-apply. Safe to delete, or they'll be cleaned "
+            f"up on next migration run: {', '.join(sorted(set(stray_files)))}",
+        )
+    ]
 
 
 def _v2_authority_retirement_finding() -> Finding:

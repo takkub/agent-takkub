@@ -92,6 +92,16 @@ class RegistryCopyStep:
         target file never created at all (a real regression this fixed)."""
         return all(self._mapping_retired(m) for m in self.mappings)
 
+    def stray_source_paths(self) -> list[Path]:
+        """V1 source files that re-appeared after migration (#634) — if
+        any mapping's source exists but its target already has data, it's
+        a stray file that should be quarantined, not used as a source."""
+        sources = []
+        for m in self.mappings:
+            if m.source.exists() and _target_has_data(m.target):
+                sources.append(m.source)
+        return sources
+
     def _backup_key(self, mapping: RegistryMapping) -> str:
         # Composite key, not bare step_id: two mappings in the same step can
         # legitimately target the same basename in different V2 subdirs
