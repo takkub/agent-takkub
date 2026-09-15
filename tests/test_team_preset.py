@@ -178,12 +178,32 @@ def test_solo_lead_blocks_every_teammate_spawn():
     assert ok is False
 
 
-def test_solo_lead_never_blocks_lead_or_providers():
+def test_solo_lead_blocks_providers_and_critic_but_not_lead_or_shell():
+    """solo-lead ("ทำเอง") tells Lead to spawn no teammate at all — providers
+    and critic are outside the preset roster but are still teammates, so they
+    must be blocked too. Only Lead itself and the user's `shell` pass."""
     team_preset.set_current("solo-lead", "proj")
     assert team_preset.can_spawn("lead", "proj")[0] is True
-    # providers/shell/critic are outside the preset roster entirely
-    for role in ("codex", "gemini", "opencode", "kimi", "cursor", "shell", "critic"):
-        assert team_preset.can_spawn(role, "proj")[0] is True
+    assert team_preset.can_spawn("shell", "proj")[0] is True
+    for role in ("codex", "gemini", "opencode", "kimi", "cursor", "critic", "codex#2"):
+        ok, msg = team_preset.can_spawn(role, "proj")
+        assert ok is False, role
+        assert "team preset" in msg
+
+
+def test_pair_blocks_providers_and_critic_but_keeps_checker():
+    team_preset.set_current("pair", "proj")
+    assert team_preset.can_spawn("reviewer", "proj")[0] is True
+    assert team_preset.can_spawn("shell", "proj")[0] is True
+    for role in ("codex", "gemini", "opencode", "kimi", "cursor", "critic"):
+        assert team_preset.can_spawn(role, "proj")[0] is False, role
+
+
+def test_full_and_auto_still_allow_providers():
+    for preset_id in ("full", "auto"):
+        team_preset.set_current(preset_id, "proj")
+        for role in ("codex", "gemini", "opencode", "kimi", "cursor", "critic"):
+            assert team_preset.can_spawn(role, "proj")[0] is True, (preset_id, role)
 
 
 def test_pair_allows_reviewer_and_qa_alias_as_checker():

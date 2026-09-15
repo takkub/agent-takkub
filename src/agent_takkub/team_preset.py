@@ -446,6 +446,18 @@ def _can_spawn_from_cfg(role: str, cfg: dict, project: str | None = None) -> tup
     if cfg["preset"] == "auto":
         return True, ""
     if base not in _governed_roles(project):
+        # solo-lead ("ทำเอง": Lead reads → edits → tests itself, 0 panes) and
+        # pair (Lead + its checker only) tell Lead "ห้าม spawn teammate ใดๆ" /
+        # "ห้าม spawn role ทำงานอื่น" — providers (codex/gemini/opencode/kimi/
+        # cursor) and critic are teammates too, so they must not slip through
+        # just because no preset roster lists them. `shell` is the user's own
+        # terminal, not a teammate.
+        if cfg["preset"] in ("solo-lead", "pair") and base != "shell":
+            return False, (
+                f"role {base} ไม่เปิดใน team preset '{label(cfg['preset'])}' ของโปรเจคนี้ — "
+                "preset นี้ให้ Lead ทำเองโดยไม่ spawn teammate · เปลี่ยน preset ที่ Settings "
+                "หรือ `takkub assign --role lead --team full` override เฉพาะงานนี้"
+            )
         return True, ""
     if base in CHECKER_ROLES.values():
         # #513/#561 folded qa/critic into reviewer --mode; resolve_role_alias is the
@@ -486,7 +498,10 @@ def can_spawn(role: str, project: str | None = None) -> tuple[bool, str]:
     project's EFFECTIVE preset (standing or task-override) doesn't include.
 
     ``role`` outside the preset roster entirely (providers, `shell`,
-    `critic`) always passes through untouched — see `_governed_roles`.
+    `critic`) passes through under ``full``/``custom`` — see `_governed_roles`
+    — but NOT under ``solo-lead``/``pair``: those presets tell Lead to spawn
+    no teammate (pair: its checker only), so every non-Lead role except the
+    user's own `shell` is blocked there.
     ``qa``/``reviewer`` ARE governed (both are checker-mappable): whichever
     one is NOT the preset's active `checker` is blocked, unless it's also
     turned on as a plain POSITION in a custom preset's roster. ``lead``

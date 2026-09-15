@@ -2382,11 +2382,11 @@ class TestTeamPresetView:
         """#592 item 1: reviewer/qa/critic and the extra positions now always
         get a row (collapsed "โหมด Reviewer"/"ตำแหน่งเสริม" sections) — under
         solo-lead (no checker, nothing governed on) reviewer/qa/extras read
-        OFF instead of being dropped from the page entirely. `critic` is the
-        one long-standing exception (`can_spawn`'s own docstring: "providers,
-        shell, critic" are never preset-governed at all — #513 never added
-        it to `CHECKER_ROLES`) so it stays ON here, same as a provider chip
-        would."""
+        OFF instead of being dropped from the page entirely. `critic` reads
+        OFF too: it is outside the preset roster, but solo-lead ("ทำเอง")
+        spawns no teammate at all, so `can_spawn` blocks every non-Lead role
+        except the user's `shell` under solo-lead/pair (it used to be the
+        one exception that stayed ON)."""
         dlg = settings_window.SettingsWindow(
             project="proj-a", initial_view=settings_window.VIEW_PROVIDERS_ROLES
         )
@@ -2397,7 +2397,7 @@ class TestTeamPresetView:
             assert role in dlg._role_toggles
             assert dlg._role_toggles[role].isChecked() is False
         assert "critic" in dlg._role_toggles
-        assert dlg._role_toggles["critic"].isChecked() is True
+        assert dlg._role_toggles["critic"].isChecked() is False
         assert "lead" in dlg._role_toggles or "lead" in dlg._role_provider_combos
         dlg.deleteLater()
 

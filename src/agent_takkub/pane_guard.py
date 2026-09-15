@@ -2534,6 +2534,10 @@ def is_in_protected_data_home(
     raw = str(target_path).strip().strip("\"'")
     if not raw:
         return False, None
+    # #633: a backslash is a separator on Windows but a filename character on
+    # POSIX — `{home}\projects.json` must still resolve INTO `{home}` on
+    # macOS/Linux. Windows accepts `/` too, so normalizing is safe everywhere.
+    raw = raw.replace("\\", "/")
     raw = os.path.expandvars(raw)
     raw = re.sub(
         r"\$env:([A-Za-z0-9_]+)", lambda m: os.environ.get(m.group(1), ""), raw, flags=re.I
