@@ -173,27 +173,70 @@ class TestRecoverAuthFailedPaneDegradesImmediately:
         assert ps_after.no_content_recover_attempts == 1
         mock_resend.assert_called_once()
 
-    def test_warns_lead_with_provider_and_reason(self, orch: Orchestrator) -> None:
+    @pytest.mark.parametrize(
+        "provider", ["claude", "codex", "gemini-agy", "opencode", "kimi", "cursor"]
+    )
+    def test_warns_lead_with_provider_and_reason(self, orch: Orchestrator, provider: str) -> None:
         lead = _pane(_live_session())
-        qa = _pane(_auth_failed_session(), provider="gemini-agy")
+        qa = _pane(_auth_failed_session(), provider=provider)
+        qa._session_generation = 1
         orch._panes_by_project["P"] = {"lead": lead, "qa": qa}
+        notices = []
+        settled = []
+
+        def spawn(*args, **kwargs):
+            qa.session = _live_session()
+            qa.session.is_at_ready_prompt.return_value = True
+            qa.session.first_content_ts.return_value = 1.0
+            qa.model.provider_name = "claude"
+            return True, "ok"
+
+        def verify(*args, **kwargs):
+            settled.append(kwargs["on_settled"])
 
         with (
             patch.object(orch, "close"),
-            patch.object(orch, "spawn", return_value=(True, "ok")),
-            patch.object(orch, "_send_when_ready"),
+            patch.object(orch, "spawn", side_effect=spawn),
+            patch.object(
+                orch, "_notify_lead", side_effect=lambda *a, **kw: notices.append((a, kw))
+            ),
+            patch.object(orch_mod, "_delayed_enter_verified", side_effect=verify),
             patch("agent_takkub.lead_inbox._log_event"),
         ):
             orch._recover_auth_failed_pane(
-                "qa", "P", qa, "run tests", provider="gemini-agy", reason="not signed in"
+                "qa", "P", qa, "run tests", provider=provider, reason="not signed in"
             )
+            assert notices == [], "must not claim delivery before acceptance"
+            assert qa.session.write.called
+            assert len(settled) == 1
+            qa.session.is_at_ready_prompt.return_value = False
+            settled[0]()
+            settled[0]()  # duplicate settlement must not repeat the notice
 
-        warnings = [
-            c.args[0]
-            for c in lead.session.write.call_args_list
-            if c.args and isinstance(c.args[0], str)
-        ]
-        degrade_warnings = [m for m in warnings if "[auth-failure-degrade]" in m]
-        assert len(degrade_warnings) == 1
-        assert "qa" in degrade_warnings[0]
-        assert "not signed in" in degrade_warnings[0]
+        assert len(notices) == 1
+        assert notices[0][1]["kind"] == "auth-failure-degrade"
+        body = notices[0][0][1]
+        assert "qa login ไม่ผ่าน → ย้ายไป claude แล้ว งานส่งต่อให้แล้ว" in body
+        assert "not signed in" in body
+        assert orch._ps(_exit_key("P", "qa")).pending_auth_recovery is None
+
+    def test_failed_respawn_reports_failure_without_success_notice(
+        self, orch: Orchestrator
+    ) -> None:
+        qa = _pane(_auth_failed_session(), provider="kimi")
+        orch._panes_by_project["P"] = {"lead": _pane(_live_session()), "qa": qa}
+        with (
+            patch.object(orch, "close"),
+            patch.object(orch, "spawn", return_value=(False, "spawn refused")),
+            patch.object(orch, "_notify_lead") as notify,
+            patch.object(orch, "_send_when_ready") as resend,
+            patch("agent_takkub.lead_inbox._log_event"),
+        ):
+            orch._recover_auth_failed_pane(
+                "qa", "P", qa, "run tests", provider="kimi", reason="not signed in"
+            )
+        resend.assert_not_called()
+        notify.assert_called_once()
+        assert notify.call_args.kwargs["kind"] == "spawn-failed"
+        assert "kimi login ไม่ผ่าน" in notify.call_args.args[1]
+        assert "งานส่งต่อให้แล้ว" not in notify.call_args.args[1]

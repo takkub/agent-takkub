@@ -238,3 +238,113 @@ class TestCmdTask:
 
         assert result["ok"] is False
         assert result["exit_code"] == 1
+
+
+@pytest.mark.parametrize(
+    "provider", ["claude", "codex", "gemini-agy", "opencode", "kimi", "cursor"]
+)
+@pytest.mark.parametrize("delivered", [False, True])
+def test_recovery_close_does_not_report_abandoned_task_or_finalize_worktree(
+    orch: Orchestrator, provider: str, delivered: bool
+) -> None:
+    pane = MagicMock()
+    pane.session = None
+    pane.model.provider_name = provider
+    orch._panes_by_project[TEST_PROJECT] = {"backend": pane}
+    ps = orch._ps(_exit_key(TEST_PROJECT, "backend"))
+    ps.last_assigned_task = "continue this task"
+    ps.task_delivered = delivered
+    ps.worktree = MagicMock()
+    with (
+        patch("agent_takkub.task_ledger.mark_done", return_value=None),
+        patch.object(orch, "_drain_pane_health", return_value=None),
+        patch.object(orch, "_notify_lead") as notify,
+        patch.object(orch, "_finalize_worktree") as finalize,
+        patch.object(orch, "_snapshot_dirty_worktree_if_needed") as snapshot,
+    ):
+        ok, message = orch.close(
+            "backend",
+            project=TEST_PROJECT,
+            suppress_pipeline=True,
+            suppress_auto_chain=True,
+            keep_queue=True,
+        )
+    assert ok, message
+    assert not any(c.kwargs.get("kind") == "close-undelivered" for c in notify.call_args_list)
+    finalize.assert_not_called()
+    snapshot.assert_not_called()
+    if not delivered:
+        assert (
+            orch.task_show_info("backend", project=TEST_PROJECT)[2]["task"] == "continue this task"
+        )
+
+
+@pytest.mark.parametrize(
+    "provider", ["claude", "codex", "gemini-agy", "opencode", "kimi", "cursor"]
+)
+def test_auth_handoff_uses_real_close_and_delivery_in_same_worktree(
+    orch: Orchestrator, provider: str, tmp_path: pathlib.Path
+) -> None:
+    from agent_takkub import orchestrator as orch_mod
+    from agent_takkub.worktree_manager import WorktreeInfo
+
+    pane = MagicMock()
+    pane.session = None
+    pane._session_cwd = str(tmp_path)
+    pane._session_generation = 1
+    pane.model.provider_name = provider
+    lead = MagicMock()
+    lead.session.is_alive = True
+    orch._panes_by_project[TEST_PROJECT] = {"backend": pane, "lead": lead}
+    ps = orch._ps(_exit_key(TEST_PROJECT, "backend"))
+    ps.last_assigned_task = "continue original task"
+    info = WorktreeInfo(str(tmp_path), "wt/backend-test", "base", str(tmp_path))
+    ps.worktree = info
+    marker = tmp_path / "existing-work.txt"
+    marker.write_text("preserve work", encoding="utf-8")
+    spawned = []
+    deliveries = []
+
+    def spawn(role, **kwargs):
+        spawned.append(kwargs)
+        replacement = MagicMock()
+        replacement._session_cwd = kwargs["cwd"]
+        replacement._session_generation = 2
+        replacement.model.provider_name = "claude"
+        replacement.session.is_alive = True
+        replacement.session.is_at_ready_prompt.return_value = True
+        replacement.session.is_at_trust_prompt.return_value = False
+        replacement.session.is_blocked_on_tty_prompt.return_value = None
+        replacement.session.is_blocked_on_permission_prompt.return_value = None
+        replacement.session.first_content_ts.return_value = 1.0
+        orch._panes_by_project[TEST_PROJECT][role] = replacement
+        return True, "ok"
+
+    def verify(pane, session, *args, **kwargs):
+        assert not [
+            c for c in notify.call_args_list if c.kwargs.get("kind") == "auth-failure-degrade"
+        ]
+        session.is_at_ready_prompt.return_value = False
+        kwargs["on_settled"]()
+        deliveries.extend(session.write.call_args_list)
+
+    with (
+        patch.object(orch_mod.QTimer, "singleShot", side_effect=lambda ms, fn: fn()),
+        patch.object(orch_mod, "_delayed_enter_verified", side_effect=verify),
+        patch.object(orch, "spawn", side_effect=spawn),
+        patch.object(orch, "_notify_lead") as notify,
+        patch("agent_takkub.task_ledger.mark_done", return_value=None),
+    ):
+        orch._recover_auth_failed_pane(
+            "backend",
+            TEST_PROJECT,
+            pane,
+            ps.last_assigned_task,
+            provider=provider,
+            reason="not signed in",
+        )
+    assert spawned[0]["cwd"] == info.path
+    assert orch._ps(_exit_key(TEST_PROJECT, "backend")).worktree is info
+    assert marker.read_text(encoding="utf-8") == "preserve work"
+    assert any("continue original task" in str(c) for c in deliveries)
+    assert [c.kwargs.get("kind") for c in notify.call_args_list] == ["auth-failure-degrade"]

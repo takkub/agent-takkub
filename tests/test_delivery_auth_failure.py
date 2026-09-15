@@ -158,7 +158,7 @@ class TestReadyPromptWinsOverStaleAuthMarker:
 
         warnings = _written_strings(lead.session)
         auth_warnings = [m for m in warnings if "[auth-failure]" in m]
-        assert len(auth_warnings) == 1
+        assert auth_warnings == []  # #630: recovery reports once after acceptance
         # auth_failure_reason is only ever called on a NOT-ready poll (the
         # ready poll skips it outright) — if the reset had not happened, the
         # leftover n_before credit would let it fire after just ONE more
@@ -208,9 +208,7 @@ class TestAuthFailureRequiresConsecutivePolls:
 
         warnings = _written_strings(lead.session)
         auth_warnings = [m for m in warnings if "[auth-failure]" in m]
-        assert len(auth_warnings) == 1
-        assert "backend" in auth_warnings[0]
-        assert "not signed in" in auth_warnings[0]
+        assert auth_warnings == []  # #630: recovery reports once after acceptance
         assert backend.session.auth_failure_reason.call_count == _AUTH_FAILURE_CONFIRM_POLLS
         assert any(c.args and c.args[0] == "task_deliver_auth_failure" for c in log.call_args_list)
         # #269: no longer blind-pastes into the broken pane — routes to the
