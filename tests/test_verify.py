@@ -235,6 +235,47 @@ def test_limit_concurrency_true_caps_direct_vitest(tmp_path: Path) -> None:
     ]
 
 
+def test_limit_concurrency_true_caps_direct_vitest4_with_maxworkers(tmp_path: Path) -> None:
+    """#607 H4: Vitest 4 dropped `--poolOptions.forks.maxForks` — CLI
+    parsing rejects it outright (`CACError: Unknown option --poolOptions`),
+    verified against a real Vitest 4.0.0 binary. The version-gated flag
+    must switch to `--maxWorkers=N` once vitest resolves to major >= 4."""
+    _pkg(tmp_path, {"test": "vitest run"}, devDependencies={"vitest": "^4.0.0"})
+    (tmp_path / "package-lock.json").write_text("{}")
+    checks = detect_stack(tmp_path, limit_concurrency=True)
+    test_check = next(c for c in checks if c.name == "test")
+    assert test_check.cmd[1:] == ["run", "test", "--", "--maxWorkers=2"]
+
+
+def test_limit_concurrency_true_prefers_installed_over_declared_vitest_version(
+    tmp_path: Path,
+) -> None:
+    """The installed node_modules version is ground truth over a declared
+    devDependency spec (e.g. a caret range left stale after a major bump)."""
+    _pkg(tmp_path, {"test": "vitest run"}, devDependencies={"vitest": "^2.0.0"})
+    (tmp_path / "package-lock.json").write_text("{}")
+    vitest_pkg = tmp_path / "node_modules" / "vitest"
+    vitest_pkg.mkdir(parents=True)
+    (vitest_pkg / "package.json").write_text(json.dumps({"version": "4.0.0"}))
+    checks = detect_stack(tmp_path, limit_concurrency=True)
+    test_check = next(c for c in checks if c.name == "test")
+    assert test_check.cmd[1:] == ["run", "test", "--", "--maxWorkers=2"]
+
+
+def test_limit_concurrency_true_injects_nothing_when_vitest_version_unknown(
+    tmp_path: Path,
+) -> None:
+    """#607 H4: with no node_modules and no declared vitest version to read,
+    guessing either flag family risks a hard CLI-parse failure on whichever
+    major is actually installed — inject nothing (fail-safe) rather than
+    turn a healthy project's gate red."""
+    _pkg(tmp_path, {"test": "vitest run"})
+    (tmp_path / "package-lock.json").write_text("{}")
+    checks = detect_stack(tmp_path, limit_concurrency=True)
+    test_check = next(c for c in checks if c.name == "test")
+    assert test_check.cmd[1:] == ["run", "test"]
+
+
 def test_limit_concurrency_true_caps_direct_jest(tmp_path: Path) -> None:
     _pkg(tmp_path, {"test": "jest --ci"}, devDependencies={"jest": "^29.0.0"})
     (tmp_path / "package-lock.json").write_text("{}")

@@ -879,6 +879,26 @@ _WORKER_TIMEOUT_RE = re.compile(
 _TEST_SUMMARY_RE = re.compile(
     r"tests?\s*:?\s*\d+\s+passed|test suites?:.*passed|\b\d+\s+passed\b", re.IGNORECASE
 )
+# H3 (2026-09-15 review, #607): a multi-workspace run can print a genuine
+# passed-tests summary for ONE package alongside a real assertion failure in
+# ANOTHER — the worker-timeout+passed-summary signature above alone can't
+# tell that apart from pure machine-load flake. Any of these means a real
+# test actually failed, so the run must stay FAIL and skip the retry
+# entirely, no matter what else is in the log.
+_FAILED_COUNT_RE = re.compile(r"\b(\d+)\s+failed\b", re.IGNORECASE)
+_ASSERTION_SIGNAL_RE = re.compile(
+    r"^\s*FAIL[ \t]|✗|×|AssertionError|expect\(", re.IGNORECASE | re.MULTILINE
+)
+
+
+def _has_real_test_failure(text: str) -> bool:
+    """True when *text* carries a genuine failure signal — a nonzero "N
+    failed" count, a `FAIL ` file line, a vitest/jest failure glyph, or an
+    assertion error/`expect(...)` — as opposed to only the worker-timeout +
+    passed-summary signature #607 was written for."""
+    if any(m.group(1) != "0" for m in _FAILED_COUNT_RE.finditer(text)):
+        return True
+    return bool(_ASSERTION_SIGNAL_RE.search(text))
 
 
 def _node_worker_timeout_flake(step: StepResult) -> bool:
@@ -886,17 +906,26 @@ def _node_worker_timeout_flake(step: StepResult) -> bool:
     one (every full-tier run does); a targeted/auto-tier run with no log
     file falls back to the step's own tail — a false negative there just
     means the gate reports a plain FAIL instead of a masked retry, never a
-    masked FAIL turning into a false PASS."""
+    masked FAIL turning into a false PASS.
+
+    H3: a real assertion failure mixed into the same output (a different
+    workspace's genuine red test alongside an unrelated worker timeout)
+    must never be classified infra-only — that would retry serial, the
+    retry's own (unrelated) package would pass, and the original failure's
+    evidence gets discarded. Any real-failure signal anywhere in the text
+    disqualifies the flake classification outright."""
     text = step.detail
     if step.log_path is not None:
         try:
             text = step.log_path.read_text(encoding="utf-8", errors="replace")
         except OSError:
             pass
-    return bool(_WORKER_TIMEOUT_RE.search(text) and _TEST_SUMMARY_RE.search(text))
+    if not (_WORKER_TIMEOUT_RE.search(text) and _TEST_SUMMARY_RE.search(text)):
+        return False
+    return not _has_real_test_failure(text)
 
 
-def _serial_retry_cmd(cmd: list[str], runner: str | None) -> list[str] | None:
+def _serial_retry_cmd(cmd: list[str], runner: str | None, cwd: Path, pkg: dict) -> list[str] | None:
     """The narrowest safe serial re-run of *cmd* for the #607 retry — `None`
     when this command can't be told apart from an unrecognized custom
     runner (caller then skips the retry rather than guessing a flag).
@@ -906,11 +935,24 @@ def _serial_retry_cmd(cmd: list[str], runner: str | None) -> list[str] | None:
     never contains the literal word "vitest"/"jest" even though the
     package.json script it runs does (caught by the #607 manual real-repo
     verification: the old text-sniffed version silently never retried
-    anything real, only its own mocked-cmd unit tests)."""
+    anything real, only its own mocked-cmd unit tests).
+
+    H4: Vitest 4 dropped `--poolOptions.forks.maxForks` — CLI parsing itself
+    rejects it (`CACError: Unknown option --poolOptions`) before a single
+    test runs. Version-gate the same way verify._direct_runner_concurrency_args
+    does; version unknown → no retry (`None`) rather than a guessed flag that
+    can turn a real worker-timeout flake into a hard CLI-parse failure."""
     if "--continue" in cmd:
         return [*cmd, "--concurrency=1"]
     if runner == "vitest":
-        extra = ["--pool=forks", "--poolOptions.forks.maxForks=1"]
+        from .verify import vitest_major_version
+
+        major = vitest_major_version(cwd, pkg)
+        if major is None:
+            return None
+        extra = (
+            ["--maxWorkers=1"] if major >= 4 else ["--pool=forks", "--poolOptions.forks.maxForks=1"]
+        )
     elif runner == "jest":
         extra = ["--runInBand"]
     else:
@@ -1836,8 +1878,23 @@ def _non_python_gate(
         # summary is machine load, not a regression — retry serial once.
         if is_test_like and not step.ok and _node_worker_timeout_flake(step):
             runner = _detect_node_test_runner(root, db_pkg)
-            retry_cmd = _serial_retry_cmd(check.cmd, runner)
+            retry_cmd = _serial_retry_cmd(check.cmd, runner, check.cwd or root, db_pkg)
             if retry_cmd is not None:
+                attempt1 = step
+                # H3: attempt 1's log would otherwise be overwritten in place
+                # by the retry (`_run_step` writes to the same `{name}.log`
+                # path) — copy it aside first so the worker-timeout evidence
+                # survives even after the retry completes.
+                attempt1_log_name = None
+                if attempt1.log_path is not None and attempt1.log_path.exists():
+                    attempt1_log_path = attempt1.log_path.with_name(
+                        f"{attempt1.log_path.stem}.attempt1{attempt1.log_path.suffix}"
+                    )
+                    try:
+                        shutil.copy2(attempt1.log_path, attempt1_log_path)
+                        attempt1_log_name = attempt1_log_path.name
+                    except OSError:
+                        pass
                 print(
                     f"qa-gate: {check.name} failed on a vitest/jest worker-pool timeout "
                     "signature (#607) while its own output still shows a real passed-tests "
@@ -1845,12 +1902,17 @@ def _non_python_gate(
                     "not a real regression)."
                 )
                 retry_step = _run_step(check.name, retry_cmd, env, check.cwd or root, log_dir)
-                if retry_step.ok:
-                    retry_step.detail = (
-                        "[passed after retry serial — worker-timeout signature, #607] "
-                        f"{retry_step.detail}"
-                    )
-                    step = retry_step
+                # Report both rounds regardless of outcome (#607 H3: never
+                # discard the original failure's evidence) — the retry's own
+                # ok/returncode still decides pass/fail, so a retry that
+                # itself fails (a different reason than the timeout) stays
+                # FAIL, not silently swallowed.
+                attempt1_note = f" [log: {attempt1_log_name}]" if attempt1_log_name else ""
+                retry_step.detail = (
+                    f"round 1 (worker timeout){attempt1_note}: {attempt1.detail} | "
+                    f"round 2 (retry serial): {retry_step.detail}"
+                )
+                step = retry_step
 
         if marker is not None:
             marker.unlink(missing_ok=True)
