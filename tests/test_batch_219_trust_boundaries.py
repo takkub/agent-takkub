@@ -312,6 +312,46 @@ def test_sensitive_production_module_cannot_opt_out_by_spec_suffix(tmp_path):
     assert not verdict.allowed
 
 
+def test_lead_direct_edit_snake_case_sensitive_identifier_denied_issue_628(tmp_path):
+    # #628: snake_case identifiers must not escape word boundary checks
+    verdict = pane_guard.evaluate_lead_direct_edit(
+        "Write",
+        {
+            "file_path": "src/agent_takkub/probe_tmp.py",
+            "content": "def check_auth_token():\n    return refresh_token()\n",
+        },
+        cwd=str(tmp_path),
+        scope="tiny",
+        state_file=tmp_path / "guard-state.json",
+    )
+    assert not verdict.allowed
+    assert verdict.rule == "lead_direct_edit:deep_category"
+
+
+def test_lead_direct_edit_scratchpad_outside_root_allowed_issue_625(tmp_path, monkeypatch):
+    # #625: scratchpad files outside project root are exempt from sensitive content denies
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    scratch_dir = tmp_path / "scratchpad"
+    scratch_dir.mkdir()
+    monkeypatch.setattr(
+        "agent_takkub.lead_context._allowed_project_roots",
+        lambda p: [project_root.resolve()],
+    )
+    verdict = pane_guard.evaluate_lead_direct_edit(
+        "Write",
+        {
+            "file_path": str(scratch_dir / "probe.sh"),
+            "content": "echo check auth token flow\n",
+        },
+        cwd=str(project_root),
+        project="demo",
+        scope="tiny",
+        state_file=tmp_path / "guard-state.json",
+    )
+    assert verdict.allowed
+
+
 def test_real_assertion_failure_with_worker_error_is_not_infra_only():
     step = qa_gate.StepResult(
         "test",

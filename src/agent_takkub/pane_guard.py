@@ -996,6 +996,17 @@ _SENSITIVE_PATH_SEGMENTS = frozenset(
 )
 
 
+def _normalize_identifier_boundaries(text: str) -> str:
+    """#628: Split camelCase/PascalCase word transitions and treat underscores
+    as word delimiters so sensitive identifiers (check_auth_token, refresh_token,
+    api_auth, checkAuthToken, isAdminUser, bypass_auth, etc.) produce true word
+    boundaries for regex word matching."""
+    s = re.sub(r"([a-z0-9])([A-Z])", r"\1 \2", text)
+    s = re.sub(r"([A-Z]+)([A-Z][a-z])", r"\1 \2", s)
+    s = s.replace("_", " ")
+    return s.lower()
+
+
 def _is_deep_test_path(norm_file: str) -> bool:
     """True when `norm_file` (already lowercased, `/`-separated) is trusted
     enough to skip the sensitive-keyword PATH leg below (#611/#611-M1) —
@@ -1008,7 +1019,14 @@ def _is_deep_test_path(norm_file: str) -> bool:
     if not _DEEP_TEST_SUFFIX_EXEMPT.search(norm_file):
         return False
     segments = norm_file.split("/")[:-1]
-    return not any(seg in _SENSITIVE_PATH_SEGMENTS for seg in segments)
+    return not any(
+        seg in _SENSITIVE_PATH_SEGMENTS
+        or any(
+            re.search(rf"\b{s}\b", _normalize_identifier_boundaries(seg))
+            for s in _SENSITIVE_PATH_SEGMENTS
+        )
+        for seg in segments
+    )
 
 
 def _direct_edit_diff_text(tool_name: str, tool_input: dict) -> str:
@@ -1048,20 +1066,22 @@ def evaluate_lead_direct_edit(
     file that spawn never actually wired in, and has since been removed.
     This is the ONLY place that guarantee is enforced now.
 
-    The deep-category deny (condition 5) runs BEFORE the runtime/
-    outside-root exemption (#587 F3) — a repo-level file like `package.json`
-    that happens to live outside every configured project root (a common
-    gap in a multi-root project) must still be denied, not silently pass
-    through the exemption meant for scratchpad/memory notes. Only after
-    that does `_is_direct_edit_exempt` get a chance to allow it
-    unconditionally, still ahead of the scope/line/cumulative caps below.
+    The structural deep-category deny runs BEFORE the runtime/outside-root
+    exemption (#587 F3) — a repo-level file like `package.json` that happens
+    to live outside every configured project root must still be denied, not
+    silently pass through the exemption meant for scratchpad/memory notes.
+    Only after structural deep patterns does `_is_direct_edit_exempt` allow
+    scratchpad/runtime files unconditionally (#625), ahead of sensitive-keyword
+    patterns (#628) and the scope/line/cumulative caps below.
 
-    #611: the "sensitive keyword" half of condition 5 (auth/security/token/
+    #611/#628: the "sensitive keyword" half of condition 5 (auth/security/token/
     crypto/payment — see `sensitive_deep_patterns` below) is checked against
     both the file's diff text AND its path, with the path leg skipped for a
     test/e2e path (`_DEEP_TEST_PATH_EXEMPT`) — a folder merely named
     `security-e2e/` denied a 1-line type fix even though nothing sensitive
-    was touched. The "structural" half (schema/migration/lockfile/manifest/
+    was touched. Identifiers are normalized across snake_case, camelCase,
+    kebab-case, dot-notation, and screaming snake to prevent word boundary
+    bypasses (#628). The "structural" half (schema/migration/lockfile/manifest/
     CI/Dockerfile) stays path-only with no test exemption — those are deep
     because of WHERE the file lives, not a word in its name, per Lead's own
     package.json/pyproject.toml version-bump experience the same night.
@@ -1110,6 +1130,13 @@ def evaluate_lead_direct_edit(
                 reason=f"ไฟล์ {file_path} อยู่ในหมวด deep ({pat}) — ห้าม Lead แก้เอง ต้อง delegate ผ่าน takkub assign --role <role>",
             )
 
+    # #625: files outside project root (scratchpad in %TEMP%, memory files,
+    # cockpit runtime) are exempt from direct-edit caps and sensitive content
+    # checks (#587 F3 preserved: structural deep files like package.json/lockfile
+    # above are still denied everywhere).
+    if _is_direct_edit_exempt(file_path, cwd, project):
+        return Verdict(True)
+
     # #611: these are word-based, and a word alone can sit in a path that
     # isn't actually sensitive source — `apps/api/src/security-e2e/
     # test-harness.ts` denied a 1-line type fix in a TEST file because
@@ -1118,36 +1145,40 @@ def evaluate_lead_direct_edit(
     # the actual diff text (old_string+new_string for Edit, content for
     # Write) is always checked, so a genuinely sensitive change hiding
     # inside a test file (e.g. a hardcoded secret in a fixture) still denies.
+    #
+    # #628: identifiers in snake_case (check_auth_token, refresh_token,
+    # api_auth, is_admin_user...), camelCase (checkAuthToken, refreshToken),
+    # dot-notation, and kebab-case are normalized so word boundaries
+    # (`\b`) match cleanly across all casing conventions.
     sensitive_deep_patterns = (
-        r"\b(?:auth|oauth|jwt|login|signup|password|permission|privilege|otp|2fa|mfa|rate[\s_-]?limit)\b",
-        r"(?:bypass|skip|disable|remove)\s*(?:verif|valid|signature|sanitiz|auth|check)",
+        r"\b(?:auth|oauth|jwt|login|signup|password|permission|privilege|otp|mfa|rate[\s_-]?limit)\b|(?:\b|\D)2fa\b",
+        r"(?:bypass|skip|disable|remove)[\s\-_]*(?:verif|valid|signature|sanitiz|auth|check)",
         r"(?:admin|role|session)[\s\-_]*(?:permission|access|based|privilege|panel|timeout|expiry|cookie)",
         r"\b(?:security|vulnerabilit|cve|xss|csrf)\b",
-        r"\b(?:tokens?|api[_-]?keys?|secrets?)\b",
+        r"\b(?:tokens?|api[\s\-_]?keys?|secrets?)\b",
         r"\b(?:crypto|encryption|bcrypt)\b",
         r"\b(?:payments?|stripe|billing)\b",
-        # #611 M1: camelCase/snake_case identifiers a bland-looking one-line
+        # #611 M1 / #628: camelCase/snake_case identifiers a bland-looking one-line
         # diff can hide a real bypass behind — `verifySignature`/`isAdmin`
-        # word-parts (not requiring underscores/case, since a diff is
-        # lowercased before this check runs) and a bare `return true`, the
-        # exact shape of the proven bypass (`return verifySignature(value)`
-        # -> `return true`). Content-only: never matched against the path.
-        r"verify\w*signature|is[_]?admin|\bbypass\b|return\s+true\b",
+        # word-parts and a bare `return true`, the exact shape of the proven
+        # bypass (`return verifySignature(value)` -> `return true`).
+        r"verify[\s\-_]*signature|is[\s\-_]*admin|\bbypass\b|return\s+true\b",
     )
     is_test_path = _is_deep_test_path(norm_file)
-    diff_text = _direct_edit_diff_text(tool_name, tool_input).lower()
+    diff_text = _direct_edit_diff_text(tool_name, tool_input)
+    norm_diff = _normalize_identifier_boundaries(diff_text)
+    norm_path = _normalize_identifier_boundaries(file_path.replace("\\", "/"))
     for pat in sensitive_deep_patterns:
-        path_hit = (not is_test_path) and re.search(pat, norm_file)
-        content_hit = re.search(pat, diff_text)
+        path_hit = (not is_test_path) and (
+            bool(re.search(pat, norm_file)) or bool(re.search(pat, norm_path))
+        )
+        content_hit = bool(re.search(pat, diff_text.lower())) or bool(re.search(pat, norm_diff))
         if path_hit or content_hit:
             return Verdict(
                 False,
                 rule="lead_direct_edit:deep_category",
                 reason=f"ไฟล์ {file_path} อยู่ในหมวด deep ({pat}) — ห้าม Lead แก้เอง ต้อง delegate ผ่าน takkub assign --role <role>",
             )
-
-    if _is_direct_edit_exempt(file_path, cwd, project):
-        return Verdict(True)
 
     # 1. Non-tiny scope check
     norm_scope = (scope or "").strip().lower()

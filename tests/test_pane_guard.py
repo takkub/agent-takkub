@@ -1616,6 +1616,224 @@ class TestDeepCategoryOutranksRootExemption:
         assert verdict.allowed
 
 
+class TestLeadDirectEditIssues628And625:
+    """#628: Snake_case, camelCase, PascalCase, dot-notation, and kebab-case
+    sensitive identifiers must not escape sensitive_deep_patterns.
+    #625: Scratchpad/temporary files outside project root must not be denied
+    by sensitive content checks."""
+
+    def test_scratchpad_outside_root_with_sensitive_content_is_exempt(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        """#625: Write to a scratchpad in temp or outside project root with sensitive
+        keywords (e.g. echo check auth token flow) must be allowed."""
+        repo_root = tmp_path / "proj"
+        repo_root.mkdir()
+        monkeypatch.setattr(
+            "agent_takkub.lead_context._allowed_project_roots",
+            lambda p: [repo_root.resolve()],
+        )
+        scratch_dir = tmp_path / "scratchpad"
+        scratch_dir.mkdir()
+        probe_sh = scratch_dir / "probe.sh"
+        state_file = tmp_path / "state.json"
+        verdict = pane_guard.evaluate_lead_direct_edit(
+            "Write",
+            {"file_path": str(probe_sh), "content": "echo check auth token flow\n"},
+            cwd=str(repo_root),
+            project="proj",
+            scope="tiny",
+            state_file=state_file,
+        )
+        assert verdict.allowed
+
+    def test_scratchpad_outside_root_structural_deep_still_denied(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        """#625/#587 F3: Structural deep files (e.g. package.json, lockfile) outside root
+        must still be denied everywhere."""
+        repo_root = tmp_path / "proj"
+        repo_root.mkdir()
+        monkeypatch.setattr(
+            "agent_takkub.lead_context._allowed_project_roots",
+            lambda p: [repo_root.resolve()],
+        )
+        scratch_dir = tmp_path / "scratchpad"
+        scratch_dir.mkdir()
+        pkg = scratch_dir / "package.json"
+        state_file = tmp_path / "state.json"
+        verdict = pane_guard.evaluate_lead_direct_edit(
+            "Write",
+            {"file_path": str(pkg), "content": "{}\n"},
+            cwd=str(repo_root),
+            project="proj",
+            scope="tiny",
+            state_file=state_file,
+        )
+        assert not verdict.allowed
+        assert verdict.rule == "lead_direct_edit:deep_category"
+
+    @pytest.mark.parametrize(
+        "content",
+        [
+            "def check_auth_token(): pass\n",
+            "refresh_token = get_token()\n",
+            "def api_auth(): pass\n",
+            "is_admin_user = True\n",
+            "def bypass_auth(): pass\n",
+            "def skip_auth_check(): pass\n",
+            "def disable_signature_validation(): pass\n",
+            "def bypass_signature(): pass\n",
+            "api_key = read_key()\n",
+            "get_secret_key()\n",
+            "jwt_token = encode()\n",
+            "user_password = hash_pass()\n",
+            "user_permission = check()\n",
+            "check_2fa(code)\n",
+            "verify_otp(code)\n",
+            "user_mfa(user)\n",
+            "rate_limit = 100\n",
+        ],
+    )
+    def test_snake_case_sensitive_identifiers_denied(self, tmp_path, content: str) -> None:
+        """#628: Snake_case identifiers in project source must be caught by sensitive_deep_patterns."""
+        state_file = tmp_path / "state.json"
+        verdict = pane_guard.evaluate_lead_direct_edit(
+            "Write",
+            {"file_path": "src/agent_takkub/probe_tmp.py", "content": content},
+            scope="tiny",
+            project=None,
+            state_file=state_file,
+        )
+        assert not verdict.allowed
+        assert verdict.rule == "lead_direct_edit:deep_category"
+
+    @pytest.mark.parametrize(
+        "file_path",
+        [
+            "src/agent_takkub/check_auth_token.py",
+            "src/agent_takkub/refresh_token.py",
+            "src/agent_takkub/api_auth.py",
+            "src/agent_takkub/is_admin_user.py",
+        ],
+    )
+    def test_snake_case_sensitive_paths_denied(self, tmp_path, file_path: str) -> None:
+        """#628: Snake_case file paths in project source must be caught by sensitive_deep_patterns."""
+        state_file = tmp_path / "state.json"
+        verdict = pane_guard.evaluate_lead_direct_edit(
+            "Write",
+            {"file_path": file_path, "content": "x = 1\n"},
+            scope="tiny",
+            project=None,
+            state_file=state_file,
+        )
+        assert not verdict.allowed
+        assert verdict.rule == "lead_direct_edit:deep_category"
+
+    @pytest.mark.parametrize(
+        "content",
+        [
+            "function checkAuthToken() {}\n",
+            "const refreshToken = token;\n",
+            "function apiAuth() {}\n",
+            "const isAdminUser = true;\n",
+            "function bypassAuth() {}\n",
+            "function skipAuthCheck() {}\n",
+            "disableSignatureValidation()\n",
+            "const checkApiKey = key;\n",
+            "getSecretKey()\n",
+            "const jwtToken = sign();\n",
+            "const userPassword = val;\n",
+            "const userPermission = p;\n",
+            "check2FA(code)\n",
+            "verifyOtp(code)\n",
+            "userMfa(user)\n",
+            "const rateLimit = 50;\n",
+        ],
+    )
+    def test_camel_case_sensitive_identifiers_denied(self, tmp_path, content: str) -> None:
+        """#628: CamelCase identifiers in project source must be caught by sensitive_deep_patterns."""
+        state_file = tmp_path / "state.json"
+        verdict = pane_guard.evaluate_lead_direct_edit(
+            "Write",
+            {"file_path": "src/agent_takkub/probe_tmp.ts", "content": content},
+            scope="tiny",
+            project=None,
+            state_file=state_file,
+        )
+        assert not verdict.allowed
+        assert verdict.rule == "lead_direct_edit:deep_category"
+
+    @pytest.mark.parametrize(
+        "file_path",
+        [
+            "src/agent_takkub/checkAuthToken.ts",
+            "src/agent_takkub/refreshToken.ts",
+            "src/agent_takkub/apiAuth.ts",
+            "src/agent_takkub/isAdminUser.ts",
+        ],
+    )
+    def test_camel_case_sensitive_paths_denied(self, tmp_path, file_path: str) -> None:
+        """#628: CamelCase file paths in project source must be caught by sensitive_deep_patterns."""
+        state_file = tmp_path / "state.json"
+        verdict = pane_guard.evaluate_lead_direct_edit(
+            "Write",
+            {"file_path": file_path, "content": "x = 1\n"},
+            scope="tiny",
+            project=None,
+            state_file=state_file,
+        )
+        assert not verdict.allowed
+        assert verdict.rule == "lead_direct_edit:deep_category"
+
+    @pytest.mark.parametrize(
+        "content",
+        [
+            'AUTH_TOKEN = "secret"\n',
+            'API_KEY = "key123"\n',
+            'JWT_SECRET = "jwt"\n',
+            'url = "/api/check-auth-token"\n',
+            "const userToken = req.auth_token;\n",
+            "const k = config.apiKey;\n",
+        ],
+    )
+    def test_screaming_snake_kebab_and_dot_notation_denied(self, tmp_path, content: str) -> None:
+        """#628: SCREAMING_SNAKE, kebab-case, and dot-notation properties must be denied."""
+        state_file = tmp_path / "state.json"
+        verdict = pane_guard.evaluate_lead_direct_edit(
+            "Write",
+            {"file_path": "src/agent_takkub/probe_tmp.ts", "content": content},
+            scope="tiny",
+            project=None,
+            state_file=state_file,
+        )
+        assert not verdict.allowed
+        assert verdict.rule == "lead_direct_edit:deep_category"
+
+    @pytest.mark.parametrize(
+        "content",
+        [
+            'author_name = "Jane Doe"\n',
+            "git_author = get_author()\n",
+            "result = tokenizer.tokenize(text)\n",
+            "on_key_press(keyboard_event)\n",
+            "for key in mapping.keys(): pass\n",
+            "def calculate_total(items): return sum(items)\n",
+        ],
+    )
+    def test_false_positives_not_denied(self, tmp_path, content: str) -> None:
+        """#628: Non-sensitive words (author, tokenize, keyboard, dict keys, normal logic) must be allowed."""
+        state_file = tmp_path / "state.json"
+        verdict = pane_guard.evaluate_lead_direct_edit(
+            "Write",
+            {"file_path": "src/agent_takkub/util.py", "content": content},
+            scope="tiny",
+            project=None,
+            state_file=state_file,
+        )
+        assert verdict.allowed
+
+
 class TestGitConfigInjectionRound5:
     """#609/#611 round 5: `git -c <key>=<value>`/`--config-env` config
     injection is a code-execution vector (`diff.external`, `core.sshCommand`,
