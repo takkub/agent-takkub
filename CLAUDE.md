@@ -13,3 +13,9 @@ Teammates: frontend · backend · mobile · devops · qa · reviewer · critic �
 > **Cross-platform (Windows ConPTY + macOS `_pty_backend`):** ทุกการเปลี่ยนแปลงต้องทำงานทั้ง 2 OS — ห้าม hardcode path/command เฉพาะ platform · CI matrix `windows-latest`+`macos-latest` ต้องเขียวทั้งคู่ก่อน merge
 
 > **Test tiers (#485/#585 — ทดสอบของจริง ไม่ใช่เขียนไฟล์เทส):** specialist **ห้ามรัน `takkub qa-gate` เอง** — ทดสอบสิ่งที่แก้ด้วยของจริงแล้วเขียนในโน้ตว่าเห็นอะไร · เขียนไฟล์เทสใหม่เฉพาะ scope=deep / bug ที่เคยหลุด / Lead สั่ง (งาน UI ห้ามเขียน) · รันได้แค่ **targeted เฉพาะไฟล์ที่แก้** และห้าม build/รัน suite ตอนเครื่องไม่ว่าง แล้ว `takkub done` · qa-gate ครั้งเดียวท้าย batch **เฉพาะ batch ที่มีงาน deep** · รายละเอียดเต็ม → `docs/qa-gate-policy.md`
+
+## กฎสำหรับคนพัฒนาตัว cockpit (repo นี้เท่านั้น — Lead ที่ทำ batch/release)
+- **รวบ merge ทุก worktree → push ครั้งเดียว → CI รอบเดียว** — ห้ามวน merge/push/แดง/แก้ ทีละใบ · bump version + CHANGELOG อยู่ใน push เดียวกับ fix · ปิด issue ให้หมดก่อน bump
+- **ก่อน push:** รัน `tests/test_*guard*.py` + `test_issues.py` + `test_core_contracts.py` **และ** ไฟล์เทสที่ grep เจอว่าอ้าง method/ฟังก์ชันที่แก้ หรือใช้ test double ของ orchestrator (`_FakeOrch|_ExitFake|SimpleNamespace`) — targeted เฉพาะไฟล์ที่แก้ไม่พอ (2.1.8 CI แดง 37 เทส) · เทสที่แตะ provider ต้องผ่านแบบตัด codex/agy/gemini ออกจาก PATH ด้วย (CI ไม่มี)
+- ห้ามรัน full qa-gate ในเครื่อง ให้ CI รัน · ยืนยัน HEAD/merge/CI ด้วย `rtk proxy git …` / `gh run list --json conclusion` (rtk แสดง git log เพี้ยน, `gh run watch` โกหก exit 0)
+- แก้ `remote/static/app.js|index.html` ต้อง bump `CACHE_NAME` ใน `sw.js` (PWA cache-first) · storage V2: 1 domain 1 โฟลเดอร์ ไม่มีไฟล์ลอย ไม่ลบข้อมูล · Lead พิมพ์ช้า = GIL convoy จาก worker thread → `py-spy dump` ไม่ใช่ดู CPU
