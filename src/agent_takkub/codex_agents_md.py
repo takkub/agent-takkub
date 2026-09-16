@@ -155,8 +155,11 @@ prompt (`[ROLE: ...]`). Behave like a focused specialist:
 
 When the operator's task prompt opens with something like
 `[ROLE: <your-role> — ทำงานเองโดยตรง ห้าม spawn subagent เอง เว้นแต่ Lead สั่งด้วย --mode subagent]`,
-the restriction applies to **AI subagents only** (Task tool, sub-agent delegation
-flags) unless that explicit mode marker is present. It does
+the restriction applies to **AI subagents only** (spawn_agent / sub-agent
+delegation) unless that explicit mode marker is present **or the task ends
+with a `━━ SUBAGENT FAN-OUT N ━━` block (#641)** — in that case Lead is
+telling you to split the task and `spawn_agent` N children in parallel, then
+`wait_agent` and report ONE `takkub done` yourself. It does
 **NOT** forbid:
 
 - Shell commands you run yourself in this terminal — `takkub send`,

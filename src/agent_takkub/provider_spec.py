@@ -194,6 +194,12 @@ class ProviderSpec:
     # ─── 9. Claude/provider branch specific knobs ───
     plugin_dirs: tuple[str, ...] = field(default_factory=tuple)
     disallowed_tools: tuple[str, ...] = field(default_factory=tuple)
+    # #641: one-line description of this CLI's native subagent tool, pasted
+    # into a subagent fan-out task (`assign --shards N` on a non-browser
+    # role = ONE pane + N native subagents). Empty = the CLI has no native
+    # subagent the cockpit knows of → `shard_fanout.resolve_shard_fanout`
+    # falls back to the legacy N-pane fan-out for that provider.
+    native_subagent_hint: str = ""
     model_flag: str | None = None
     tools_flag: str | None = None
     autocompact_flag: str | None = None
@@ -528,7 +534,13 @@ CLAUDE_DEFAULT_BUILTIN_TOOLS: tuple[str, ...] = (
     "MultiEdit",
     "NotebookEdit",
     "SlashCommand",
-    "Task",
+    # #641: Claude Code renamed the subagent tool Task → Agent (2.1.268 ships
+    # only `AgentInput`). Cut from the teammate allowlist below like before —
+    # an ordinary teammate pane must not fan out; only a subagent fan-out
+    # pane appends "Agent" at spawn (spawn_engine._fanout_tool_lists).
+    # Verified live on 2.1.268: `--tools <teammate list>` → the model reports
+    # the subagent tool blocked; the same list plus "Agent" → it dispatches.
+    "Agent",
     "TodoWrite",
     "TaskCreate",
     "TaskGet",
@@ -578,7 +590,7 @@ TEAMMATE_CUT_TOOLS: tuple[str, ...] = (
     "MultiEdit",
     "NotebookEdit",
     "SlashCommand",
-    "Task",
+    "Agent",  # was "Task" — Claude Code renamed the subagent tool (#641)
     "TodoWrite",
 )
 
@@ -665,7 +677,16 @@ claude_spec = ProviderSpec(
     supports_slash_commands=True,
     supports_hooks=True,
     plugin_dirs=("TAKKUB_EXTRA_PLUGINS",),  # spawn_engine.py:1529-1536 (env var name)
-    disallowed_tools=("Task",),  # spawn_engine.py:351 _teammate_disallowed_tools() default
+    # Claude Code renamed its subagent tool Task → Agent (2.1.268 ships only
+    # `AgentInput` in sdk-tools.d.ts). Probed on 2.1.268 (#641): the permission
+    # matcher still honours "Task" as an alias, so the old value was not
+    # broken — but the tool's real name is what the fan-out allowlist has to
+    # add back (`_fanout_tool_lists`), so both halves now use one spelling.
+    disallowed_tools=("Agent",),  # spawn_engine._teammate_disallowed_tools() default
+    native_subagent_hint=(
+        "Agent tool — เรียกหลายตัวในเทิร์นเดียว (หรือ run_in_background=true) "
+        'ไม่ใช้ subagent_type="fork" (fork copy context แม่ทั้งก้อน)'
+    ),
     tools_flag="--tools",  # #581 Phase 1: teammate built-in tool schema filtering
     autocompact_flag="--autocompact",  # #582: compact at 200k instead of ~1M
     # (AskUserQuestion is a SECOND, separate --disallowed-tools flag at
@@ -727,6 +748,12 @@ claude_spec = ProviderSpec(
 codex_spec = ProviderSpec(
     name="codex",
     binary_names=["codex", "codex.cmd", "codex.bat"],
+    # codex 0.154: `multi_agent` feature = stable/on by default; tools
+    # spawn_agent / wait_agent / send_input / close_agent / list_agents
+    # (verified by grepping the shipped codex.exe, 2026-09-16).
+    native_subagent_hint=(
+        "spawn_agent ทีละตัวจนครบ แล้ว wait_agent รวมผล (multi_agent เปิดอยู่แล้วใน codex 0.154)"
+    ),
     install_instructions=(
         "codex binary not on PATH. Install with "
         "`npm install -g @openai/codex`, then run `codex login` once."
@@ -866,8 +893,9 @@ codex_spec = ProviderSpec(
     task_notice_preamble=(
         "[orchestrator note] อ่านก่อนเริ่มงาน:\n"
         "- กฎ `ห้าม spawn subagent เอง` ใน ROLE prefix ห้าม native child\n"
-        "  เว้นแต่ Lead สั่ง task นี้ด้วย `--mode subagent`; ไม่รวม shell\n"
-        "  command ที่คุณรันเองในเทอร์มินัลนี้\n"
+        "  เว้นแต่ Lead สั่ง task นี้ด้วย `--mode subagent` หรือ task มีบล็อก\n"
+        "  `━━ SUBAGENT FAN-OUT N ━━` (#641 — ให้ spawn_agent ตามบล็อกนั้น);\n"
+        "  ไม่รวม shell command ที่คุณรันเองในเทอร์มินัลนี้\n"
         "- เมื่อเสร็จงาน ต้อง **รัน shell command** ผ่าน Bash tool:\n"
         '      takkub done "<one-line summary>"\n'
         '  ห้ามพิมพ์ "takkub done" เป็นข้อความตอบในแชท (orchestrator\n'
@@ -976,6 +1004,10 @@ codex_spec = ProviderSpec(
 gemini_spec = ProviderSpec(
     name="gemini",
     binary_names=["agy", "agy.exe"],
+    # agy 1.2.3 ships subagents (run_subagent + custom subagent frontmatter,
+    # per `agy changelog`); the fan-out block tells the pane to fall back to
+    # sequential work if its build exposes no subagent tool.
+    native_subagent_hint="subagent ของ agy (run_subagent) — ถ้า build นี้ไม่มี ให้ทำทีละชิ้นเอง",
     install_instructions=(
         "agy binary not on PATH. Install the Antigravity CLI from "
         "https://antigravity.google/download, then run `agy` once to sign in."
@@ -1182,6 +1214,9 @@ opencode_spec = ProviderSpec(
     name="opencode",
     display_name="OpenCode",
     binary_names=["opencode", "opencode.cmd", "opencode.exe"],
+    # opencode 1.18: built-in subagents `general` + `explore` via the task
+    # tool (`opencode agent list`, 2026-09-16).
+    native_subagent_hint='task tool subagent_type="general" (opencode agent list มี general/explore)',
     install_instructions=(
         "opencode binary not on PATH. Install with `npm install -g opencode-ai`, "
         "then run `opencode auth login` once to connect a model provider."

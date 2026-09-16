@@ -545,7 +545,8 @@ Lead ทำเองได้เฉพาะงานเล็กเมื่อ
 - คำสั่งนี้ลงทะเบียน ledger แล้วคืน path ของ task capsule (ไม่เปิด pane); จากนั้น Lead ต้องส่ง capsule นั้นให้ native subagent tool ทันที
 - native child ต้องจบด้วย `takkub subagent-done --role <role> "<summary>"` ตามคำสั่งใน capsule เพื่อให้ inbox/wait/ledger เห็นผล
 - `--mode subagent` ใช้ provider เดียวกับ Lead เสมอ จึงห้ามอ้างว่าเป็น cross-model/cross-provider check
-- scan/audit/search/triage/fan-out เหมาะกับ subagent; implementation ที่ user ต้องเห็นหรือ cross-check ต่างโมเดลใช้ pane
+- scan/audit/search/triage ชิ้นเล็กเหมาะกับ `--mode subagent` ของ Lead; implementation ที่ user ต้องเห็นหรือ cross-check ต่างโมเดลใช้ pane
+- **fan-out งาน implement ให้ specialist (#641): `takkub assign --role frontend --shards N "<task>"` = เปิด pane เดียว แล้ว pane นั้นยิง native subagent N ตัวเอง** (claude Agent / codex spawn_agent / agy run_subagent / opencode task) — **ห้าม** ยิง `frontend#1..#K` แยก pane เอง (จ่ายค่า boot+MCP+RAM ซ้ำ K รอบ) · ระบบ fallback เป็น N pane ให้เองเฉพาะ reviewer e2e/ui (browser profile ต่อ shard), `--plan`, และ provider ที่ไม่มี subagent (kimi/cursor) · ต้องการ pane แยกจริงใส่ `--fanout pane` · Lead ห้ามรัน subagent N ตัวเองแทน specialist (Lead จะติดรอ)
 - If you need to communicate with another agent, use the shell command `takkub send --to <role> "<message>"`.
 
 ละเมิดข้อใดข้อหนึ่ง → หยุดทันที สรุปงานแล้ว delegate ผ่าน `takkub assign`
@@ -771,10 +772,13 @@ Status เปลี่ยนระหว่าง session: cockpit จะ inject
 User เปิด **Multi mode** — เมื่อ request มี **หลาย feature ที่อิสระต่อกัน** ให้ Lead:
 
 1. **แตกงานเป็น K features** ที่ independent จริง (ไม่ depend output กัน)
-2. **Fan out N instance/role ต่อ 1 feature** — `frontend#1..#K`, `backend#1..#K` ฯลฯ
-   (ใช้ `takkub assign --role frontend#1 --cwd <web> "feature A"` แยกแต่ละ instance,
-   หรือ `--shards K` ถ้างานแบ่ง modulo ได้) — ยิงคู่ขนานด้วย `&` + `wait`
-3. **หลาย instance แก้โค้ดใน repo เดียวกัน → ใส่ `--isolation worktree` ทุก instance**
+2. **Fan out ภายใน pane เดียวต่อ role (#641)** — `takkub assign --role frontend --shards K
+   --cwd <web> "feature A / B / C …"` = เปิด `frontend` **ตัวเดียว** แล้วมันยิง native subagent
+   K ตัวคู่ขนานเอง (ไม่เสียค่า boot/MCP/RAM ซ้ำ K รอบ) — ใส่ทุก feature ของ role นั้นลง
+   task เดียว แยกหัวข้อชัดๆ ให้ pane แบ่งเอง · **ห้าม** `frontend#1..#K` แยก pane แล้ว
+   ยิง `&` + `wait` แบบเดิม เว้นแต่ `--fanout pane` (browser-QA shard / provider ไม่มี
+   subagent ระบบ fallback ให้เองอยู่แล้ว) · คนละ role ยังยิงคู่ขนานกันได้ตามปกติ
+3. **หลาย pane แก้โค้ดใน repo เดียวกัน → ใส่ `--isolation worktree` ทุก pane**
    แต่ละตัวได้ git worktree + branch แยก (`wt/<role>-<ts>`) — ไม่มี commit race /
    ไฟล์ปนกัน · ตอน done Lead ได้ **merge proposal ต่อ branch** → review + merge
    **ทีละอัน** (integration จุดเดียวคือ Lead) · repo ไม่ใช่ git → fallback shared

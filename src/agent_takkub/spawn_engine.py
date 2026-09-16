@@ -678,6 +678,14 @@ class PaneState:
     last_assigned_task_file: str | None = None
     # #585: task scope budget tier ("tiny" | "normal" | "deep")
     last_assigned_scope: str | None = None
+    # #641: N > 0 when the current assign is a subagent fan-out (`--shards N`
+    # on a non-browser role = ONE pane + N native subagents). Consulted at
+    # spawn to allow the CLI's subagent tool for THIS pane only (claude:
+    # `Agent` added to --tools and dropped from --disallowedTools) and to stamp
+    # TAKKUB_SUBAGENT_FANOUT. Same one-shot contract as model_override: set by
+    # assign() before a fresh spawn, cleared by the next fan-out-less assign,
+    # carried through spawn gate/FIFO retries and crash auto-respawn.
+    subagent_fanout: int = 0
     # #484: True once `last_assigned_task`'s text has actually been written
     # into the pane's session at least once (set by lead_inbox._deliver's
     # real paste branch — never by the confirmed-prompt-block give-up path,
@@ -1090,18 +1098,59 @@ class PaneRegistry:
 def _teammate_disallowed_tools() -> list[str]:
     """Tools hard-blocked for teammate panes via claude ``--disallowedTools``.
 
-    Pane-mode teammates still block ``Task`` so they cannot create untracked
-    invisible children. ``assign --mode subagent`` never enters this pane spawn
-    path: the Lead's native child runs in the parent provider process and reports
-    through ``subagent-done`` instead.
+    Pane-mode teammates still block ``Agent`` (Claude Code's subagent tool —
+    renamed from ``Task`` upstream, #641; the CLI still honours the old name
+    as an alias, so this is a spelling change, not a behaviour change) so they
+    cannot create untracked invisible children. ``assign --mode
+    subagent`` never enters this pane spawn path: the Lead's native child runs
+    in the parent provider process and reports through ``subagent-done``
+    instead. A subagent fan-out pane (``assign --shards N``, #641) lifts this
+    per pane via `_fanout_tool_lists`, not here.
 
     Override or clear via ``TAKKUB_TEAMMATE_DISALLOWED_TOOLS`` (space/comma-
     separated tool names; empty string disables the block entirely). Only
     teammates are restricted — the Lead orchestrates via the ``takkub`` CLI, not
-    the Task tool, and is left unrestricted.
+    the Agent tool, and is left unrestricted.
     """
-    raw = os.environ.get("TAKKUB_TEAMMATE_DISALLOWED_TOOLS", "Task").strip()
+    raw = os.environ.get("TAKKUB_TEAMMATE_DISALLOWED_TOOLS", "Agent").strip()
     return raw.replace(",", " ").split()
+
+
+#: Claude Code's native subagent tool name (was ``Task`` before 2.1.x).
+CLAUDE_SUBAGENT_TOOL = "Agent"
+
+
+def _stamp_subagent_fanout_env(env: dict[str, str], subagent_fanout: int) -> None:
+    """Stamp ``TAKKUB_SUBAGENT_FANOUT=N`` on a fan-out pane (#641); every
+    other pane gets the key removed so a stale inherited value can't leak in
+    from the cockpit's own environment."""
+    from .shard_fanout import ENV_SUBAGENT_FANOUT
+
+    if subagent_fanout > 0:
+        env[ENV_SUBAGENT_FANOUT] = str(subagent_fanout)
+    else:
+        env.pop(ENV_SUBAGENT_FANOUT, None)
+
+
+def _fanout_tool_lists(
+    tools: list[str], disallowed: list[str], subagent_fanout: int
+) -> tuple[list[str], list[str]]:
+    """Adjust a teammate pane's ``--tools`` allowlist and ``--disallowedTools``
+    deny list for a subagent fan-out pane (#641).
+
+    ``subagent_fanout <= 0`` (every ordinary pane) returns both lists
+    unchanged. A fan-out pane gets ``Agent`` appended to the allowlist (it is
+    deliberately absent from ``TEAMMATE_DEFAULT_BUILTIN_TOOLS``) and removed
+    from the deny list — the two places an ordinary pane is kept from
+    spawning children. Pure so tests can pin it without a spawn.
+    """
+    if subagent_fanout <= 0:
+        return tools, disallowed
+    out_tools = list(tools)
+    if out_tools and CLAUDE_SUBAGENT_TOOL not in out_tools:
+        out_tools.append(CLAUDE_SUBAGENT_TOOL)
+    out_disallowed = [t for t in disallowed if t not in {CLAUDE_SUBAGENT_TOOL, "Task"}]
+    return out_tools, out_disallowed
 
 
 def _teammate_builtin_tools() -> list[str]:
@@ -2501,6 +2550,7 @@ class SpawnEngineMixin:
             env = _build_lead_env(project_ns) if _is_lead else _build_pane_env(project_ns)
             env["TAKKUB_ROLE"] = role_name
             env["TAKKUB_PROJECT"] = project_ns
+            _stamp_subagent_fanout_env(env, int(_ps_initial.subagent_fanout or 0))
             apply_chrome_bin(env, base_role)
             inject_user_profile_env(env, project_ns)
             # Prod isolation for this provider's own state (sessions/auth/
@@ -3119,6 +3169,7 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
             env["TAKKUB_SHARD"] = str(shard_idx)
             if _shard_total > 0:
                 env["TAKKUB_SHARD_TOTAL"] = str(_shard_total)
+        _stamp_subagent_fanout_env(env, int(_ps_initial.subagent_fanout or 0))
         # Tag the pane with its project so the `takkub` CLI inside the
         # session can stamp every JSON request with `from_project`. The
         # cli_server uses that to scope routing to panes in the *same*
@@ -3321,6 +3372,11 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
             # Teammate panes stay restricted; the Lead remains unrestricted. Override/clear via
             # TAKKUB_TEAMMATE_DISALLOWED_TOOLS (see _teammate_disallowed_tools).
             _disallowed_tools = _teammate_disallowed_tools()
+            # #641: a subagent fan-out pane is the one teammate allowed to
+            # spawn native children — drop the Agent deny for it only.
+            _, _disallowed_tools = _fanout_tool_lists(
+                [], _disallowed_tools, int(_ps_initial.subagent_fanout or 0)
+            )
             if _disallowed_tools:
                 disallowed_tools_argv.extend(["--disallowedTools", *_disallowed_tools])
         else:
@@ -3455,8 +3511,16 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
         #                      because that's the legitimate channel to
         #                      the cockpit owner.
         denied: list[str] = []
-        if os.environ.get("TAKKUB_ALLOW_TASK", "0") != "1":
-            denied.append("Task")
+        # #641: the tool is `Agent` on current Claude Code (`Task` still works
+        # as an alias); a subagent fan-out pane keeps it instead of denying it.
+        # Teammates only: the Lead's own `assign --mode subagent` flow needs
+        # the tool (lead_context "CONDITIONAL SUBAGENT RULE").
+        if (
+            role_name != LEAD.name
+            and os.environ.get("TAKKUB_ALLOW_TASK", "0") != "1"
+            and int(_ps_initial.subagent_fanout or 0) <= 0
+        ):
+            denied.append(CLAUDE_SUBAGENT_TOOL)
         if role_name != LEAD.name:
             denied.append("AskUserQuestion")
         denied_tools_argv: list[str] = []
@@ -3538,6 +3602,8 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
             _claude_tools_flag = PROVIDER_REGISTRY[CLAUDE].tools_flag
             if _claude_tools_flag:
                 _tools = _teammate_builtin_tools()
+                # #641: fan-out pane gets the Agent tool appended.
+                _tools, _ = _fanout_tool_lists(_tools, [], int(_ps_initial.subagent_fanout or 0))
                 if _tools:
                     tools_argv.extend([_claude_tools_flag, ",".join(_tools)])
 

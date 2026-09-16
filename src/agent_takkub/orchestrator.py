@@ -1322,10 +1322,15 @@ def resolve_auto_assign_mode(
     plan: bool,
     shard_total: int,
     project: str | None,
+    subagent_fanout: int = 0,
 ) -> tuple[str, str | None]:
     """Decide the effective `assign` mode when the caller left `--mode`
     unset (#364 lever 2 — auto-route short, no-frills tasks to a native
     subagent instead of a full pane; ~650MB/spawn saved).
+
+    *subagent_fanout* > 1 (#641, `--shards N` resolved to one pane + N native
+    subagents) always means "pane" — the fan-out needs a real pane of the
+    role's own provider, never a Lead-side subagent.
 
     Returns `(mode, note)`. `note` is `None` whenever `requested_mode` was
     given explicitly (an explicit `--mode pane` or `--mode subagent` always
@@ -1360,7 +1365,7 @@ def resolve_auto_assign_mode(
     """
     if requested_mode is not None:
         return requested_mode, None
-    if plan or shard_total > 1:
+    if plan or shard_total > 1 or int(subagent_fanout or 0) > 1:
         return "pane", None
     if model or provider or effort:
         return "pane", None
@@ -2548,8 +2553,15 @@ class Orchestrator(
         worktree_prepared: tuple | None = None,
         base_ref: str | None = None,
         scope: str = "auto",
+        subagent_fanout: int = 0,
     ) -> tuple[bool, str]:
-        """*distinct_from* (#514): this task must never end up running the
+        """*subagent_fanout* (#641): N > 1 = this ONE pane must split the task
+        across N native subagents of its own CLI (`takkub assign --shards N`
+        on a non-browser role resolves to this instead of N `role#N` panes —
+        see `shard_fanout.resolve_shard_fanout`). Appends the fan-out contract
+        to *task* and records N on PaneState for spawn().
+
+        *distinct_from* (#514): this task must never end up running the
         same provider as *distinct_from*'s pane — a cross-check pairing
         (e.g. reviewer vs. the impl role it's checking) where correlated
         model errors would defeat the point. Recorded on `PaneState` and
@@ -2708,6 +2720,74 @@ class Orchestrator(
                     ) + task
                 except Exception:
                     pass
+        # #641: subagent fan-out — `assign --shards N` on a non-browser role
+        # arrives here as ONE assign with `subagent_fanout=N` (never N
+        # `role#N` assigns). The task gets the fan-out contract appended and
+        # the PaneState remembers N so spawn() can allow the CLI's subagent
+        # tool for this pane only. Done here, before the busy-queue /
+        # worktree / dispatch forks below, so every path (queued follow-up,
+        # worktree assign, crash auto-respawn replay) carries the same text.
+        subagent_fanout = int(subagent_fanout or 0)
+        if subagent_fanout > 1 and mode == "subagent":
+            return False, (
+                "subagent fan-out (--shards N) ใช้กับ --mode subagent ไม่ได้: --mode subagent คือ "
+                "subagent ของ Lead เอง — ใช้ --fanout pane หรือตัด --mode ออก"
+            )
+        if subagent_fanout > 1 and plan:
+            return False, "subagent fan-out (--shards N) ใช้กับ --plan ไม่ได้ — ใช้ --fanout pane"
+        _fo_ps = self._ps(_exit_key(role_check_project_ns, role_name))
+        _fo_pane = self._project_panes(role_check_project_ns).get(role_name)
+        _fo_pane_alive = bool(
+            _fo_pane is not None
+            and getattr(_fo_pane, "session", None) is not None
+            and getattr(_fo_pane.session, "is_alive", False)
+        )
+        if subagent_fanout > 1:
+            from .shard_fanout import effective_provider_hint, wrap_subagent_fanout_task
+
+            _fo_provider, _fo_hint = effective_provider_hint(
+                role_name.split("#", 1)[0].strip().lower(), role_check_project_ns, provider
+            )
+            task = wrap_subagent_fanout_task(task, subagent_fanout, _fo_provider, _fo_hint)
+            if (
+                _fo_pane_alive
+                and int(_fo_ps.subagent_fanout or 0) <= 0
+                and _fo_provider == "claude"
+            ):
+                # A running claude pane was spawned WITHOUT the Agent tool
+                # (argv can't change after process start — same contract as
+                # model_override); the fan-out block's own fallback makes it
+                # finish sequentially, so say so instead of failing.
+                self._notify_lead(
+                    role_check_project_ns,
+                    f"⚠️ [{role_name}] subagent fan-out ×{subagent_fanout}: pane เปิดอยู่แล้วโดยไม่มี "
+                    "Agent tool → งานนี้จะทำทีละชิ้นใน pane เดิม · ต้องการคู่ขนานจริง: "
+                    f"`takkub close --role {role_name}` แล้ว assign ใหม่",
+                    from_role=role_name,
+                    note="",
+                    kind="assign-override-ignored",
+                )
+                _log_event(
+                    "subagent_fanout_pane_running",
+                    role=role_name,
+                    project=role_check_project_ns,
+                    shards=subagent_fanout,
+                )
+            elif not _fo_pane_alive:
+                _fo_ps.subagent_fanout = subagent_fanout
+            _log_event(
+                "assign_subagent_fanout",
+                role=role_name,
+                project=role_check_project_ns,
+                shards=subagent_fanout,
+                provider=_fo_provider,
+                has_native_subagent=bool(_fo_hint),
+            )
+        elif not _fo_pane_alive:
+            # One-shot contract: a fresh, fan-out-less assign clears the flag
+            # so the next spawn is an ordinary (no-Agent) teammate pane.
+            _fo_ps.subagent_fanout = 0
+
         from . import task_scope
 
         requested_scope = (scope or "auto").strip().lower()

@@ -127,7 +127,22 @@ class TestArgparse:
             "agent_takkub.provider_config.assign_provider_override_error",
             lambda *_a, **_kw: None,
         )
-        cli.main(["assign", "--role", "backend", "--shards", "2", "--provider", "claude", "scan"])
+        # --fanout pane (#641): the default now resolves to ONE pane + native
+        # subagents; this test is about the N-shard-pane path.
+        cli.main(
+            [
+                "assign",
+                "--role",
+                "backend",
+                "--shards",
+                "2",
+                "--fanout",
+                "pane",
+                "--provider",
+                "claude",
+                "scan",
+            ]
+        )
         assert [payload["provider"] for payload in fake_request[-2:]] == ["claude", "claude"]
 
     def test_subagent_mode_rejects_provider_override(
@@ -246,7 +261,20 @@ class TestArgparse:
             "agent_takkub.provider_config.assign_effort_override_error",
             lambda *_a, **_kw: None,
         )
-        cli.main(["assign", "--role", "backend", "--shards", "2", "--effort", "high", "scan"])
+        cli.main(
+            [
+                "assign",
+                "--role",
+                "backend",
+                "--shards",
+                "2",
+                "--fanout",
+                "pane",
+                "--effort",
+                "high",
+                "scan",
+            ]
+        )
         assert [payload["effort"] for payload in fake_request[-2:]] == ["high", "high"]
 
     def test_subagent_mode_rejects_effort_override(
@@ -707,7 +735,7 @@ class TestShardFanoutResourceWaitVisibility:
         monkeypatch.setattr(cli, "_request", lambda _payload: next(responses))
         monkeypatch.delenv("TAKKUB_ROLE", raising=False)
 
-        cli.main(["assign", "--role", "backend", "--shards", "2", "build it"])
+        cli.main(["assign", "--role", "backend", "--shards", "2", "--fanout", "pane", "build it"])
 
         out = capsys.readouterr().out
         assert "heavy_project_limit" in out
@@ -718,7 +746,7 @@ class TestShardFanoutResourceWaitVisibility:
     ) -> None:
         """The routine per-shard success wording (the default stub's plain
         "stubbed" message) must not itself trip the resource-wait detection."""
-        cli.main(["assign", "--role", "backend", "--shards", "2", "build it"])
+        cli.main(["assign", "--role", "backend", "--shards", "2", "--fanout", "pane", "build it"])
         out = capsys.readouterr().out
         assert "queued 2/2 shards" in out
         assert "heavy_project_limit" not in out

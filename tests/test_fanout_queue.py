@@ -268,9 +268,12 @@ class TestDurability:
 
 
 class TestDisallowedTools:
-    def test_default_blocks_task(self, monkeypatch) -> None:
+    def test_default_blocks_agent(self, monkeypatch) -> None:
+        # #641: Claude Code renamed the subagent tool Task → Agent (the CLI
+        # still accepts the old name as an alias); the deny list follows the
+        # real name so it matches what the fan-out allowlist adds back.
         monkeypatch.delenv("TAKKUB_TEAMMATE_DISALLOWED_TOOLS", raising=False)
-        assert _teammate_disallowed_tools() == ["Task"]
+        assert _teammate_disallowed_tools() == ["Agent"]
 
     def test_env_override_space_and_comma(self, monkeypatch) -> None:
         monkeypatch.setenv("TAKKUB_TEAMMATE_DISALLOWED_TOOLS", "Task, WebFetch Agent")

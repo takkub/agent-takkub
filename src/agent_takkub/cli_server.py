@@ -821,6 +821,19 @@ class CliServer(QObject):
                     # pane vs. subagent here instead of defaulting straight to
                     # "pane" — an explicit --mode from the caller always wins
                     # (resolve_auto_assign_mode returns it unchanged).
+                    # #641: `--shards N` resolved client-side to ONE pane + N
+                    # native subagents arrives as `subagent_fanout: N`.
+                    subagent_fanout_req = int(req.get("subagent_fanout", 0) or 0)
+                    if subagent_fanout_req > 1 and mode_requested == "subagent":
+                        self._reply(
+                            sock,
+                            ok=False,
+                            msg=(
+                                "subagent fan-out (--shards N) ใช้กับ --mode subagent ไม่ได้ — "
+                                "ใช้ --fanout pane หรือตัด --mode ออก"
+                            ),
+                        )
+                        return
                     mode, auto_mode_note = resolve_auto_assign_mode(
                         role,
                         req.get("task", ""),
@@ -832,6 +845,7 @@ class CliServer(QObject):
                         plan=bool(req.get("plan", False)),
                         shard_total=int(req.get("shard_total", 0)),
                         project=from_project,
+                        subagent_fanout=subagent_fanout_req,
                     )
                     if auto_mode_note:
                         _log_event(
@@ -971,6 +985,7 @@ class CliServer(QObject):
                         ),
                         mode=mode,
                         scope=str(req.get("scope", "auto") or "auto"),
+                        subagent_fanout=subagent_fanout_req,
                     )
                     _wt_inputs_fn = getattr(self._orch, "worktree_assign_inputs", None)
                     if _assign_kwargs["isolation"] == "worktree" and callable(_wt_inputs_fn):

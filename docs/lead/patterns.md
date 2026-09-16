@@ -11,7 +11,8 @@ Lead เป็นผู้ตัดสินสุดท้าย.
 | รูปทรงงาน | Mode | เหตุผลหลัก |
 |---|---|---|
 | scan / audit / ค้นหา / triage เทสเสีย / first-pass review | `subagent` | boot เร็วและผลกลับ parent โดยตรง |
-| fan-out จำนวนมากที่แต่ละชิ้นอิสระ | `subagent` | ไม่สร้าง pane/PTY จำนวนมาก |
+| fan-out งาน implement ของ role เดียว หลายชิ้นอิสระ | `pane` + `--shards N` (#641) | เปิด pane เดียว แล้ว pane ยิง native subagent N ตัวเอง — ไม่สร้าง pane/PTY จำนวนมาก และ Lead ไม่ติดรอ (ดูหัวข้อ Shard fan-out) |
+| scan/triage ชิ้นเล็กจำนวนมากที่ Lead อยากรวมผลเอง | `subagent` | Lead รัน native child เอง; ผลกลับ Lead โดยตรง — ใช้เมื่อ Lead ต้องเป็นคนรวม ไม่ใช่ implement |
 | implement / fix / refactor ที่ user อยากดูหรืออาจสั่งแทรก | `pane` | มองเห็นสด ส่งข้อความแทรก และจัดการ permission ได้ |
 | cross-check ต่าง provider/model (เช่น codex เทียบ gemini) | `pane` เท่านั้น | native subagent ใช้ provider เดียวกับ parent เสมอ |
 
@@ -74,6 +75,27 @@ wait
 ```
 
 ## Shard fan-out + Plan-first
+
+### Subagent fan-out = default ของ `--shards` (#641, 2026-09-16)
+
+`takkub assign --role frontend --shards 5 "<งาน 5 ชิ้นอิสระ>"` → เปิด `frontend` **pane เดียว** แล้ว pane นั้นแบ่งงานและยิง native subagent 5 ตัวคู่ขนานเอง (task ลงท้ายด้วยบล็อก `━━ SUBAGENT FAN-OUT 5 ━━` ที่บอกขั้นตอน + fallback) → `takkub done` ครั้งเดียว ไม่มี ShardGroup/timeout 45 นาที
+
+| provider | subagent tool ที่ pane ใช้ | หมายเหตุ |
+|---|---|---|
+| claude | `Agent` (เปิดให้เฉพาะ pane fan-out; pane ปกติยัง deny) | Claude Code เปลี่ยนชื่อ Task→Agent แล้ว |
+| codex | `spawn_agent` + `wait_agent` | `multi_agent` stable เปิดอยู่แล้ว (0.154) |
+| gemini (agy) | `run_subagent` | ถ้า build ไม่มี → pane ทำทีละชิ้นเอง ไม่ค้าง |
+| opencode | `task` (`subagent_type="general"`) | `opencode agent list` มี general/explore |
+| kimi / cursor | — | fallback เป็น N pane อัตโนมัติ + note |
+
+- **ประหยัดอะไร:** ค่า boot CLI + role prompt + MCP init + ~0.5 GB RAM + PTY ต่อ pane × (N-1) · **ไม่ประหยัด:** ค่าอ่านไฟล์/CLAUDE.md ของแต่ละ subagent (context แยกกันคนละก้อน ไม่ได้แชร์กับ pane แม่)
+- **fallback เป็น N pane เอง (มี note ใน assign ack):** reviewer `--mode e2e|ui` (= qa/critic/designer — browser profile ต่อ shard pane), `--plan`, provider ไม่มี subagent · `--mode subagent` ของ Lead ไม่เกี่ยว (คนละ feature)
+- `--fanout pane` = บังคับแบบเดิม (อยากดูสดทีละตัว) · `--fanout subagent` = บังคับแบบใหม่ error ถ้าทำไม่ได้ (ไม่ fallback เงียบ)
+- ใช้ร่วม `--isolation worktree` ได้: worktree เดียว branch เดียว subagent แก้คนละไฟล์ในนั้น → merge ง่ายกว่า N branch · ใช้ร่วม `--auto-chain` ได้ (done เดียว)
+- pane claude ที่เปิดอยู่แล้วโดยไม่ได้ fan-out ไม่มี Agent tool → assign fan-out ไปจะได้ warning และ pane ทำทีละชิ้นแทน (`takkub close --role <r>` ก่อนถ้าต้องการคู่ขนานจริง)
+- ข้อจำกัดที่ยอมรับ: เห็นแค่ pane แม่บนจอ (subagent ไม่มี pane) · pane แม่ตาย = subagent ตายหมด · งานต้องแยกไฟล์กันจริง (โฟลเดอร์เดียวกัน)
+
+### Pane fan-out แบบเดิม (browser QA / --plan / บังคับ --fanout pane)
 
 **#513/#590:** use `--role reviewer --mode e2e` (shown below) as the canonical form — `--role qa` still works as a deprecated alias (>= 1 release, shard/browser machinery untouched: `resolve_role_alias("qa") == ("reviewer", "e2e")`), but its provider/model/effort now resolve against reviewer's Settings row too (#590 — the roster never renders qa its own row under any built-in preset), so `--role qa` can look like it's on a different CLI than what Settings shows while `--role reviewer --mode e2e` says so plainly in its result line.
 

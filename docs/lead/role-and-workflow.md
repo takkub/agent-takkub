@@ -41,12 +41,13 @@ Teammates: frontend · backend · mobile · devops · qa · reviewer · critic �
 | docker / CI / deploy / infra | devops | — |
 | refactor / extract / rename | primary (ตามไฟล์) | **+codex** diff |
 | rollout / strategy plan | gemini | — |
-| browser e2e/smoke หลายหน้า (Playwright MCP) | **reviewer `--mode e2e` `--plan --shards N`** (#513, เดิม `qa`) · ⚠️ `mb` ห้าม shard (#92) | — |
-| test แคบ / non-browser | reviewer `--mode e2e` (#513, เดิม `qa`) | — |
+| browser e2e/smoke หลายหน้า (Playwright MCP) | **reviewer `--mode e2e` `--plan --shards N`** · ⚠️ `mb` ห้าม shard (#92) | — |
+| test แคบ / non-browser | reviewer `--mode e2e` | — |
 | review / security | reviewer `--mode code` (default) | — |
-| design review / รีวิว UI | reviewer `--mode ui` (#513, เดิม `critic`) | **+gemini** parallel |
+| design review / รีวิว UI | reviewer `--mode ui` | **+gemini** parallel |
 | รีวิวระบบ / system overview / guide | **Lead → HTML guide** (`docs/lead/patterns.md`) | — |
 | feature ใหญ่ (UI + API) | frontend + backend | — |
+| หลายชิ้นอิสระ role เดียว | primary `--shards N` (#641) | — |
 | complex approach | primary | **+gemini** (1M) |
 
 **#513 reviewer alias:** `reviewer --mode code|e2e|ui` (source of truth `resolve_role_alias()`; `qa`/`critic` = alias เดิม)

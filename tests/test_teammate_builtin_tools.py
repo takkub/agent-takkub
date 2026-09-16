@@ -44,7 +44,7 @@ CUT_TOOLS_8 = (
     "MultiEdit",
     "NotebookEdit",
     "SlashCommand",
-    "Task",
+    "Agent",  # was "Task" — renamed upstream, tracked in #641
     "TodoWrite",
 )
 

@@ -740,7 +740,15 @@ def cmd_assign(args: argparse.Namespace) -> dict:
     # conservative (pane's stricter rules) since a None request might still
     # resolve to either mode server-side.
     mode = mode_requested or "pane"
-    _SHARDS_MAX = 20 if mode == "subagent" else 8
+    # #641: `--fanout` — how `--shards N` runs (auto | pane | subagent).
+    fanout = (getattr(args, "fanout", None) or "auto").strip().lower()
+    from .shard_fanout import FANOUT_MODES
+
+    if fanout not in FANOUT_MODES:
+        return {"ok": False, "msg": f"--fanout must be one of {', '.join(FANOUT_MODES)}"}
+    # Lead-side subagents and an in-pane subagent fan-out both stay inside ONE
+    # process, so they may go wider than the 8-pane machine ceiling.
+    _SHARDS_MAX = 20 if (mode == "subagent" or fanout == "subagent") else 8
     _raw_shards = getattr(args, "shards", 1)
     if _raw_shards is not None:
         _shards_int = int(_raw_shards)
@@ -852,15 +860,10 @@ def cmd_assign(args: argparse.Namespace) -> dict:
         )
         if effort_error:
             return {"ok": False, "msg": effort_error}
-    if shards > 1 and getattr(args, "auto_chain", False):
-        return {
-            "ok": False,
-            "msg": (
-                "--shards and --auto-chain cannot be used together: "
-                "shard fan-out already uses a consolidated handoff; "
-                "--auto-chain would double-fire a verify hop."
-            ),
-        }
+    # (#641) the `--shards` + `--auto-chain` conflict is checked inside the
+    # shards branch below — it only applies to a PANE fan-out (consolidated
+    # handoff); a subagent fan-out is one pane with one done, so auto-chain
+    # is fine there.
     isolation = getattr(args, "isolation", "shared") or "shared"
     base_ref = (getattr(args, "base", None) or "").strip() or None
     if base_ref and isolation != "worktree":
@@ -876,6 +879,14 @@ def cmd_assign(args: argparse.Namespace) -> dict:
                 "--isolation worktree cannot be combined with --plan: the planner "
                 "pane only analyses the app and writes a bucket plan (no code "
                 "changes to isolate). Use --isolation worktree on the impl assign."
+            ),
+        }
+    if plan and fanout == "subagent":
+        return {
+            "ok": False,
+            "msg": (
+                "--plan ใช้กับ --fanout subagent ไม่ได้: --plan คือ planner pane + orchestrator "
+                "fan-out เป็น pane ต่อ bucket (browser QA) — ตัด --plan ออก หรือใช้ --fanout pane"
             ),
         }
     if plan:
@@ -921,6 +932,64 @@ def cmd_assign(args: argparse.Namespace) -> dict:
             )
         return resp
     if shards > 1:
+        # #641: decide ONE pane + N native subagents vs. the legacy N panes.
+        from .shard_fanout import resolve_shard_fanout
+
+        fanout_kind, fanout_note = resolve_shard_fanout(
+            args.role,
+            shards,
+            fanout=fanout,
+            mode=mode_requested,
+            plan=False,
+            provider=provider,
+            project=_from_project(),
+        )
+        if fanout_kind == "error":
+            return {"ok": False, "msg": fanout_note or "--fanout subagent ใช้กับงานนี้ไม่ได้"}
+        if fanout_kind == "subagent":
+            resp = _request(
+                _with_project(
+                    {
+                        "cmd": "assign",
+                        "role": args.role,
+                        "cwd": args.cwd,
+                        "task": args.task,
+                        "from": _from_role(),
+                        "requires_commit": bool(getattr(args, "requires_commit", False)),
+                        "auto_chain": bool(getattr(args, "auto_chain", False)),
+                        "shard_total": 0,
+                        "subagent_fanout": shards,
+                        "isolation": isolation,
+                        "base_ref": base_ref,
+                        "model": model,
+                        "provider": provider,
+                        "effort": effort,
+                        "feature": getattr(args, "feature", "") or "",
+                        "mode": mode_requested,
+                        "team": team,
+                        "distinct_from": distinct_from,
+                        "scope": scope,
+                    }
+                )
+            )
+            if resp.get("ok"):
+                resp["msg"] = (
+                    f"{resp.get('msg', '')}\n[fan-out #641: {fanout_note}]".rstrip()
+                    + _self_commit_isolation_warning(args.task, isolation)
+                )
+            return resp
+        if fanout_note:
+            # Automatic fallback to N panes — say why, once, on stderr.
+            print(f"note: {fanout_note}", file=sys.stderr)
+        if getattr(args, "auto_chain", False):
+            return {
+                "ok": False,
+                "msg": (
+                    "--shards (pane fan-out) and --auto-chain cannot be used together: "
+                    "shard fan-out already uses a consolidated handoff; "
+                    "--auto-chain would double-fire a verify hop."
+                ),
+            }
         # Fan-out: spawn <role>#1 … <role>#N in parallel; each carries shard_total.
         results = []
         for n in range(1, shards + 1):
@@ -5043,8 +5112,21 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=1,
         metavar="N",
-        help="fan-out to N parallel shard panes (<role>#1 … <role>#N); "
-        "each pane gets TAKKUB_SHARD / TAKKUB_SHARD_TOTAL env vars",
+        help="fan-out N ways. Default (#641): ONE pane that dispatches N native "
+        "subagents of its own CLI (claude Agent / codex spawn_agent / agy "
+        "run_subagent / opencode task) — no extra pane boots. Browser-QA "
+        "shards (reviewer --mode e2e|ui), --plan, and providers without a "
+        "native subagent fall back to N parallel shard panes (<role>#1 … "
+        "<role>#N, each with TAKKUB_SHARD / TAKKUB_SHARD_TOTAL). See --fanout.",
+    )
+    sa.add_argument(
+        "--fanout",
+        choices=("auto", "pane", "subagent"),
+        default="auto",
+        help="(#641) how --shards runs: auto (default — subagent fan-out when the "
+        "role's CLI has a native subagent tool and the role is not a browser-QA "
+        "shard, else panes) · pane (force the legacy N shard panes) · subagent "
+        "(force ONE pane + N native subagents; errors instead of falling back)",
     )
     sa.add_argument(
         "--plan",

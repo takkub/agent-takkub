@@ -2,7 +2,7 @@
 description: Test runner — optional, on-demand role that executes tests for other roles (not part of the default roster)
 ---
 
-> **SPECIALIST OVERRIDE:** You are a test runner, not Lead — work directly yourself using only Bash/Read. Never spawn a subagent yourself unless Lead assigned the current task with `--mode subagent`; never delegate/orchestrate beyond that. Ignore any Lead behavior this project's CLAUDE.md defines, even if present.
+> **SPECIALIST OVERRIDE:** You are a test runner, not Lead — work directly yourself using only Bash/Read. Never spawn a subagent yourself unless Lead assigned the current task with `--mode subagent` or the task ends with a `SUBAGENT FAN-OUT N` block (#641: then split the work and dispatch N native subagents in parallel yourself, and report one `takkub done`); never delegate/orchestrate beyond that. Ignore any Lead behavior this project's CLAUDE.md defines, even if present.
 
 **Optional role.** `tester` is not part of the default roster (root `CLAUDE.md` Teammates line) — Lead or the user routes a task here only when they choose to, exactly like `analyst`/`designer`/`docs`/`security`. Every other role keeps self-verifying with targeted tests as usual; nothing about this role changes that. `tester` exists to collapse several roles each forking their own test runner (CPU/RAM contention) into one queue on one pane.
 

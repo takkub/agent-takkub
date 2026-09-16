@@ -4,6 +4,31 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 
 ## [vNEXT]
 
+## [v2.1.11] - 2026-09-16
+
+### Changed (เปลี่ยน)
+
+- **fan-out ใหม่: `--shards N` = pane เดียว + N native subagent (#641)** — `takkub assign --role frontend --shards 5`
+  เคยเปิด `frontend#1…#5` 5 pane (จ่ายค่า boot CLI + role prompt + MCP init + ~0.5 GB RAM + PTY ซ้ำ 5 รอบ
+  แล้วรอ ShardGroup/timeout 45 นาที) ตอนนี้เปิด pane เดียว แล้ว task ลงท้ายด้วยบล็อก `━━ SUBAGENT FAN-OUT N ━━`
+  สั่งให้ pane แบ่งงานเป็นชิ้นอิสระ ยิง native subagent ของ CLI ตัวเองคู่ขนาน รวมผล แล้ว `takkub done` ครั้งเดียว
+  · รองรับ claude (`Agent`), codex (`spawn_agent`/`wait_agent` — `multi_agent` stable ใน 0.154), gemini-agy
+  (`run_subagent`), opencode (`task` subagent `general`) — `ProviderSpec.native_subagent_hint` ใหม่
+  · fallback เป็น N pane อัตโนมัติ + note: reviewer `--mode e2e|ui` (browser profile ต่อ shard pane), `--plan`,
+  kimi/cursor (ไม่มี subagent) · `--fanout pane|subagent` บังคับได้ (subagent = error แทน fallback เงียบ)
+  · ใช้ร่วม `--auto-chain` และ `--isolation worktree` ได้ (done เดียว/branch เดียว) · pane claude ที่เปิดอยู่แล้ว
+  ไม่มี Agent tool → เตือน Lead แล้ว pane ทำทีละชิ้นเอง (บล็อกมี fallback "ห้ามค้าง ห้ามถาม") · `--mode subagent`
+  ของ Lead ไม่เปลี่ยน · module ใหม่ `shard_fanout.py` + env `TAKKUB_SUBAGENT_FANOUT=N` บน pane fan-out
+  · คู่มือ Lead (`role-and-workflow.md` routing row, `patterns.md`, `cli-reference.md`, PARALLEL mode ใน
+  `lead_context.py`) เลิกสอน `frontend#1..#K` · role prompt ทุกตัว (`.claude/agents/*.md`, custom role,
+  codex AGENTS.md/preamble) เพิ่มข้อยกเว้น "spawn subagent ได้เมื่อ task มีบล็อก SUBAGENT FAN-OUT"
+
+- **ชื่อ subagent tool ของ claude → `Agent` ทั้งระบบ (#641)** — Claude Code 2.1.x เปลี่ยนชื่อจาก `Task`
+  (2.1.268 มีแต่ `AgentInput` ใน sdk-tools.d.ts) · `--disallowedTools`/`--disallowed-tools` และ
+  `TEAMMATE_CUT_TOOLS` ใช้ชื่อใหม่ · **ไม่ใช่ bug fix** — probe บน 2.1.268 ยืนยันว่า CLI ยังรับ `Task`
+  เป็น alias (deny เดิมยังบล็อกได้จริง) แต่ allowlist ของ pane fan-out ต้องเติมชื่อจริงกลับเข้าไป
+  จึงรวมให้เหลือสะกดเดียว · deny ใช้กับ teammate เท่านั้น (Lead ต้องมี `Agent` ไว้ใช้ `--mode subagent`)
+
 ## [v2.1.10] - 2026-09-15
 
 ### Added (เพิ่ม)

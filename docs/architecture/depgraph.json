@@ -1,6 +1,6 @@
 {
   "generated_by": "grimp 3.14",
-  "module_count": 343,
+  "module_count": 344,
   "modules": [
     {
       "module": "agent_takkub",
@@ -469,6 +469,7 @@
         "agent_takkub.resource_lock",
         "agent_takkub.routing_planner",
         "agent_takkub.services",
+        "agent_takkub.shard_fanout",
         "agent_takkub.shared_dev_tools",
         "agent_takkub.skill_audit",
         "agent_takkub.skill_policy",
@@ -485,7 +486,7 @@
         "agent_takkub.__main__"
       ],
       "fan_in": 1,
-      "fan_out": 50
+      "fan_out": 51
     },
     {
       "module": "agent_takkub.cli_server",
@@ -3273,6 +3274,7 @@
         "agent_takkub.roles",
         "agent_takkub.routing_planner",
         "agent_takkub.secret_redact",
+        "agent_takkub.shard_fanout",
         "agent_takkub.shared_dev_tools",
         "agent_takkub.spawn_engine",
         "agent_takkub.task_delivery",
@@ -3293,7 +3295,7 @@
         "agent_takkub.user_actions"
       ],
       "fan_in": 6,
-      "fan_out": 57
+      "fan_out": 58
     },
     {
       "module": "agent_takkub.orchestrator_text",
@@ -3737,6 +3739,7 @@
         "agent_takkub.settings_management.services.cleanup",
         "agent_takkub.settings_management.services.relationships",
         "agent_takkub.settings_window",
+        "agent_takkub.shard_fanout",
         "agent_takkub.spawn_engine",
         "agent_takkub.status_header",
         "agent_takkub.team_preset",
@@ -3744,7 +3747,7 @@
         "agent_takkub.user_actions",
         "agent_takkub.user_profile"
       ],
-      "fan_in": 27,
+      "fan_in": 28,
       "fan_out": 8
     },
     {
@@ -3854,9 +3857,10 @@
         "agent_takkub.settings_management.pages.roles_page",
         "agent_takkub.settings_management.repositories.providers",
         "agent_takkub.settings_window",
+        "agent_takkub.shard_fanout",
         "agent_takkub.spawn_engine"
       ],
-      "fan_in": 28,
+      "fan_in": 29,
       "fan_out": 4
     },
     {
@@ -4285,9 +4289,10 @@
         "agent_takkub.cli_server",
         "agent_takkub.lead_wait",
         "agent_takkub.orchestrator",
+        "agent_takkub.shard_fanout",
         "agent_takkub.team_preset"
       ],
-      "fan_in": 5,
+      "fan_in": 6,
       "fan_out": 1
     },
     {
@@ -4883,6 +4888,22 @@
       "fan_out": 35
     },
     {
+      "module": "agent_takkub.shard_fanout",
+      "imports": [
+        "agent_takkub.provider_config",
+        "agent_takkub.provider_spec",
+        "agent_takkub.routing_planner",
+        "agent_takkub.team_preset"
+      ],
+      "imported_by": [
+        "agent_takkub.cli",
+        "agent_takkub.orchestrator",
+        "agent_takkub.spawn_engine"
+      ],
+      "fan_in": 3,
+      "fan_out": 4
+    },
+    {
       "module": "agent_takkub.shared_dev_tools",
       "imports": [
         "agent_takkub._win_console",
@@ -5022,6 +5043,7 @@
         "agent_takkub.role_models",
         "agent_takkub.roles",
         "agent_takkub.rtk_helper",
+        "agent_takkub.shard_fanout",
         "agent_takkub.shared_dev_tools",
         "agent_takkub.skill_policy",
         "agent_takkub.skill_scan",
@@ -5037,7 +5059,7 @@
         "agent_takkub.remote.api"
       ],
       "fan_in": 3,
-      "fan_out": 42
+      "fan_out": 43
     },
     {
       "module": "agent_takkub.spawn_gate",
@@ -5172,11 +5194,12 @@
         "agent_takkub.pipeline_executor",
         "agent_takkub.remote.api",
         "agent_takkub.settings_window",
+        "agent_takkub.shard_fanout",
         "agent_takkub.spawn_engine",
         "agent_takkub.status_header",
         "agent_takkub.user_actions"
       ],
-      "fan_in": 15,
+      "fan_in": 16,
       "fan_out": 7
     },
     {
