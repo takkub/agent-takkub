@@ -1531,3 +1531,47 @@ class TestPhaseLabelAndNumber:
 
     def test_none_is_unknown(self) -> None:
         assert bfw._phase_label_and_number(None) == ("ไม่ทราบขั้นตอน", None)
+
+
+class TestBootGateDeadline:
+    """#640: the gate's event loop had no ceiling. A stage worker that never
+    returned (provider update wedged behind another instance's npm install, a
+    subprocess outliving its own timeout) left the cockpit invisible — the
+    reported "boot ค้าง 5 นาที", once ending in an abort inside the gate."""
+
+    def test_default_and_env_override(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("TAKKUB_BOOT_GATE_TIMEOUT_S", raising=False)
+        assert bfw._boot_gate_timeout_s() == bfw._BOOT_GATE_TIMEOUT_DEFAULT_S
+        monkeypatch.setenv("TAKKUB_BOOT_GATE_TIMEOUT_S", "600")
+        assert bfw._boot_gate_timeout_s() == 600.0
+        monkeypatch.setenv("TAKKUB_BOOT_GATE_TIMEOUT_S", "nonsense")
+        assert bfw._boot_gate_timeout_s() == bfw._BOOT_GATE_TIMEOUT_DEFAULT_S
+
+    def test_zero_or_negative_disables_the_ceiling(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("TAKKUB_BOOT_GATE_TIMEOUT_S", "0")
+        assert bfw._boot_gate_timeout_s() == float("inf")
+        monkeypatch.setenv("TAKKUB_BOOT_GATE_TIMEOUT_S", "-5")
+        assert bfw._boot_gate_timeout_s() == float("inf")
+
+    def test_wedged_stage_still_opens_the_cockpit(
+        self, _qt_session_app, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A wizard whose start() never finishes must not hold the process:
+        the deadline fires, the event is logged, and the main window is built
+        anyway (fail-open — a skipped update beats no cockpit at all)."""
+        monkeypatch.setenv("TAKKUB_BOOT_GATE_TIMEOUT_S", "0.2")
+
+        # Replace start() with a no-op so the flow never completes.
+        monkeypatch.setattr(bfw.BootFlowWindow, "start", lambda self: None)
+        logged: list[tuple] = []
+        monkeypatch.setattr(
+            "agent_takkub.orchestrator_text._log_event",
+            lambda event, **kw: logged.append((event, kw)),
+        )
+        built: list[str] = []
+
+        window = bfw.run_boot_flow_gate(lambda: built.append("main") or "window")
+
+        assert window == "window"
+        assert built == ["main"]
+        assert any(event == "boot_gate_timeout" for event, _ in logged)

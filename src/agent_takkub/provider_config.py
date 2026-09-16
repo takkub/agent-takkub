@@ -375,12 +375,20 @@ def reset_provider_available_cache() -> None:
 def _provider_available(provider: str) -> bool:
     """True iff `provider` can actually run right now.
 
-    Two ways a codex/gemini provider becomes unusable:
+    Two ways a provider becomes unusable:
       1. Toggled off in Settings → Providers & Roles (`disabled-providers.json`).
       2. Its CLI isn't installed (binary not on PATH).
 
-    `claude` is always considered available (it's the cockpit's baseline;
-    if claude itself is missing the spawn fails far louder elsewhere).
+    #639: `claude` used to short-circuit to True here, unconditionally. Since
+    it is also first in `_REROUTE_PRIORITY`, that made it the universal
+    fallback even for someone who never installed it or deliberately turned it
+    off — the reported symptom was a Lead pinned to codex that opened as
+    claude on every degrade, on a machine with no Claude subscription. It now
+    goes through the same two checks as everyone else. The baseline role it
+    used to play is preserved where it belongs instead: a role explicitly
+    CONFIGURED as claude still spawns claude (`effective_provider_for`), and
+    when nothing at all is available the caller keeps its configured provider
+    and fails loudly at spawn rather than silently running the wrong CLI.
     Imports are lazy so this stays a thin per-role config module with no
     hard dependency on provider_state / the CLI helpers at import time.
 
@@ -395,9 +403,6 @@ def _provider_available(provider: str) -> bool:
     `_PROVIDER_AVAILABLE_TTL_S`) — see the module comment above this
     function for why the disable-toggle check below is deliberately not.
     """
-    if provider == CLAUDE:
-        return True
-
     # (1) user-intent toggle — always read live, never cached.
     try:
         from .provider_state import is_disabled
@@ -478,9 +483,16 @@ def effective_provider_for(role: str, project: str | None = None) -> str:
     role = re.sub(r"#\d+$", "", role or "")
     desired = provider_for(role, project)
     if desired == CLAUDE:
+        # Explicit configuration always wins over availability: a role set to
+        # claude spawns claude and fails visibly if claude is broken, rather
+        # than being quietly moved onto a CLI the user did not choose.
         return CLAUDE
     if not _provider_available(desired):
-        return CLAUDE
+        # #639: was `return CLAUDE` unconditionally. Pick the best AVAILABLE
+        # substitute instead; `or desired` keeps the configured provider (and
+        # a loud spawn failure) when nothing qualifies — never a silent swap
+        # onto a CLI that is not installed or was switched off.
+        return _pick_quota_fallback(desired) or desired
     if role.lower().strip() in FORCED_ROLES:
         return desired
     from . import provider_state
@@ -519,6 +531,34 @@ def provider_quota_skip_info(
     if fallback is None:
         return None
     return desired, fallback, provider_state.quota_reset_at(desired)
+
+
+def provider_unavailable_substitution_info(
+    role: str, project: str | None = None
+) -> tuple[str, str] | None:
+    """`(desired_provider, substitute)` when `role`'s configured provider is
+    not usable right now (switched off in Settings, or its CLI is not
+    installed) and resolving it will therefore run a DIFFERENT CLI, else
+    `None`.
+
+    #639 proposal 3: the substitution used to be completely silent — the pane
+    simply came up on another CLI and the operator had to notice by reading
+    the header. Same side-effect-free query shape as
+    `provider_quota_skip_info` so `_assign_dispatch` can notify once per
+    assign instead of on every `effective_provider_for` call.
+
+    Returns `None` when nothing is substituted, including the case where no
+    substitute qualifies at all — there the role keeps its configured
+    provider and fails at spawn, which is its own (louder) signal.
+    """
+    stripped = re.sub(r"#\d+$", "", role or "")
+    desired = provider_for(stripped, project)
+    if desired == CLAUDE or _provider_available(desired):
+        return None
+    substitute = _pick_quota_fallback(desired)
+    if substitute is None or substitute == desired:
+        return None
+    return desired, substitute
 
 
 # ── model-id family patterns (issue #127) ───────────────────────────────────

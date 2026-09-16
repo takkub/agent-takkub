@@ -27,8 +27,15 @@ GEMINI = "gemini"
 
 
 def _togglable() -> frozenset[str]:
-    """Every registered provider except claude (the cockpit's baseline —
-    disabling it would leave nothing to substitute with).
+    """Every registered provider, claude included (#639).
+
+    claude used to be excluded here — "the cockpit's baseline, disabling it
+    would leave nothing to substitute with". That assumption belongs to a
+    machine that has claude. The reported case is the opposite: a user with no
+    Claude subscription whose codex-pinned Lead kept being degraded onto
+    claude, with no way to say "never use it". claude is now togglable like
+    the rest, and the substitution logic no longer treats it as an always-on
+    universal fallback (`provider_config._provider_available`).
 
     Derived from PROVIDER_REGISTRY (#103 Phase 1) instead of a hand-maintained
     frozenset, so a new registry entry is automatically togglable in the
@@ -37,7 +44,7 @@ def _togglable() -> frozenset[str]:
     """
     from .provider_spec import PROVIDER_REGISTRY
 
-    return frozenset(PROVIDER_REGISTRY) - {"claude"}
+    return frozenset(PROVIDER_REGISTRY)
 
 
 # Providers that can be toggled. Adding a new togglable provider only needs a

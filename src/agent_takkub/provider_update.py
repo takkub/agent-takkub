@@ -22,12 +22,16 @@ via `provider_state` is never probed or downloaded — it just reports
 
 from __future__ import annotations
 
+import os
 import platform
 import re
 import shutil
 import subprocess
 import sys
 import threading
+import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 
 from ._win_console import SUBPROCESS_NO_WINDOW
@@ -50,6 +54,61 @@ _UPDATE_TIMEOUT_S = 180.0
 # and any future manager stay parallel.
 _NPM_LOCK = threading.Lock()
 _NPM_LOCK_WAIT_S = _UPDATE_TIMEOUT_S
+
+# #640: `_NPM_LOCK` only serialises npm runs INSIDE one process. Two cockpit
+# instances (a dev checkout and the installed one, or a restart racing the
+# boot updater it just orphaned) share the same global npm prefix and used to
+# collide exactly the way the comment above describes — one reported boot
+# ended in `Fatal Python error: Aborted` with several `_update_claude` workers
+# in flight. This machine-wide file lock closes that: same prefix, one
+# installer. It lives in the OS temp dir on purpose — per-DATA_HOME runtime
+# dirs would give each instance its own lock and defeat the point.
+_NPM_MACHINE_LOCK_NAME = "npm-global-install"
+
+
+@contextmanager
+def _npm_machine_lock(wait_s: float) -> Iterator[bool]:
+    """Hold the machine-wide npm lock, or yield False when someone else has
+    it. Never raises — a lock that cannot be taken (read-only temp, exotic
+    filesystem) degrades to the in-process lock alone rather than blocking
+    every update on this machine."""
+    import tempfile
+    from pathlib import Path
+
+    try:
+        from . import resource_lock
+    except Exception:
+        yield True
+        return
+    lock_dir = Path(tempfile.gettempdir())
+    holder = f"pid{os.getpid()}"
+    deadline = time.monotonic() + max(0.0, wait_s)
+    acquired = False
+    try:
+        while True:
+            try:
+                acquired, _info = resource_lock.try_acquire(
+                    lock_dir,
+                    None,
+                    _NPM_MACHINE_LOCK_NAME,
+                    holder,
+                    ttl_s=_UPDATE_TIMEOUT_S + 60.0,
+                    note="provider update (npm -g)",
+                )
+            except Exception:
+                yield True  # lock unusable here — fall back to in-process only
+                return
+            if acquired or time.monotonic() >= deadline:
+                break
+            time.sleep(0.5)
+        yield acquired
+    finally:
+        if acquired:
+            try:
+                resource_lock.release(lock_dir, None, _NPM_MACHINE_LOCK_NAME, holder)
+            except Exception:
+                pass
+
 
 STATUS_UP_TO_DATE = "up_to_date"
 STATUS_UPDATED = "updated"
@@ -213,7 +272,19 @@ def _run_update_command(
             f"another provider's npm install held the global npm lock for {_NPM_LOCK_WAIT_S:.0f}s",
         )
     try:
-        return _run([program, *argv[1:]], timeout=_UPDATE_TIMEOUT_S)
+        if not needs_npm_lock:
+            return _run([program, *argv[1:]], timeout=_UPDATE_TIMEOUT_S)
+        # #640: second gate, this one across processes.
+        with _npm_machine_lock(_NPM_LOCK_WAIT_S) as got_machine_lock:
+            if not got_machine_lock:
+                return UpdateOutcome(
+                    name,
+                    STATUS_FAILED,
+                    "another cockpit instance is running an npm global install "
+                    f"(waited {_NPM_LOCK_WAIT_S:.0f}s) — skipped to avoid a corrupted "
+                    "install; it will be offered again next boot",
+                )
+            return _run([program, *argv[1:]], timeout=_UPDATE_TIMEOUT_S)
     except subprocess.TimeoutExpired:
         return UpdateOutcome(
             name, STATUS_FAILED, f"update timed out after {_UPDATE_TIMEOUT_S:.0f}s"
@@ -284,7 +355,18 @@ def _update_claude() -> UpdateOutcome:
             f"another provider's npm install held the global npm lock for {_NPM_LOCK_WAIT_S:.0f}s",
         )
     try:
-        ok, msg = apply_update()
+        # #640: and the cross-process gate — the reported abort had several
+        # `_update_claude` calls in flight at once across instances.
+        with _npm_machine_lock(_NPM_LOCK_WAIT_S) as got_machine_lock:
+            if not got_machine_lock:
+                return UpdateOutcome(
+                    "claude",
+                    STATUS_FAILED,
+                    "another cockpit instance is running an npm global install "
+                    f"(waited {_NPM_LOCK_WAIT_S:.0f}s) — skipped to avoid a corrupted "
+                    "install; it will be offered again next boot",
+                )
+            ok, msg = apply_update()
     finally:
         _NPM_LOCK.release()
     if not ok:

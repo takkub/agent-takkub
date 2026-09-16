@@ -476,6 +476,12 @@ def test_fifo_queue_drains_three_claude_assigns_with_preload_events(
                 cwd=str(tmp_path),
                 task=f"[ROLE: {role}]\nqueue integration task",
                 project=TEST_PROJECT,
+                # #641: sibling `backend#N` panes only come from a real pane
+                # fan-out now (`--shards N --fanout pane`), which stamps
+                # shard_total — a bare `backend#1` assign is refused. Carrying
+                # it here keeps this a FIFO/spawn test instead of accidentally
+                # testing the gate.
+                shard_total=len(roles),
             )
             assert ok is True, message
         assert [item[0] for item in orch._spawn_queue] == list(roles)

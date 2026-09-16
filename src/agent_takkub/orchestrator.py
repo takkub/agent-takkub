@@ -3519,6 +3519,31 @@ class Orchestrator(
                     note="provider_quota_skip",
                     kind="quota-skip",
                 )
+            # #639: the availability substitution (provider switched off in
+            # Settings, or its CLI is not installed) used to happen silently —
+            # the pane just came up on another CLI. Same one-notice-per-assign
+            # shape as the quota skip above.
+            from .provider_config import provider_unavailable_substitution_info
+
+            sub_info = provider_unavailable_substitution_info(settings_role_a, project=project_ns)
+            if sub_info is not None:
+                sub_from, sub_to = sub_info
+                _log_event(
+                    "provider_unavailable_substitution",
+                    role=role_name,
+                    project=project_ns,
+                    from_provider=sub_from,
+                    to_provider=sub_to,
+                )
+                self._notify_lead(
+                    project_ns,
+                    f"⚠️ [{role_name}] {sub_from} ใช้ไม่ได้ (ปิดใน Settings หรือไม่ได้ติดตั้ง) "
+                    f"→ ใช้ {sub_to} แทน · ถ้าไม่ต้องการให้สลับ ให้ปิด {sub_to} ใน Settings "
+                    f"หรือแก้ provider ของ role นี้",
+                    from_role=role_name,
+                    note="provider_unavailable_substitution",
+                    kind="provider-substitution",
+                )
         if effective_provider == CODEX:
             task = _rewrite_task_for_codex(task)
         task = _append_verify_fail_hint(task, base_role_a)

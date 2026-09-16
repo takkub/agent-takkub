@@ -46,7 +46,10 @@ class TestOpencodeSpec:
         from agent_takkub.provider_state import TOGGLABLE
 
         assert "opencode" in TOGGLABLE
-        assert "claude" not in TOGGLABLE  # baseline is never togglable
+        # #639: claude is togglable too now. It used to be excluded as "the
+        # baseline", which left a user with no Claude subscription unable to
+        # stop their codex-pinned roles from degrading onto it.
+        assert "claude" in TOGGLABLE
 
     def test_ready_rule_in_global_table(self) -> None:
         assert (True, "ctrl+p commands") in READY_RULES

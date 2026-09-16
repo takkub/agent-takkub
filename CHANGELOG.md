@@ -8,6 +8,30 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 
 ### Fixed (แก้)
 
+- **#639 — Lead ที่ตั้งเป็น codex ถูก degrade ไป claude ตลอด (เครื่องที่ไม่มี Claude subscription)**
+  `_provider_available()` เคย `return True` ให้ claude แบบไม่มีเงื่อนไข และ claude เป็นตัวแรกใน
+  `_REROUTE_PRIORITY` → ทุกการ degrade ลงที่ claude เสมอ แม้ผู้ใช้ไม่ได้ติดตั้ง/ไม่ได้ใช้
+  → ตอนนี้ claude ผ่านเกณฑ์เดียวกับทุก provider (toggle ใน Settings + ตรวจว่า CLI ติดตั้งจริง)
+  · `effective_provider_for` เลิก hardcode `return CLAUDE` ตอน provider เป้าหมายใช้ไม่ได้ —
+  เลือกตัวที่ **ใช้ได้จริง** แทน และถ้าไม่มีเลยจะ **คง provider เดิมไว้ให้ spawn fail ดังๆ**
+  ไม่ใช่สลับเงียบไป CLI ที่ผู้ใช้ไม่ได้เลือก · role ที่ตั้งเป็น claude ตรงๆ ยัง spawn claude เหมือนเดิม
+  · **claude toggle ปิดได้แล้วใน Settings** (เดิมเป็น required ปิดไม่ได้) = ทางออกของเครื่องที่ไม่มี
+  subscription · การสลับ provider เพราะ "ใช้ไม่ได้" ไม่เงียบอีกต่อไป — แจ้ง Lead 1 ครั้งต่อ assign
+  (`provider_unavailable_substitution_info` + event `provider_unavailable_substitution`)
+
+- **#640 (บางส่วน) — boot gate ไม่มีเพดานเวลา + updater ซ้ำข้าม instance**
+  ทุก stage ของ boot รันบน worker อยู่แล้ว แต่ `run_boot_flow_gate` รอ `loop.exec()` แบบไม่มี deadline
+  → worker ที่ไม่ตอบทำให้ cockpit ไม่ขึ้นเลย (อาการ "ค้าง 5 นาที" และมี boot หนึ่งที่ abort คาใน gate)
+  → ใส่เพดาน `TAKKUB_BOOT_GATE_TIMEOUT_S` (default 180 วิ, ตั้ง 0 = ปิดเพดาน) ครบเวลาแล้ว log
+  `boot_gate_timeout` พร้อมข้อความ stage ที่ค้าง แล้ว **เปิด cockpit ต่อ** (fail-open — อัปเดตที่ข้ามไป
+  เป็นเรื่องน่ารำคาญ แต่ cockpit ที่ไม่ขึ้นเลยใช้งานไม่ได้) · `_NPM_LOCK` เดิมกันได้แค่ใน process เดียว
+  เพิ่ม **machine-wide file lock** (`resource_lock` ใน temp dir) ครอบทุก `npm install -g` ทั้งใน
+  `_run_update_command` และ `_update_claude` → dev + prod cockpit ไม่ลง npm ทับกันอีก
+  · **ยังไม่ปิดใบ** — เกณฑ์ข้อ "event loop ตอบสนองระหว่าง scan/psutil ช้า" ยังไม่ทำ มีหลักฐานสด
+  บน prod 2.1.11 ว่า stall 0.8–1.5 วิ มาจาก 7 จุดที่บล็อก main thread (spawn_pty_bounded join,
+  http `_send_output`, pathlib glob, `snapshot_console_hwnds`, tunnel `_verify_named_started`,
+  `subprocess.run`, `worktree_manager._expand_dir_entries`) — บันทึกไว้ในใบแล้ว
+
 - **#641 รอบ 2 — `role#N` แยก pane ถูกปฏิเสธที่ระบบแล้ว (fan-out ไม่เคยถูกใช้จริงใน 2.1.11)**
   2.1.11 ทำกลไกครบและอัปคู่มือ Lead แล้ว แต่ **ไม่มีอะไรบังคับให้ Lead ใช้ `--shards`** —
   หลักฐานจาก prod: ติดตั้ง 2.1.11 เวลา 13:44 · Lead spawn ใหม่ 13:45 (ได้ prompt ใหม่แล้ว) ·

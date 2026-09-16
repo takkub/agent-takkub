@@ -351,13 +351,14 @@
         "agent_takkub.boot_flow",
         "agent_takkub.cockpit_theme",
         "agent_takkub.config",
-        "agent_takkub.core.versioning.store"
+        "agent_takkub.core.versioning.store",
+        "agent_takkub.orchestrator_text"
       ],
       "imported_by": [
         "agent_takkub.app"
       ],
       "fan_in": 1,
-      "fan_out": 5
+      "fan_out": 6
     },
     {
       "module": "agent_takkub.browser_chrome",
@@ -3316,6 +3317,7 @@
         "agent_takkub.auto_migrate_boot",
         "agent_takkub.boot_context",
         "agent_takkub.boot_flow",
+        "agent_takkub.boot_flow_window",
         "agent_takkub.cli",
         "agent_takkub.cli_server",
         "agent_takkub.core.capabilities.permission_engine",
@@ -3332,7 +3334,7 @@
         "agent_takkub.settings_window",
         "agent_takkub.spawn_engine"
       ],
-      "fan_in": 18,
+      "fan_in": 19,
       "fan_out": 10
     },
     {
@@ -3893,14 +3895,15 @@
         "agent_takkub.claude_update",
         "agent_takkub.config",
         "agent_takkub.provider_spec",
-        "agent_takkub.provider_state"
+        "agent_takkub.provider_state",
+        "agent_takkub.resource_lock"
       ],
       "imported_by": [
         "agent_takkub.boot_flow",
         "agent_takkub.provider_model_catalog"
       ],
       "fan_in": 2,
-      "fan_out": 6
+      "fan_out": 7
     },
     {
       "module": "agent_takkub.provider_usage",
@@ -4182,9 +4185,10 @@
       "module": "agent_takkub.resource_lock",
       "imports": [],
       "imported_by": [
-        "agent_takkub.cli"
+        "agent_takkub.cli",
+        "agent_takkub.provider_update"
       ],
-      "fan_in": 1,
+      "fan_in": 2,
       "fan_out": 0
     },
     {

@@ -2299,6 +2299,25 @@ def _circle_icon(bg: str, check: bool = False, warn: bool = False) -> QWidget:
     return icon
 
 
+#: Hard ceiling on the whole boot gate (#640). Every stage already runs on a
+#: worker with its own timeout; this bounds the case where a worker never
+#: comes back at all. Tunable for a slow machine / a deliberately long
+#: migration: `TAKKUB_BOOT_GATE_TIMEOUT_S=600`. Values <= 0 disable the
+#: ceiling (opt-out, for debugging a stage that legitimately takes longer).
+_BOOT_GATE_TIMEOUT_DEFAULT_S = 180.0
+
+
+def _boot_gate_timeout_s() -> float:
+    raw = (os.environ.get("TAKKUB_BOOT_GATE_TIMEOUT_S") or "").strip()
+    if not raw:
+        return _BOOT_GATE_TIMEOUT_DEFAULT_S
+    try:
+        value = float(raw)
+    except ValueError:
+        return _BOOT_GATE_TIMEOUT_DEFAULT_S
+    return value if value > 0 else float("inf")
+
+
 def run_boot_flow_gate(
     main_window_factory: Callable[[], Any],
     quit_requested: Callable[[], bool] | None = None,
@@ -2312,12 +2331,24 @@ def run_boot_flow_gate(
     SIGINT/SIGTERM/SIGBREAK): while the wizard's modal loop runs, a QTimer
     checks it every 100 ms and, when it turns True, closes the gate the same
     way the "close program" button does — clean exit(0), never a late
-    KeyboardInterrupt surfacing through the wizard's worker lambdas (#631)."""
+    KeyboardInterrupt surfacing through the wizard's worker lambdas (#631).
+
+    #640: the loop had no deadline. Every stage runs on a `_CallWorker`, so a
+    worker that never returns (a provider update wedged behind another
+    instance's npm install, a subprocess that outlives its own timeout, a
+    migration probe on a stalled filesystem) left `loop.exec()` waiting with
+    nothing on screen — the reported "boot ค้าง 5 นาที", and in one case the
+    process aborted while still inside the gate. The gate now carries a hard
+    ceiling (`TAKKUB_BOOT_GATE_TIMEOUT_S`, default 180 s): when it fires, it
+    records `boot_gate_timeout` with whatever the wizard was showing and
+    OPENS THE COCKPIT ANYWAY. Fail-open is deliberate — a skipped provider
+    update is a nuisance, a cockpit that never appears is not usable at all.
+    """
     from PyQt6.QtCore import QEventLoop
 
     wizard = BootFlowWindow()
     loop = QEventLoop()
-    result = {"proceed": True}
+    result = {"proceed": True, "timed_out": False}
 
     def _on_finished(proceed: bool) -> None:
         result["proceed"] = proceed
@@ -2328,6 +2359,25 @@ def run_boot_flow_gate(
             result["proceed"] = False
             loop.quit()
 
+    def _on_deadline() -> None:
+        if not loop.isRunning():
+            return
+        result["timed_out"] = True
+        result["proceed"] = True
+        stage = ""
+        try:
+            label = getattr(wizard, "_subtitle_label", None)
+            stage = label.text() if label is not None else ""
+        except Exception:
+            stage = ""
+        try:
+            from .orchestrator_text import _log_event
+
+            _log_event("boot_gate_timeout", timeout_s=_boot_gate_timeout_s(), stage=stage[:200])
+        except Exception:
+            pass
+        loop.quit()
+
     wizard.flowFinished.connect(_on_finished)
     if quit_requested is not None:
         poll_timer = QTimer()
@@ -2336,11 +2386,21 @@ def run_boot_flow_gate(
         poll_timer.start()
     else:
         poll_timer = None
+    deadline_timer = QTimer()
+    deadline_timer.setSingleShot(True)
+    deadline_timer.timeout.connect(_on_deadline)
+    deadline_timer.start(int(_boot_gate_timeout_s() * 1000))
     wizard.show()
     QTimer.singleShot(0, wizard.start)
     loop.exec()
+    deadline_timer.stop()
     if poll_timer is not None:
         poll_timer.stop()
     if not result["proceed"]:
         sys.exit(0)
+    if result["timed_out"]:
+        try:
+            wizard.close()
+        except Exception:
+            pass
     return main_window_factory()

@@ -368,3 +368,51 @@ class TestNpmSerialisation:
             mock_run.assert_not_called()
         finally:
             pu._NPM_LOCK.release()
+
+
+class TestNpmMachineLock:
+    """#640: `_NPM_LOCK` is per-process. Two cockpit instances sharing one
+    global npm prefix used to run `npm install -g` concurrently — the failure
+    mode the module docstring already describes, plus one boot that aborted
+    with several `_update_claude` workers in flight."""
+
+    def test_another_instance_holding_it_refuses_this_one(self) -> None:
+        """Simulates the real shape: a DIFFERENT cockpit process already
+        installing. (Re-acquiring as the same pid is a refresh by design —
+        within one process `_NPM_LOCK` is the gate.)"""
+        import tempfile
+        from pathlib import Path
+
+        from agent_takkub import resource_lock
+
+        lock_dir = Path(tempfile.gettempdir())
+        other = "pid999999"
+        ok, _ = resource_lock.try_acquire(
+            lock_dir, None, pu._NPM_MACHINE_LOCK_NAME, other, ttl_s=300.0, pid=999999
+        )
+        assert ok is True
+        try:
+            with pu._npm_machine_lock(0.0) as mine:
+                assert mine is False
+        finally:
+            resource_lock.release(lock_dir, None, pu._NPM_MACHINE_LOCK_NAME, other)
+
+    def test_lock_is_released_for_the_next_caller(self) -> None:
+        with pu._npm_machine_lock(5.0) as first:
+            assert first is True
+        with pu._npm_machine_lock(0.0) as again:
+            assert again is True
+
+    def test_unusable_lock_degrades_to_allowing_the_update(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A lock that cannot be taken at all (read-only temp, exotic fs) must
+        not block every update on the machine."""
+        from agent_takkub import resource_lock
+
+        def _boom(*_a, **_kw):
+            raise OSError("no locks here")
+
+        monkeypatch.setattr(resource_lock, "try_acquire", _boom)
+        with pu._npm_machine_lock(0.0) as allowed:
+            assert allowed is True

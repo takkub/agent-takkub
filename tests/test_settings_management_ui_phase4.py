@@ -49,11 +49,13 @@ def test_providers_page_lists_all_providers() -> None:
     assert names == {"claude", "codex", "gemini", "opencode", "kimi", "cursor"}
 
 
-def test_providers_page_claude_toggle_is_disabled() -> None:
+def test_providers_page_claude_toggle_is_editable() -> None:
+    # #639: claude is togglable like any other provider now — the off switch
+    # is the opt-out for a machine with no Claude subscription.
     page = ProvidersPage()
     page.refresh()
     page.on_select("claude")
-    assert page.enabled_toggle.isEnabled() is False
+    assert page.enabled_toggle.isEnabled() is True
     assert page.enabled_toggle.isChecked() is True
 
 
@@ -193,11 +195,11 @@ class TestModelField:
         assert ok is True
         assert provider_models.model_for("gemini") is None
 
-    def test_claude_model_field_editable_though_toggle_is_not(self) -> None:
+    def test_claude_model_field_editable(self) -> None:
         page = ProvidersPage()
         page.refresh()
         page.on_select("claude")
-        assert page.enabled_toggle.isEnabled() is False
+        assert page.enabled_toggle.isEnabled() is True  # #639
         assert page.model_edit.isEnabled() is True
         page.model_edit.setText("opus")
         ok = page._save()

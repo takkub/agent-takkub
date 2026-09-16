@@ -39,10 +39,13 @@ class TestList:
         assert {p.name for p in providers_repo.list(query="codex")} == {"codex"}
         assert {p.name for p in providers_repo.list(query="openc")} == {"opencode"}
 
-    def test_claude_is_required_and_always_enabled(self) -> None:
+    def test_claude_is_togglable_like_every_other_provider(self) -> None:
+        # #639: claude used to be `required` (no off switch), which left a
+        # user with no Claude subscription unable to stop their codex-pinned
+        # roles from degrading onto it.
         by_name = {p.name: p for p in providers_repo.list()}
-        assert by_name["claude"].required is True
-        assert by_name["claude"].enabled is True
+        assert by_name["claude"].required is False
+        assert by_name["claude"].enabled is True  # still on by default
 
     def test_codex_gemini_are_not_required(self) -> None:
         by_name = {p.name: p for p in providers_repo.list()}
@@ -75,13 +78,11 @@ class TestGet:
 
 
 class TestCapabilities:
-    def test_claude_can_be_updated_model_only(self) -> None:
-        # claude's `enabled` flag can never be flipped (required provider),
-        # but its per-provider `model` override is still writable — so
-        # can_update stays True (update() itself rejects an enabled flip).
+    def test_claude_can_be_updated(self) -> None:
+        # #639: both the `enabled` flag and the per-provider model override
+        # are writable now, same as every other provider.
         cap = providers_repo.capabilities("claude")
         assert cap.can_update is True
-        assert cap.reason
 
     def test_codex_can_be_updated(self) -> None:
         cap = providers_repo.capabilities("codex")
@@ -105,9 +106,11 @@ class TestUpdate:
         assert result.ok
         assert provider_state.is_disabled("codex") is False
 
-    def test_update_rejects_claude(self) -> None:
+    def test_update_accepts_claude_disable(self) -> None:
+        # #639: turning claude off is the documented opt-out for a machine
+        # without a Claude subscription.
         result = providers_repo.update("claude", UpdateProviderCommand(enabled=False))
-        assert not result.ok
+        assert result.ok
 
     def test_update_rejects_unknown_provider(self) -> None:
         result = providers_repo.update("bogus", UpdateProviderCommand(enabled=False))
@@ -160,8 +163,8 @@ class TestModel:
         assert result.ok
         assert provider_models.model_for("claude") == "opus"
 
-    def test_claude_enabled_flip_still_rejected_alongside_model_set(self) -> None:
+    def test_claude_enabled_flip_and_model_set_apply_together(self) -> None:
+        # #639: both halves are writable now, and they apply as one update.
         result = providers_repo.update("claude", UpdateProviderCommand(enabled=False, model="opus"))
-        assert not result.ok
-        # Rejected before the model write happens — no partial apply.
-        assert provider_models.model_for("claude") is None
+        assert result.ok
+        assert provider_models.model_for("claude") == "opus"

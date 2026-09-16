@@ -156,15 +156,37 @@ class TestEffectiveProviderFor:
         assert provider_config.effective_provider_for("codex") == "codex"
 
     def test_codex_unavailable_degrades_to_claude(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setattr(provider_config, "_provider_available", lambda p: False)
+        # #639: the substitute is whatever is actually AVAILABLE, so claude has
+        # to be available for this to land on claude.
+        monkeypatch.setattr(provider_config, "_provider_available", lambda p: p == "claude")
         # role identity (provider_for) is still codex...
         assert provider_config.provider_for("codex") == "codex"
         # ...but the effective engine is claude (the substitute).
         assert provider_config.effective_provider_for("codex") == "claude"
 
     def test_gemini_unavailable_degrades_to_claude(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setattr(provider_config, "_provider_available", lambda p: False)
+        monkeypatch.setattr(provider_config, "_provider_available", lambda p: p == "claude")
         assert provider_config.effective_provider_for("gemini") == "claude"
+
+    def test_unavailable_with_no_substitute_keeps_configured_provider(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """#639: nothing available (claude never installed / switched off) must
+        NOT silently swap onto claude — the role keeps its configured provider
+        and the spawn fails visibly instead of running a CLI nobody chose."""
+        monkeypatch.setattr(provider_config, "_provider_available", lambda p: False)
+        assert provider_config.effective_provider_for("codex") == "codex"
+
+    def test_unavailable_prefers_an_available_non_claude_provider(
+        self, monkeypatch: pytest.MonkeyPatch, redirect_config_path: Path
+    ) -> None:
+        """#639 headline case: a machine with no usable claude must degrade a
+        codex role onto another installed CLI, not onto claude."""
+        redirect_config_path.write_text('{"lead": "codex"}', encoding="utf-8")
+        monkeypatch.setattr(
+            provider_config, "_provider_available", lambda p: p in ("gemini", "opencode")
+        )
+        assert provider_config.effective_provider_for("lead") in ("gemini", "opencode")
 
     def test_shard_suffix_uses_base_role_effective_provider(
         self, monkeypatch: pytest.MonkeyPatch, redirect_config_path: Path
@@ -183,7 +205,7 @@ class TestEffectiveProviderFor:
     ) -> None:
         # A user-remapped role (backend→codex) substitutes too when codex is off.
         redirect_config_path.write_text('{"backend": "codex"}', encoding="utf-8")
-        monkeypatch.setattr(provider_config, "_provider_available", lambda p: False)
+        monkeypatch.setattr(provider_config, "_provider_available", lambda p: p == "claude")
         assert provider_config.effective_provider_for("backend") == "claude"
 
     def test_disabled_toggle_makes_unavailable(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -238,6 +260,53 @@ class TestEffectiveProviderFor:
         fake_now[0] += provider_config._PROVIDER_AVAILABLE_TTL_S + 1
         monkeypatch.setattr(ch, "find_codex_executable", lambda: None)
         assert provider_config._provider_available("codex") is False
+
+
+class TestProviderUnavailableSubstitutionNotice:
+    """#639 proposal 3: the availability substitution used to be silent — the
+    pane just came up on a different CLI. `_assign_dispatch` now notifies once
+    per assign off this query."""
+
+    def test_reports_desired_and_substitute(
+        self, monkeypatch: pytest.MonkeyPatch, redirect_config_path: Path
+    ) -> None:
+        redirect_config_path.write_text('{"backend": "codex"}', encoding="utf-8")
+        monkeypatch.setattr(provider_config, "_provider_available", lambda p: p == "claude")
+        assert provider_config.provider_unavailable_substitution_info("backend") == (
+            "codex",
+            "claude",
+        )
+
+    def test_silent_when_nothing_is_substituted(
+        self, monkeypatch: pytest.MonkeyPatch, redirect_config_path: Path
+    ) -> None:
+        redirect_config_path.write_text('{"backend": "codex"}', encoding="utf-8")
+        monkeypatch.setattr(provider_config, "_provider_available", lambda p: True)
+        assert provider_config.provider_unavailable_substitution_info("backend") is None
+
+    def test_silent_when_no_substitute_qualifies(
+        self, monkeypatch: pytest.MonkeyPatch, redirect_config_path: Path
+    ) -> None:
+        # Role keeps codex and fails loudly at spawn — that is its own signal,
+        # so there is no substitution to announce.
+        redirect_config_path.write_text('{"backend": "codex"}', encoding="utf-8")
+        monkeypatch.setattr(provider_config, "_provider_available", lambda p: False)
+        assert provider_config.provider_unavailable_substitution_info("backend") is None
+        assert provider_config.effective_provider_for("backend") == "codex"
+
+    def test_claude_can_be_switched_off_and_stops_being_the_fallback(
+        self, monkeypatch: pytest.MonkeyPatch, redirect_config_path: Path
+    ) -> None:
+        """The reported case end to end: no Claude subscription, claude turned
+        off in Settings, a codex Lead must not be degraded onto claude."""
+        import agent_takkub.provider_state as ps
+
+        redirect_config_path.write_text('{"lead": "codex"}', encoding="utf-8")
+        provider_config.reset_provider_available_cache()
+        monkeypatch.setattr(ps, "is_disabled", lambda prov: prov in ("claude", "codex"))
+        monkeypatch.setattr(provider_config, "_provider_cli_installed_uncached", lambda p: True)
+        assert provider_config._provider_available("claude") is False
+        assert provider_config.effective_provider_for("lead") != "claude"
 
 
 class TestEffectiveProviderForQuotaSkip:
@@ -309,7 +378,7 @@ class TestEffectiveProviderForQuotaSkip:
         import agent_takkub.provider_state as provider_state
 
         redirect_config_path.write_text('{"reviewer": "codex"}', encoding="utf-8")
-        monkeypatch.setattr(provider_config, "_provider_available", lambda p: False)
+        monkeypatch.setattr(provider_config, "_provider_available", lambda p: p == "claude")
         provider_state.set_quota_reset_at("codex", time.time() + 3600)
 
         assert provider_config.effective_provider_for("reviewer") == "claude"
@@ -664,7 +733,7 @@ class TestLeadCapabilityGap:
         # silently falls back to claude at spawn time, so there's no
         # capability gap to report — the *effective* engine is claude.
         redirect_config_path.write_text('{"lead": "codex"}', encoding="utf-8")
-        monkeypatch.setattr(provider_config, "_provider_available", lambda p: False)
+        monkeypatch.setattr(provider_config, "_provider_available", lambda p: p == "claude")
         assert provider_config.lead_capability_gap() is None
 
 
