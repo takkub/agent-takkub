@@ -1017,7 +1017,9 @@ def _boot_main_window() -> MainWindow:
     provider's row reports the failure.
     """
     from .boot_flow_window import boot_update_enabled, run_boot_flow_gate
+    from .orchestrator_text import boot_phase
 
+    boot_phase("gate_start", wizard=boot_update_enabled())
     if not boot_update_enabled():
         # No provider-update/migration wizard to piggyback a progress surface
         # on (TAKKUB_BOOT_UPDATE=0, normally a dev/test opt-out) — the
@@ -1025,6 +1027,7 @@ def _boot_main_window() -> MainWindow:
         # finish before MainWindow spawns any pane; only the UI progress
         # surface is skipped, logged to the boot log instead.
         _run_auto_migrate_headless()
+        boot_phase("gate_end", wizard=False)
         return MainWindow()
     return run_boot_flow_gate(MainWindow, quit_requested=lambda: _quit_requested)
 
@@ -1103,6 +1106,9 @@ def _set_macos_app_name(name: str = "agent-takkub") -> None:
 def main(argv: list[str] | None = None) -> int:
     from . import config
     from .config import ensure_gui_path
+    from .orchestrator_text import boot_phase, mark_boot_start
+
+    mark_boot_start()  # #640: origin for every boot_phase event
 
     ensure_gui_path()
     # #631: install the Ctrl+C/termination handlers before the boot-flow wizard,
@@ -1161,6 +1167,7 @@ def main(argv: list[str] | None = None) -> int:
         ):
             _boot_log("[single-instance] restart successor — predecessor exited, lock acquired")
             w = _boot_main_window()
+            boot_phase("main_window_built", restart_successor=True)
             if _quit_requested:
                 # #631: Ctrl+C/SIGTERM landed during the boot flow — abort before
                 # wiring a window we were just asked to close.
@@ -1168,6 +1175,7 @@ def main(argv: list[str] | None = None) -> int:
             _install_signal_handlers(w)
             _start_deadman_watchdog(w)
             w.show()
+            boot_phase("window_shown", restart_successor=True)
             return app.exec()
 
         # Before attempting auto-kill, probe whether the existing instance is
@@ -1312,6 +1320,7 @@ def main(argv: list[str] | None = None) -> int:
                     return 1
 
     w = _boot_main_window()
+    boot_phase("main_window_built")
     if _quit_requested:
         # #631: Ctrl+C/SIGTERM landed during the boot-flow wizard (or the
         # headless migrate gate). The MainWindow constructor merely SCHEDULES
@@ -1333,6 +1342,7 @@ def main(argv: list[str] | None = None) -> int:
     except Exception:
         pass
     w.show()
+    boot_phase("window_shown")
     return app.exec()
 
 

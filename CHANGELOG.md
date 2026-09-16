@@ -4,6 +4,31 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 
 ## [vNEXT]
 
+## [v2.1.13] - 2026-09-16
+
+### Fixed (แก้)
+
+- **#640 — boot หลังอัปเดตช้า ~50 วิจนดูเหมือน "เปิดไม่ติด" + UI ค้างเป็นพักๆ**
+  prod 2.1.12 หลังอัปเดต: boot เริ่ม 16:14:48 → ผ่าน gate +17s → prune +19s → แล้วเงียบไป 30 วิ
+  เจ้าของเห็นหน้าต่างไม่ขึ้นเลยเปิดซ้ำตอน +51s ซึ่ง **ฆ่า boot ที่อีกราว 1 วิจะขึ้นแล้ว** (boot ที่ดีของ
+  2.1.11 ก็ใช้ 44 วิแบบเดียวกัน)
+  · **ต้นเหตุ 30 วิ (วัดบนข้อมูล prod แบบอ่านอย่างเดียว):** `prune_orphan_worktrees_boot` รันแบบ sync ใน
+  `Orchestrator.__init__` ตรวจ worktree 52 โฟลเดอร์ด้วย git หลายรอบต่อโฟลเดอร์ = **25 วิทุก boot** และลบได้
+  0 รายการ · เกิดก่อนหน้าต่างขึ้นและก่อน watchdog เริ่ม เลยไม่มี log ไหนเห็น → ย้ายไป thread เบื้องหลัง
+  (ปลอดภัย: ลบเฉพาะ checkout ที่ git ไม่รู้จักแล้ว worktree ใหม่ลงทะเบียนทันทีที่สร้าง)
+  · **เห็น boot ทุกขั้นแล้ว:** event `boot_phase` ใหม่ (`gate_start/gate_end`, `mw_orchestrator_start/built`,
+  `orch_prune_start/end`, `orch_worktree_sweep_scheduled`, `mw_init_end`, `main_window_built`,
+  `window_shown`, `mw_boot_start`, `mw_boot_lead_scheduled`, `lead_spawn_ready`) พร้อม `t_ms` นับจากเริ่ม
+  process — boot ครั้งหน้าบอกเองว่าเวลาหายไปไหน
+  · **ย้ายงานที่ watchdog จับได้ว่าถือ main thread ออกไป thread อื่น** (ทุกตัวมี stack เต็มจาก boot.log):
+  remote control ตอน boot (sweep process + bind server + probe HTTP + spawn cloudflared + sleep — 1.6s ทุก
+  boot ที่เปิด remote; ส่วน Qt ยังอยู่ main thread) · git snapshot/finalize ของ worktree ตอน `close()` (1.6s)
+  · git baseline ของ shared tree ตอน `assign` (0.86s, ใส่ผลกลับเฉพาะ task เดิม) · เขียน `INDEX.md` ของ
+  ledger (1.6s, รวมรอบเหลือไฟล์ล่าสุด) · เขียน `events.log` ทุก event (1.7s, writer ตัวเดียวรักษาลำดับ +
+  flush ตอนปิด) · remote notify ที่ glob หา transcript ที่ยังไม่มีทุก 200ms (ลดเหลือทุก 2 วิ)
+  · `_notify_lead` เรียกจาก thread อื่นได้แล้ว (post กลับ Qt thread เอง)
+  · เทส: สวิตช์ `TAKKUB_*_SYNC=1` ใน conftest คงจังหวะเดิมให้เทสเก่า และมีเทสเฉพาะของเส้นทาง async ทุกตัว
+
 ## [v2.1.12] - 2026-09-16
 
 ### Fixed (แก้)

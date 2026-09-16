@@ -11,12 +11,15 @@ depend only on stdlib, config leaf modules, and each other.  The original
 
 from __future__ import annotations
 
+import atexit
 import json
 import os
 import pathlib
+import queue
 import re
 import subprocess
 import sys as _sys
+import threading
 import time
 from collections.abc import Collection
 from datetime import datetime
@@ -728,26 +731,145 @@ def _looks_like_source_reference(line: str) -> bool:
 
 def _log_event(event: str, **details) -> None:
     """Append a JSONL event line to runtime/events.log. Best-effort; never
-    raises so an audit-log failure can't take down the orchestrator."""
+    raises so an audit-log failure can't take down the orchestrator.
+
+    #640: called hundreds of times a minute, mostly from the Qt main thread,
+    and every call used to mkdir + stat + open-append-close events.log right
+    there — the watchdog caught one of those opens holding the UI for 1.7s
+    (disk contention during a spawn). The line is now built HERE (timestamp
+    and ordering unchanged) and handed to a single background writer that
+    appends in batches; `flush_events_log()` drains it (registered with
+    atexit). `TAKKUB_EVENTS_LOG_SYNC=1` keeps the old inline write — the test
+    suite sets it, since so many tests read events.log straight after."""
     try:
         # Read via proxy so tests that patch orchestrator.EVENTS_LOG /
         # orchestrator._EVENTS_LOG_MAX_BYTES see their patches here.
         events_log = _orch_attr("EVENTS_LOG", EVENTS_LOG)
         max_bytes = _orch_attr("_EVENTS_LOG_MAX_BYTES", _EVENTS_LOG_MAX_BYTES)
+        line = json.dumps(
+            {"ts": datetime.now().isoformat(timespec="seconds"), "event": event, **details},
+            ensure_ascii=False,
+        )
+        if os.environ.get("TAKKUB_EVENTS_LOG_SYNC", "").strip() == "1":
+            _append_event_lines(events_log, max_bytes, [line])
+            return
+        global _EVENT_PENDING
+        with _EVENT_LOCK:
+            _EVENT_PENDING += 1
+        _EVENT_QUEUE.put((events_log, max_bytes, line))
+        _ensure_event_writer()
+    except Exception:
+        pass
+
+
+def _append_event_lines(events_log, max_bytes: int, lines: list[str]) -> None:
+    try:
         ensure_runtime()
         try:
             if events_log.exists() and events_log.stat().st_size > max_bytes:
                 os.replace(events_log, events_log.parent / (events_log.name + ".old"))
         except OSError:
             pass
-        line = json.dumps(
-            {"ts": datetime.now().isoformat(timespec="seconds"), "event": event, **details},
-            ensure_ascii=False,
-        )
         with open(events_log, "a", encoding="utf-8") as f:
-            f.write(line + "\n")
+            f.write("".join(line + "\n" for line in lines))
     except Exception:
         pass
+
+
+_EVENT_QUEUE: queue.SimpleQueue = queue.SimpleQueue()
+_EVENT_LOCK = threading.Lock()
+_EVENT_WRITER: threading.Thread | None = None
+#: Lines handed to the writer and not yet on disk. Counted under the lock at
+#: enqueue and decremented after the write, so `flush_events_log` can never
+#: see "empty queue" while a batch is still being written.
+_EVENT_PENDING = 0
+
+
+def _ensure_event_writer() -> None:
+    global _EVENT_WRITER
+    if _EVENT_WRITER is not None and _EVENT_WRITER.is_alive():
+        return
+    with _EVENT_LOCK:
+        if _EVENT_WRITER is not None and _EVENT_WRITER.is_alive():
+            return
+        _EVENT_WRITER = threading.Thread(
+            target=_event_writer_loop, daemon=True, name="events-log-writer"
+        )
+        _EVENT_WRITER.start()
+
+
+def _event_writer_loop() -> None:
+    global _EVENT_PENDING
+    while True:
+        batch = [_EVENT_QUEUE.get()]
+        while True:
+            try:
+                batch.append(_EVENT_QUEUE.get_nowait())
+            except queue.Empty:
+                break
+        # Group consecutive lines by target file (tests may repoint it);
+        # order within the batch is preserved.
+        start = 0
+        for i in range(1, len(batch) + 1):
+            if i == len(batch) or batch[i][0] != batch[start][0]:
+                path, max_bytes, _ = batch[start]
+                _append_event_lines(path, max_bytes, [item[2] for item in batch[start:i]])
+                start = i
+        with _EVENT_LOCK:
+            _EVENT_PENDING -= len(batch)
+
+
+def flush_events_log(timeout: float = 2.0) -> bool:
+    """Block until every queued event line has been written (or *timeout*).
+    Safe to call from any thread; True when nothing is left pending."""
+    deadline = time.monotonic() + timeout
+    while True:
+        with _EVENT_LOCK:
+            if _EVENT_PENDING <= 0:
+                return True
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.02)
+
+
+atexit.register(flush_events_log)
+
+
+#: #640: monotonic origin for `boot_phase` events — set once by
+#: `mark_boot_start()` at the top of `app.main`. None = not a cockpit boot
+#: (tests, CLI), in which case `boot_phase` stays silent.
+_BOOT_T0: float | None = None
+
+
+def mark_boot_start() -> None:
+    """Record the process-level origin every `boot_phase` is measured from."""
+    global _BOOT_T0
+    import time as _time
+
+    _BOOT_T0 = _time.monotonic()
+
+
+def boot_phase(phase: str, **details) -> None:
+    """#640: one `boot_phase` event per boot milestone, stamped with the
+    milliseconds since `mark_boot_start()`.
+
+    Why: a prod boot after an update took ~50 s and the owner, seeing nothing,
+    relaunched it — killing a boot that was about a second from ready. The
+    only milestones on record were `instance_boot`, `browser_mcp_init`,
+    `transcript_prune` and `boot_lead_spawn_ready`, which left a 30 s hole
+    nobody could attribute, and the stall watchdog only starts AFTER the main
+    window is built, so it was blind to that hole too. These events close it:
+    every boot now says where its time went. No-op outside a real boot."""
+    if _BOOT_T0 is None:
+        return
+    import time as _time
+
+    _log_event(
+        "boot_phase",
+        phase=phase,
+        t_ms=int((_time.monotonic() - _BOOT_T0) * 1000),
+        **details,
+    )
 
 
 def prune_old_transcripts(max_age_days: int = _TRANSCRIPT_RETENTION_DAYS) -> int:

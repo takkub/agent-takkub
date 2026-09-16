@@ -67,6 +67,7 @@ from .editor_widget import EditorHost
 from .limit_panel import LimitPanelMixin
 from .logs_panel import LogsPanel
 from .orchestrator import Orchestrator, _log_event
+from .orchestrator_text import boot_phase as _boot_phase
 from .preview_widget import PreviewHost
 from .project_explorer import project_roots
 from .project_nav import ProjectNav
@@ -249,7 +250,9 @@ class MainWindow(
         self._apply_base_stylesheet()
 
         # ── orchestrator + cli server ───────────────────────────
+        _boot_phase("mw_orchestrator_start")
         self.orch = Orchestrator(self)
+        _boot_phase("mw_orchestrator_built")
         # Inject the 3-layer spawn gate predicate (layers 1+2; layer 3 is the
         # Win32 InSendMessageEx check inside spawn_gate.py itself).
         # Prevents RPC_E_CANTCALLOUT_ININPUTSYNCCALL when QTimer fires during
@@ -505,6 +508,7 @@ class MainWindow(
         self._install_shortcuts()
 
         # ── boot: start CLI server + auto-spawn Lead ────────────
+        _boot_phase("mw_init_end")
         QTimer.singleShot(0, self._boot)
 
         # Restore window/splitter sizes from last session (after layout is
@@ -897,6 +901,7 @@ class MainWindow(
 
     # ──────────────────────────────────────────────────────────────
     def _boot(self) -> None:
+        _boot_phase("mw_boot_start")
         try:
             port = self.cli.listen()
             self._status.showMessage(f"cli port {port} — waiting for quiet boot...")
@@ -908,18 +913,18 @@ class MainWindow(
         # so deleting src/agent_takkub/remote/ is just a ModuleNotFoundError
         # no-op and import-linter never sees a static core->remote edge. See
         # remote-control-plan/2026-07-07-remote-control.md §4/§13 (B4/C1/C2/C6).
+        self._remote = None
         try:
             import importlib
 
             _remote_mod = importlib.import_module("agent_takkub.remote")
-            self._remote = _remote_mod.RemoteControl.maybe_start(
-                self.orch, on_auto_suspend=self._on_remote_auto_suspended
-            )
         except ModuleNotFoundError:  # folder deleted = uninstall no-op (B4)
-            self._remote = None
+            _remote_mod = None
         except Exception:  # any other error: never leave a half-open socket
-            self._remote = None
+            _remote_mod = None
             _log_event("remote_boot_failed")
+        if _remote_mod is not None:
+            self._start_remote_off_thread(_remote_mod)
         self._refresh_remote_chip()
 
         # Reflect orchestrator errors (eg. claude.exe not found) into the
@@ -952,6 +957,7 @@ class MainWindow(
         # _BOOT_LEAD_QUIET_N consecutive event-loop turns.
         self._boot_quiet_count = 0
         QTimer.singleShot(_BOOT_LEAD_INITIAL_MS, self._spawn_lead_when_quiet)
+        _boot_phase("mw_boot_lead_scheduled")
 
         # (The /remote-control auto-bridge was removed 2026-07-10 — it raced
         # claude's /resume picker. The 🌐 Remote chip configures pairing; type
@@ -996,6 +1002,50 @@ class MainWindow(
         restore_delay = 2_500 + n_extra * 4_000 + 12_000
         QTimer.singleShot(restore_delay, self._restore_teammates_from_snapshot)
 
+    def _start_remote_off_thread(self, remote_mod) -> None:
+        """#640: bring remote control up without holding the Qt thread.
+
+        `RemoteControl.maybe_start` used to run right here, inline — an
+        orphan-process sweep, binding the HTTP server, a loopback HTTP probe,
+        spawning cloudflared and sleeping to see it survive. The watchdog
+        recorded that as a 1.6s main-thread stall on every remote-enabled
+        boot. The blocking half (`prepare`) now runs on a worker; the Qt half
+        (`finish_start`: notifier timer, idle timer, aboutToQuit) runs back
+        on this thread once it is done.
+
+        The 🌐 chip shows "off" for that short window and repaints when the
+        handle lands. If the window closes first, the half-started server and
+        tunnel are torn down instead of being adopted by a dead window."""
+
+        def _work():
+            try:
+                return remote_mod.RemoteControl.prepare(
+                    self.orch, on_auto_suspend=self._on_remote_auto_suspended
+                )
+            except Exception:
+                _log_event("remote_boot_failed")
+                return None
+
+        def _then(rc) -> None:
+            if rc is None:
+                return
+            # Plain instance-dict read: a missing attribute on a QMainWindow
+            # falls through to the C++ wrapper, which raises when the window
+            # is already half torn down — exactly the moment this matters.
+            if self.__dict__.get("_closing_down", False):
+                try:
+                    rc._stop_blocking_parts()
+                except Exception:
+                    pass
+                return
+            if rc.finish_start():
+                self._remote = rc
+            else:
+                _log_event("remote_boot_failed", stage="finish_start")
+            self._refresh_remote_chip()
+
+        self.cli.run_off_thread(_work, _then)
+
     def _spawn_lead_when_quiet(self) -> None:
         """Quiet-boot debounce (Tier 1): sample gate once per event-loop turn.
 
@@ -1033,6 +1083,7 @@ class MainWindow(
             return
 
         _log_event("boot_lead_spawn_ready", quiet_turns=self._boot_quiet_count)
+        _boot_phase("lead_spawn_ready")
         ok, msg = self.orch.spawn(LEAD.name)
         if not ok:
             self._status.showMessage(f"⚠ Lead spawn failed: {msg}", 30_000)
@@ -1791,6 +1842,10 @@ class MainWindow(
         # stop() is idempotent (disconnects its own aboutToQuit hookup
         # first), so calling it here is safe even if aboutToQuit does
         # still fire afterwards.
+        # #640: a remote start still running on its worker must not be
+        # adopted by a window that is going away — `_start_remote_off_thread`
+        # checks this and tears the half-started server/tunnel down instead.
+        self._closing_down = True
         try:
             if self._remote is not None:
                 self._remote.stop()

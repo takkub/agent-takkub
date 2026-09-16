@@ -47,6 +47,7 @@ import logging
 import os
 import pathlib
 import re
+import threading
 import time
 from datetime import datetime
 
@@ -686,4 +687,55 @@ def _regen_index(project: str, state: dict) -> None:
         "---\n\n"
     )
     body = "\n---\n\n".join(_render_group(g) for g in state.get("groups", []))
-    _atomic_write(_index_path(project), header + body)
+    _write_index_text(_index_path(project), header + body)
+
+
+# #640: INDEX.md is a human-readable summary rebuilt on every assign/done —
+# the rendering is cheap string work, but the write went to disk on the Qt
+# main thread (a 1.6s stall recorded at `_regen_index` → `_atomic_write` →
+# `pathlib.open` inside `orchestrator.assign`). The ledger state JSON stays a
+# synchronous write (it is the source of truth later reads depend on); only
+# this derived file is written by a background writer that coalesces bursts
+# to the latest text per path. `TAKKUB_LEDGER_INDEX_SYNC=1` keeps it inline
+# (the test suite sets it, since many tests read INDEX.md straight after).
+_INDEX_PENDING: dict[pathlib.Path, str] = {}
+_INDEX_LOCK = threading.Lock()
+_INDEX_WRITER_RUNNING = False
+
+
+def _write_index_text(path: pathlib.Path, text: str) -> None:
+    global _INDEX_WRITER_RUNNING
+    if os.environ.get("TAKKUB_LEDGER_INDEX_SYNC", "").strip() == "1":
+        _atomic_write(path, text)
+        return
+    with _INDEX_LOCK:
+        _INDEX_PENDING[path] = text
+        if _INDEX_WRITER_RUNNING:
+            return
+        _INDEX_WRITER_RUNNING = True
+    threading.Thread(target=_drain_index_writes, daemon=True, name="ledger-index-writer").start()
+
+
+def _drain_index_writes() -> None:
+    global _INDEX_WRITER_RUNNING
+    while True:
+        with _INDEX_LOCK:
+            if not _INDEX_PENDING:
+                _INDEX_WRITER_RUNNING = False
+                return
+            path, text = _INDEX_PENDING.popitem()
+        try:
+            _atomic_write(path, text)
+        except OSError as exc:
+            logger.warning("task_ledger INDEX write failed for %s: %s", path, exc)
+
+
+def flush_index_writes(timeout: float = 5.0) -> bool:
+    """Wait for pending INDEX.md writes (shutdown / tests). True when drained."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        with _INDEX_LOCK:
+            if not _INDEX_PENDING and not _INDEX_WRITER_RUNNING:
+                return True
+        time.sleep(0.02)
+    return False

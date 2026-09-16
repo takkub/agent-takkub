@@ -183,6 +183,7 @@
         "agent_takkub.custom_roles",
         "agent_takkub.main_window",
         "agent_takkub.orchestrator",
+        "agent_takkub.orchestrator_text",
         "agent_takkub.service_spawner",
         "agent_takkub.theme_settings",
         "agent_takkub.update_worker",
@@ -192,7 +193,7 @@
         "agent_takkub.__main__"
       ],
       "fan_in": 1,
-      "fan_out": 14
+      "fan_out": 15
     },
     {
       "module": "agent_takkub.auto_issue_capture",
@@ -3079,6 +3080,7 @@
         "agent_takkub.limit_panel",
         "agent_takkub.logs_panel",
         "agent_takkub.orchestrator",
+        "agent_takkub.orchestrator_text",
         "agent_takkub.preview_widget",
         "agent_takkub.project_explorer",
         "agent_takkub.project_nav",
@@ -3100,7 +3102,7 @@
         "agent_takkub.app"
       ],
       "fan_in": 1,
-      "fan_out": 26
+      "fan_out": 27
     },
     {
       "module": "agent_takkub.maintenance",
@@ -3314,6 +3316,7 @@
         "agent_takkub.worktree_manager"
       ],
       "imported_by": [
+        "agent_takkub.app",
         "agent_takkub.auto_migrate_boot",
         "agent_takkub.boot_context",
         "agent_takkub.boot_flow",
@@ -3328,13 +3331,14 @@
         "agent_takkub.lead_inbox",
         "agent_takkub.lead_wait",
         "agent_takkub.limit_autoresume",
+        "agent_takkub.main_window",
         "agent_takkub.orchestrator",
         "agent_takkub.pty_session",
         "agent_takkub.remote.notify",
         "agent_takkub.settings_window",
         "agent_takkub.spawn_engine"
       ],
-      "fan_in": 19,
+      "fan_in": 21,
       "fan_out": 10
     },
     {

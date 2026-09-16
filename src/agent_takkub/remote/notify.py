@@ -93,6 +93,14 @@ _POLL_MS = 200
 # lag before Mobile notices is imperceptible, while this still bounds the
 # #229 stat-storm risk to a ~25x reduction versus per-tick (5s / 200ms).
 _UUIDLESS_RESYNC_THROTTLE_S = 5.0
+# #640: a project whose Lead transcript has not resolved yet (fresh spawn,
+# provider store not flushed, or a provider that never writes one there) used
+# to be re-resolved on EVERY 200ms tick — a provider-store glob on the Qt main
+# thread five times a second, for as long as the file stayed missing. The
+# watchdog caught it as a `pathlib ... _select_from` stall. Retry on this
+# cadence instead; a late session is still picked up within a couple of
+# seconds, which the phone cannot perceive.
+_UNRESOLVED_RETRY_S = 2.0
 _DEFAULT_HISTORY_LIMIT = 200
 # History reads are one-shot (reconnect/project-switch), not the live poll
 # tail, but a long-running Lead session's JSONL can grow into the tens of
@@ -2065,6 +2073,8 @@ class LeadNotifier(QObject):
         # uuid-less provider's already-tailed session (throttle state, see
         # `_UUIDLESS_RESYNC_THROTTLE_S`).
         self._uuidless_resolved_at: dict[str, float] = {}
+        # project_ns -> monotonic time of the last FAILED resolve (#640).
+        self._unresolved_at: dict[str, float] = {}
         self._timer = QTimer(self)
         self._timer.setInterval(_POLL_MS)
         self._timer.timeout.connect(self._poll_all)
@@ -2182,11 +2192,17 @@ class LeadNotifier(QObject):
                 last = self._uuidless_resolved_at.get(project_ns, 0.0)
                 if now - last < _UUIDLESS_RESYNC_THROTTLE_S:
                     continue
+            if existing is None:
+                last_miss = self._unresolved_at.get(project_ns)
+                if last_miss is not None and now - last_miss < _UNRESOLVED_RETRY_S:
+                    continue
             if uuidless:
                 self._uuidless_resolved_at[project_ns] = now
             path = self._resolve_jsonl(project_ns, session_uuid, provider, spawn_ts)
             if path is None:
+                self._unresolved_at[project_ns] = now
                 continue
+            self._unresolved_at.pop(project_ns, None)
             if existing is not None and path == existing.path:
                 if provider == "opencode":
                     sid = _LAST_OPENCODE_SESSION_BY_PROJECT.get(project_ns, session_uuid)
@@ -2227,6 +2243,8 @@ class LeadNotifier(QObject):
 
         for gone in set(self._uuidless_resolved_at) - set(wanted):
             del self._uuidless_resolved_at[gone]
+        for gone in set(self._unresolved_at) - set(wanted):
+            del self._unresolved_at[gone]
 
     def _emit_lead_working_transitions(self) -> None:
         """Push a 'working' / 'idle' SSE event whenever the Lead pane's own

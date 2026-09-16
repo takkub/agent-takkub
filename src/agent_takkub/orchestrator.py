@@ -128,6 +128,7 @@ from .orchestrator_text import (  # re-exported for test/app/main_window imports
     screenshot_paths_in_note,
     ui_evidence_gate,
 )
+from .orchestrator_text import boot_phase as _boot_phase  # #640
 from .pane_env import (  # re-exported for test imports — see pane_env.py docstring
     _DEFAULT_MCP_STARTUP_TIMEOUT_MS,
     _DEFAULT_MCP_TOOL_TIMEOUT_MS,
@@ -1298,6 +1299,14 @@ def _log_context_gate_inefficient(role_name: str, project_ns: str | None) -> Non
         pass
 
 
+#: #640: run `close()`'s worktree git work (dirty snapshot + finalize) on a
+#: worker thread. `TAKKUB_CLOSE_WORKTREE_SYNC=1` keeps it inline — the test
+#: suite sets that (tests/conftest.py) so every existing close()-then-assert
+#: test keeps its synchronous timing; the async path has its own test.
+def _offload_close_worktree_git() -> bool:
+    return os.environ.get("TAKKUB_CLOSE_WORKTREE_SYNC", "").strip() != "1"
+
+
 #: Roles that routinely need a different model/provider than the Lead's own
 #: (model diversity) or independent-process isolation — a native subagent
 #: shares the Lead's own process/provider, so it can never stand in for
@@ -1497,9 +1506,14 @@ class Orchestrator(
     previewOpened = pyqtSignal(str, object)  # project, PreviewState
     previewUpdated = pyqtSignal(str, object)  # project, PreviewState
     previewClosed = pyqtSignal(str)  # project
+    # #640: carries a zero-arg callable from a worker thread onto the Qt
+    # thread (auto-queued across threads). Used by
+    # `LeadInboxMixin._post_to_qt_thread_if_needed`.
+    _invokeOnMain = pyqtSignal(object)
 
     def __init__(self, parent: QObject | None = None) -> None:
         super().__init__(parent)
+        self._invokeOnMain.connect(self._run_posted_callable)
         # Browser MCPs (playwright + chrome-devtools) follow Lead into
         # every project. Merge them into runtime/shared-mcp.json before
         # any pane spawns — the orchestrator will then hand the file to
@@ -1558,10 +1572,12 @@ class Orchestrator(
         # Reclaim disk: prune stale per-pane PTY transcripts so runtime/sessions
         # can't grow without bound (a runaway pane once left a 203 MB log).
         # Best-effort and non-fatal — a readonly runtime never blocks startup.
+        _boot_phase("orch_prune_start")
         try:
             prune_old_transcripts()
         except Exception as e:
             _log_event("transcript_prune_error", error=repr(e))
+        _boot_phase("orch_prune_end")
         # Reclaim disk: prune stale per-(project, role, shard, browser) Chromium
         # profile dirs (#39 fan-out) so runtime/browser-profiles/ can't grow
         # without bound (#42). Safe here: no pane is alive yet at startup, so no
@@ -1573,6 +1589,7 @@ class Orchestrator(
             prune_old_browser_profiles()
         except Exception as e:
             _log_event("browser_profile_prune_error", error=repr(e))
+
         # Reclaim disk: sweep ORPHAN worktree checkouts only — dirs under
         # runtime/../worktrees/ that `git worktree list` no longer knows about
         # (crashed cockpit, deleted .git pointer). Never touches a still-
@@ -1585,14 +1602,41 @@ class Orchestrator(
         # orphan-worktrees-review --yes`. Safe at boot for the same reason as
         # the two prunes above: no pane is alive yet to be using one.
         # Best-effort / non-fatal.
-        try:
-            from .disk_usage import prune_orphan_worktrees_boot
+        #
+        # #640: this sweep ran INLINE, before the main window existed and before
+        # the stall watchdog started — invisible to both. Measured read-only on
+        # the owner's prod data: 52 worktree dirs, ~0.5-1 s of git subprocesses
+        # each, 25 s total per boot, and it removed nothing (0 SAFE orphans).
+        # That was the unexplained ~30 s between `transcript_prune` and Lead
+        # ready after an update restart — long enough that the owner relaunched
+        # a boot that was one second from finishing. It is pure maintenance, so
+        # it now runs on a background thread. Still safe to overlap with pane
+        # spawns: it only removes UNREGISTERED checkouts, and a worktree a new
+        # pane creates is registered with git the moment it exists.
+        def _orphan_worktree_sweep() -> None:
+            try:
+                from .disk_usage import prune_orphan_worktrees_boot
 
-            removed = prune_orphan_worktrees_boot()
-            if removed:
-                _log_event("orphan_worktree_prune", removed=removed)
-        except Exception as e:
-            _log_event("orphan_worktree_prune_error", error=repr(e))
+                started = time.monotonic()
+                removed = prune_orphan_worktrees_boot()
+                elapsed_ms = int((time.monotonic() - started) * 1000)
+                if removed or elapsed_ms >= 500:
+                    _log_event(
+                        "orphan_worktree_prune",
+                        removed=removed,
+                        ms=elapsed_ms,
+                        background=True,
+                    )
+            except Exception as e:
+                _log_event("orphan_worktree_prune_error", error=repr(e))
+
+        if os.environ.get("TAKKUB_BOOT_SWEEP_SYNC", "").strip() == "1":
+            _orphan_worktree_sweep()
+        else:
+            threading.Thread(
+                target=_orphan_worktree_sweep, daemon=True, name="boot-orphan-worktree-sweep"
+            ).start()
+        _boot_phase("orch_worktree_sweep_scheduled")
         # Reconcile task-ledger rows orphaned by a cockpit that exited
         # without ever calling `takkub done` (issue #166 — previously stuck
         # "working" forever since `mark_done` only fires from a live pane's
@@ -3759,19 +3803,53 @@ class Orchestrator(
             _snap_pane = self._project_panes(project_ns).get(role_name)
             _snap_cwd = getattr(_snap_pane, "_session_cwd", None)
             if _snap_cwd:
-                _snap_mgr = _WorktreeManagerSnap()
-                (
-                    ps_assign.assign_base_sha,
-                    ps_assign.assign_git_root,
-                    ps_assign.assign_dirty_snapshot,
-                ) = _snap_mgr.shared_tree_baseline(_snap_cwd)
-                # #560: classify a missing baseline ONCE, here, not on every
-                # done() — a plain `rev-parse --show-toplevel` failure means
-                # cwd isn't a git repo at all (a static project fact), unlike
-                # an unborn-HEAD or status-read failure inside a real repo.
-                ps_assign.assign_non_git = (
-                    ps_assign.assign_base_sha is None and _snap_mgr.git_root(_snap_cwd) is None
-                )
+
+                def _compute_baseline(cwd=_snap_cwd):
+                    _snap_mgr = _WorktreeManagerSnap()
+                    base_sha, git_root, dirty = _snap_mgr.shared_tree_baseline(cwd)
+                    # #560: classify a missing baseline ONCE, here, not on every
+                    # done() — a plain `rev-parse --show-toplevel` failure means
+                    # cwd isn't a git repo at all (a static project fact), unlike
+                    # an unborn-HEAD or status-read failure inside a real repo.
+                    non_git = base_sha is None and _snap_mgr.git_root(cwd) is None
+                    return base_sha, git_root, dirty, non_git
+
+                def _apply_baseline(result, ps=ps_assign, task_id=ps_assign.task_id):
+                    # A newer assign (or a close) may have replaced this task
+                    # by the time the worker finishes — never stamp a stale
+                    # baseline onto someone else's assignment.
+                    if result is None or ps.task_id != task_id:
+                        return
+                    (
+                        ps.assign_base_sha,
+                        ps.assign_git_root,
+                        ps.assign_dirty_snapshot,
+                        ps.assign_non_git,
+                    ) = result
+
+                # #640: this is two git processes plus a per-dirty-path stat
+                # walk (the watchdog caught `_expand_dir_entries` → git at
+                # 860ms inside assign). done() reads the result minutes later,
+                # so compute it off the Qt thread and apply it back on it.
+                ps_assign.assign_base_sha = None
+                ps_assign.assign_git_root = None
+                ps_assign.assign_dirty_snapshot = None
+                ps_assign.assign_non_git = False
+                if os.environ.get("TAKKUB_ASSIGN_BASELINE_SYNC", "").strip() == "1":
+                    _apply_baseline(_compute_baseline())
+                else:
+                    import threading as _bl_threading
+
+                    def _baseline_worker():
+                        try:
+                            result = _compute_baseline()
+                        except Exception:
+                            result = None
+                        self._invokeOnMain.emit(lambda r=result: _apply_baseline(r))
+
+                    _bl_threading.Thread(
+                        target=_baseline_worker, daemon=True, name="assign-baseline"
+                    ).start()
             else:
                 ps_assign.assign_base_sha = None
                 ps_assign.assign_git_root = None
@@ -4186,6 +4264,44 @@ class Orchestrator(
             setter = getattr(pane, "set_worktree_branch", None)
             if callable(setter):
                 setter(branch)
+
+    def _run_posted_callable(self, fn) -> None:
+        """Slot for `_invokeOnMain` — runs a callable a worker posted here."""
+        try:
+            fn()
+        except Exception:
+            _log_event("posted_callable_error")
+
+    def _close_worktree_git(self, project_ns: str, role_name: str, worktree: dict) -> None:
+        """#640: `close()`'s worktree wrap-up — the dirty snapshot (#573),
+        then the merge-proposal / keep-worktree decision — off the Qt thread.
+
+        Both are nothing but git subprocesses plus Lead notices, and they ran
+        inline inside `close()`: the watchdog recorded a 1.6s main-thread
+        stall with `worktree_manager.snapshot_dirty_worktree` → `git` on top of
+        `orchestrator.close`. Order is preserved (snapshot BEFORE finalize,
+        same as before) by running both on one worker; `_notify_lead` re-posts
+        itself to the Qt thread. `TAKKUB_CLOSE_WORKTREE_SYNC=1` keeps the old
+        synchronous timing (the test suite sets it)."""
+
+        def _work() -> None:
+            self._snapshot_dirty_worktree_if_needed(project_ns, role_name, worktree, "close")
+            try:
+                self._finalize_worktree(project_ns, role_name, worktree)
+            except Exception as exc:
+                _log_event(
+                    "close_worktree_finalize_error",
+                    role=role_name,
+                    project=project_ns,
+                    error=str(exc)[:200],
+                )
+
+        if not _offload_close_worktree_git():
+            _work()
+            return
+        import threading
+
+        threading.Thread(target=_work, daemon=True, name="close-worktree-git").start()
 
     def _snapshot_dirty_worktree_if_needed(
         self, project: str, role: str, worktree: dict | None, reason: str
@@ -5738,10 +5854,7 @@ class Orchestrator(
         getattr(self, "_last_done_task_ids", {}).pop(key, None)
 
         if had_worktree_close and not recovery_close:
-            self._snapshot_dirty_worktree_if_needed(
-                project_ns, role_name, had_worktree_close, "close"
-            )
-            self._finalize_worktree(project_ns, role_name, had_worktree_close)
+            self._close_worktree_git(project_ns, role_name, had_worktree_close)
         # Revoke the pane's capability token so stale done/send requests from
         # the closing pane are rejected after it terminates.
         self._revoke_session_tokens(project_ns, role_name, closing_session)

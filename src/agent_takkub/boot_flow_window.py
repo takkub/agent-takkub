@@ -2403,4 +2403,10 @@ def run_boot_flow_gate(
             wizard.close()
         except Exception:
             pass
+    try:
+        from .orchestrator_text import boot_phase
+
+        boot_phase("gate_end", wizard=True, timed_out=result["timed_out"])
+    except Exception:
+        pass
     return main_window_factory()

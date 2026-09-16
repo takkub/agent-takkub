@@ -679,10 +679,54 @@ class TestBootWiring:
         # port a dev's own running cockpit might already hold.
         RemoteConfig(enabled=True, bind_port=0, auto_start_tunnel=False).save()
         win = self._make_window_stub(monkeypatch)
+        deferred: list = []
+        # #640: the blocking half runs on a worker now; capture it and run
+        # the two halves by hand so the test controls the ordering.
+        win.cli.run_off_thread = lambda work, then: deferred.append((work, then))
         try:
             win._boot()
+            assert win._remote is None, "boot must not block on remote startup"
+            assert len(deferred) == 1
+            work, then = deferred[0]
+            then(work())
             assert win._remote is not None
             assert win._remote.config.enabled is True
         finally:
             if win._remote is not None:
                 win._remote.stop()
+
+    def test_boot_does_not_adopt_remote_after_window_closed(self, monkeypatch, tmp_path):
+        """#640: if the window starts closing while the worker is still
+        bringing remote up, the half-started server must be torn down, not
+        attached to a dead window (it would keep serving with nothing to
+        stop it)."""
+        import agent_takkub.remote.config as remote_config
+
+        monkeypatch.setattr(remote_config, "_PATH", tmp_path / "remote.json")
+        RemoteConfig(enabled=True, bind_port=0, auto_start_tunnel=False).save()
+        win = self._make_window_stub(monkeypatch)
+        deferred: list = []
+        win.cli.run_off_thread = lambda work, then: deferred.append((work, then))
+        win._boot()
+        work, then = deferred[0]
+        rc = work()
+        assert rc is not None and rc._server is not None
+        win._closing_down = True
+        then(rc)
+        assert win._remote is None
+        assert rc._server is None, "the half-started HTTP server must be stopped"
+
+    def test_boot_survives_a_failing_remote_prepare(self, monkeypatch):
+        win = self._make_window_stub(monkeypatch)
+        import agent_takkub.remote as remote_pkg
+
+        def _boom(*_a, **_kw):
+            raise RuntimeError("boom")
+
+        monkeypatch.setattr(remote_pkg.RemoteControl, "prepare", classmethod(_boom))
+        deferred: list = []
+        win.cli.run_off_thread = lambda work, then: deferred.append((work, then))
+        win._boot()
+        work, then = deferred[0]
+        then(work())  # _work swallows the error and hands back None
+        assert win._remote is None

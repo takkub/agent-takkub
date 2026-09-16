@@ -435,6 +435,18 @@ def _isolate_runtime(monkeypatch: pytest.MonkeyPatch, tmp_path):
     # tests focused by disabling the production 60 s inbox window per test;
     # digest-specific tests explicitly remove/override this value.
     monkeypatch.setenv("TAKKUB_INBOX_DIGEST_MS", "0")
+    # #640: close()'s worktree git work runs on a worker in production; keep
+    # the synchronous timing every close()-then-assert test was written for.
+    # tests/test_close_worktree_offload_640.py covers the async path.
+    monkeypatch.setenv("TAKKUB_CLOSE_WORKTREE_SYNC", "1")
+    # #640: same for the ledger INDEX.md background writer.
+    monkeypatch.setenv("TAKKUB_LEDGER_INDEX_SYNC", "1")
+    # #640: and for the assign-time shared-tree git baseline.
+    monkeypatch.setenv("TAKKUB_ASSIGN_BASELINE_SYNC", "1")
+    # #640: events.log is written by a background writer in production.
+    monkeypatch.setenv("TAKKUB_EVENTS_LOG_SYNC", "1")
+    # #640: boot-time disk sweeps run in the background in production.
+    monkeypatch.setenv("TAKKUB_BOOT_SWEEP_SYNC", "1")
 
     # Distinct name (not "runtime") so we don't collide with test-local fixtures
     # that do `(tmp_path / "runtime").mkdir()` without exist_ok. Tests that set

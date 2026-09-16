@@ -4150,6 +4150,28 @@ class LeadInboxMixin:
             "จึงไม่ต้องทำอะไรต่อ (ย่อจากข้อความเต็ม; รายละเอียดอยู่ใน events.log)"
         )
 
+    def _post_to_qt_thread_if_needed(self, fn) -> bool:
+        """#640: True when the caller is NOT on this object's Qt thread and
+        *fn* has been re-posted there (the caller should return). False when
+        already on the right thread — or when there is no live Qt object to
+        ask (test doubles built with `__new__`), so behaviour stays the plain
+        synchronous call it always was."""
+        signal = getattr(self, "_invokeOnMain", None)
+        if signal is None:
+            return False
+        try:
+            from PyQt6.QtCore import QThread
+
+            if QThread.currentThread() is self.thread():
+                return False
+        except Exception:
+            return False
+        try:
+            signal.emit(fn)
+        except Exception:
+            return False
+        return True
+
     def _notify_lead(
         self,
         project_ns: str,
@@ -4214,6 +4236,23 @@ class LeadInboxMixin:
         shows up as its own countable bucket pointing at the exact line to
         fix, instead of disappearing into one opaque "unknown" pile.
         """
+        # #640: callable from a worker thread. The queues, timers and pane
+        # writes below all belong to the Qt thread, so an off-thread caller
+        # (e.g. `close()`'s worktree git work, now off the UI thread) is
+        # re-posted there with the same arguments instead of racing them.
+        if self._post_to_qt_thread_if_needed(
+            lambda: self._notify_lead(
+                project_ns,
+                body,
+                from_role=from_role,
+                note=note,
+                pane_token=pane_token,
+                digest_facts=digest_facts,
+                queued_ts=queued_ts if queued_ts is not None else time.time(),
+                kind=kind or "off-thread-notice",
+            )
+        ):
+            return
         occurred_ts = queued_ts if queued_ts is not None else time.time()
         _log_lead_notice(kind, from_role=from_role, project_ns=project_ns, body=body)
         # #441: done notes / proposals / CCs are the cockpit's own copy of

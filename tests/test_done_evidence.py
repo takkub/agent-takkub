@@ -187,6 +187,80 @@ class TestAssignBaseShaCapture:
         assert ps.assign_dirty_snapshot == {"stale.png": ("??", 123, 456)}
         assert ps.assign_non_git is False
 
+    def test_baseline_is_computed_off_the_qt_thread(self, orch, monkeypatch, qapp):
+        """#640: the baseline is two git processes plus a stat walk, and it
+        ran inline inside assign (watchdog: `_expand_dir_entries` → git at
+        860ms). It is computed on a worker now and applied back on the Qt
+        thread — and only onto the assignment that asked for it."""
+        import threading
+        import time
+
+        from agent_takkub import worktree_manager as wm_mod
+
+        monkeypatch.delenv("TAKKUB_ASSIGN_BASELINE_SYNC", raising=False)
+        # The fixture skips __init__, where production wires this slot.
+        orch._invokeOnMain.connect(orch._run_posted_callable)
+        monkeypatch.setattr(orch, "spawn", lambda *a, **kw: (True, "ok"))
+        monkeypatch.setattr(orch, "_send_when_ready", lambda *a, **kw: None)
+        monkeypatch.setattr(orch, "_apply_session_goal", lambda task, ns: task)
+        pane = _register_pane(orch, "backend", "proj")
+        pane._session_cwd = "/repo/api"
+        main_ident = threading.get_ident()
+        seen_threads: list[int] = []
+
+        class _FakeMgr:
+            def shared_tree_baseline(self, cwd):
+                seen_threads.append(threading.get_ident())
+                return "deadbeef", "/repo", {}
+
+            def git_root(self, cwd):
+                return "/repo"
+
+        monkeypatch.setattr(wm_mod, "WorktreeManager", lambda *a, **k: _FakeMgr())
+
+        orch._assign_dispatch("backend", "/repo/api", "do the thing", project="proj")
+        ps = orch._pane_state["proj::backend"]
+        assert ps.assign_base_sha is None, "assign must not wait for git"
+
+        deadline = time.monotonic() + 5
+        while ps.assign_base_sha is None and time.monotonic() < deadline:
+            qapp.processEvents()
+            time.sleep(0.01)
+        assert ps.assign_base_sha == "deadbeef"
+        assert seen_threads and seen_threads[0] != main_ident
+
+    def test_stale_baseline_is_not_applied_to_a_newer_task(self, orch, monkeypatch, qapp):
+        import time
+
+        from agent_takkub import worktree_manager as wm_mod
+
+        monkeypatch.delenv("TAKKUB_ASSIGN_BASELINE_SYNC", raising=False)
+        # The fixture skips __init__, where production wires this slot.
+        orch._invokeOnMain.connect(orch._run_posted_callable)
+        monkeypatch.setattr(orch, "spawn", lambda *a, **kw: (True, "ok"))
+        monkeypatch.setattr(orch, "_send_when_ready", lambda *a, **kw: None)
+        monkeypatch.setattr(orch, "_apply_session_goal", lambda task, ns: task)
+        pane = _register_pane(orch, "backend", "proj")
+        pane._session_cwd = "/repo/api"
+
+        class _FakeMgr:
+            def shared_tree_baseline(self, cwd):
+                return "old-sha", "/repo", {}
+
+            def git_root(self, cwd):
+                return "/repo"
+
+        monkeypatch.setattr(wm_mod, "WorktreeManager", lambda *a, **k: _FakeMgr())
+        orch._assign_dispatch("backend", "/repo/api", "first", project="proj")
+        ps = orch._pane_state["proj::backend"]
+        ps.task_id = "a-newer-task"  # a re-assign landed before git finished
+
+        end = time.monotonic() + 0.5
+        while time.monotonic() < end:
+            qapp.processEvents()
+            time.sleep(0.01)
+        assert ps.assign_base_sha is None
+
     def test_no_resolved_cwd_leaves_baseline_none(self, orch, monkeypatch):
         monkeypatch.setattr(orch, "spawn", lambda *a, **kw: (True, "ok"))
         monkeypatch.setattr(orch, "_send_when_ready", lambda *a, **kw: None)

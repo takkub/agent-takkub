@@ -308,6 +308,13 @@ class CliServer(QObject):
 
         threading.Thread(target=_runner, name="cli-server-git-offload", daemon=True).start()
 
+    def run_off_thread(self, work: Callable[[], object], then: Callable[[object], None]) -> None:
+        """Public entry to `_run_off_thread` for other main-thread owners
+        (#640: `MainWindow` starts remote control through it). Same contract:
+        *work* on a daemon thread, *then(result)* back on the Qt thread,
+        ``None`` if *work* raised."""
+        self._run_off_thread(work, then)
+
     def _fire_staggered(self, delay_ms: int, callback: Callable[[], None]) -> None:
         """Run *callback* once after *delay_ms*, via a QTimer parented to
         `self` instead of the `QTimer.singleShot()` static call this replaces

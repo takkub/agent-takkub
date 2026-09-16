@@ -87,6 +87,25 @@ class RemoteControl:
         moment the cockpit last closed". An idle-auto-suspended session
         leaves `enabled` untouched (see `_check_idle_expire`), so a fresh
         boot the next morning starts remote control back up on its own."""
+        self = cls.prepare(orch, on_auto_suspend=on_auto_suspend)
+        if self is None:
+            return None
+        return self if self.finish_start() else None
+
+    @classmethod
+    def prepare(cls, orch, *, on_auto_suspend=None) -> RemoteControl | None:
+        """The BLOCKING half of `maybe_start` — safe to run off the Qt thread.
+
+        #640: `maybe_start` ran entirely inside `MainWindow._boot` on the Qt
+        main thread, and this half is slow: an orphan-process sweep, binding
+        the HTTP server, a loopback HTTP probe, spawning cloudflared and then
+        sleeping to see whether it survived. The watchdog caught it on every
+        remote-enabled boot (1.6s SOFT stalls, full stack in boot.log). None
+        of it touches a Qt object, so the boot now runs it on a worker and
+        calls `finish_start()` — the Qt half — back on the main thread.
+
+        Returns None when remote control is off, or when startup failed (the
+        server/tunnel are already torn down in that case)."""
         from . import tunnel as _tunnel_mod
 
         try:
@@ -99,17 +118,51 @@ class RemoteControl:
             return None
         self = cls(config, orch, on_auto_suspend=on_auto_suspend)
         try:
-            self._start()
+            self._start_blocking()
         except Exception:
             _log.exception("remote-control failed to start — cleaning up")
-            self.stop()
+            self._stop_blocking_parts()
             return None
         return self
 
+    def finish_start(self) -> bool:
+        """The Qt half of startup — MUST run on the Qt main thread (it builds
+        the Lead notifier's QTimer and the idle QTimer, and connects to
+        `aboutToQuit`). False means it failed and everything was stopped."""
+        try:
+            self._start_qt()
+        except Exception:
+            _log.exception("remote-control failed to finish starting — cleaning up")
+            self.stop()
+            return False
+        return True
+
+    def _stop_blocking_parts(self) -> None:
+        """Tear down only what `_start_blocking` created — no Qt calls, so it
+        is safe on the worker thread `prepare` may be running on."""
+        if self._tunnel is not None:
+            try:
+                self._tunnel.stop()
+            except Exception:
+                _log.exception("remote-control: tunnel stop during failed start")
+            self._tunnel = None
+        if self._server is not None:
+            try:
+                self._server.stop()
+            except Exception:
+                _log.exception("remote-control: server stop during failed start")
+            self._server = None
+
     def _start(self) -> None:
+        """Both halves in order, on the calling thread (the Settings dialog's
+        Enable flow and tests still start synchronously)."""
+        self._start_blocking()
+        self._start_qt()
+
+    def _start_blocking(self) -> None:
         # Lazy imports (P0 discipline, X-check C2/U5): none of this network
         # machinery loads unless a config file already says enabled=true.
-        from . import diagnostics, http_server, notify, tunnel
+        from . import diagnostics, http_server, tunnel
 
         if not self.config.secret_path or not self.config.token:
             self.config.secret_path = self.config.secret_path or secrets.token_urlsafe(16)
@@ -117,7 +170,6 @@ class RemoteControl:
             self.config.save()
 
         self._server = http_server.start_server(self.config, self._orch)
-        self._notifier = notify.LeadNotifier(self._orch, self._server.broadcaster)
 
         # #193 item 1: `start_server` silently scans forward past a taken
         # port — that's the right behavior (this instance still comes up),
@@ -178,6 +230,13 @@ class RemoteControl:
                 _log.exception("remote tunnel failed to start — server stays loopback-only")
                 self._tunnel = None
                 self.tunnel_error = str(exc)
+
+    def _start_qt(self) -> None:
+        """Everything that creates or connects a Qt object — must run on the
+        Qt main thread, after `_start_blocking` has bound the server."""
+        from . import notify
+
+        self._notifier = notify.LeadNotifier(self._orch, self._server.broadcaster)
 
         app = QCoreApplication.instance()
         if app is not None:

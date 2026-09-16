@@ -1456,13 +1456,18 @@ class TestLeadOutputTail:
         assert broadcaster.events == []
 
     def test_retries_resolving_jsonl_that_is_created_after_first_resync(
-        self, qapp, tmp_path, config_dir
+        self, qapp, tmp_path, config_dir, monkeypatch
     ):
         # codex HIGH: the Lead's session uuid can be known before Claude has
         # created/flushed its jsonl file. `_resync()` used to run only on
         # `statusChanged` — if the glob missed on that first pass, the
         # session was never retried unless some unrelated `statusChanged`
         # happened to fire later, so every reply for it was lost for good.
+        # (#640 throttles those retries; this test is about the retry itself,
+        # so it runs with no throttle — the throttle has its own test below.)
+        import agent_takkub.remote.notify as notify_mod
+
+        monkeypatch.setattr(notify_mod, "_UNRESOLVED_RETRY_S", 0.0)
         orch = _FakeOrch()
         broadcaster = _FakeBroadcaster()
 
@@ -1483,6 +1488,37 @@ class TestLeadOutputTail:
                 fh.write(_assistant_line("finally here") + "\n")
             notifier._poll_all()
             assert broadcaster.events == [("lead", "finally here", "proj")]
+        finally:
+            notifier.stop()
+
+    def test_unresolved_session_is_not_globbed_on_every_tick(
+        self, qapp, tmp_path, config_dir, monkeypatch
+    ):
+        """#640: a transcript that has not appeared yet used to be re-resolved
+        on every 200ms tick — a provider-store glob on the Qt main thread five
+        times a second. Retries are throttled to `_UNRESOLVED_RETRY_S`."""
+        import agent_takkub.remote.notify as notify_mod
+
+        orch = _FakeOrch()
+        notifier = LeadNotifier(orch, _FakeBroadcaster())
+        calls: list[str] = []
+        real = notifier._resolve_jsonl
+
+        def _counting(*args, **kwargs):
+            calls.append(args[0])
+            return real(*args, **kwargs)
+
+        monkeypatch.setattr(notifier, "_resolve_jsonl", _counting)
+        try:
+            orch.set_lead("proj", "uuid-missing")
+            for _ in range(10):
+                notifier._poll_all()
+            assert calls.count("proj") == 1, "must not re-glob every tick"
+
+            later = notify_mod.time.monotonic() + notify_mod._UNRESOLVED_RETRY_S + 1
+            monkeypatch.setattr(notify_mod.time, "monotonic", lambda: later)
+            notifier._poll_all()
+            assert calls.count("proj") == 2, "must retry once the window has passed"
         finally:
             notifier.stop()
 
