@@ -376,15 +376,21 @@ class TestNpmMachineLock:
     mode the module docstring already describes, plus one boot that aborted
     with several `_update_claude` workers in flight."""
 
-    def test_another_instance_holding_it_refuses_this_one(self) -> None:
+    def test_another_instance_holding_it_refuses_this_one(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """Simulates the real shape: a DIFFERENT cockpit process already
         installing. (Re-acquiring as the same pid is a refresh by design —
         within one process `_NPM_LOCK` is the gate.)"""
         import tempfile
+        import uuid
         from pathlib import Path
 
         from agent_takkub import resource_lock
 
+        # xdist workers share the OS temp dir — give this run its own lock name
+        # so two workers don't fight over the production one.
+        monkeypatch.setattr(pu, "_NPM_MACHINE_LOCK_NAME", f"npm-test-{uuid.uuid4().hex[:8]}")
         lock_dir = Path(tempfile.gettempdir())
         other = "pid999999"
         ok, _ = resource_lock.try_acquire(
@@ -397,7 +403,10 @@ class TestNpmMachineLock:
         finally:
             resource_lock.release(lock_dir, None, pu._NPM_MACHINE_LOCK_NAME, other)
 
-    def test_lock_is_released_for_the_next_caller(self) -> None:
+    def test_lock_is_released_for_the_next_caller(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        import uuid
+
+        monkeypatch.setattr(pu, "_NPM_MACHINE_LOCK_NAME", f"npm-test-{uuid.uuid4().hex[:8]}")
         with pu._npm_machine_lock(5.0) as first:
             assert first is True
         with pu._npm_machine_lock(0.0) as again:

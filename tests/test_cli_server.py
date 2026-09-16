@@ -241,6 +241,10 @@ class TestAsyncSpawnDispatch:
             "agent_takkub.team_preset.can_spawn",
             lambda *_args, **_kwargs: (True, ""),
         )
+        # #639: claude is probed for real now (installed + not switched off),
+        # and CI runners have no claude — stub availability so this stays a
+        # flag-passing test instead of an environment test.
+        monkeypatch.setattr("agent_takkub.provider_config._provider_available", lambda p: True)
         orch = _FakeOrch()
         srv = CliServer(orch)
         sock = _FakeSock()
@@ -294,8 +298,12 @@ class TestAsyncSpawnDispatch:
         qapp.processEvents()
         assert orch.assign_calls == []
 
-    def test_assign_passes_provider_override(self, qapp: QCoreApplication) -> None:
-        # Issue #270.
+    def test_assign_passes_provider_override(
+        self, qapp: QCoreApplication, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Issue #270. #639: --provider claude is validated against real
+        # availability now, and CI has no claude installed.
+        monkeypatch.setattr("agent_takkub.provider_config._provider_available", lambda p: True)
         orch = _FakeOrch()
         srv = CliServer(orch)
         sock = _FakeSock()
@@ -1271,6 +1279,7 @@ class TestBrowserShardSpawnStagger:
             "agent_takkub.team_preset.can_spawn",
             lambda *_args, **_kwargs: (True, ""),
         )
+        monkeypatch.setattr("agent_takkub.provider_config._provider_available", lambda p: True)
         srv = CliServer(_FakeOrch())
         # Mock _is_codex_spawn to return False so backend is not treated as codex
         srv._is_codex_spawn = lambda *_args, **_kwargs: False
