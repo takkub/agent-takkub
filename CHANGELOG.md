@@ -4,6 +4,24 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 
 ## [vNEXT]
 
+## [v2.1.12] - 2026-09-16
+
+### Fixed (แก้)
+
+- **#641 รอบ 2 — `role#N` แยก pane ถูกปฏิเสธที่ระบบแล้ว (fan-out ไม่เคยถูกใช้จริงใน 2.1.11)**
+  2.1.11 ทำกลไกครบและอัปคู่มือ Lead แล้ว แต่ **ไม่มีอะไรบังคับให้ Lead ใช้ `--shards`** —
+  หลักฐานจาก prod: ติดตั้ง 2.1.11 เวลา 13:44 · Lead spawn ใหม่ 13:45 (ได้ prompt ใหม่แล้ว) ·
+  14:12 Lead ยัง assign `frontend#2` และ `frontend#3` เป็น pane แยก (`shard_total=0`) ·
+  `assign_subagent_fanout` ใน events.log = 0 ครั้ง · ผู้ใช้เห็น 3 pane เหมือนเดิม
+  → เพิ่ม `shard_fanout.direct_instance_assign_error()` เป็น gate ที่ **assign (CLI + orchestrator)
+  และ spawn (CLI + cli_server)** ทั้ง 4 ทาง: `role#N` ที่พิมพ์เองถูกปฏิเสธพร้อมคำสั่งที่ถูกต้อง
+  (`--role <r> --shards N` ใบเดียว) · ปล่อยผ่านเฉพาะรูปที่ subagent ทำแทนไม่ได้จริง — shard ของ
+  `--shards … --fanout pane` และ `--plan` (`shard_total>0`), `--mode subagent` ของ Lead,
+  browser-QA (`qa#N`/`critic#N`/`designer#N` รวม ad-hoc #167), `--isolation worktree`
+  (ต้องการ branch แยกต่อชิ้น), และ provider ที่ไม่มี native subagent
+  · คู่มือ `worktree-isolation.md` + PARALLEL mode ใน `lead_context.py` เลิกสอน `role#1..#K`
+  · บทเรียน: feature ที่เป็น opt-in = feature ที่ไม่ถูกใช้ — ต้อง default-deny ทางเก่าเสมอ
+
 ## [v2.1.11] - 2026-09-16
 
 ### Changed (เปลี่ยน)

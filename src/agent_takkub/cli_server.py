@@ -949,6 +949,19 @@ class CliServer(QObject):
                         msg = f"{msg}\n[{auto_mode_note}]"
                     self._reply(sock, ok=ok, msg=msg)
                     return
+                if cmd == "spawn":
+                    # #641 round 2: an external `spawn role#N` would otherwise
+                    # walk straight past the assign gate and open the sibling
+                    # pane anyway. Internal fan-out spawns never come through
+                    # this socket path.
+                    from .shard_fanout import direct_instance_assign_error
+
+                    _spawn_instance_err = direct_instance_assign_error(
+                        str(role), project=from_project
+                    )
+                    if _spawn_instance_err:
+                        self._reply(sock, ok=False, msg=_spawn_instance_err)
+                        return
                 delay = self._next_spawn_delay_ms(role, from_project)
                 if cmd == "spawn":
                     self._fire_staggered(

@@ -144,6 +144,72 @@ def test_provider_override_wins_over_role_setting(provider):
     assert kind == "subagent" and "codex" in (note or "")
 
 
+# ── role#N gate (round 2) ────────────────────────────────────────────────────
+#
+# The feature shipped in 2.1.11 with the mechanism tested and the Lead prompt
+# updated, and it still did nothing in production: the Lead never typed
+# --shards at all, it dispatched frontend#2 / frontend#3 as separate panes
+# (prod events.log, 2026-09-16 14:12, shard_total=0, zero fan-out events, on
+# Lead panes respawned AFTER the upgrade). These tests pin the gate that makes
+# the intended path the only path.
+
+
+@pytest.mark.parametrize("role", ["frontend#2", "backend#3", "mobile#2", "devops#4"])
+def test_direct_instance_assign_is_refused(provider, role):
+    provider("claude")
+    err = sf.direct_instance_assign_error(role, project="p")
+    assert err and "--shards" in err
+    assert "--fanout pane" in err  # the escape hatch must be in the message
+
+
+def test_gate_allows_every_shape_a_fanout_cannot_serve(provider):
+    provider("claude")
+    # plain role, no suffix
+    assert sf.direct_instance_assign_error("frontend", project="p") is None
+    # a real --shards pane fan-out dispatching its own shards
+    assert sf.direct_instance_assign_error("frontend#2", shard_total=3, project="p") is None
+    # the Lead's own native children key off role#N too
+    assert sf.direct_instance_assign_error("frontend#2", mode="subagent", project="p") is None
+    # separate branches per piece is a real need subagents cannot reproduce
+    assert sf.direct_instance_assign_error("frontend#2", isolation="worktree", project="p") is None
+    # browser-QA panes need one browser profile each (#92, #167 ad-hoc qa#N)
+    for r in ("qa#2", "critic#2", "designer#3"):
+        assert sf.direct_instance_assign_error(r, project="p") is None
+
+
+def test_gate_allows_instance_when_provider_has_no_subagent(provider):
+    provider("kimi")
+    assert sf.direct_instance_assign_error("frontend#2", project="p") is None
+
+
+def test_cli_assign_refuses_direct_instance(provider, fake_request):
+    provider("claude")
+    rc = cli.main(["assign", "--role", "frontend#2", "build the second page"])
+    assert rc == 1
+    assert fake_request == []
+
+
+def test_cli_spawn_refuses_direct_instance(provider, fake_request):
+    provider("claude")
+    rc = cli.main(["spawn", "--role", "frontend#2"])
+    assert rc == 1
+    assert fake_request == []
+
+
+def test_cli_pane_fanout_still_dispatches_its_own_instances(provider, fake_request):
+    """The gate must not fire on the shards the fan-out itself sends."""
+    provider("claude")
+    rc = cli.main(["assign", "--role", "frontend", "--shards", "3", "--fanout", "pane", "x"])
+    assert rc == 0
+    assert [p["role"] for p in fake_request] == ["frontend#1", "frontend#2", "frontend#3"]
+
+
+def test_cli_worktree_instance_still_allowed(provider, fake_request):
+    provider("claude")
+    rc = cli.main(["assign", "--role", "frontend#2", "--isolation", "worktree", "feature B"])
+    assert rc == 0 and fake_request[-1]["role"] == "frontend#2"
+
+
 # ── task contract block ──────────────────────────────────────────────────────
 
 

@@ -2720,6 +2720,28 @@ class Orchestrator(
                     ) + task
                 except Exception:
                     pass
+        # #641 round 2: authoritative half of the `role#N` gate the CLI also
+        # applies — a caller reaching cli_server directly (or an older client)
+        # must not be able to open sibling panes the fan-out exists to replace.
+        if shard_total <= 0 and not plan:
+            from .shard_fanout import direct_instance_assign_error
+
+            _instance_err = direct_instance_assign_error(
+                role_name,
+                shard_total=shard_total,
+                mode=mode,
+                isolation=isolation,
+                provider=provider,
+                project=role_check_project_ns,
+            )
+            if _instance_err:
+                _log_event(
+                    "direct_instance_assign_denied",
+                    role=role_name,
+                    project=role_check_project_ns,
+                )
+                return False, _instance_err
+
         # #641: subagent fan-out — `assign --shards N` on a non-browser role
         # arrives here as ONE assign with `subagent_fanout=N` (never N
         # `role#N` assigns). The task gets the fan-out contract appended and

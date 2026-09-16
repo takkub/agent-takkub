@@ -549,6 +549,14 @@ def _with_project(payload: dict) -> dict:
 
 
 def cmd_spawn(args: argparse.Namespace) -> dict:
+    # #641 round 2: `spawn --role frontend#2` is the same sibling-pane the
+    # assign gate refuses — close it here too, or the gate is one `spawn`
+    # away from being bypassed.
+    from .shard_fanout import direct_instance_assign_error
+
+    instance_err = direct_instance_assign_error(args.role, project=_from_project())
+    if instance_err:
+        return {"ok": False, "msg": instance_err}
     return _request(
         _with_project({"cmd": "spawn", "role": args.role, "cwd": args.cwd, "from": _from_role()})
     )
@@ -872,6 +880,23 @@ def cmd_assign(args: argparse.Namespace) -> dict:
             "msg": "--base ใช้ได้เฉพาะกับ --isolation worktree (#544)",
         }
     plan = bool(getattr(args, "plan", False))
+    # #641 round 2: a hand-typed `--role frontend#2` is the exact pattern the
+    # subagent fan-out replaces — refuse it here, in the Lead's own shell, so
+    # the correct command is the next thing it reads. `--shards`-driven pane
+    # fan-out sets shard_total below and never reaches this check.
+    if shards <= 1 and not plan:
+        from .shard_fanout import direct_instance_assign_error
+
+        instance_err = direct_instance_assign_error(
+            args.role,
+            shard_total=0,
+            mode=mode_requested,
+            isolation=isolation,
+            provider=provider,
+            project=_from_project(),
+        )
+        if instance_err:
+            return {"ok": False, "msg": instance_err}
     if isolation == "worktree" and plan:
         return {
             "ok": False,

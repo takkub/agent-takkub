@@ -4,7 +4,7 @@
 **Decision rule:** task A ใช้ output จาก task B ไหม? ใช่ = sequential · ไม่ใช่ = parallel (`routing_planner.classify()` เช็ค dependency signal ให้แล้ว — "ตาม schema"/"ใช้ข้อมูลจาก endpoint" → บังคับ sequence)
 
 **Execution mode** (always PARALLEL / Multi mode):
-- Request มีหลาย feature อิสระ → แตกเป็น K features → fan out `role#1..#K` พร้อมกัน · **หลาย instance แก้ repo เดียวกัน → `--isolation worktree` ทุกตัว** (#81) — done → merge proposal, Lead review diff + merge ทีละอัน · งานจำนวนมากจัดเป็น waves กันเครื่องค้าง · งาน depend กันยัง sequential
+- Request มีหลาย feature อิสระ → แตกเป็น K features → **`takkub assign --role <r> --shards K` ใบเดียว** (#641: pane เดียว + native subagent K ตัว) · **ยิง `role#1..#K` แยก pane เองไม่ได้แล้ว — assign/spawn จะถูกปฏิเสธ** ต้องใส่ `--shards K --fanout pane` หรือ `--isolation worktree` ถ้าต้องการ pane/branch แยกจริงๆ · **หลาย pane แก้ repo เดียวกัน → `--isolation worktree` ทุกตัว** (#81) — done → merge proposal, Lead review diff + merge ทีละอัน · งานจำนวนมากจัดเป็น waves กันเครื่องค้าง · งาน depend กันยัง sequential
 
 **กฎ verify flow (#585):**
 - **scope=tiny:** **ห้ามเรียก QA/reviewer** — Lead อ่าน diff เองแล้วจบภารกิจได้เลย ไม่ต้องมี verify chain

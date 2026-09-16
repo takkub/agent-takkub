@@ -142,6 +142,65 @@ def resolve_shard_fanout(
     return "subagent", f"1 pane + {shards} native subagents ({provider_name}: {hint})"
 
 
+def direct_instance_assign_error(
+    role: str,
+    *,
+    shard_total: int = 0,
+    mode: str | None = None,
+    isolation: str = "shared",
+    provider: str | None = None,
+    project: str | None = None,
+) -> str | None:
+    """Refuse a hand-typed ``role#N`` pane assign that should have been one
+    ``--shards N`` subagent fan-out (#641 round 2).
+
+    Why this exists: shipping the fan-out plus the Lead-prompt rule was NOT
+    enough. Measured on prod 2.1.11 — installed 13:44, Lead panes respawned
+    13:45 (so they carried the new prompt), and at 14:12 the Lead still
+    dispatched ``frontend#2`` and ``frontend#3`` as separate panes,
+    ``shard_total=0``, ``assign_subagent_fanout`` count 0. A prompt is a
+    suggestion; this is the gate.
+
+    Returns ``None`` (allow) for every shape a subagent fan-out cannot serve:
+
+    * no ``#N`` suffix at all — the ordinary single-pane assign;
+    * ``shard_total > 0`` — a REAL fan-out dispatching its own shards
+      (``--shards … --fanout pane``, and the ``--plan`` bucket fan-out);
+    * ``mode == "subagent"`` — the Lead's own native children, which use
+      ``role#N`` as their fan-out key (see ``_register_subagent``);
+    * browser-QA roles — they need one browser profile per pane (#92);
+    * ``isolation == "worktree"`` — separate branches per piece is a real
+      need that subagents inside one pane cannot reproduce;
+    * providers with no native subagent tool — nothing to fan out onto.
+    """
+    base, idx = (role or "").split("#", 1)[0].strip().lower(), None
+    if "#" in (role or ""):
+        try:
+            idx = int(role.split("#", 1)[1])
+        except ValueError:
+            idx = None
+    if idx is None:
+        return None
+    if shard_total > 0 or mode == "subagent" or isolation == "worktree":
+        return None
+    if base in BROWSER_SHARD_ROLES:
+        return None
+    provider_name, hint = effective_provider_hint(base, project, provider)
+    if not hint:
+        return None
+    return (
+        f"{role} = เปิด pane ที่ {idx} ของ role เดียวกัน — #641 ปิดทางนี้แล้ว "
+        f"(pane ใหม่จ่ายค่า boot + role prompt + tool schema + MCP ซ้ำทั้งก้อน ~36k token/pane "
+        f"เทียบกับ subagent ~13.5k)\n"
+        f"รวมทุกชิ้นเป็น assign เดียวแทน:\n"
+        f'  takkub assign --role {base} --shards <N> "<งานทุกชิ้น แยกหัวข้อ 1./2./3.>"\n'
+        f"→ เปิด pane เดียว แล้ว pane ยิง native subagent N ตัวคู่ขนานเอง "
+        f"({provider_name}: {hint}) แล้วรายงาน done ครั้งเดียว\n"
+        f"ถ้าจำเป็นต้องได้ pane แยกจริงๆ: `--shards <N> --fanout pane` "
+        f"(หรือ `--isolation worktree` ถ้าต้องการ branch แยกต่อชิ้น)"
+    )
+
+
 def wrap_subagent_fanout_task(task: str, shards: int, provider_name: str, hint: str) -> str:
     """Append the fan-out contract to *task* — the block the pane acts on.
 
