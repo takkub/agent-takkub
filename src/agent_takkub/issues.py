@@ -850,10 +850,21 @@ def cmd_issue_new(args: Any) -> dict:
     body: str = args.body or ""
 
     if not body:
-        if not sys.stdin.isatty():
+        # #643: a cockpit pane IS a tty (ConPTY), so the isatty() check alone
+        # let `takkub issue new` with no --body launch notepad inside a pane
+        # with no human at it — the command sat silent past 120s. Any pane
+        # (TAKKUB_ROLE set) is non-interactive by definition.
+        import os as _os
+
+        in_pane = bool((_os.environ.get("TAKKUB_ROLE") or "").strip())
+        if in_pane or not sys.stdin.isatty():
+            why = "running inside a cockpit pane" if in_pane else "no TTY"
             return {
                 "ok": False,
-                "msg": 'no --body provided and no TTY — pass --body "<text>" explicitly',
+                "msg": (
+                    f'no --body provided and {why} — pass --body "<text>" explicitly '
+                    '(or --body "" for an empty body)'
+                ),
             }
         import os
         import shlex

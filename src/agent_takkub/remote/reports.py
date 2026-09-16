@@ -309,6 +309,12 @@ def validate_standalone_html(path: Path) -> list[str]:
             raise ReportError(
                 "report must be standalone (no external script/link/img/iframe/"
                 f"object/embed/CSS reference) — found: {match.group(0)[:80]!r}"
+                # #653: the rule only ever surfaced here, after the report was
+                # already written — one report had to have its Google Fonts
+                # <link> tags stripped by hand before it would publish. Say
+                # what to do about it, and where the rule is announced now.
+                " · แก้: ลบแท็กนั้นออกหรือ inline เนื้อหาเข้าไฟล์ (เว็บฟอนต์/CDN ใช้ไม่ได้ "
+                "— ใช้ font stack ของระบบแทน) แล้ว publish ใหม่"
             )
     try:
         size = path.stat().st_size

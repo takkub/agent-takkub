@@ -961,6 +961,37 @@ _VERIFY_FAIL_APPENDIX = (
 )
 
 
+_REPORT_RULES_MARKER = "------ กติกา report ------"
+_REPORT_RULES_APPENDIX = (
+    f"\n\n{_REPORT_RULES_MARKER}\n"
+    "งานนี้พูดถึง `takkub report` — อ่านก่อนเริ่ม จะได้ไม่ต้องรื้อตอนจบ:\n"
+    "1. **`takkub report publish|build` เป็นคำสั่งของ Lead เท่านั้น** — pane รันไม่ได้ "
+    "(ติด role gate) · คุณทำไฟล์ให้เสร็จแล้วบอก path กลับมาใน `takkub done` "
+    "แล้ว Lead จะ publish ให้เอง\n"
+    "2. **ไฟล์รายงานต้อง standalone** — ห้ามมี `<script src>` / `<link href>` / `<img src>` "
+    "ที่ชี้ออกนอกไฟล์ (รวมเว็บฟอนต์ Google Fonts และ CDN ทุกชนิด) ห้ามมี `@import` หรือ "
+    "`url()` ที่ชี้ออกนอก · ใส่ CSS/JS ทุกอย่าง inline และใช้ font stack ของระบบ "
+    "ไม่งั้น publish จะถูกปฏิเสธทั้งไฟล์"
+)
+
+
+def _append_report_rules_hint(task: str) -> str:
+    """#653: a report task used to learn the two rules that shape it only
+    AFTER the report was written — the pane discovered `takkub report` is
+    Lead-only when it tried to publish, and Lead then discovered the
+    standalone rule when the finished file was rejected over three lines of
+    Google Fonts. Both are stated up front now.
+
+    Only fires for a task that actually mentions the command. Idempotent
+    (marker-guarded) so an auto-respawn replay doesn't stack copies.
+    """
+    if "takkub report" not in (task or ""):
+        return task
+    if _REPORT_RULES_MARKER in task:
+        return task
+    return task + _REPORT_RULES_APPENDIX
+
+
 def _append_verify_fail_hint(task: str, base_role: str) -> str:
     """For verify roles (qa/reviewer), append the `takkub done --fail` reporting
     instruction so a failed check routes back into a Lead-proposed fix loop.

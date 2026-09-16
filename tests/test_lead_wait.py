@@ -733,15 +733,14 @@ class TestPollWaitUserInputInterrupt:
         assert "backend" in result["pending"]
         assert PROJECT not in orch._active_waits
 
-    def test_interrupt_carries_printable_flag_from_the_stamped_chunk(
-        self, orch: Orchestrator
-    ) -> None:
-        """#449: the interrupt dict must surface whether the chunk that
-        stamped `_lead_last_user_input_ts` had any real content left after
-        stripping recognizable escape sequences — `cli.cmd_wait` uses this
-        to tell confirmed typing apart from an unrecognized terminal-echo/
-        digest-artifact structure instead of asserting "you typed
-        something" either way."""
+    def test_non_printable_chunk_no_longer_interrupts_the_wait(self, orch: Orchestrator) -> None:
+        """#644 (supersedes #449's wording-only fix): a chunk with no real
+        text left after stripping escape sequences is terminal chrome or a
+        cockpit digest artifact — never the owner asking for attention. It
+        used to cut the wait anyway, and since the cockpit's own inbox
+        digests keep producing these, Lead had to re-issue `takkub wait`
+        four or five times a session for input nobody typed. It is now
+        consumed silently and the wait keeps running."""
         _register_working(orch, "backend")
         begin = orch.begin_wait(PROJECT, ["backend"], 1800.0)
         started_ts = orch._active_waits[PROJECT]["started_ts"]
@@ -750,11 +749,23 @@ class TestPollWaitUserInputInterrupt:
 
         result = orch.poll_wait(PROJECT, begin["wait_id"])
 
-        assert result["interrupt"]["printable"] is False
-        assert "byte แปลกๆ" in result["interrupt"]["detail"]
-        assert "มีข้อความ/คำสั่งใหม่จากคุณเข้ามา" not in result["interrupt"]["detail"], (
-            "an unconfirmed chunk must never be worded as confirmed typing"
-        )
+        assert result["interrupt"] is None
+        assert "backend" in result["pending"]
+        assert PROJECT in orch._active_waits, "the wait must stay registered"
+
+    def test_real_typing_still_interrupts(self, orch: Orchestrator) -> None:
+        """The other half of #644: a printable chunk is the owner, and still
+        stops the wait immediately."""
+        _register_working(orch, "backend")
+        begin = orch.begin_wait(PROJECT, ["backend"], 1800.0)
+        started_ts = orch._active_waits[PROJECT]["started_ts"]
+        orch._lead_last_user_input_ts[PROJECT] = started_ts + 1.0
+        orch._lead_last_user_input_printable[PROJECT] = True
+
+        result = orch.poll_wait(PROJECT, begin["wait_id"])
+
+        assert result["interrupt"]["reason"] == "user_input"
+        assert result["interrupt"]["printable"] is True
 
     def test_interrupt_defaults_to_printable_true_when_unset(self, orch: Orchestrator) -> None:
         """Back-compat / conservative default: if `_lead_last_user_input_printable`

@@ -119,6 +119,14 @@ def _split_role_args(raw: list[str] | None) -> list[str]:
     return out
 
 
+def _severity_alias(raw: str) -> str:
+    """#643: accept the spellings people actually type for `--severity`.
+    `medium` (and `m`) mean `med`; everything else is passed through for
+    argparse's own `choices` error, which is already clear."""
+    value = (raw or "").strip().lower()
+    return {"medium": "med", "m": "med", "l": "low", "h": "high"}.get(value, value)
+
+
 def _warn_deprecated_role(raw: str | list[str] | None) -> None:
     """Warn when a deprecated role alias (qa, critic) is specified (#513/#561)."""
     if not raw:
@@ -687,6 +695,7 @@ def cmd_assign(args: argparse.Namespace) -> dict:
     print(f"scope: {scope} ({scope_reason})")
 
     mode_requested = getattr(args, "mode", None)
+    deprecated_alias_note = ""
     if base_role == "reviewer":
         if mode_requested is None:
             mode_requested = "code"
@@ -710,6 +719,15 @@ def cmd_assign(args: argparse.Namespace) -> dict:
             alias_mode = REVIEWER_MODE_ALIASES[base_role]
             if mode_requested is None:
                 _warn_deprecated_role(base_role)
+                # #654: the stderr warn above never reached the Lead that
+                # actually typed `--role qa` (assign was the ONE path with no
+                # visible notice, while `messages`/`close` showed theirs), so
+                # it kept using the deprecated alias for three rounds. Carry
+                # it in the ack body too, where nothing can filter it out.
+                deprecated_alias_note = (
+                    f"\n[#513] --role {base_role} เป็น alias เก่า — ใช้ "
+                    f"`--role reviewer --mode {alias_mode}` แทน (pane ยังชื่อ {base_role} เหมือนเดิม)"
+                )
                 mode_requested = alias_mode
             elif mode_requested == alias_mode:
                 pass
@@ -954,6 +972,7 @@ def cmd_assign(args: argparse.Namespace) -> dict:
                 str(resp.get("msg", ""))
                 + _browser_shard_warning(args.role, shards, mode=mode_requested)
                 + _self_commit_isolation_warning(args.task, "shared")
+                + deprecated_alias_note
             )
         return resp
     if shards > 1:
@@ -1073,7 +1092,10 @@ def cmd_assign(args: argparse.Namespace) -> dict:
             )
         ]
         detail = ("\n" + "\n".join(resource_blocked)) if resource_blocked else ""
-        return {"ok": ok_count == shards, "msg": f"queued {ok_count}/{shards} shards{warn}{detail}"}
+        return {
+            "ok": ok_count == shards,
+            "msg": f"queued {ok_count}/{shards} shards{warn}{detail}{deprecated_alias_note}",
+        }
     resp = _request(
         _with_project(
             {
@@ -1098,8 +1120,10 @@ def cmd_assign(args: argparse.Namespace) -> dict:
         )
     )
     if resp.get("ok"):
-        resp["msg"] = str(resp.get("msg", "")) + _self_commit_isolation_warning(
-            args.task, isolation
+        resp["msg"] = (
+            str(resp.get("msg", ""))
+            + _self_commit_isolation_warning(args.task, isolation)
+            + deprecated_alias_note
         )
     return resp
 
@@ -1661,11 +1685,43 @@ def cmd_spawn_service(args: argparse.Namespace) -> dict:
     services; stopping one is `takkub service-stop --name X` (Lead)."""
     if getattr(args, "list", False):
         return _request(_with_project({"cmd": "service-list", "from": _from_role()}))
-    cmd = list(getattr(args, "service_argv", None) or [])
-    if cmd and cmd[0] == "--":
-        cmd = cmd[1:]
+    cmd_file = (getattr(args, "cmd_file", None) or "").strip()
+    if cmd_file:
+        # #645: git-bash/MSYS rewrites any argument that starts with "/" into
+        # a Windows path before Python ever sees it ("/c" became
+        # "C:/Program Files/Git/c"), so `-- cmd /c ...` reached the service
+        # with mangled args and the process exited immediately. Reading the
+        # argv from a file bypasses the shell entirely — one argument per
+        # line, no quoting rules to get wrong.
+        try:
+            cmd = [
+                line.strip()
+                for line in Path(cmd_file).read_text(encoding="utf-8").splitlines()
+                if line.strip()
+            ]
+        except OSError as exc:
+            return {"ok": False, "msg": f"--cmd-file read failed: {exc}"}
+    else:
+        cmd = list(getattr(args, "service_argv", None) or [])
+        if cmd and cmd[0] == "--":
+            cmd = cmd[1:]
     if not cmd:
-        return {"ok": False, "msg": "usage: takkub spawn-service --name <name> -- <cmd> [args...]"}
+        return {
+            "ok": False,
+            "msg": (
+                "usage: takkub spawn-service --name <name> -- <cmd> [args...]\n"
+                "       takkub spawn-service --name <name> --cmd-file <file>  "
+                "(one argv element per line — use this from git-bash/WSL, where "
+                "MSYS rewrites /flags into Windows paths; MSYS_NO_PATHCONV=1 works too)"
+            ),
+        }
+    if os.environ.get("MSYSTEM") and not cmd_file:
+        print(
+            "note: git-bash/MSYS detected — arguments starting with '/' get rewritten into "
+            "Windows paths before takkub sees them (#645). If the service misbehaves, rerun "
+            "with MSYS_NO_PATHCONV=1 or pass --cmd-file.",
+            file=sys.stderr,
+        )
     name = getattr(args, "name", None) or Path(cmd[0]).stem
     return _request(
         _with_project(
@@ -5917,6 +5973,14 @@ def build_parser() -> argparse.ArgumentParser:
     # action already set it to "spawn-service", leaving `args.command` a
     # list by the time `_enforce_role_gate(args.command)` runs — an
     # unhashable `in LEAD_ONLY_COMMANDS` check crashes every invocation.
+    ssv.add_argument(
+        "--cmd-file",
+        dest="cmd_file",
+        default=None,
+        metavar="FILE",
+        help="read the command from FILE (one argv element per line) instead of `-- ...` — "
+        "avoids git-bash/MSYS rewriting /flags into Windows paths (#645)",
+    )
     ssv.add_argument("service_argv", nargs=argparse.REMAINDER, help="-- <cmd> [args...]")
     ssv.set_defaults(func=cmd_spawn_service)
 
@@ -6070,7 +6134,9 @@ def build_parser() -> argparse.ArgumentParser:
     # issue new
     sin = si_sub.add_parser("new", help="create a new issue")
     sin.add_argument("title", help="issue title")
-    sin.add_argument("--severity", choices=["low", "med", "high"], default="med")
+    sin.add_argument(
+        "--severity", type=_severity_alias, choices=["low", "med", "high"], default="med"
+    )
     sin.add_argument("--noticed-in", dest="noticed_in", default=None, metavar="PROJECT")
     sin.add_argument("--role", default=None, metavar="ROLE")
     sin.add_argument("--tag", default=None, metavar="a,b,c", help="comma-separated tags")
@@ -6103,7 +6169,9 @@ def build_parser() -> argparse.ArgumentParser:
     sil.add_argument("--closed", action="store_true", dest="closed", help="show only closed issues")
     sil.add_argument("--noticed-in", dest="noticed_in", default=None, metavar="PROJECT")
     sil.add_argument("--role", default=None, metavar="ROLE")
-    sil.add_argument("--severity", choices=["low", "med", "high"], default=None)
+    sil.add_argument(
+        "--severity", type=_severity_alias, choices=["low", "med", "high"], default=None
+    )
     sil.add_argument(
         "--cockpit-bug",
         dest="cockpit_bug",

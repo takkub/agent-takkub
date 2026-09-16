@@ -788,9 +788,54 @@ _TAKKUB_QA_GATE = re.compile(
 SCOPE_TINY_DENY_TEXT = "งานนี้ถูกตีเป็นงานเล็ก — ถ้าจำเป็นต้อง gate จริง ให้ takkub progress ขอ Lead ปรับ scope"
 
 
+#: Subcommands whose positional argument is free-form TEXT (a task spec, a
+#: message, a done note) rather than something this process will execute.
+#: #649: `_CMD_START` anchors on `^` under `re.M`, so a task spec containing a
+#: line like "ทดสอบ: npm run build ต้องผ่าน" made `takkub assign` itself read
+#: as a heavy build and get denied — Lead was blocked from HANDING OUT the
+#: work, and had to write every spec to a file to dodge the guard.
+_TAKKUB_TEXT_SUBCOMMANDS = (
+    "assign",
+    "send",
+    "done",
+    "progress",
+    "goal",
+    "issue",
+    "end-session",
+    "say",
+)
+_TAKKUB_TEXT_CMD = re.compile(
+    rf"{_CMD_START}(?:python3?\s+-m\s+agent_takkub\.cli|takkub)\s+"
+    rf"(?:{'|'.join(_TAKKUB_TEXT_SUBCOMMANDS)})(?![\w-])",
+    re.I | re.M,
+)
+_QUOTED_RUN = re.compile(r"""(?s)'[^']*'|"[^"]*\"""")
+
+
+def strip_takkub_text_payload(cmd: str) -> str:
+    """Blank out the quoted free-text argument of a `takkub <text-subcommand>`
+    invocation so command-shaped words INSIDE a task spec are not classified
+    as commands this pane is about to run (#649).
+
+    Only applies to segments that really are such an invocation — anything
+    else (including `bash -c "npm run build"`) is returned untouched, so this
+    cannot be used to smuggle a heavy command past the gate.
+    """
+    if not cmd or "takkub" not in cmd.lower():
+        return cmd
+    out: list[str] = []
+    for segment in re.split(r"(&&|\|\||[;|]|\n)", cmd):
+        if segment and _TAKKUB_TEXT_CMD.search(segment):
+            out.append(_QUOTED_RUN.sub('""', segment))
+        else:
+            out.append(segment)
+    return "".join(out)
+
+
 # #585 round 2: Heavy build and test suite detection for busy-machine gate
 def _is_heavy_build_or_suite(cmd: str) -> tuple[bool, str]:
     """Check if *cmd* is a heavy build or full test suite command (#585 round 2)."""
+    cmd = strip_takkub_text_payload(cmd)
     if _TAKKUB_QA_GATE.search(cmd):
         return True, "qa_gate"
     fs = _full_suite_rule(cmd)
@@ -894,19 +939,33 @@ def _is_machine_busy_from_snapshot(
     if data is None:
         return False, ""
 
-    # Condition 1: Other pane is working
+    # Condition 1: Other pane is working.
+    #
+    # #646: this gate is machine-wide ON PURPOSE (one CPU, one disk), so the
+    # panes it counts routinely belong to OTHER projects. It used to print
+    # bare role names, which in a multi-project cockpit reads as a lie: Lead
+    # in `easy-ui` was told "backend, backend#2 are working" for panes that
+    # project never had, and `takkub list` — which is project-scoped — showed
+    # only `lead`. Same names, no way to tell a cross-project pane from stale
+    # state. Every cited pane now carries its project.
     working_panes = data.get("working_panes")
     if working_panes is None:
         working_panes = []
-        for entries in (data.get("projects") or {}).values():
+        for proj, entries in (data.get("projects") or {}).items():
             for e in entries:
                 if e.get("state") == "working":
-                    working_panes.append(e.get("role"))
+                    role_name = e.get("role")
+                    working_panes.append(f"{role_name}@{proj}" if proj else role_name)
 
     norm_role = normalise_role(role)
-    other_working = [r for r in working_panes if normalise_role(r) != norm_role]
+    other_working = [
+        r for r in working_panes if normalise_role(str(r).split("@", 1)[0]) != norm_role
+    ]
     if other_working:
-        return True, f"มี pane อื่นกำลังทำงาน ({', '.join(other_working)})"
+        return True, (
+            f"มี pane อื่นกำลังทำงาน ({', '.join(str(r) for r in other_working)}) "
+            "— นับทั้งเครื่องทุกโปรเจค (takkub list เห็นเฉพาะโปรเจคนี้)"
+        )
 
     # Condition 2: RAM or CPU exceeds governor ceiling
     if bool(data.get("overloaded")):

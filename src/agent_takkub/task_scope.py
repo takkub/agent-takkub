@@ -334,16 +334,41 @@ def _action_region(task_text: str) -> str:
     return "\n".join(out)
 
 
+#: #650: tokens that name a thing rather than describe an action — a path or
+#: slug ("pricing/toggle-billing", "blocks/auth"), an attribute pair
+#: ("role=menu", 'rel="preconnect"'), or a dotted/snake identifier
+#: ("entry.dependencies", "toggle_billing"). Scope signals inside these are
+#: the name of the code being touched, never a statement that the task
+#: touches auth or payments.
+_IDENTIFIER_RE = re.compile(
+    # an attribute pair: role=menu, rel="preconnect"
+    r"""[A-Za-z0-9_-]+\s*=\s*(?:"[^"]*"|'[^']*'|[A-Za-z0-9_.:-]+)"""
+    # a slug path with NO dot in it: pricing/toggle-billing, blocks/auth.
+    # Anything carrying an extension (pnpm-lock.yaml, .github/workflows/ci.yml)
+    # is deliberately left alone — there the FILE is the deep signal.
+    r"""|(?<![.\w-])[A-Za-z0-9_-]+(?:/[A-Za-z0-9_-]+)+(?![\w-]*\.)"""
+    # a schema field shown with its literal value: dependencies: []
+    r"""|[A-Za-z0-9_-]+\s*:\s*(?:\[[^\]\n]{0,60}\]|\{[^}\n]{0,60}\})"""
+)
+
+
 def _clean_analysis(text: str) -> str:
     """Strip references/prohibitions so deep keywords don't count by mention.
 
     - drop fenced code and inline backtick contents (variable/file names in
       backticks are references, not actions),
+    - drop identifier-shaped tokens: slash paths, attribute pairs, dotted and
+      snake/kebab names (#650 — a component library with no auth or payments
+      anywhere kept being sized `deep` off the NAMES of its blocks:
+      "pricing/toggle-billing" read as payment, the block category "auth" as
+      auth, the ARIA attribute `role=menu` as "panel role", and the
+      `dependencies` field of a registry schema as a dependency change),
     - cut the tail of each line from the first "ห้าม/ไม่ต้อง/อย่า/never/don't"
       (a prohibition is a boundary, not an action).
     """
     text = _FENCED_RE.sub(" ", text or "")
     text = _BACKTICK_RE.sub(" ", text)
+    text = _IDENTIFIER_RE.sub(" ", text)
     lines: list[str] = []
     for line in text.split("\n"):
         m = _FORBIDDEN_TAIL_RE.search(line)
@@ -387,7 +412,13 @@ def _deep_categories(text: str) -> tuple[set[str], tuple[str, str] | None]:
         if m:
             names.add(signal_name)
             if first is None:
-                first = (signal_name, m.group(0))
+                # #650: a pattern with a `.*` arm can span a whole sentence,
+                # and the reason line then quoted ~100 chars of prose with no
+                # way to tell WHICH word matched. Keep the evidence short.
+                sample = " ".join(m.group(0).split())
+                if len(sample) > 60:
+                    sample = sample[:57] + "…"
+                first = (signal_name, sample)
     return names, first
 
 

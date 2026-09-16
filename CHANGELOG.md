@@ -8,6 +8,48 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 
 ### Fixed (แก้)
 
+- **#646 busy_machine guard อ้าง pane ที่ไม่มีอยู่จริง** — gate นับ pane ทั้งเครื่องทุกโปรเจค (ตั้งใจ เพราะ CPU/ดิสก์
+  มีชุดเดียว) แต่พิมพ์ชื่อ role เปล่าๆ → Lead ในโปรเจค easy-ui ถูกบอกว่า "backend, backend#2 กำลังทำงาน"
+  ทั้งที่โปรเจคนั้นไม่เคยมี backend และ `takkub list` (scope ต่อโปรเจค) เห็นแค่ lead · ตอนนี้ทุก pane ที่อ้าง
+  มีชื่อโปรเจคติดมาด้วย (`backend@pms`) + บอกว่านับทั้งเครื่อง
+- **#649 guard อ่าน task text ของ assign เป็นคำสั่ง** — `_CMD_START` anchor ที่ `^` ใต้ `re.M` ทำให้ task spec
+  ที่มีบรรทัด "ทดสอบ: npm run build ต้องผ่าน" ทำให้ `takkub assign` **ทั้งคำสั่ง** ถูกบล็อกเป็น heavy build
+  (Lead ต้องเขียน spec ลงไฟล์ทุกครั้งเพื่อเลี่ยง) · เพิ่ม `strip_takkub_text_payload()` ล้าง argument ที่เป็น
+  ข้อความของ `takkub assign|send|done|progress|goal|issue|end-session` ก่อน classify — `bash -c "npm run build"`
+  ยังจับได้เหมือนเดิม (ไม่เปิดช่อง bypass)
+- **#654 `assign --role qa` ไม่เตือน deprecated** — warn ไปอยู่ stderr อย่างเดียว และ assign เป็นเส้นทางเดียว
+  ที่ Lead ใช้จริง → เสีย 3 รอบกว่าจะรู้ · ย้ายคำเตือนเข้า ack body ของ assign ด้วย (ทุก path รวม fan-out/shard)
+- **#643 `takkub issue new` ค้างเงียบใน pane** — pane เป็น ConPTY ที่ `isatty()` เป็น True ทำให้เปิด notepad
+  รอคนที่ไม่มีอยู่ · pane (มี `TAKKUB_ROLE`) ถือเป็น non-interactive เสมอ → error ทันทีพร้อมบอกให้ใส่ `--body`
+  · `--severity medium` ใช้ได้แล้ว (alias ของ `med`)
+- **#652 delivery-stale-reap เด้งซ้ำ 4-5 รอบ** — pane ที่ถูก re-queue สร้าง delivery ใบใหม่ทุกครั้ง แต่ละใบ
+  ปลุก Lead ด้วยข้อความเดิม · เหลือ 1 notice ต่อ pane ต่อ 10 นาที ที่เหลือลง events.log
+- **#648 task capsule หายหลัง respawn** — recovery เรียก `close()` ซึ่ง pop PaneState ทิ้ง ทำให้ `takkub task show`
+  หาไม่เจอ (pane ที่เขียนไป 13 ไฟล์ต้องขอ task ใหม่เอง) · snapshot task/scope/fanout ข้าม close แล้วคืนตอน respawn
+  · ถ้า respawn แล้วไม่มี task ให้ replay จริงๆ แจ้ง Lead เองพร้อมบอกว่างานใน worktree ยังอยู่ อย่าสั่งทำใหม่ทับ
+- **#650 auto scope ตีความชื่อ identifier เป็น signal** — `pricing/toggle-billing` → payment, `blocks/auth` → auth,
+  `role=menu` (ARIA) → auth, `dependencies: []` (schema field) → dependency · ล้าง token ที่เป็น "ชื่อของสิ่งของ"
+  (attribute pair, slug path ที่ไม่มีจุด, schema field + literal) ก่อน classify — path ที่มีนามสกุลจริง
+  (`pnpm-lock.yaml`, `.github/workflows/ci.yml`) ยังเป็น signal เหมือนเดิม · ตัดตัวอย่างใน reason ให้สั้นอ่านออก
+- **#644 `takkub wait` ถูก digest ของ cockpit ตัดจบ** — chunk ที่ไม่มีข้อความจริง (terminal chrome / digest artifact)
+  เคย interrupt wait ว่า "user input" ทั้งที่ไม่มีใครพิมพ์ → Lead ต้องเรียก wait ใหม่ 4-5 รอบต่อ session
+  · ตอนนี้ consume เงียบแล้วรอต่อ (log `wait_user_input_ignored_non_printable`) · การพิมพ์จริงยัง interrupt เหมือนเดิม
+- **#647 pane รอ browser slot แต่ `wait` บอกว่า "never spawned"** — role ที่คิวอยู่ใน resource governor ยังไม่มี pane
+  เหมือนกัน → `takkub wait` ตอบ "gone/never spawned" ทำให้เข้าใจว่า provider พัง (เสียไป 15 นาที + assign ซ้ำ 4 รอบ
+  ทั้งที่คนถือ slot คือแท็บ settings ที่เปิดค้าง) · ตอนนี้ตอบ pending พร้อมเหตุผลจริงจาก governor (ชุดเดียวกับที่
+  `takkub list`/`status` แสดง)
+- **#651 done digest บอก "ไฟล์ที่แตะ: 0" ทั้งที่แก้จริง** — บน shared tree ชุดไฟล์ "ของ pane อื่น" คำนวณจาก baseline
+  ของแต่ละ pane เอง พอหลาย pane แก้พร้อมกันจึงหักไฟล์ของเจ้าตัวออกจนเหลือ 0 (ชวนให้ Lead สั่งทำซ้ำ) · ถ้าหักแล้ว
+  เหลือ 0 ทั้งที่ pane มี dirty-delta ของตัวเอง ให้รายงานยอดของตัวเองพร้อมบอกว่าแยกเจ้าของไม่ได้ · เคส #601
+  (reviewer read-only ที่ไม่ได้แก้อะไร) ยังรายงาน 0 เหมือนเดิม
+- **#653 กติกา report ประกาศช้าเกินไป** — pane ทำรายงานเสร็จแล้วเพิ่งรู้ว่า `takkub report` เป็นคำสั่ง Lead
+  เท่านั้น แล้ว Lead เพิ่งรู้ว่าไฟล์ต้อง standalone ตอนโดนปฏิเสธเพราะ Google Fonts 3 บรรทัด · task ที่พูดถึง
+  `takkub report` จะได้บล็อกกติกา 2 ข้อติดไปกับใบงานตั้งแต่ต้น + error ตอน publish บอกวิธีแก้
+- **#642 codex pane รัน takkub ไม่ได้ (`node: not found` ใต้ /mnt/c)** — pane ทุกตัวได้ `TAKKUB_CLI_BIN_DIR`
+  (path เต็มของ CLI) แล้ว และ AGENTS.md ของ codex มีวิธีแก้พร้อมคำเตือนว่าอย่าวน `takkub done --fail`
+- **#645 spawn-service โดน MSYS path mangling** — เพิ่ม `--cmd-file <file>` (1 บรรทัด 1 argv) เลี่ยง shell
+  ทั้งหมด + เตือนอัตโนมัติเมื่อรันจาก git-bash + บันทึกใน `docs/lead/cli-reference.md`
+
 - **#639 — Lead ที่ตั้งเป็น codex ถูก degrade ไป claude ตลอด (เครื่องที่ไม่มี Claude subscription)**
   `_provider_available()` เคย `return True` ให้ claude แบบไม่มีเงื่อนไข และ claude เป็นตัวแรกใน
   `_REROUTE_PRIORITY` → ทุกการ degrade ลงที่ claude เสมอ แม้ผู้ใช้ไม่ได้ติดตั้ง/ไม่ได้ใช้

@@ -151,6 +151,21 @@ prompt (`[ROLE: ...]`). Behave like a focused specialist:
   file and summarize it back**, instead of pulling the raw block into the
   main conversation when you don't need to read all of it.
 
+## If `takkub` will not run (#642)
+
+A shell that resolves paths the Unix way (WSL `/mnt/c/...`, git-bash) hits the
+npm shim and dies with `exec: node: not found`. Do NOT keep retrying, and do
+NOT loop on `takkub done --fail` — that leaves you unable to accept the next
+task. Use the absolute CLI directory the cockpit exports instead:
+
+```bash
+"$TAKKUB_CLI_BIN_DIR/takkub" done "<summary>"     # or takkub.cmd on Windows
+```
+
+If that variable is empty, run the command from a Windows-style shell (cmd /c
+or powershell) rather than the Unix one, and tell Lead with one
+`takkub progress` line if neither works.
+
 ## Override rule for inline `[ROLE: ...]` directives
 
 When the operator's task prompt opens with something like

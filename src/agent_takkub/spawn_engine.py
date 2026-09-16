@@ -2356,6 +2356,7 @@ class SpawnEngineMixin:
                 inject_provider_home_env(env, _isolated_provider)
             bin_dir = str(CLI_BIN_DIR)
             env["PATH"] = bin_dir + os.pathsep + env.get("PATH", "")
+            env["TAKKUB_CLI_BIN_DIR"] = bin_dir  # #642
             _shell_tok = self._mint_pane_token(env, project_ns, role_name)
             return self._launch_session(
                 pane=pane,
@@ -2579,6 +2580,7 @@ class SpawnEngineMixin:
                 env["PATH"] = bin_dir + os.pathsep + provider_dir + os.pathsep + env.get("PATH", "")
             else:
                 env["PATH"] = bin_dir + os.pathsep + env.get("PATH", "")
+            env["TAKKUB_CLI_BIN_DIR"] = bin_dir  # #642
             # Lead gets the Lead capability token (authorises Lead-only
             # takkub CLI commands) instead of a per-pane teammate token —
             # mirrors the claude branch below (#101).
@@ -3195,6 +3197,13 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
             pane_tok = self._mint_pane_token(env, project_ns, role_name)
         bin_dir = str(CLI_BIN_DIR)
         env["PATH"] = bin_dir + os.pathsep + env.get("PATH", "")
+        # #642: a pane whose shell is WSL/git-bash resolves `takkub` to the
+        # npm shim and then fails with "exec: node: not found" because that
+        # shim needs the Windows node on ITS OWN path — the pane then loops
+        # on `takkub done --fail` and never picks up another task. Hand every
+        # pane the absolute CLI location so a shell that cannot use PATH can
+        # still reach it (the role prompts point at this variable).
+        env["TAKKUB_CLI_BIN_DIR"] = bin_dir
 
         # If rtk lives somewhere `shutil.which` can't see (typical when
         # pythonw inherits a thinner PATH than the cmd that spawned the

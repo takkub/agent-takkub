@@ -965,6 +965,12 @@ def _delayed_enter_verified(
 # ── Mixin ─────────────────────────────────────────────────────────────────────
 
 
+#: #652: one stale-reap notice per pane per this window. A pane that keeps
+#: getting re-queued produces a fresh delivery each round, and each one used
+#: to wake Lead with an identical message it could do nothing about.
+_STALE_REAP_NOTICE_COOLDOWN_S = 600.0
+
+
 class LeadInboxMixin:
     """Lead-inbox queue and delivery methods for Orchestrator.
 
@@ -2451,6 +2457,29 @@ class LeadInboxMixin:
                     reason=reason,
                 )
                 continue
+            # #652: `expire_stale` can only reap a given delivery once, but a
+            # pane that keeps being re-queued (a dead pane whose task is
+            # re-delivered) produces a NEW delivery each round — Lead got the
+            # same notice 4-5 times, ~20s apart, for one task, and it only
+            # stopped when Lead closed the pane by hand. One notice per pane
+            # per cooldown; the rest are audit-log only.
+            seen = getattr(self, "_stale_reap_notified", None)
+            if seen is None:
+                seen = self._stale_reap_notified = {}
+            reap_key = (delivery.project_id, delivery.pane_id)
+            now_ts = time.time()
+            last_ts = seen.get(reap_key)
+            if last_ts is not None and (now_ts - last_ts) < _STALE_REAP_NOTICE_COOLDOWN_S:
+                _log_event(
+                    "delivery_stale_reap_suppressed",
+                    role=delivery.pane_id,
+                    project=delivery.project_id,
+                    delivery_id=delivery.delivery_id,
+                    reason="already_notified_for_this_pane",
+                    since_s=round(now_ts - last_ts, 1),
+                )
+                continue
+            seen[reap_key] = now_ts
             self._notify_lead(
                 delivery.project_id,
                 f"⚠️ [delivery-stale-reap] task delivery ค้างอยู่สำหรับ {delivery.pane_id} "
@@ -3330,6 +3359,16 @@ class LeadInboxMixin:
         snap_auth_recovery = (
             getattr(_ps_snap, "pending_auth_recovery", None) if _ps_snap is not None else None
         )
+        # #648: `close()` below pops the whole PaneState, including the task
+        # bookkeeping — so after a recovery respawn `takkub task show` found
+        # nothing and the pane had to ask Lead to resend by hand (one such
+        # pane had already written 13 files into its worktree; had Lead not
+        # checked, it would have re-assigned the whole batch). Carry the task
+        # record across the pop the same way the counters above are.
+        snap_task_text = getattr(_ps_snap, "last_assigned_task", None) if _ps_snap else None
+        snap_task_file = getattr(_ps_snap, "last_assigned_task_file", None) if _ps_snap else None
+        snap_scope = getattr(_ps_snap, "last_assigned_scope", None) if _ps_snap else None
+        snap_fanout = int(getattr(_ps_snap, "subagent_fanout", 0) or 0) if _ps_snap else 0
         # #422: closed-enum reason + bounded snapshot + recovery_id shared
         # with the `{kind}_pane_respawned` event below (see
         # orchestrator_text.RECOVERY_REASONS).
@@ -3382,6 +3421,13 @@ class LeadInboxMixin:
             if degrade:
                 ps.provider_override = "claude"
             ps.pending_auth_recovery = snap_auth_recovery
+            # #648: restore the task record so `takkub task show` still
+            # answers for this pane even if the re-send below never lands.
+            if snap_task_text and not ps.last_assigned_task:
+                ps.last_assigned_task = snap_task_text
+                ps.last_assigned_task_file = snap_task_file
+                ps.last_assigned_scope = snap_scope
+                ps.subagent_fanout = snap_fanout
             ok, msg = self.spawn(role_name, cwd=cwd, project=project_ns, _from_auto_respawn=True)
             _log_event(
                 f"{kind}_pane_respawned",
@@ -3395,6 +3441,28 @@ class LeadInboxMixin:
             )
             if ok and task:
                 self._send_when_ready(role_name, task, project=project_ns)
+            elif ok and not task and snap_task_text:
+                # #648: respawn succeeded but this recovery path carries no
+                # task text to replay. Say so — with the fact that the work
+                # already on disk is untouched — instead of leaving the fresh
+                # pane to discover it has nothing and ask Lead itself.
+                self._notify_lead(
+                    project_ns,
+                    f"⚠️ [{role_name}] respawn แล้วแต่ไม่ได้ส่ง task เดิมไปด้วย — "
+                    f'ส่งใหม่ด้วย `takkub send --to {role_name} "$(takkub task show '
+                    f'--role {role_name})"` หรือ assign ใหม่ · '
+                    "งานที่ทำค้างไว้ยังอยู่ใน worktree/ไฟล์เดิม ไม่ได้หาย — อย่าสั่งทำใหม่ทับ",
+                    from_role="system",
+                    note="respawn_without_task",
+                    kind="respawn-task-missing",
+                )
+                _log_event(
+                    "respawn_without_task",
+                    role=role_name,
+                    project=project_ns,
+                    reason=reason,
+                    recovery_id=recovery_id,
+                )
             elif not ok:
                 ps.pending_auth_recovery = None
                 detail = msg

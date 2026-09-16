@@ -132,6 +132,23 @@ class LeadWaitMixin:
         `_subagent_assignments` entry, and no `list_status` presence yet."""
         self._recent_assign_queue[(project_ns, role)] = time.time()
 
+    def _resource_queue_detail(self, project_ns: str, role: str) -> str:
+        """#647: the governor's own description for *role* if it is queued
+        waiting for a slot, else "". Reuses `_queued_resource_roles`, the
+        same source `takkub list`/`status` render, so the wait and the status
+        table never tell different stories about the same pane.
+
+        Layer rule: that method lives on the Orchestrator this mixin is mixed
+        into — reached via `getattr` so a lightweight test double without it
+        simply reports nothing queued instead of raising."""
+        fn = getattr(self, "_queued_resource_roles", None)
+        if not callable(fn):
+            return ""
+        try:
+            return str(fn(project_ns, {}).get(role, "") or "")
+        except Exception:
+            return ""
+
     def _resolve_requested_roles(
         self, requested_roles: list[str], known_roles: set[str]
     ) -> list[str]:
@@ -400,6 +417,14 @@ class LeadWaitMixin:
             # current assign) — so any event still on record here is proof
             # this role WAS spawned and reported at least once before its
             # pane fully disappeared, not a typo'd/never-existed role name.
+            # #647: a role sitting in the resource governor's queue (no
+            # browser slot, machine overloaded) also has no pane yet — and
+            # calling that "never spawned" sent a real session hunting a
+            # broken provider for 15 minutes while the actual holder was a
+            # settings tab the owner had left open. It is pending, not gone.
+            queued = self._resource_queue_detail(project_ns, role)
+            if queued:
+                return "pending", queued
             if event is not None:
                 return "gone", _GONE_ALREADY_REPORTED_DETAIL
             return "gone", _GONE_NEVER_SPAWNED_DETAIL
@@ -510,6 +535,26 @@ class LeadWaitMixin:
         if hasattr(self, "_wait_user_input_ack_ts"):
             self._wait_user_input_ack_ts[project_ns] = last_input_ts
         printable = getattr(self, "_lead_last_user_input_printable", {}).get(project_ns, True)
+        if not printable:
+            # #644: a chunk with no real text in it is terminal chrome or a
+            # digest artifact that slipped the #357/#420/#428/#431 denylist —
+            # never the owner asking for attention. It used to cut the wait
+            # anyway with "interrupted by user input", and since the cockpit's
+            # own inbox digests keep producing these, Lead re-issued `takkub
+            # wait` four or five times per session for input nobody typed.
+            # Consume it (ack_ts above) and keep waiting; the audit log still
+            # records that something arrived.
+            try:
+                from .orchestrator_text import _log_event
+
+                _log_event(
+                    "wait_user_input_ignored_non_printable",
+                    project=project_ns,
+                    last_input_ts=last_input_ts,
+                )
+            except Exception:
+                pass
+            return None
         detail = (
             (
                 "มีข้อความ/คำสั่งใหม่จากคุณเข้ามาระหว่างที่ wait กำลังรออยู่ — "

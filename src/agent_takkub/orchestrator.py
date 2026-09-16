@@ -88,6 +88,7 @@ from .orchestrator_text import (  # re-exported for test/app/main_window imports
     BRACKETED_PASTE_THRESHOLD,
     TASK_HANDOFF_THRESHOLD,
     UI_NO_UI_MARKER,
+    _append_report_rules_hint,
     _append_verify_fail_hint,
     _append_worktree_hint,
     _build_transcript_path,
@@ -3547,6 +3548,7 @@ class Orchestrator(
         if effective_provider == CODEX:
             task = _rewrite_task_for_codex(task)
         task = _append_verify_fail_hint(task, base_role_a)
+        task = _append_report_rules_hint(task)  # #653
         # v2-hardening C (Adaptive Escalation) — a NEW task dispatched to a
         # role whose pane is still alive (pane_is_running, computed above)
         # is being reassigned before its previous task ever closed out: the
@@ -6820,6 +6822,26 @@ class Orchestrator(
         files_touched, dirs = union_files_touched(
             diffstat, changed_uncommitted, exclude=sibling_files
         )
+        # #651: on a shared tree every pane's "own" set is computed from its
+        # own baseline, so with several panes editing at once each one's set
+        # contains the others' files — the exclusion then subtracted this
+        # pane's REAL work down to zero and the done note said "ไฟล์ที่แตะ: 0
+        # — ยังไม่มีอะไรเปลี่ยน" to a pane that had just written three files.
+        # A wrong zero is worse than an over-count: it invites Lead to order
+        # the work redone. Fall back to the unexcluded set and say plainly
+        # that attribution is uncertain.
+        # Narrow on purpose: only `changed_uncommitted` — paths whose dirty
+        # state changed since THIS pane's own assign snapshot — counts as
+        # direct evidence. A read-only pane has none (that is #601's reviewer,
+        # whose 4 files were devops's commits and must still report 0), while
+        # a pane that actually wrote files does, even when a sibling's
+        # over-claiming set covers the same paths.
+        sibling_over_subtracted = False
+        if sibling_files and not files_touched and changed_uncommitted:
+            own_touched, own_dirs = union_files_touched("", changed_uncommitted)
+            if own_touched:
+                files_touched, dirs = own_touched, own_dirs
+                sibling_over_subtracted = True
         facts = DigestFacts(
             role=from_role,
             ref=ref,
@@ -6837,9 +6859,16 @@ class Orchestrator(
                 else (
                     "เทียบ HEAD + dirty path/mtime/size ตอน assign"
                     + (
-                        f" — ตัดไฟล์ {len(sibling_files)} รายการที่ pane อื่น แตะในช่วงเดียวกันออกแล้ว"
-                        if sibling_files
-                        else ""
+                        (
+                            f" — pane อื่นแตะ {len(sibling_files)} ไฟล์ทับช่วงเดียวกันจนหักออกแล้วเหลือ 0 "
+                            "จึงรายงานยอดก่อนหัก (แยกไม่ได้ว่าไฟล์ไหนของใครบน shared tree — #651)"
+                        )
+                        if sibling_over_subtracted
+                        else (
+                            f" — ตัดไฟล์ {len(sibling_files)} รายการที่ pane อื่น แตะในช่วงเดียวกันออกแล้ว"
+                            if sibling_files
+                            else ""
+                        )
                     )
                     + " — shared tree ยังอาจรวมการเปลี่ยนของ pane อื่นที่เกิดในช่วงเวลาเดียวกัน"
                 )
