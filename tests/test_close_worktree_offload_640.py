@@ -101,8 +101,16 @@ def test_ledger_index_is_written_off_thread_and_coalesced(tmp_path, monkeypatch)
     main_ident = threading.get_ident()
     writers: list[int] = []
     real = tl._atomic_write
+    # Hold the writer's first write until the whole burst is enqueued —
+    # without this the test is a race: a fast writer thread legitimately
+    # drains each enqueue as it lands and writes all 20 (seen on the
+    # macos-latest runner, 2026-09-17), which is correct behavior, just not
+    # the burst this test means to produce. `_atomic_write` runs OUTSIDE
+    # _INDEX_LOCK, so blocking here never blocks the enqueues.
+    gate = threading.Event()
 
     def _spy(path, text):
+        gate.wait(5.0)
         writers.append(threading.get_ident())
         real(path, text)
 
@@ -110,10 +118,13 @@ def test_ledger_index_is_written_off_thread_and_coalesced(tmp_path, monkeypatch)
     target = tmp_path / "INDEX.md"
     for i in range(20):
         tl._write_index_text(target, f"version {i}")
+    gate.set()
     assert tl.flush_index_writes(5.0)
     assert target.read_text(encoding="utf-8") == "version 19"
     assert writers and all(w != main_ident for w in writers)
-    assert len(writers) < 20, "a burst must be coalesced, not written 20 times"
+    # At most: one write the thread had already popped before the gate
+    # opened, plus one for the coalesced latest text.
+    assert len(writers) <= 2, "a burst must be coalesced, not written per enqueue"
 
 
 def test_orphan_worktree_sweep_no_longer_blocks_orchestrator_boot(_qt_session_app, monkeypatch):
