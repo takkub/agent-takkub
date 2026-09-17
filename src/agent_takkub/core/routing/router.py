@@ -32,11 +32,12 @@ class Router:
         (and effort) into that Protocol as a real widening for a later V2
         phase, not something to do half-way here.
 
-        `project` is accepted (not yet consulted — the role/provider model
-        pin store carries no project scoping either) purely to keep this
-        façade's shape consistent with `effective_provider_for`.
+        `project` selects that project's role-model bucket when it has one
+        (#657 — `role_models`'s aliases-projects store; a project with no
+        bucket falls back to the global pins, same as
+        `effective_provider_for`'s routing.json contract).
         """
         from agent_takkub.provider_models import model_for as _provider_model_for
         from agent_takkub.role_models import model_for as _role_model_for
 
-        return _role_model_for(role, provider) or _provider_model_for(provider)
+        return _role_model_for(role, provider, project) or _provider_model_for(provider)

@@ -305,10 +305,10 @@ def provider_for(role: str, project: str | None = None) -> str:
     mapping = load_providers(project)
     if key in mapping:
         return mapping[key]
-    return _provider_from_role_models(key)
+    return _provider_from_role_models(key, project)
 
 
-def _provider_from_role_models(key: str) -> str:
+def _provider_from_role_models(key: str, project: str | None = None) -> str:
     """Fallback for a role that `role-providers.json` says nothing about:
     honour the provider recorded alongside its model in `role-models.json`
     before defaulting to claude (#338).
@@ -330,7 +330,7 @@ def _provider_from_role_models(key: str) -> str:
     try:
         from . import role_models
 
-        entry = role_models.raw_model_for(key)
+        entry = role_models.raw_model_for(key, project)
     except Exception:
         return CLAUDE
     if not entry:

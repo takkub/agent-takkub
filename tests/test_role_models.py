@@ -241,3 +241,80 @@ def test_set_provider_writes_v2_routing_global(isolated_v2_data_home) -> None:
 
     routing_target = RoleAgentMigrationStep(data_home=isolated_v2_data_home)._routing_target()
     assert read_json(routing_target).get("global") == {"frontend": "codex"}
+
+
+# ── #657: per-project buckets — a project WITH a bucket resolves wholly
+# from it (mirrors provider_config.load_providers' routing.json contract);
+# a project with no bucket falls back to the global entries; the first
+# project-scoped write seeds the bucket from a snapshot of global. ─────────
+
+
+class TestPerProjectBuckets:
+    def test_project_without_bucket_falls_back_to_global(self) -> None:
+        role_models.set_model("backend", "codex", "gpt-5.6-sol")
+        assert role_models.model_for("backend", "codex", "pms") == "gpt-5.6-sol"
+        assert role_models.effort_for("backend", "codex", "pms") is None
+
+    def test_project_bucket_wins_over_global(self) -> None:
+        role_models.set_model("backend", "codex", "gpt-5.6-sol")
+        role_models.set_model("backend", "codex", "gpt-5.7", project="pms")
+        assert role_models.model_for("backend", "codex", "pms") == "gpt-5.7"
+        # Global stays untouched; other projects still see it.
+        assert role_models.model_for("backend", "codex") == "gpt-5.6-sol"
+        assert role_models.model_for("backend", "codex", "other") == "gpt-5.6-sol"
+
+    def test_first_project_write_seeds_snapshot_of_global(self) -> None:
+        role_models.set_model("frontend", "claude", "claude-sonnet-5")
+        role_models.set_effort("qa", "claude", "high")
+        # First scoped write for "pms" touches only backend...
+        role_models.set_model("backend", "codex", "gpt-5.7", project="pms")
+        # ...but frontend/qa carried over from the global snapshot, so the
+        # project doesn't silently lose the pins the page was showing.
+        assert role_models.model_for("frontend", "claude", "pms") == "claude-sonnet-5"
+        assert role_models.effort_for("qa", "claude", "pms") == "high"
+
+    def test_scoped_entry_cleared_project_stays_self_scoped(self) -> None:
+        role_models.set_model("backend", "codex", "gpt-5.7", project="pms")
+        role_models.set_model("backend", "codex", "", project="pms")
+        assert role_models.model_for("backend", "codex", "pms") is None
+        # Bucket still exists: a LATER global pin must NOT leak in (same
+        # "project with an entry resolves from it, full stop" contract as
+        # routing.json's projects bucket).
+        role_models.set_model("backend", "codex", "gpt-5.6-sol")
+        assert role_models.model_for("backend", "codex", "pms") is None
+        assert role_models.model_for("backend", "codex") == "gpt-5.6-sol"
+
+    def test_provider_binding_enforced_inside_bucket(self) -> None:
+        role_models.set_model("backend", "codex", "gpt-5.7", project="pms")
+        assert role_models.model_for("backend", "claude", "pms") is None
+
+    def test_effort_roundtrip_per_project(self) -> None:
+        role_models.set_effort("backend", "claude", "high", project="pms")
+        assert role_models.effort_for("backend", "claude", "pms") == "high"
+        assert role_models.effort_for("backend", "claude") is None
+
+    def test_clear_model_scoped_to_project(self) -> None:
+        role_models.set_model("backend", "codex", "gpt-5.6-sol")
+        role_models.set_model("backend", "codex", "gpt-5.7", project="pms")
+        role_models.clear_model("backend", project="pms")
+        assert role_models.model_for("backend", "codex", "pms") is None
+        assert role_models.model_for("backend", "codex") == "gpt-5.6-sol"
+
+    def test_all_models_and_raw_model_for_take_project(self) -> None:
+        role_models.set_model("backend", "codex", "gpt-5.7", project="pms")
+        assert role_models.all_models("pms")["backend"]["model"] == "gpt-5.7"
+        assert role_models.raw_model_for("backend", "pms") == ("codex", "gpt-5.7")
+
+    def test_corrupt_projects_file_behaves_empty(self) -> None:
+        target = role_models.projects_path()
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("{not json", encoding="utf-8")
+        role_models.set_model("backend", "codex", "gpt-5.6-sol")
+        assert role_models.model_for("backend", "codex", "pms") == "gpt-5.6-sol"
+
+    def test_project_buckets_lists_every_bucket(self) -> None:
+        role_models.set_model("backend", "codex", "gpt-5.7", project="pms")
+        role_models.set_model("frontend", "claude", "claude-sonnet-5", project="easy-ui")
+        buckets = role_models.project_buckets()
+        assert buckets["pms"]["backend"]["model"] == "gpt-5.7"
+        assert buckets["easy-ui"]["frontend"]["model"] == "claude-sonnet-5"

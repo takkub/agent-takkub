@@ -794,7 +794,7 @@ def stale_legacy_role_configs(project: str | None = None) -> list[dict[str, str]
             provider = str(routing["projects"].get(project, {}).get(role, "")).strip()
         if not provider:
             provider = str(routing["global"].get(role, "")).strip()
-        raw = role_models.raw_model_for(role)
+        raw = role_models.raw_model_for(role, project)
         model = ""
         if provider:
             if raw and raw[0] == provider:
@@ -804,7 +804,7 @@ def stale_legacy_role_configs(project: str | None = None) -> list[dict[str, str]
         if not provider:
             continue
         reviewer_provider = provider_config.provider_for("reviewer", project)
-        reviewer_model = role_models.model_for("reviewer", reviewer_provider) or ""
+        reviewer_model = role_models.model_for("reviewer", reviewer_provider, project) or ""
         if (provider, model) == (reviewer_provider, reviewer_model):
             continue  # already what Reviewer uses — nothing to flag
         out.append({"role": role, "provider": provider, "model": model})

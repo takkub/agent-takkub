@@ -325,22 +325,34 @@ def _pins_for(provider: str) -> list[tuple[str | None, str]]:
     a real config — every pin in role-models.json, none at provider level —
     the boot refresh reported NO_PIN and did nothing, every single boot,
     while the roles stayed frozen on whatever they were pinned to.
+
+    #657 added per-project role buckets — those pins age exactly the same
+    way, so every project bucket is swept too. Tuple shape is
+    ``(project, role, model)``: ``(None, None, m)`` the provider-level
+    default, ``(None, r, m)`` a global role pin, ``(p, r, m)`` a project
+    bucket's pin.
     """
     from . import provider_models, role_models
 
-    pins: list[tuple[str | None, str]] = []
+    pins: list[tuple[str | None, str | None, str]] = []
     provider_pin = provider_models.model_for(provider)
     if provider_pin:
-        pins.append((None, provider_pin))
+        pins.append((None, None, provider_pin))
     pins.extend(
-        (role, entry["model"])
+        (None, role, entry["model"])
         for role, entry in sorted(role_models.all_models().items())
         if entry.get("provider") == provider and entry.get("model")
     )
+    for project, bucket in sorted(role_models.project_buckets().items()):
+        pins.extend(
+            (project, role, entry["model"])
+            for role, entry in sorted(bucket.items())
+            if entry.get("provider") == provider and entry.get("model")
+        )
     return pins
 
 
-def _apply_pin(provider: str, role: str | None, model: str) -> None:
+def _apply_pin(provider: str, project: str | None, role: str | None, model: str) -> None:
     """Persist a bumped pin back to whichever store it came from — the same
     calls Settings makes, so a bump is indistinguishable from the user
     picking the newer model themselves and Settings can still override it
@@ -352,7 +364,7 @@ def _apply_pin(provider: str, role: str | None, model: str) -> None:
     if role is None:
         provider_models.set_model(provider, model)
     else:
-        role_models.set_model(role, provider, model)
+        role_models.set_model(role, provider, model, project=project)
 
 
 def _refresh_pins(provider: str, binary: str) -> ModelRefreshOutcome:
@@ -370,8 +382,13 @@ def _refresh_pins(provider: str, binary: str) -> ModelRefreshOutcome:
 
     bumped: list[str] = []
     unmatched: list[str] = []
-    for role, pinned in pins:
-        label = pinned if role is None else f"{role}: {pinned}"
+    for project, role, pinned in pins:
+        if role is None:
+            label = pinned
+        elif project is None:
+            label = f"{role}: {pinned}"
+        else:
+            label = f"{project}/{role}: {pinned}"
         fam = _family_key(pinned)
         latest = latest_by_family.get(fam) if fam is not None else None
         if latest is None:
@@ -379,7 +396,7 @@ def _refresh_pins(provider: str, binary: str) -> ModelRefreshOutcome:
             # the catalog — left exactly as configured, never guessed at.
             unmatched.append(label)
         elif latest != pinned:
-            _apply_pin(provider, role, latest)
+            _apply_pin(provider, project, role, latest)
             bumped.append(f"{label} -> {latest}")
 
     # One outcome covers every pin: a bump anywhere is the headline, since
@@ -388,7 +405,7 @@ def _refresh_pins(provider: str, binary: str) -> ModelRefreshOutcome:
         return ModelRefreshOutcome(provider, STATUS_BUMPED, " · ".join(bumped))
     if unmatched:
         return ModelRefreshOutcome(provider, STATUS_UNMATCHED, " · ".join(unmatched))
-    return ModelRefreshOutcome(provider, STATUS_UP_TO_DATE, " · ".join(p for _, p in pins))
+    return ModelRefreshOutcome(provider, STATUS_UP_TO_DATE, " · ".join(p for *_ignored, p in pins))
 
 
 def refresh_provider_model(name: str, binary: str) -> ModelRefreshOutcome:

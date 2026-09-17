@@ -62,7 +62,7 @@ def effective_model_for_v2(role: str, provider: str, project: str | None = None)
         from agent_takkub.provider_models import model_for as _provider_model_for
         from agent_takkub.role_models import model_for as _role_model_for
 
-        return _role_model_for(role, provider) or _provider_model_for(provider)
+        return _role_model_for(role, provider, project) or _provider_model_for(provider)
 
     if not v2_router_enabled():
         return _direct()

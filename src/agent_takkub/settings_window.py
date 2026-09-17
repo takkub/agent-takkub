@@ -323,7 +323,8 @@ _VIEW_HEADERS: dict[int, tuple[str, str]] = {
     ),
     VIEW_PROVIDERS_ROLES: (
         "Roles & ตำแหน่ง",
-        "ขนาดทีมของโปรเจคนี้ + ตำแหน่งที่เปิดจริง + provider/model ต่อ role",
+        "ขนาดทีมของโปรเจคนี้ + ตำแหน่งที่เปิดจริง + provider/model/effort ต่อ role "
+        "— เซฟแล้วมีผลเฉพาะโปรเจคนี้ (โปรเจคที่ไม่เคยเซฟหน้านี้ใช้ค่ากลาง)",
     ),
     VIEW_PIPELINE_BUILDER: (
         "Pipeline",
@@ -1515,6 +1516,9 @@ class SettingsWindow(
             # "save failed" while the model files are already persisted.
             provider_models.path(),
             role_models.path(),
+            # #657: role model/effort now land in the current project's
+            # bucket — that file is part of the same all-or-nothing Save.
+            role_models.projects_path(),
         )
         snapshots = {p: (p.read_bytes() if p.exists() else None) for p in snapshot_paths}
 
@@ -1563,10 +1567,22 @@ class SettingsWindow(
                 # role's provider (or a substitute kicking in) can't pass a
                 # model id to a CLI that doesn't know it.
                 role_provider = role_provider_combos[role].currentData() or provider_config.CLAUDE
-                role_models.set_model(role, role_provider, _combo_model(combo))
+                # #657: scope the pin to the project whose Settings this is —
+                # same scope the provider row two lines down goes to
+                # (`save_role_overrides(..., self._project)`), so the whole
+                # row (provider + model + effort) means ONE thing: "ของ
+                # โปรเจคนี้". A project with no bucket yet gets seeded from
+                # the global entries on this first write (role_models's own
+                # first-save snapshot), mirroring what save_role_overrides
+                # already does for providers.
+                role_models.set_model(
+                    role, role_provider, _combo_model(combo), project=self._project
+                )
                 effort_combo = role_effort_combos.get(role)
                 if effort_combo is not None:
-                    if not effort_combo.isEnabled() and role_models.effort_for(role, role_provider):
+                    if not effort_combo.isEnabled() and role_models.effort_for(
+                        role, role_provider, self._project
+                    ):
                         # Combo is disabled because the CURRENT provider/model
                         # can't take an effort argument, yet a value is still
                         # on disk for this exact provider (stale from before
@@ -1574,7 +1590,9 @@ class SettingsWindow(
                         # than persist something the CLI would reject, and
                         # tell the user once instead of silently.
                         dropped_effort_roles.append(role)
-                    role_models.set_effort(role, role_provider, _combo_effort(effort_combo))
+                    role_models.set_effort(
+                        role, role_provider, _combo_effort(effort_combo), project=self._project
+                    )
 
             role_providers = {
                 role: combo.currentData() for role, combo in role_provider_combos.items()
@@ -2780,7 +2798,7 @@ class SettingsWindow(
         _fill_model_combo(
             model_combo,
             _role_provider_now,
-            role_models.model_for(role, _role_provider_now),
+            role_models.model_for(role, _role_provider_now, self._project),
             role=role,
             project=self._project,
         )
@@ -2798,8 +2816,8 @@ class SettingsWindow(
         _fill_effort_combo(
             effort_combo,
             _role_provider_now,
-            role_models.model_for(role, _role_provider_now) or "",
-            role_models.effort_for(role, _role_provider_now),
+            role_models.model_for(role, _role_provider_now, self._project) or "",
+            role_models.effort_for(role, _role_provider_now, self._project),
             role=role,
         )
         effort_combo.currentIndexChanged.connect(self._mark_dirty)

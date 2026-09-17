@@ -168,3 +168,16 @@ def test_append_provider_effort_empty_value_appends_nothing() -> None:
     argv: list[str] = []
     _append_provider_effort(argv, CLAUDE, "")
     assert argv == []
+
+
+def test_project_scoped_effort_wins_for_that_project_only() -> None:
+    """#657: a project bucket's effort applies when the pane spawns for that
+    project; every other project (and project=None) keeps resolving the
+    global entry."""
+    role_models.set_effort("backend", "claude", "medium")
+    role_models.set_effort("backend", "claude", "low", project="pms")
+    assert _resolve_teammate_effort("backend", CLAUDE, "claude-sonnet-5", project="pms") == "low"
+    assert _resolve_teammate_effort("backend", CLAUDE, "claude-sonnet-5") == "medium"
+    assert (
+        _resolve_teammate_effort("backend", CLAUDE, "claude-sonnet-5", project="other") == "medium"
+    )

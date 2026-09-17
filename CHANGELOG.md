@@ -6,6 +6,17 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 
 ## [v2.1.15] - 2026-09-17
 
+### Added (เพิ่ม)
+
+- **#657 — model/effort ต่อ role แยกตามโปรเจคแล้ว** (provider แยกได้อยู่แล้วผ่าน `routing.json`)
+  หน้า Settings → Roles & ตำแหน่ง ของโปรเจคไหน เซฟ provider+model+effort ลงของโปรเจคนั้นทั้งแถว
+  (bucket ใหม่ `v2/models/aliases-projects.json`) — โปรเจคที่ไม่เคยเซฟหน้านี้ใช้ค่ากลางเหมือนเดิม,
+  เซฟครั้งแรก seed จากค่ากลาง ณ ตอนนั้น (สัญญาเดียวกับ provider ใน `save_role_overrides`) ·
+  จุด resolve ตอน spawn (model ผ่าน `effective_model_for_v2`, effort ผ่าน
+  `_resolve_teammate_effort`) รับ project ครบ · stale-pin bump ตอน boot กวาด bucket
+  ทุกโปรเจคด้วย · หัวข้อหน้า Roles บอก scope ตรงๆ แล้ว · ทุก provider ได้เหมือนกัน
+  (เก็บ per-(role,provider) เหมือนเดิม ไม่มี gap)
+
 ### Fixed (แก้)
 
 - **#655 — watchdog ฆ่า pane ที่กำลังคิดยาว (extended thinking) ทิ้งตอนครบ 40 นาทีพอดี**

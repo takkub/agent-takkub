@@ -200,14 +200,14 @@ def test_facade_model_flag_off_never_touches_router(monkeypatch):
         raise AssertionError("Router must not be constructed when the flag is off")
 
     monkeypatch.setattr("agent_takkub.core.routing.facade.Router", boom)
-    monkeypatch.setattr(role_models, "model_for", lambda role, provider: None)
+    monkeypatch.setattr(role_models, "model_for", lambda role, provider, project=None: None)
     monkeypatch.setattr(provider_models, "model_for", lambda provider: "claude-haiku-4-5")
     assert effective_model_for_v2("backend", "claude") == "claude-haiku-4-5"
 
 
 def test_facade_model_flag_on_fails_open_on_router_exception(monkeypatch):
     monkeypatch.setenv("TAKKUB_V2_ROUTER", "1")
-    monkeypatch.setattr(role_models, "model_for", lambda role, provider: None)
+    monkeypatch.setattr(role_models, "model_for", lambda role, provider, project=None: None)
     monkeypatch.setattr(provider_models, "model_for", lambda provider: "claude-haiku-4-5")
 
     class _BoomRouter:

@@ -236,6 +236,26 @@ class TestRefreshGemini:
         assert outcome.detail == "gemini-3.5-flash-medium -> gemini-3.7-flash-medium"
         assert set_calls == [("gemini", "gemini-3.7-flash-medium")]
 
+    def test_stale_project_bucket_pin_gets_bumped_in_place(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """#657: pins inside a per-project bucket age like every other pin —
+        the sweep must bump them IN that bucket, never into the global file."""
+        import agent_takkub.role_models as role_models
+
+        role_models.set_model("backend", "gemini", "gemini-3.5-flash-medium", project="pms")
+        monkeypatch.setattr(
+            pmr,
+            "_discover_gemini_models",
+            lambda binary: ["gemini-3.7-flash-medium", "gemini-3.5-flash-medium"],
+        )
+        outcome = pmr.refresh_provider_model("gemini", "/bin/agy")
+        assert outcome.status == pmr.STATUS_BUMPED
+        assert "pms/backend" in outcome.detail
+        assert role_models.model_for("backend", "gemini", "pms") == "gemini-3.7-flash-medium"
+        # Nothing leaked into the global entries.
+        assert role_models.model_for("backend", "gemini") is None
+
     def test_already_latest_is_up_to_date(self, monkeypatch: pytest.MonkeyPatch) -> None:
         import agent_takkub.provider_models as provider_models
 

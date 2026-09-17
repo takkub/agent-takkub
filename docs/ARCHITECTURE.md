@@ -82,7 +82,7 @@ src/agent_takkub/
 │ ── providers / pipelines / plan ──
 ├── provider_config.py per-role CLI mapping (claude/codex/gemini/opencode/kimi/cursor) — ~/.takkub/role-providers.json
 ├── provider_models.py per-provider model override — ~/.takkub/provider-models.json
-├── role_models.py    per-role model override, bound to its provider — ~/.takkub/role-models.json
+├── role_models.py    per-role model/effort override, bound to its provider — v2/models/aliases.json (global) + aliases-projects.json (per-project buckets, #657)
 ├── provider_install.py shared provider-CLI installer (takkub provider install · doctor --install-providers)
 ├── provider_state.py  per-provider enable/disable state — ~/.takkub/disabled-providers.json
 ├── pipeline_config.py pipeline template store (feature/design/quickfix) — ~/.takkub/pipelines.json

@@ -962,6 +962,24 @@ class TestRoleEffortCombo:
         assert notices == []
         dlg.deleteLater()
 
+    def test_save_scopes_role_model_and_effort_to_the_open_project(self) -> None:
+        """#657: the Roles page header says "ของโปรเจคนี้" — Save must mean
+        exactly that for the model/effort columns too (they used to write the
+        global store while the provider column next to them went to the
+        project's routing bucket)."""
+        role_models.set_model("backend", "claude", "claude-sonnet-5")
+        dlg = settings_window.SettingsWindow(
+            initial_view=settings_window.VIEW_PROVIDERS_ROLES, project="pms"
+        )
+        dlg._role_model_combos["backend"].setCurrentText("claude-opus-5")
+
+        dlg._on_save_apply_clicked()
+
+        assert role_models.model_for("backend", "claude", "pms") == "claude-opus-5"
+        # Global entry untouched — other projects keep resolving it.
+        assert role_models.model_for("backend", "claude") == "claude-sonnet-5"
+        dlg.deleteLater()
+
     def test_reset_restores_effort_combo_from_disk(self) -> None:
         role_models.set_model("backend", "claude", "claude-sonnet-5")
         role_models.set_effort("backend", "claude", "medium")

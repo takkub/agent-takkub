@@ -156,7 +156,11 @@ def _append_provider_effort(
 
 
 def _resolve_teammate_effort(
-    base_role: str, spec: ProviderSpec, model: str, override: str = ""
+    base_role: str,
+    spec: ProviderSpec,
+    model: str,
+    override: str = "",
+    project: str | None = None,
 ) -> str:
     """Resolve the effort value a teammate pane should spawn with for
     *base_role* on *spec*, spawning *model* (empty string when no explicit
@@ -195,7 +199,7 @@ def _resolve_teammate_effort(
         return ""
     if override:
         return override
-    role_effort = role_effort_for(base_role, spec.name)
+    role_effort = role_effort_for(base_role, spec.name, project)
     if role_effort:
         return role_effort
     if "TAKKUB_TEAMMATE_EFFORT" in os.environ:
@@ -2647,7 +2651,11 @@ class SpawnEngineMixin:
                 # accepts — _append_provider_effort is then a no-op whenever
                 # that resolves to "".
                 provider_effort = _resolve_teammate_effort(
-                    settings_role, spec, provider_model, override=_ps_initial.effort_override or ""
+                    settings_role,
+                    spec,
+                    provider_model,
+                    override=_ps_initial.effort_override or "",
+                    project=project_ns,
                 )
                 _append_provider_effort(effort_argv, spec, provider_effort)
             # #591: remember what this pane actually resolved to spawn with
@@ -3366,6 +3374,7 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
                 PROVIDER_REGISTRY[CLAUDE],
                 teammate_model,
                 override=_ps_initial.effort_override or "",
+                project=project_ns,
             )
             _append_provider_effort(
                 effort_argv,
