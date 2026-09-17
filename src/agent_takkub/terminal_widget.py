@@ -258,8 +258,8 @@ _OSC_COLOR_QUERY = re.compile(r"\x1b\](1[01]);\?(\x07|\x1b\\)")
 _OSC_COLOR_QUERY_TAIL = 7
 _OSC_COLOR_REPLY = re.compile(r"\x1b\]1[01];rgb:[0-9a-fA-F/]+(?:\x07|\x1b\\)")
 _TERM_THEME_RGB = {
-    "10": "e6e6/e6e6/e6e6",  # foreground #e6e6e6 (terminal.html theme.foreground)
-    "11": "0e0e/0e0e/1010",  # background #0e0e10 (terminal.html theme.background)
+    "10": "e6e6/e6e6/e6e6",  # foreground e6e6e6 (terminal.html theme.foreground)
+    "11": "0e0e/0e0e/1010",  # background 0e0e10 (terminal.html theme.background)
 }
 
 
