@@ -679,8 +679,10 @@ class StatusHeaderMixin:
         current_profile = user_profile.profile_for(proj, provider=lead_provider)
 
         # Determine if other providers also have non-default profiles
+        from .provider_spec import PROVIDER_REGISTRY
+
         active_others = []
-        for p in ["claude", "codex", "gemini"]:
+        for p in PROVIDER_REGISTRY:
             if p != lead_provider:
                 prof = user_profile.profile_for(proj, provider=p)
                 if prof != "default":
@@ -695,7 +697,7 @@ class StatusHeaderMixin:
         # Tooltip clearly shows all logged in providers
         tooltip = f"Click: switch user account or provider.\n\nActive in {proj}:"
         tooltip += f"\n✅ {lead_provider.capitalize()} (Lead): {current_profile}"
-        for p in ["claude", "codex", "gemini"]:
+        for p in PROVIDER_REGISTRY:
             if p != lead_provider:
                 prof = user_profile.profile_for(proj, provider=p)
                 tooltip += f"\n✅ {p.capitalize()}: {prof}"

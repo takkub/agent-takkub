@@ -1801,15 +1801,10 @@ class TestAccountsView:
                 app.aboutToQuit.disconnect(settings_accounts._wait_for_accounts_refresh_jobs)
             settings_accounts._accounts_refresh_shutdown_hooked = was_hooked
 
-    def test_gap_reason_full_text_moved_behind_diagnostics_button(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """2026-09-08 design review — a provider isolation-gap panel used to
-        render the FULL raw probe note (internal env-var names, provider
-        version, sqlite table names — `accounts_adapter.PROVIDER_ISOLATION_
-        GAPS`) inline as a wrapped paragraph. Now only a short, generic
-        sentence shows inline; the raw note is reachable via a Diagnostics
-        button that opens a themed message box."""
+    def test_gap_panel_is_one_line_no_buttons(self) -> None:
+        """2026-09-17 (user: "ปรับให้ใช้งานได้"): a gap panel shows one short
+        sentence with the raw probe note as its tooltip — no Diagnostics
+        button, no disabled add button."""
         from PyQt6.QtWidgets import QLabel, QPushButton
 
         from agent_takkub import accounts_adapter
@@ -1824,21 +1819,29 @@ class TestAccountsView:
             add_hint="",
         )
         panel = dlg._build_provider_panel(row)
-        panel_labels = [w.text() for w in panel.findChildren(QLabel)]
-        assert not any(row.gap_reason in text for text in panel_labels)
-        buttons = [b for b in panel.findChildren(QPushButton) if b.text() == "Diagnostics"]
-        assert len(buttons) == 1
+        labels = panel.findChildren(QLabel)
+        assert not any(row.gap_reason in w.text() for w in labels)
+        assert any(w.toolTip() == row.gap_reason for w in labels)
+        assert panel.findChildren(QPushButton) == []
+        dlg.deleteLater()
 
-        seen: dict = {}
+    def test_addable_provider_shows_enabled_add_button(self) -> None:
+        from PyQt6.QtWidgets import QPushButton
 
-        def _fake_exec(self):
-            seen["title"] = self.windowTitle()
-            seen["informative"] = self.informativeText()
-            return 0
+        from agent_takkub import accounts_adapter
 
-        monkeypatch.setattr(QMessageBox, "exec", _fake_exec)
-        buttons[0].click()  # real click signal, not a direct method call
-        assert row.gap_reason in seen["informative"]
+        dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_USERS)
+        row = accounts_adapter.ProviderRow(
+            provider="codex",
+            display_name="Codex",
+            gap_reason="",
+            accounts=[],
+            can_add=True,
+            add_hint="",
+        )
+        panel = dlg._build_provider_panel(row)
+        buttons = [b for b in panel.findChildren(QPushButton) if "เพิ่มบัญชี" in b.text()]
+        assert len(buttons) == 1 and buttons[0].isEnabled()
         dlg.deleteLater()
 
     def test_renders_loading_placeholder_before_the_background_refresh_lands(self) -> None:

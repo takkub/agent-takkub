@@ -2353,7 +2353,7 @@ class SpawnEngineMixin:
             from .config import isolated_providers as _isolated_providers
 
             for _isolated_provider in _isolated_providers():
-                inject_provider_home_env(env, _isolated_provider)
+                inject_provider_home_env(env, _isolated_provider, project_ns)
             bin_dir = str(CLI_BIN_DIR)
             env["PATH"] = bin_dir + os.pathsep + env.get("PATH", "")
             env["TAKKUB_CLI_BIN_DIR"] = bin_dir  # #642
@@ -2568,7 +2568,7 @@ class SpawnEngineMixin:
                     _log_event("provider_home_seeded", provider=spec.name)
             except Exception:
                 _log.exception("provider home seeding failed for %s", spec.name)
-            inject_provider_home_env(env, spec.name)
+            inject_provider_home_env(env, spec.name, project_ns)
             inject_provider_no_autoupdate_env(env, spec.name)
             from .core.routing.flag import v2_router_enabled
 

@@ -619,7 +619,13 @@ def inject_claude_project_dir_name_env(
         env["CLAUDE_CODE_PROJECT_DIR_NAME"] = claude_project_dir_name(project_ns, base_role)
 
 
-def inject_provider_home_env(env: dict[str, str], provider: str) -> None:
+# Providers whose per-project named account (user_profile registry, added from
+# Settings → Accounts) overrides the isolated default home — the var here is
+# the one the account's `config_dir` becomes (#505 stage 2).
+_PROFILE_HOME_VAR: dict[str, str] = {"codex": "CODEX_HOME"}
+
+
+def inject_provider_home_env(env: dict[str, str], provider: str, project: str = "") -> None:
     """Point a non-claude provider's state at DATA_HOME (user directive
     2026-08-19) — the codex/opencode/kimi counterpart of
     ``inject_user_profile_env``'s ``CLAUDE_CONFIG_DIR``.
@@ -635,11 +641,26 @@ def inject_provider_home_env(env: dict[str, str], provider: str) -> None:
     XDG_* would otherwise win and quietly de-isolate the pane. A user who
     really wants a custom location sets ``AGENT_TAKKUB_HOME``, which moves
     DATA_HOME and therefore these with it.
+
+    *project* given and that project picked a non-default account for
+    *provider* (``_PROFILE_HOME_VAR``) → that account's home wins, so the
+    pane logs in as the chosen account.
     """
     from . import config
 
     try:
         env.update(config.provider_home_env(provider))
+    except Exception:
+        pass
+    var = _PROFILE_HOME_VAR.get(provider)
+    if not (var and project):
+        return
+    try:
+        from .user_profile import provider_config_dir_for
+
+        home = provider_config_dir_for(project, provider)
+        if home is not None:
+            env[var] = str(home)
     except Exception:
         pass
 

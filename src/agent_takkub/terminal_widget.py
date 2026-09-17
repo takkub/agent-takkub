@@ -237,6 +237,50 @@ def _strip_osc52(text: str) -> tuple[str, str]:
     return cleaned, ""
 
 
+# ── OSC 10/11 color-query auto-reply ───────────────────────────────────────
+# A TUI may query the terminal's fg/bg colors at boot (ESC]10;? / ESC]11;?)
+# to detect the theme. Our reply used to come from xterm.js after a full
+# PTY→Python→QWebChannel→JS→QWebChannel→Python round-trip; codex's
+# crossterm/ratatui input parser turns any such reply — verified live
+# 2026-09-17 even with an immediate one — into Alt+] plus the printable
+# remainder ("]10;rgb:e6e6/…\") typed straight into the composer. So:
+#   * xterm.js's own reply is ALWAYS dropped in _on_input_data (it is late
+#     and duplicates ours at best, poisons the composer at worst);
+#   * write_bytes answers the query from HERE, immediately, but only when
+#     the pane's provider is confirmed to parse the reply
+#     (ProviderSpec.handles_osc_color_reply → set_osc_color_reply). A
+#     provider that can't gets NO reply and falls back to its default
+#     theme — junk-free beats theme-detected.
+# Colors must match the theme in static/terminal.html.
+_OSC_COLOR_QUERY = re.compile(r"\x1b\](1[01]);\?(\x07|\x1b\\)")
+# Longest query is 8 chars (ST form) → longest incomplete prefix a chunk
+# boundary can split is 7; carrying that much overlap catches every split.
+_OSC_COLOR_QUERY_TAIL = 7
+_OSC_COLOR_REPLY = re.compile(r"\x1b\]1[01];rgb:[0-9a-fA-F/]+(?:\x07|\x1b\\)")
+_TERM_THEME_RGB = {
+    "10": "e6e6/e6e6/e6e6",  # foreground #e6e6e6 (terminal.html theme.foreground)
+    "11": "0e0e/0e0e/1010",  # background #0e0e10 (terminal.html theme.background)
+}
+
+
+def _osc_color_replies(text: str, tail: str) -> tuple[str, str]:
+    """Answer OSC 10/11 color queries found in a PTY output chunk.
+
+    ``tail`` is the sub-8-char overlap carried from the previous chunk so a
+    query split across chunks is still seen exactly once — a match ending
+    inside ``tail`` was already answered last time. Each reply mirrors the
+    query's own terminator (BEL or ST). Returns ``(replies, new_tail)``.
+    Pure / no Qt → unit-tested.
+    """
+    buf = tail + text
+    replies: list[str] = []
+    for m in _OSC_COLOR_QUERY.finditer(buf):
+        if m.end() <= len(tail):
+            continue  # fully inside the carried overlap → answered already
+        replies.append(f"\x1b]{m.group(1)};rgb:{_TERM_THEME_RGB[m.group(1)]}{m.group(2)}")
+    return "".join(replies), buf[len(buf) - min(len(buf), _OSC_COLOR_QUERY_TAIL) :]
+
+
 def _within_allowed_bases(p: Path, cwd: str | None, extra_bases: tuple[str, ...]) -> bool:
     """True if `p` resolves to somewhere inside the pane cwd or one of the
     allowed base dirs. Clicked paths that escape every allowed subtree (an
@@ -339,6 +383,13 @@ class TerminalWidget(QWidget):
         # PTY read chunks so Thai/CJK chars split at chunk boundaries are not
         # corrupted into replacement chars (U+FFFD).
         self._utf8_decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+        # Chunk-boundary overlap for the OSC 10/11 color-query auto-reply.
+        self._osc_query_tail = ""
+        # Whether this pane's program parses an OSC color reply on stdin.
+        # True until attach_session says otherwise — a plain shell (vim,
+        # less, …) deserves an answer; provider panes narrow it via
+        # set_osc_color_reply from ProviderSpec.handles_osc_color_reply.
+        self._osc_reply_enabled = True
 
         # buffer bytes until xterm.js says it's ready, then flush in order
         self._pending_writes: list[str] = []
@@ -481,6 +532,13 @@ class TerminalWidget(QWidget):
             text = data
         if not text:
             return
+        # Answer OSC 10/11 fg/bg queries right away — before the page-ready
+        # gate, so a program that asks during its very first paint gets the
+        # reply while its parser is still listening. Gated per provider:
+        # codex types ANY reply into its composer (see module comment).
+        replies, self._osc_query_tail = _osc_color_replies(text, self._osc_query_tail)
+        if replies and self._osc_reply_enabled:
+            self.inputBytes.emit(replies.encode("utf-8"))
         if not self._page_ready:
             self._pending_writes.append(text)
             return
@@ -536,6 +594,7 @@ class TerminalWidget(QWidget):
         self._pending_writes.clear()
         self._write_buf.clear()
         self._utf8_decoder.reset()
+        self._osc_query_tail = ""
         self._discard_snapshot = None
         if self._flush_timer.isActive():
             self._flush_timer.stop()
@@ -663,10 +722,25 @@ class TerminalWidget(QWidget):
             except Exception:
                 pass
 
+    def set_osc_color_reply(self, enabled: bool) -> None:
+        """Whether write_bytes may answer this pane's OSC 10/11 fg/bg
+        queries (ProviderSpec.handles_osc_color_reply). False for a TUI
+        whose input parser types the reply into its composer as literal
+        text (codex) — it then simply gets no answer."""
+        self._osc_reply_enabled = enabled
+
     def _on_input_data(self, data: str) -> None:
         # xterm.js gives us already-encoded escape sequences for keys; just
         # ship the bytes to the PTY — unless this pane is input-locked, in which
         # case the keystroke is dropped (accidental-input guard).
+        #
+        # xterm.js also answers OSC 10/11 color queries itself through this
+        # same onData path — a duplicate of the reply write_bytes already
+        # sent, arriving a QWebChannel round-trip too late (codex's parser
+        # has moved on and would type it into the composer). Drop it.
+        data = _OSC_COLOR_REPLY.sub("", data)
+        if not data:
+            return
         if self._input_locked:
             return
         self.inputBytes.emit(data.encode("utf-8"))

@@ -55,3 +55,47 @@ def test_cancel_keeps_existing_provider(monkeypatch: pytest.MonkeyPatch) -> None
     assert provider_config.provider_for("lead", "proj") == "claude"
     assert user_profile.default_provider("proj") == "claude"
     window._restart_lead_for_active_project.assert_not_called()
+
+
+def test_selecting_codex_account_keeps_lead_provider(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """2026-09-17: picking an account in the 🤖 menu changes only that
+    provider's account — it used to also flip Lead to that provider."""
+    monkeypatch.setattr(QMessageBox, "question", lambda *_a, **_kw: QMessageBox.StandardButton.Ok)
+    user_profile.add_profile("work", str(tmp_path / "codex-work"), provider="codex")
+    window = _fake_window()
+    codex_pane = MagicMock()
+    codex_pane.model.provider_name = "codex"
+    claude_pane = MagicMock()
+    claude_pane.model.provider_name = "claude"
+    window.orch._project_panes.return_value = {
+        "lead": claude_pane,
+        "codex": codex_pane,
+        "frontend": claude_pane,
+    }
+
+    UserActionsMixin._on_account_selected(window, "work", "codex")
+
+    assert user_profile.profile_for("proj", provider="codex") == "work"
+    assert provider_config.provider_for("lead", "proj") == "claude"
+    window._restart_lead_for_active_project.assert_not_called()
+    window.orch.close.assert_called_once_with("codex", project="proj", reason="account_switch")
+
+
+def test_codex_pane_env_uses_selected_account(tmp_path: Path) -> None:
+    from agent_takkub import pane_env
+
+    home = tmp_path / "codex-work"
+    user_profile.add_profile("work", str(home), provider="codex")
+    env: dict[str, str] = {}
+    pane_env.inject_provider_home_env(env, "codex", "proj")
+    assert "CODEX_HOME" not in env or env["CODEX_HOME"] != str(home)
+
+    user_profile.set_profile("proj", "work", provider="codex")
+    env = {}
+    pane_env.inject_provider_home_env(env, "codex", "proj")
+    assert env["CODEX_HOME"] == str(home)
+    env = {}
+    pane_env.inject_provider_home_env(env, "codex", "other-proj")
+    assert env.get("CODEX_HOME") != str(home)

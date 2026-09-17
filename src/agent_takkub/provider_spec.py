@@ -161,6 +161,16 @@ class ProviderSpec:
     # safe default None: terminal.html then does NOT intercept the keystroke,
     # so xterm.js sends its native '\r' (pre-#149 behavior, same as plain Enter).
     multiline_newline_seq: str | None = None
+    # Whether this provider's TUI parses an OSC 10/11 color REPLY on stdin —
+    # the pane answers its fg/bg theme query only when True (terminal_widget's
+    # auto-reply). Confirmed for the Ink-based TUIs (claude, gemini/agy —
+    # same toolkit-family reasoning as multiline_newline_seq above). codex's
+    # crossterm/ratatui parser types the reply into the composer as literal
+    # "]10;rgb:…\" text (seen live 2026-09-17, even with an immediate reply),
+    # so it — and every unconfirmed TUI (opencode/bubbletea, kimi, cursor) —
+    # stays at the safe default False: no reply is sent and the CLI falls
+    # back to its default theme.
+    handles_osc_color_reply: bool = False
 
     # ─── 8. Spawning capability flags ───
     # #422 item 2: explicit per-capability state overrides. `capability_matrix`
@@ -672,6 +682,7 @@ claude_spec = ProviderSpec(
     input_swallow_recovery=True,
     multiline_newline_seq="\x1b\r",  # Ink TUI: bare ESC is a no-op, so ESC+CR
     # inserts a newline instead of submitting (#149).
+    handles_osc_color_reply=True,  # Ink parses the OSC 10/11 color reply cleanly
     supports_mirror=True,
     supports_resume=True,
     supports_slash_commands=True,
@@ -1069,6 +1080,7 @@ gemini_spec = ProviderSpec(
     input_swallow_recovery=True,
     multiline_newline_seq="\x1b\r",  # agy is Ink-based like claude — same ESC+CR
     # multiline newline behavior (#149).
+    handles_osc_color_reply=True,  # Ink-based like claude — same clean OSC reply parse
     supports_mirror=False,
     supports_resume=True,
     session_resume_flag="--conversation",

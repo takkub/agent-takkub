@@ -21,8 +21,12 @@ Login/plan detection policy (issue #505): only report what a provider's own
 credential store proves. claude = ``.claude.json`` ``oauthAccount`` /
 ``.credentials.json`` access token (macOS default profile: login Keychain,
 same source ``limit_status`` uses). codex = ``auth.json`` presence (same
-heuristic as ``doctor._codex_auth_finding``). Everything else = "unknown" —
-never guessed (mirrors ``doctor.check_provider_auth``).
+heuristic as ``doctor._codex_auth_finding``). gemini = the agy OAuth blob in
+the OS keyring (``gemini:antigravity`` — the same credential
+``provider_usage``'s live-quota RPC reads, verified in the 2026-08-31 quota
+hunt; ``~/.gemini/oauth_creds.json`` is classic gemini-cli's, NOT agy's).
+Everything else = "unknown" — never guessed (mirrors
+``doctor.check_provider_auth``).
 """
 
 from __future__ import annotations
@@ -215,9 +219,29 @@ def _codex_plan_cached(home: Path, *, is_default: bool) -> str | None:
         return None
 
 
+def gemini_login_status() -> LoginStatus:
+    """agy (Antigravity) keeps its OAuth blob in the OS keyring —
+    Windows Credential Manager / macOS Keychain item ``gemini:antigravity``,
+    the exact credential ``provider_usage``'s live-quota RPC authenticates
+    with. Machine-wide by nature: gemini has no per-account homes
+    (``PROVIDER_ISOLATION_GAPS``), so this is only ever asked about the
+    default row. An EXPIRED access token still counts as logged in (agy
+    refreshes it itself); only "no keyring item at all" means logged out."""
+    from .provider_usage import _parse_gemini_keyring_token, _read_gemini_keyring_secret
+
+    if sys.platform not in ("win32", "darwin"):
+        return LoginStatus(UNKNOWN, "ยังอ่าน keyring ของ OS นี้ไม่ได้")
+    secret = _read_gemini_keyring_secret()
+    if secret is None:
+        return LoginStatus(LOGGED_OUT, "ยังไม่ได้เข้าสู่ระบบ (ไม่พบ credential ใน keyring ของเครื่อง)")
+    if _parse_gemini_keyring_token(secret) is None:
+        return LoginStatus(UNKNOWN, "credential ใน keyring อ่านไม่ออก — ลอง login agy ใหม่")
+    return LoginStatus(LOGGED_IN, "")
+
+
 def login_status(provider: str, config_dir: str, *, is_default: bool = False) -> LoginStatus:
     """Best-known login status for one account. Unverifiable providers
-    (everything but claude/codex — see module docstring) report UNKNOWN."""
+    (everything but claude/codex/gemini — see module docstring) report UNKNOWN."""
     if provider == "claude":
         base = Path(config_dir) if config_dir else user_profile._DEFAULT_CONFIG_DIR
         return claude_login_status(base, is_default=is_default)
@@ -229,6 +253,9 @@ def login_status(provider: str, config_dir: str, *, is_default: bool = False) ->
 
             home = codex_home()
         return codex_login_status(home, is_default=is_default)
+    if provider == "gemini":
+        # config_dir/is_default are moot: one machine-wide account only.
+        return gemini_login_status()
     return LoginStatus(UNKNOWN, "ยังไม่มีวิธีตรวจ credential ของ provider นี้ที่ยืนยันแล้ว")
 
 
@@ -294,16 +321,22 @@ def _v2_registry_accounts(provider: str, known_names: set[str]) -> list[AccountI
     return out
 
 
+# Providers whose per-project account pick reaches the spawned pane end-to-end
+# (add → login → select → spawn env): claude via CLAUDE_CONFIG_DIR, codex via
+# CODEX_HOME (#505 stage 2, `pane_env.inject_provider_home_env`). opencode/kimi
+# have an isolation knob but no per-account selection wiring yet.
+ADDABLE_PROVIDERS: tuple[str, ...] = ("claude", "codex")
+
+
 def can_add_account(provider: str) -> tuple[bool, str]:
-    """Stage 1 (#505): only claude accounts are add-able — it is the only
-    provider whose per-project selection + spawn env injection already work
-    end-to-end. Gap providers explain themselves via PROVIDER_ISOLATION_GAPS."""
+    """Whether the Accounts page may add a named account for *provider*.
+    Gap providers explain themselves via PROVIDER_ISOLATION_GAPS."""
     gap = config.PROVIDER_ISOLATION_GAPS.get(provider)
     if gap:
         return False, gap
-    if provider == "claude":
+    if provider in ADDABLE_PROVIDERS:
         return True, ""
-    return False, f"การแยกหลายบัญชีของ {provider} จะเปิดใช้ในขั้นถัดไปของ #505 (ขั้น 2)"
+    return False, "ยังเพิ่มบัญชีที่สองของ provider นี้ไม่ได้ — ใช้บัญชี default"
 
 
 def provider_rows() -> list[ProviderRow]:
@@ -359,14 +392,26 @@ def provider_rows() -> list[ProviderRow]:
 # ── write side ─────────────────────────────────────────────────────────────
 
 
+def default_home(provider: str) -> Path | None:
+    """The provider's own default-account home (what the ``default`` row and
+    shared-session links point at), or None when it has no addable homes."""
+    if provider == "claude":
+        return user_profile._DEFAULT_CONFIG_DIR
+    if provider == "codex":
+        from .codex_helper import codex_home
+
+        return codex_home()
+    return None
+
+
 def default_account_home(provider: str, name: str) -> Path:
     """Where a NEW named account's home lives, derived from the same base
     config.py defines for the provider's default home — dev checkout:
     ``~/.claude-<name>``; installed build: ``DATA_HOME/claude-config-<name>``.
     (#504 will move this under ``providers/<p>/<account>/`` at boot — this
     function is the single place that changes.)"""
-    if provider == "claude":
-        base = user_profile._DEFAULT_CONFIG_DIR
+    base = default_home(provider)
+    if base is not None:
         return base.with_name(f"{base.name}-{name}")
     raise ValueError(
         f"provider {provider!r} does not support named account homes yet (#505 stage 2)"
@@ -387,7 +432,11 @@ def add_account(
         else default_account_home(provider, name)
     )
     linked = user_profile.add_profile(
-        name, str(home), share_sessions=share_sessions, provider=provider
+        name,
+        str(home),
+        share_sessions=share_sessions,
+        provider=provider,
+        share_from=default_home(provider),
     )
     return home, linked
 

@@ -172,14 +172,37 @@ def profiles_for_provider(provider: str) -> list[dict]:
 # settings.json, .claude.json, statsig/ stay per-profile — that's the account.
 SHARED_ITEMS: tuple[str, ...] = ("projects", "todos", "plugins", "skills")
 
+# Codex counterpart (#505 stage 2): CODEX_HOME holds sessions + credentials
+# in one tree, so a named codex account links the non-credential dirs back to
+# the default home and keeps its OWN auth.json (never linked, never copied —
+# `codex login` writes it fresh). Files cannot be junctioned on Windows, so
+# the small config files are copied once instead (see CODEX_SEED_FILES).
+CODEX_SHARED_ITEMS: tuple[str, ...] = (
+    "sessions",
+    "archived_sessions",
+    "skills",
+    "plugins",
+    "memories",
+    "rules",
+)
+CODEX_SEED_FILES: tuple[str, ...] = ("config.toml", "AGENTS.md", "instructions.md")
 
-def provision_shared_profile(config_dir: str | Path, share_from: Path | None = None) -> list[str]:
+
+def _shared_items_for(provider: str) -> tuple[str, ...]:
+    return CODEX_SHARED_ITEMS if normalize_provider(provider) == "codex" else SHARED_ITEMS
+
+
+def provision_shared_profile(
+    config_dir: str | Path, share_from: Path | None = None, provider: str = "claude"
+) -> list[str]:
     """Create *config_dir* as a shared-session profile home.
 
-    Links each :data:`SHARED_ITEMS` dir from *share_from* (default
-    ``~/.claude``) into *config_dir*. Missing source dirs are created first so
-    the link target is always valid. Existing destination entries are left
-    untouched (never clobbered). Returns the list of item names linked.
+    Links each shared dir (:data:`SHARED_ITEMS`, or :data:`CODEX_SHARED_ITEMS`
+    for codex) from *share_from* (default ``~/.claude``) into *config_dir*.
+    Missing source dirs are created first so the link target is always valid.
+    Existing destination entries are left untouched (never clobbered).
+    Codex also gets :data:`CODEX_SEED_FILES` copied once when absent.
+    Returns the list of item names linked.
     Raises ``OSError`` only when the profile dir itself cannot be created.
     """
     from .worktree_manager import _make_link
@@ -187,8 +210,16 @@ def provision_shared_profile(config_dir: str | Path, share_from: Path | None = N
     src_home = Path(share_from) if share_from else _DEFAULT_CONFIG_DIR
     dest_home = Path(config_dir).expanduser()
     dest_home.mkdir(parents=True, exist_ok=True)
+    if normalize_provider(provider) == "codex":
+        for name in CODEX_SEED_FILES:
+            src_file, dst_file = src_home / name, dest_home / name
+            if src_file.is_file() and not dst_file.exists():
+                try:
+                    shutil.copy2(src_file, dst_file)
+                except OSError:
+                    pass
     linked: list[str] = []
-    for item in SHARED_ITEMS:
+    for item in _shared_items_for(provider):
         src = src_home / item
         dst = dest_home / item
         if dst.exists() or dst.is_symlink():
@@ -280,7 +311,9 @@ def cleanup_profile_links(config_dir: str | Path) -> list[str]:
 
     dest_home = Path(config_dir).expanduser()
     removed: list[str] = []
-    for item in SHARED_ITEMS:
+    # Union of every provider's shared items: the caller may not know which
+    # provider owned this dir, and removing only link points is always safe.
+    for item in dict.fromkeys((*SHARED_ITEMS, *CODEX_SHARED_ITEMS)):
         p = dest_home / item
         try:
             if p.exists() or p.is_symlink():
@@ -293,14 +326,19 @@ def cleanup_profile_links(config_dir: str | Path) -> list[str]:
 
 
 def add_profile(
-    name: str, config_dir: str | Path = "", share_sessions: bool = False, provider: str = "claude"
+    name: str,
+    config_dir: str | Path = "",
+    share_sessions: bool = False,
+    provider: str = "claude",
+    share_from: Path | None = None,
 ) -> list[str]:
     """Register a new profile.
 
     ``share_sessions=True`` provisions *config_dir* so sessions/plugins are
     shared with the default profile (see :func:`provision_shared_profile`) —
     switching users changes ONLY the login/credentials. Returns the list of
-    shared items linked ([] when not sharing). (Only applies to 'claude' provider).
+    shared items linked ([] when not sharing). Applies to claude and codex;
+    *share_from* is that provider's default home (claude: ``~/.claude``).
 
     Raises ``ValueError`` if *name* is invalid or already taken, or
     ``OSError`` if the registry file could not be persisted (#518 — a
@@ -324,9 +362,11 @@ def add_profile(
         raise ValueError(f"Profile {name!r} already exists")
 
     linked: list[str] = []
-    if share_sessions and provider == "claude":
+    if share_sessions and provider in ("claude", "codex"):
+        if provider == "codex" and share_from is None:
+            raise ValueError("share_from is required to share a codex account's sessions")
         try:
-            linked = provision_shared_profile(config_dir_s)
+            linked = provision_shared_profile(config_dir_s, share_from, provider=provider)
         except OSError as e:
             raise ValueError(f"Cannot create profile dir {config_dir_s}: {e}") from e
 
@@ -474,6 +514,20 @@ def set_default_provider(project: str, provider: str) -> None:
         _atomic_write(path, data)
     except OSError:
         pass
+
+
+def provider_config_dir_for(project: str, provider: str) -> Path | None:
+    """The home dir of the account *project* picked for *provider*, or None
+    when it uses the provider's default account (caller keeps its own
+    default-home logic). Never raises."""
+    provider = normalize_provider(provider)
+    name = profile_for(project, provider)
+    if name == DEFAULT_PROFILE:
+        return None
+    for p in _load_registry():
+        if p["name"] == name and p["provider"] == provider and p.get("config_dir"):
+            return Path(p["config_dir"])
+    return None
 
 
 def config_dir_for(project: str) -> Path:

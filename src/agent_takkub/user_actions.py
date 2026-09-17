@@ -144,15 +144,18 @@ class UserActionsMixin:
         """Accounts / Provider menu (left-click on 🤖 Accounts).
         Built fresh on every click so user-profile state is always current.
         Menu sections:
-          1. Claude accounts
-          2. OpenAI accounts (etc)
+          1. per provider that can hold a second account: which account this
+             project uses (picking one changes ONLY the account — 2026-09-17,
+             it used to also switch Lead to that provider)
+          2. "Lead ใช้ provider" submenu — the Lead provider switch
           ─────────────────
           3. Manage Accounts… (opens Settings)
         """
         from PyQt6.QtGui import QAction
         from PyQt6.QtWidgets import QMenu
 
-        from . import user_profile
+        from . import accounts_adapter, user_profile
+        from .provider_spec import PROVIDER_REGISTRY
 
         try:
             from .config import active_project as _active_project
@@ -163,13 +166,14 @@ class UserActionsMixin:
 
         menu = QMenu(self)
 
-        for prov in ("claude", "codex", "gemini"):
+        for prov, spec in PROVIDER_REGISTRY.items():
             profiles = user_profile.profiles_for_provider(prov)
-            if not profiles:
-                continue
+            addable, _hint = accounts_adapter.can_add_account(prov)
+            if len(profiles) < 2 and not addable:
+                continue  # nothing to pick between
 
-            # Add a disabled label-like action for the provider category
-            cat_act = QAction(f"{prov.capitalize()} Accounts", self)
+            display = spec.display_name or prov.capitalize()
+            cat_act = QAction(f"บัญชี {display} ที่โปรเจคนี้ใช้", self)
             cat_act.setEnabled(False)
             menu.addAction(cat_act)
 
@@ -180,9 +184,32 @@ class UserActionsMixin:
                 act = QAction(f"  {name}", self)
                 act.setCheckable(True)
                 act.setChecked(name == current_for_prov)
-                act.triggered.connect(lambda _checked, n=name, p=prov: self._on_user_changed(n, p))
+                act.setEnabled(bool(_proj))
+                act.triggered.connect(
+                    lambda _checked, n=name, p=prov: self._on_account_selected(n, p)
+                )
                 menu.addAction(act)
 
+            menu.addSeparator()
+
+        if _proj:
+            from .provider_config import effective_provider_for
+
+            lead_provider = effective_provider_for("lead", _proj)
+            lead_menu = menu.addMenu("Lead ใช้ provider")
+            for prov in ("claude", "codex", "gemini"):
+                spec = PROVIDER_REGISTRY.get(prov)
+                if spec is None:
+                    continue
+                act = QAction(spec.display_name or prov.capitalize(), self)
+                act.setCheckable(True)
+                act.setChecked(prov == lead_provider)
+                act.triggered.connect(
+                    lambda _checked, p=prov: self._on_user_changed(
+                        user_profile.profile_for(_proj, provider=p), p
+                    )
+                )
+                lead_menu.addAction(act)
             menu.addSeparator()
 
         act_manage = QAction("⚙️ Manage Accounts…", self)
@@ -932,6 +959,66 @@ class UserActionsMixin:
     # ──────────────────────────────────────────────────────────────
     # per-project user profile selector (accessed via 👥 Team chip's right-click menu)
     # ──────────────────────────────────────────────────────────────
+
+    def _on_account_selected(self, name: str, provider: str) -> None:
+        """Pick which *provider* account the active project uses — nothing
+        else (Lead's provider stays as is). Panes already running on that
+        provider still hold the old login, so they are restarted: Lead via
+        the normal restart when Lead itself runs *provider*, otherwise only
+        the teammate panes on *provider* are closed (the next assign spawns
+        them with the new account)."""
+        if not name:
+            return
+        project = active_project()[0] or ""
+        if not project:
+            return
+        from . import user_profile
+        from .provider_config import effective_provider_for
+
+        provider = user_profile.normalize_provider(provider)
+        if user_profile.profile_for(project, provider=provider) == name:
+            return
+        lead_on_provider = effective_provider_for("lead", project) == provider
+        panes = self.orch._project_panes(project)
+        teammates = [
+            role
+            for role, pane in panes.items()
+            if role != "lead"
+            and getattr(getattr(pane, "model", None), "provider_name", None) == provider
+        ]
+        if lead_on_provider:
+            effect = "Lead และทุก pane ของโปรเจคนี้จะเริ่มใหม่"
+        elif teammates:
+            effect = f"pane ที่ใช้ {provider} ({', '.join(teammates)}) จะถูกปิด แล้วเปิดใหม่ตอนสั่งงานครั้งถัดไป"
+        else:
+            effect = f"pane {provider} ที่เปิดหลังจากนี้จะใช้บัญชีนี้"
+        confirm = QMessageBox.question(
+            self,
+            "เปลี่ยนบัญชี",
+            f"ให้ '{project}' ใช้บัญชี {provider} '{name}'?\n\n{effect}",
+            QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Ok,
+        )
+        if confirm != QMessageBox.StandardButton.Ok:
+            return
+        old_cd = user_profile.config_dir_for(project)
+        try:
+            user_profile.set_profile(project, name, provider=provider)
+        except ValueError as exc:
+            QMessageBox.warning(self, "เปลี่ยนบัญชีไม่สำเร็จ", str(exc))
+            return
+        if provider == "claude" and self._limit_store is not None:
+            new_cd = user_profile.config_dir_for(project)
+            if old_cd.resolve() != new_cd.resolve():
+                self._limit_store.unregister(old_cd)
+                self._limit_store.register(new_cd)
+            self._refresh_limit_label(self._limit_store.get(new_cd))
+        self._status.showMessage(f"{project} → บัญชี {provider}/{name}", 6_000)
+        if lead_on_provider:
+            self._restart_lead_for_active_project()
+            return
+        for role in teammates:
+            self.orch.close(role, project=project, reason="account_switch")
 
     def _on_user_changed(self, name: str, provider: str = "claude") -> None:
         """Switch Lead's provider/account and restart this project's panes."""

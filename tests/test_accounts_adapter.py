@@ -158,6 +158,50 @@ class TestCodexLoginStatus:
         assert seen == {"home": tmp_path, "is_default": True}
 
 
+class TestGeminiLoginStatus:
+    """agy's credential is the OS keyring blob `gemini:antigravity` — the
+    same one provider_usage's live-quota RPC authenticates with. Machine-wide
+    (no per-account homes), so only the default row is ever asked."""
+
+    def _status(self, monkeypatch: pytest.MonkeyPatch, secret, platform: str = "win32"):
+        from agent_takkub import provider_usage
+
+        monkeypatch.setattr(sys, "platform", platform)
+        monkeypatch.setattr(provider_usage, "_read_gemini_keyring_secret", lambda: secret)
+        return accounts_adapter.gemini_login_status()
+
+    def test_keyring_token_means_logged_in(self, monkeypatch):
+        st = self._status(monkeypatch, json.dumps({"token": {"access_token": "x"}}))
+        assert st.state == accounts_adapter.LOGGED_IN
+
+    def test_expired_token_still_logged_in(self, monkeypatch):
+        # agy refreshes its own token — expiry is not a logout signal.
+        secret = json.dumps({"token": {"access_token": "x", "expiry": "2020-01-01T00:00:00+00:00"}})
+        assert self._status(monkeypatch, secret).state == accounts_adapter.LOGGED_IN
+
+    def test_no_keyring_item_means_logged_out(self, monkeypatch):
+        assert self._status(monkeypatch, None).state == accounts_adapter.LOGGED_OUT
+
+    def test_unparseable_secret_is_unknown(self, monkeypatch):
+        assert self._status(monkeypatch, "not-json").state == accounts_adapter.UNKNOWN
+
+    def test_unsupported_platform_is_unknown(self, monkeypatch):
+        st = self._status(monkeypatch, None, platform="linux")
+        assert st.state == accounts_adapter.UNKNOWN
+
+    def test_dispatcher_routes_gemini(self, monkeypatch):
+        from agent_takkub import provider_usage
+
+        monkeypatch.setattr(sys, "platform", "win32")
+        monkeypatch.setattr(
+            provider_usage,
+            "_read_gemini_keyring_secret",
+            lambda: json.dumps({"token": {"access_token": "x"}}),
+        )
+        st = accounts_adapter.login_status("gemini", "", is_default=True)
+        assert st.state == accounts_adapter.LOGGED_IN
+
+
 class TestProjectsBySelection:
     def test_reads_old_and_new_selection_formats(self, tmp_path: Path) -> None:
         a = tmp_path / "projects" / "proj-a"
@@ -239,6 +283,28 @@ class TestWriteSide:
         home = accounts_adapter.default_account_home("claude", "office")
         assert home.name == ".claude-office"
 
+    def test_codex_account_shares_sessions_but_never_auth(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        from agent_takkub import codex_helper
+
+        base = tmp_path / "codex-home"
+        (base / "sessions").mkdir(parents=True)
+        (base / "auth.json").write_text("{}", encoding="utf-8")
+        (base / "config.toml").write_text("model = 'x'", encoding="utf-8")
+        monkeypatch.setattr(codex_helper, "codex_home", lambda: base)
+
+        home, linked = accounts_adapter.add_account("codex", "work")
+        assert home == tmp_path / "codex-home-work"
+        assert "sessions" in linked
+        assert not (home / "auth.json").exists()
+        assert (home / "config.toml").read_text(encoding="utf-8") == "model = 'x'"
+        (base / "sessions" / "s.jsonl").write_text("", encoding="utf-8")
+        assert (home / "sessions" / "s.jsonl").exists()
+        removed = user_profile.cleanup_profile_links(home)
+        assert "sessions" in removed
+        assert (base / "sessions" / "s.jsonl").exists()
+
     def test_add_account_blank_dir_uses_conventional_home(self) -> None:
         home, _linked = accounts_adapter.add_account("claude", "office", share_sessions=False)
         assert home.name == ".claude-office"
@@ -274,8 +340,9 @@ class TestWriteSide:
         with pytest.raises(ValueError):
             accounts_adapter.remove_account(account)
 
-    def test_can_add_stage1_is_claude_only(self) -> None:
+    def test_can_add_claude_and_codex_only(self) -> None:
         assert accounts_adapter.can_add_account("claude") == (True, "")
+        assert accounts_adapter.can_add_account("codex") == (True, "")
         ok, hint = accounts_adapter.can_add_account("opencode")
         assert ok is False and hint
         for provider in config.PROVIDER_ISOLATION_GAPS:

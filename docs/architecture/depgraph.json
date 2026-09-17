@@ -124,9 +124,10 @@
       ],
       "imported_by": [
         "agent_takkub.settings_accounts",
-        "agent_takkub.status_header"
+        "agent_takkub.status_header",
+        "agent_takkub.user_actions"
       ],
-      "fan_in": 2,
+      "fan_in": 3,
       "fan_out": 7
     },
     {
@@ -3865,9 +3866,11 @@
         "agent_takkub.settings_management.repositories.providers",
         "agent_takkub.settings_window",
         "agent_takkub.shard_fanout",
-        "agent_takkub.spawn_engine"
+        "agent_takkub.spawn_engine",
+        "agent_takkub.status_header",
+        "agent_takkub.user_actions"
       ],
-      "fan_in": 29,
+      "fan_in": 31,
       "fan_out": 4
     },
     {
@@ -5102,6 +5105,7 @@
         "agent_takkub.limit_status",
         "agent_takkub.project_tab",
         "agent_takkub.provider_config",
+        "agent_takkub.provider_spec",
         "agent_takkub.ram_report",
         "agent_takkub.team_preset",
         "agent_takkub.token_meter",
@@ -5111,7 +5115,7 @@
         "agent_takkub.main_window"
       ],
       "fan_in": 1,
-      "fan_out": 13
+      "fan_out": 14
     },
     {
       "module": "agent_takkub.system_baseline",
@@ -5384,6 +5388,7 @@
     {
       "module": "agent_takkub.user_actions",
       "imports": [
+        "agent_takkub.accounts_adapter",
         "agent_takkub.cockpit_theme",
         "agent_takkub.config",
         "agent_takkub.doctor",
@@ -5391,6 +5396,7 @@
         "agent_takkub.pipeline_config",
         "agent_takkub.plugin_installer",
         "agent_takkub.provider_config",
+        "agent_takkub.provider_spec",
         "agent_takkub.provider_state",
         "agent_takkub.settings_management.feature_flags",
         "agent_takkub.settings_management.window",
@@ -5402,7 +5408,7 @@
         "agent_takkub.main_window"
       ],
       "fan_in": 1,
-      "fan_out": 13
+      "fan_out": 15
     },
     {
       "module": "agent_takkub.user_profile",

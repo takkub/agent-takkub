@@ -674,6 +674,9 @@ class AgentPane(QFrame):
         # #149: tell xterm.js which ESC+CR multiline-newline escape (if any)
         # this pane's provider accepts on Shift+Enter.
         self._terminal.set_newline_seq(spec.multiline_newline_seq if spec else None)
+        # Only answer this pane's OSC 10/11 fg/bg theme queries when its TUI
+        # is confirmed to parse the reply — codex types it into the composer.
+        self._terminal.set_osc_color_reply(bool(spec and spec.handles_osc_color_reply))
         if cwd and self.model.supports_token_meter:
             self._token_timer.start()
             # one quick refresh after a short delay so the badge appears as

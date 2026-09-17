@@ -304,7 +304,8 @@ PROVIDER_ISOLATION_GAPS: dict[str, str] = {
         "and spawning with JETSKI_APP_DATA_DIR + XDG_CONFIG_HOME + XDG_DATA_HOME "
         "all pointed at scratch dirs left them empty while agy still wrote "
         "`~/.gemini/antigravity-cli/` — isolating it would need a full HOME "
-        "override, which would break gh/uv/npm in the same pane"
+        "override, which would break gh/uv/npm in the same pane. Re-swept agy "
+        "1.2.4 (2026-09-17): same landscape, still no home/config-dir knob"
     ),
     "cursor": (
         # #103/M6 (review 2026-09-07): this used to state a specific dev

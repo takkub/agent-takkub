@@ -4,6 +4,30 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 
 ## [vNEXT]
 
+## [v2.1.14] - 2026-09-17
+
+### Added (เพิ่ม)
+
+- **#505 stage 2 — บัญชี codex ที่สอง end-to-end** เพิ่มบัญชี codex จากหน้า Accounts ได้แล้ว
+  (home แยกต่อบัญชี + `CODEX_HOME` ฉีดตอน spawn ต่อโปรเจค — `pane_env.inject_provider_home_env`)
+  · แชร์ sessions/skills/plugins กลับหาบ้าน default ผ่าน link, seed `config.toml`/`AGENTS.md` ครั้งแรก,
+  auth.json แยกของใครของมัน (`codex login` เขียนเอง ไม่ copy) · ทดสอบสลับบัญชีจริงบน dev ผ่าน
+- **เมนู 🤖 Accounts แยกสองเรื่องที่เคยปนกัน**: เลือก "บัญชีที่โปรเจคนี้ใช้" ต่อ provider (เปลี่ยนแค่บัญชี —
+  restart เฉพาะ pane ที่ใช้ provider นั้น) กับ submenu "Lead ใช้ provider" (สลับ CLI ของ Lead) —
+  เดิมคลิกบัญชี codex แล้ว Lead โดนย้ายไป codex ทั้งตัว
+- **Gemini แสดงสถานะ login จริง** — probe จาก OS keyring `gemini:antigravity` (credential ตัวเดียว
+  กับที่ live-quota RPC ใช้ ยืนยันแล้ว) แทนป้าย "ไม่ทราบสถานะ" · token หมดอายุไม่นับ logout (agy ต่ออายุเอง)
+  · หลายบัญชี gemini ยังไม่ได้: re-sweep agy 1.2.4 (2026-09-17) ยืนยันยังไม่มี home knob เหมือน 1.1.27
+
+### Fixed (แก้)
+
+- **Lead เป็น codex แล้วมีข้อความ `]10;rgb:…` โผล่ในช่องพิมพ์** — คือคำตอบ OSC 10/11 (query สี fg/bg
+  ที่ codex ยิงถาม terminal ตอน boot) ซึ่ง crossterm/ratatui ของ codex บน ConPTY **parse ไม่ได้ไม่ว่าตอบ
+  เร็วแค่ไหน** (พิสูจน์ live: ตอบทันทีจาก Python ก็ยังโดนพิมพ์ใส่ composer) · ทางแก้: reply ช้าจาก xterm.js
+  โดน drop เสมอที่ `_on_input_data`, ฝั่ง Python ตอบทันทีเฉพาะ TUI ที่ยืนยันว่า parse ได้
+  (`ProviderSpec.handles_osc_color_reply` — claude/gemini = Ink) ส่วน codex และตัวที่ยังไม่ยืนยัน
+  ไม่ได้รับ reply เลย → fallback ธีม default ของตัวเอง ไม่มีขยะ · ยืนยันบน dev: query มา ขยะ = 0
+
 ## [v2.1.13] - 2026-09-16
 
 ### Fixed (แก้)

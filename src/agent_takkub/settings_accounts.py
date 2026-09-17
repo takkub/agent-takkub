@@ -20,7 +20,15 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-from PyQt6.QtCore import QCoreApplication, QObject, QRunnable, QThreadPool, pyqtSignal
+from PyQt6.QtCore import (
+    QCoreApplication,
+    QObject,
+    QRunnable,
+    Qt,
+    QThread,
+    QThreadPool,
+    pyqtSignal,
+)
 from PyQt6.QtWidgets import (
     QCheckBox,
     QDialog,
@@ -162,9 +170,10 @@ class _AddAccountDialog(cockpit_theme.CockpitDialog):
         dir_row_lay.setContentsMargins(0, 0, 0, 0)
         self.dir_edit = QLineEdit(dir_row)
         self.dir_edit.setPlaceholderText("ว่างไว้ = สร้างโฟลเดอร์ใหม่ให้อัตโนมัติ")
+        home_var = "CODEX_HOME" if provider == "codex" else "CLAUDE_CONFIG_DIR"
         self.dir_edit.setToolTip(
-            "ใช้โฟลเดอร์ config ที่มีอยู่แล้ว (เช่น ~/.claude-work ที่เคย login ไว้)\n"
-            "ค่านี้จะกลายเป็น CLAUDE_CONFIG_DIR ของ pane ที่ใช้บัญชีนี้"
+            "ใช้โฟลเดอร์ config ที่มีอยู่แล้ว (โฟลเดอร์ที่เคย login ไว้)\n"
+            f"ค่านี้จะกลายเป็น {home_var} ของ pane ที่ใช้บัญชีนี้"
         )
         dir_row_lay.addWidget(self.dir_edit, 1)
         browse_btn = cockpit_theme.secondary_button("เลือก…", dir_row)
@@ -226,11 +235,33 @@ class _AddAccountDialog(cockpit_theme.CockpitDialog):
         )
 
 
+# Open login windows, kept alive here rather than by a Qt parent (see
+# `_LoginPaneDialog`). Cleared as each one is destroyed.
+_open_login_dialogs: set[_LoginPaneDialog] = set()
+_login_shutdown_hooked = False
+
+
+def _close_login_dialogs_on_quit() -> None:
+    for dlg in list(_open_login_dialogs):
+        try:
+            dlg.close()
+        except RuntimeError:
+            pass
+
+
 class _LoginPaneDialog(QDialog):
     """A real provider pane (TerminalWidget + PtySession) scoped to ONE
     account's home, so `claude` / `codex login` writes the credential exactly
-    where that account's panes will read it. Non-modal child of the Settings
-    dialog. The PTY is torn down on close — never left running."""
+    where that account's panes will read it.
+
+    Top-level, NOT a child of the Settings window (user 2026-09-17: "กด
+    เข้าระบบแล้ว cockpit แครช"): SettingsWindow is WA_DeleteOnClose, so as a
+    child this dialog — and the PtySession whose reader/writer QThreads were
+    still running — got deleted the moment Settings closed. Destroying a
+    running QThread is a Qt fatal error: the whole cockpit aborted with no
+    traceback. Now the dialog owns its own lifetime (WA_DeleteOnClose) and
+    closing it stops the PTY threads synchronously before anything is freed;
+    app quit closes any still open."""
 
     def __init__(
         self,
@@ -240,7 +271,17 @@ class _LoginPaneDialog(QDialog):
         argv: list[str],
         extra_env: dict[str, str],
     ) -> None:
-        super().__init__(parent)
+        global _login_shutdown_hooked
+        super().__init__(None)
+        del parent  # kept in the signature for callers; lifetime is our own
+        self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        _open_login_dialogs.add(self)
+        self.destroyed.connect(lambda _=None, d=self: _open_login_dialogs.discard(d))
+        app = QCoreApplication.instance()
+        if app is not None and not _login_shutdown_hooked:
+            app.aboutToQuit.connect(_close_login_dialogs_on_quit)
+            _login_shutdown_hooked = True
+        self._torn_down = False
         self.setWindowTitle(title)
         self.resize(820, 520)
         lay = QVBoxLayout(self)
@@ -263,19 +304,48 @@ class _LoginPaneDialog(QDialog):
         self._term.inputBytes.connect(self._session.write)
         self._term.resized.connect(self._session.resize)
         self._session.processExited.connect(self._on_exited)
+        self._exit_lbl = QLabel("", self)
+        self._exit_lbl.setWordWrap(True)
+        self._exit_lbl.hide()
         lay.addWidget(self._term, 1)
+        lay.addWidget(self._exit_lbl)
         self._session.spawn(argv, cwd=str(Path.home()), env={**os.environ, **extra_env})
 
-    def _on_exited(self, _code: int) -> None:
-        # The CLI ended (user typed exit / login flow closed it) — nothing
-        # left to interact with, close the window.
-        self.close()
+    def _on_exited(self, code: int) -> None:
+        if code == 0:
+            # Login flow finished — nothing left to interact with.
+            self.close()
+            return
+        # A failed CLI used to close the window instantly, hiding its error.
+        self._exit_lbl.setText(
+            f"โปรแกรม login จบพร้อม error (code {code}) — ดูข้อความด้านบน แล้วปิดหน้าต่างนี้"
+        )
+        self._exit_lbl.setStyleSheet(f"color: {cockpit_theme.STATE_WARN};")
+        self._exit_lbl.show()
 
     def closeEvent(self, event) -> None:
-        try:
-            self._session.terminate()
-        except Exception:
-            pass
+        if not self._torn_down:
+            self._torn_down = True
+            try:
+                # wait=True: the reader/writer QThreads must be stopped before
+                # WA_DeleteOnClose frees them (a login CLI is a tiny tree, so
+                # the inline taskkill is short).
+                self._session.terminate(wait=True)
+            except Exception:
+                pass
+            # A natural exit tore down on a background thread, and the reader
+            # emits its exit signal from inside run() — wait for every thread
+            # the session owns to actually finish before this dialog is freed.
+            try:
+                threads = self._session.findChildren(QThread)
+            except RuntimeError:
+                threads = []
+            for thread in threads:
+                try:
+                    thread.quit()
+                    thread.wait(3000)
+                except RuntimeError:
+                    pass
         super().closeEvent(event)
 
 
@@ -377,51 +447,43 @@ class AccountsSettingsMixin:
         count_chip = cockpit_theme.gold_soft_chip(f"{len(row.accounts)} บัญชี", panel, compact=True)
         header.addWidget(count_chip)
         header.addStretch(1)
-        if not row.gap_reason:
+        # A disabled "+ เพิ่มบัญชี" read as broken (user 2026-09-17) — only
+        # render it when it works; the reason otherwise shows as text below.
+        if row.can_add:
             add_btn = cockpit_theme.secondary_button("+ เพิ่มบัญชี", panel)
-            add_btn.setEnabled(row.can_add)
-            if not row.can_add and row.add_hint:
-                add_btn.setToolTip(row.add_hint)
             add_btn.clicked.connect(
                 lambda _=False, p=row.provider: self._on_accounts_add_clicked(p)
             )
             header.addWidget(add_btn)
         lay.addLayout(header)
 
-        if row.gap_reason:
+        if row.gap_reason or not row.can_add:
             # #505 review M7: a gap only ever blocks ADD/LOGIN for a NEW
-            # account (`login_launch` already returns None for every
-            # provider but claude/codex, so an existing account's own
-            # "เข้าสู่ระบบ" button never renders below either) — an existing
-            # account must still be listed, never hidden by this notice.
-            gap_row = QHBoxLayout()
-            gap_lbl = QLabel("ยังแยกบัญชีใหม่ไม่ได้ — ใช้บัญชีของเครื่องทั้งเครื่อง", panel)
-            gap_lbl.setStyleSheet(f"color: {cockpit_theme.TEXT_MUTED};")
-            gap_lbl.setToolTip(row.gap_reason)
-            gap_row.addWidget(gap_lbl, 1)
-            # 2026-09-08 design review: the full technical probe note (internal
-            # env-var names, provider version, sqlite table names) used to
-            # render inline as a wrapped paragraph — moved behind a
-            # Diagnostics button instead of always-on developer-jargon leak.
-            diag_btn = cockpit_theme.secondary_button("Diagnostics", panel)
-            diag_btn.clicked.connect(
-                lambda _=False, name=row.display_name, reason=row.gap_reason: (
-                    self._on_show_gap_diagnostics(name, reason)
-                )
+            # account — existing accounts still list below. The technical
+            # probe note stays a tooltip on this one line (the separate
+            # "Diagnostics" button was removed 2026-09-17: users read it as
+            # an action they had to take).
+            note = (
+                "ยังแยกบัญชีไม่ได้ — ใช้บัญชีของเครื่องทั้งเครื่อง"
+                if row.gap_reason
+                else "ใช้บัญชี default ได้บัญชีเดียว (ยังเพิ่มบัญชีที่สองไม่ได้)"
             )
-            gap_row.addWidget(diag_btn)
-            lay.addLayout(gap_row)
+            gap_lbl = QLabel(note, panel)
+            gap_lbl.setStyleSheet(f"color: {cockpit_theme.TEXT_MUTED};")
+            gap_lbl.setToolTip(row.gap_reason or row.add_hint)
+            lay.addWidget(gap_lbl)
 
         for account in row.accounts:
             lay.addWidget(self._build_account_card(account, panel))
+        if len(row.accounts) > 1:
+            pick_hint = QLabel(
+                "เลือกว่าโปรเจคไหนใช้บัญชีไหน: กดปุ่ม 🤖 บนแถบด้านบนของหน้าต่างหลัก",
+                panel,
+            )
+            pick_hint.setObjectName("panelHint")
+            pick_hint.setWordWrap(True)
+            lay.addWidget(pick_hint)
         return panel
-
-    def _on_show_gap_diagnostics(self, provider_name: str, reason: str) -> None:
-        box = cockpit_theme.themed_message_box(self)
-        box.setWindowTitle(f"{provider_name} — Diagnostics")
-        box.setText("รายละเอียดทางเทคนิคว่าทำไมยังแยกบัญชีใหม่ไม่ได้:")
-        box.setInformativeText(reason)
-        box.exec()
 
     def _build_account_card(
         self, account: accounts_adapter.AccountInfo, parent: QWidget
@@ -588,6 +650,14 @@ class AccountsSettingsMixin:
             )
             return
         argv, extra_env = launch
+        # `codex login` exits with an error when CODEX_HOME doesn't exist yet
+        # (e.g. an account added with a custom folder) — create it first.
+        for home in extra_env.values():
+            try:
+                Path(home).mkdir(parents=True, exist_ok=True)
+            except OSError as exc:
+                QMessageBox.warning(self, "เข้าสู่ระบบ", f"สร้างโฟลเดอร์บัญชีไม่ได้: {home}\n{exc}")
+                return
         hint = (
             "ถ้ายังไม่ได้เข้าสู่ระบบ พิมพ์ /login ในหน้าต่างนี้แล้วทำตามขั้นตอน · ปิดหน้าต่างเมื่อเสร็จ"
             if account.provider == "claude"
@@ -604,8 +674,16 @@ class AccountsSettingsMixin:
         except Exception as exc:
             QMessageBox.warning(self, "เปิดหน้าต่าง login ไม่สำเร็จ", str(exc))
             return
-        # Refresh the page when the login window closes so the new state shows.
-        dlg.finished.connect(lambda _r: self._accounts_refresh())
+
+        # Refresh the page when the login window closes so the new state shows
+        # — the Settings window may already be gone by then.
+        def _refresh_if_alive(_r: int = 0) -> None:
+            try:
+                self._accounts_refresh()
+            except RuntimeError:
+                pass
+
+        dlg.finished.connect(_refresh_if_alive)
         self._accounts_login_dialogs.append(dlg)
         dlg.show()
 

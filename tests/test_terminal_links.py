@@ -210,3 +210,62 @@ class TestStripOsc52:
         cleaned, carry = self._strip("just normal output\nwith newlines\n")
         assert cleaned == "just normal output\nwith newlines\n"
         assert carry == ""
+
+
+class TestOscColorReplies:
+    """OSC 10/11 fg/bg queries (codex's boot-time theme detection) must be
+    answered from Python immediately — the xterm.js reply arrives a
+    QWebChannel round-trip too late and gets typed into codex's composer as
+    literal ']10;rgb:…\\' text."""
+
+    def _replies(self, text, tail=""):
+        from agent_takkub.terminal_widget import _osc_color_replies
+
+        return _osc_color_replies(text, tail)
+
+    def test_answers_fg_and_bg_with_theme_colors(self):
+        replies, _tail = self._replies("\x1b]10;?\x1b\\\x1b]11;?\x1b\\")
+        assert replies == ("\x1b]10;rgb:e6e6/e6e6/e6e6\x1b\\\x1b]11;rgb:0e0e/0e0e/1010\x1b\\")
+
+    def test_reply_mirrors_bel_terminator(self):
+        replies, _tail = self._replies("\x1b]11;?\x07")
+        assert replies == "\x1b]11;rgb:0e0e/0e0e/1010\x07"
+
+    def test_query_split_across_chunks_answered_once(self):
+        replies1, tail = self._replies("boot noise\x1b]10;?")
+        assert replies1 == ""
+        replies2, _tail = self._replies("\x1b\\more output", tail)
+        assert replies2 == "\x1b]10;rgb:e6e6/e6e6/e6e6\x1b\\"
+
+    def test_query_inside_carried_tail_not_answered_twice(self):
+        # A complete BEL query is 7 chars — exactly the carried overlap. The
+        # chunk after it must not re-answer the copy sitting in the tail.
+        replies1, tail = self._replies("\x1b]10;?\x07")
+        assert replies1 == "\x1b]10;rgb:e6e6/e6e6/e6e6\x07"
+        replies2, _tail = self._replies("plain output", tail)
+        assert replies2 == ""
+
+    def test_set_color_and_other_osc_ignored(self):
+        # OSC 10 with an actual color (a SET, not a query) and unrelated OSC
+        # sequences must produce no reply.
+        replies, _tail = self._replies("\x1b]10;#ffffff\x07\x1b]0;title\x07\x1b]12;?\x07")
+        assert replies == ""
+
+    def test_reply_policy_per_provider(self):
+        # Only TUIs confirmed to PARSE an OSC color reply get one — codex's
+        # crossterm/ratatui types the reply into its composer as literal
+        # text (seen live 2026-09-17), unconfirmed TUIs stay safe-default off.
+        from agent_takkub.provider_spec import PROVIDER_REGISTRY
+
+        assert PROVIDER_REGISTRY["claude"].handles_osc_color_reply is True
+        assert PROVIDER_REGISTRY["gemini"].handles_osc_color_reply is True
+        for provider in ("codex", "opencode", "kimi", "cursor"):
+            assert PROVIDER_REGISTRY[provider].handles_osc_color_reply is False
+
+    def test_late_xterm_reply_is_recognized_for_dropping(self):
+        from agent_takkub.terminal_widget import _OSC_COLOR_REPLY
+
+        late = "\x1b]10;rgb:e6e6/e6e6/e6e6\x1b\\\x1b]11;rgb:0e0e/0e0e/1010\x1b\\"
+        assert _OSC_COLOR_REPLY.sub("", late) == ""
+        # a real keystroke sharing the batch must survive
+        assert _OSC_COLOR_REPLY.sub("", late + "a") == "a"
