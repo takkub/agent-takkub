@@ -1456,3 +1456,112 @@ class TestIdleNoProgressWatchdog:
         _check(fake, now2)  # re-sight → fresh edge → re-stamp
         assert ps.last_tool_marker_seen_ts == now2
         assert fake.notify_calls == []
+
+
+class TestStreamTokenCounterProgress:
+    """#655 (field case 2026-09-17): the watchdog killed two panes mid-turn at
+    exactly IDLE_NO_PROGRESS_ESCALATE_S while their own kill-event snapshots
+    showed "✶ Philosophising… (40m 0s · ↓ 109.5k tokens · thinking …)" — a
+    long extended-thinking turn streams tokens the whole time but produces no
+    tool marker, no file write and no child process, so `_real_progress_ts`
+    read it as zero progress. The fix: a CHANGING on-screen token counter
+    (`_STREAM_TOKENS_RE` signature over `display_lines()`) is real streaming
+    and stamps `last_stream_tokens_ts`; a FROZEN counter (the #570 marquee
+    shape) stamps nothing and still escalates."""
+
+    def _pane(self, now: float):
+        fake = _FakeOrch()
+        pane = _FakePane(state="working", last_out=now - 5)
+        fake._panes_by_project["p"] = {"backend": pane}
+        ps = fake._ps("p::backend")
+        ps.last_content_change_ts = now
+        ps.last_send_ts = now
+        return fake, pane, ps
+
+    def test_climbing_token_counter_blocks_idle_no_progress_kill(self) -> None:
+        t0 = 1_000_000.0
+        fake, pane, ps = self._pane(t0)
+        step = IDLE_NO_PROGRESS_NOTICE_S / 2
+        for i in range(8):  # last tick lands well past IDLE_NO_PROGRESS_ESCALATE_S
+            now = t0 + (i + 1) * step
+            pane._last_output_ts = now - 1
+            # Counter climbs every tick — tokens are genuinely streaming.
+            pane.session.display_lines.return_value = [
+                f"✶ Philosophising… (40m 0s · ↓ {10.0 + i:.1f}k tokens · esc to interrupt)",
+            ]
+            # Simulate "content still changing" the same way the #570 tests
+            # do (the spinner line itself is phrase-filtered out of the hash).
+            ps.last_content_change_ts = now
+            _check(fake, now)
+        assert ps.last_stream_tokens_ts > 0.0, "changing counter must stamp the clock"
+        assert fake.close_calls == [], "a thinking pane streaming tokens is not stuck"
+        assert fake.notify_calls == [], "no idle-no-progress notice either"
+
+    def test_frozen_token_counter_does_not_block_escalation(self) -> None:
+        """#570 regression guard: a marquee whose counter never moves gains
+        nothing from this signal — the escalate kill still lands."""
+        import agent_takkub.orchestrator as orch_mod
+
+        logged: list[dict] = []
+        orig = orch_mod._log_event
+        orch_mod._log_event = lambda event, **kw: logged.append({"event": event, **kw})
+        try:
+            t0 = 1_000_000.0
+            fake, pane, ps = self._pane(t0)
+            step = IDLE_NO_PROGRESS_NOTICE_S / 2
+            closed_at = None
+            for i in range(8):
+                now = t0 + (i + 1) * step
+                pane._last_output_ts = now - 1
+                pane.session.display_lines.return_value = [
+                    "✶ Working… (5m · ↓ 10.0k tokens · esc to interrupt)",
+                ]
+                ps.last_content_change_ts = now  # marquee keeps content "fresh"
+                _check(fake, now)
+                if fake.close_calls:
+                    closed_at = now
+                    break
+        finally:
+            orch_mod._log_event = orig
+
+        assert fake.close_calls == [("backend", "p")]
+        assert closed_at is not None
+        assert (closed_at - t0) >= IDLE_NO_PROGRESS_ESCALATE_S
+        recover_events = [e for e in logged if e["event"] == "stuck_pane_recover"]
+        assert len(recover_events) == 1
+        assert recover_events[0]["reason"] == "idle_no_progress"
+
+    def test_real_progress_ts_includes_stream_tokens_ts(self) -> None:
+        ps = PaneState()
+        ps.last_send_ts = 10.0
+        ps.last_tool_marker_seen_ts = 20.0
+        ps.last_stream_tokens_ts = 30.0
+        got = Orchestrator._real_progress_ts(  # type: ignore[arg-type]
+            _FakeOrch(), "backend", "p", _FakePane(), ps, 40.0
+        )
+        assert got == 30.0
+
+    def test_escalate_kill_deferred_by_cwd_file_activity(self, tmp_path) -> None:
+        """#655 second layer: `_idle_no_progress_real_activity` (#599) used to
+        gate only the 20-minute NOTICE — the 40-minute KILL skipped it. A pane
+        whose only evidence is fresh file writes under its own cwd must now be
+        deferred at kill time too, not just spared the notice."""
+        import agent_takkub.orchestrator as orch_mod
+
+        logged: list[dict] = []
+        orig = orch_mod._log_event
+        orch_mod._log_event = lambda event, **kw: logged.append({"event": event, **kw})
+        try:
+            t0 = 1_000_000.0
+            fake, pane, ps = self._pane(t0)
+            pane._session_cwd = str(tmp_path)
+            (tmp_path / "work.txt").write_text("x", encoding="utf-8")
+            ps.last_send_ts = t0 - IDLE_NO_PROGRESS_ESCALATE_S - 1
+            _check(fake, t0)
+        finally:
+            orch_mod._log_event = orig
+
+        assert fake.close_calls == [], "fresh cwd file writes must defer the kill"
+        deferred = [e for e in logged if e["event"] == "stuck_recover_deferred_real_activity"]
+        assert len(deferred) == 1
+        assert deferred[0]["reason"] == "cwd file activity"

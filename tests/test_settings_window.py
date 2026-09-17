@@ -188,6 +188,38 @@ class TestSettingsWindowStructure:
         dlg.deleteLater()
 
 
+class TestModelCatalogRefreshLandsBeforeProvidersPageBuilt:
+    """#656 (prod crash, auto-captured): the background catalog-refresh
+    thread's `resultReady` → `_on_model_catalog_refreshed` landed on a
+    SettingsWindow opened at a NON-providers view — the Providers & Roles
+    page is lazy (H3/#515), so `_provider_model_combos` /
+    `_role_model_combos` / `_role_provider_combos` did not exist yet and
+    the handler died with AttributeError. The handler must treat "page
+    never visited" as "nothing to repopulate" (same `getattr(..., {})`
+    contract `_collect_pending_from_widgets` already documents)."""
+
+    def test_refresh_signal_before_providers_view_is_a_noop(self) -> None:
+        dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_GENERAL)
+        assert not hasattr(dlg, "_provider_model_combos"), (
+            "precondition: providers page must still be unbuilt, or this "
+            "test no longer reproduces #656"
+        )
+        # Pre-fix: AttributeError. Post-fix: clean no-op.
+        dlg._on_model_catalog_refreshed({"claude": ["claude-sonnet-5"]})
+        dlg.deleteLater()
+
+    def test_refresh_signal_after_providers_view_still_repopulates(self) -> None:
+        dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_GENERAL)
+        dlg._goto_view(settings_window.VIEW_PROVIDERS_ROLES)
+        assert hasattr(dlg, "_provider_model_combos")
+        dlg._on_model_catalog_refreshed({"claude": ["claude-sonnet-5"]})
+        combo = dlg._provider_model_combos.get("claude")
+        if combo is not None:
+            items = [combo.itemText(i) for i in range(combo.count())]
+            assert any("claude-sonnet-5" in t for t in items)
+        dlg.deleteLater()
+
+
 class TestParkFallbackToggle:
     def test_default_on_and_clicks_persist_across_reopen(self) -> None:
         dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_GENERAL)

@@ -1023,6 +1023,20 @@ _SPINNER_VOLATILE_RE = re.compile(
     re.IGNORECASE,
 )
 
+# #655: extracts every on-screen token counter ("↓ 109.5k tokens",
+# "12,340 tokens") into a comparable signature for the idle-no-progress
+# watchdog. The counter is the one busy-spinner element a marquee can't
+# fake: it only moves when the provider actually streams tokens. Broader
+# than the arrow-required tokens half of _SPINNER_VOLATILE_RE on purpose —
+# codex/others print the count without claude's ↑↓ arrows. A static
+# transcript mention of "N tokens" contributes a static signature (no
+# stamp); one that scrolls away changes the signature, but scrolling
+# content is real provider output anyway. Providers whose busy UI shows no
+# token counter at all (gemini-agy's "esc to cancel · 412s", plain
+# opencode/cursor spinners) get no signal from this — unchanged behavior
+# for them, they still rely on tool markers / live children / file writes.
+_STREAM_TOKENS_RE = re.compile(r"[↑↓]?\s*[\d.,]+\s*[km]?\s*tokens?\b", re.IGNORECASE)
+
 
 IDLE_WATCHDOG_INTERVAL_MS = 5_000
 # #406: how long the cockpit-owned mb Chrome may sit with no browser pane
@@ -9025,6 +9039,12 @@ class Orchestrator(
         ts = ps.last_send_ts
         if ps.last_tool_marker_seen_ts > ts:
             ts = ps.last_tool_marker_seen_ts
+        # #655: a moving on-screen token counter is streaming, not a marquee
+        # — the counter only climbs when tokens actually arrive, so a long
+        # thinking turn (no tool marker / file / child the whole time) stays
+        # protected while a frozen #570 marquee still ages out normally.
+        if ps.last_stream_tokens_ts > ts:
+            ts = ps.last_stream_tokens_ts
         return ts
 
     def _idle_no_progress_real_activity(
@@ -12569,6 +12589,8 @@ class Orchestrator(
                 ps.last_send_ts += gap
             if ps.last_tool_marker_seen_ts > 0.0:
                 ps.last_tool_marker_seen_ts += gap
+            if ps.last_stream_tokens_ts > 0.0:
+                ps.last_stream_tokens_ts += gap
         for project_panes in self._panes_by_project.values():
             for pane in project_panes.values():
                 last_out = getattr(pane, "_last_output_ts", 0.0)
@@ -12651,6 +12673,21 @@ class Orchestrator(
                                 # the very first tick rather than getting a free
                                 # STUCK_THRESHOLD_S grace period.
                                 ps_ck.last_content_change_ts = last_out
+                        # #655: streaming-token-counter progress stamp. Stamp
+                        # only on a CHANGE from a previously-observed signature
+                        # (never on first sight — a fresh spawn's static
+                        # transcript may already mention "N tokens"), so a
+                        # frozen marquee (#570) can't keep this clock fresh but
+                        # a 40-minute thinking turn — whose counter climbs with
+                        # every streamed token while producing no tool marker,
+                        # no file write and no child process — can.
+                        _tok_sig = " ".join(_STREAM_TOKENS_RE.findall("\n".join(disp)))
+                        if (
+                            ps_ck.stream_tokens_sig is not None
+                            and _tok_sig != ps_ck.stream_tokens_sig
+                        ):
+                            ps_ck.last_stream_tokens_ts = now
+                        ps_ck.stream_tokens_sig = _tok_sig
                     except Exception:
                         # display_lines() failed (session torn down mid-tick); fall
                         # back to initialising the ts from last raw byte time.
@@ -12907,6 +12944,29 @@ class Orchestrator(
                         role, project_name, pane, ps_ck, now
                     ):
                         continue
+                    # #655: last-chance gate for the idle-no-progress path
+                    # specifically. `_idle_no_progress_real_activity` (#599)
+                    # only ran before the 20-minute NOTICE — the 40-minute
+                    # KILL skipped it, so a pane whose only evidence was cwd
+                    # file writes (live children are covered by the defer
+                    # just above) still died. Runs only when a recover is
+                    # otherwise imminent (past cooldown/gave-up gates), so
+                    # the heavier probe stays off the every-tick hot path.
+                    if not content_stale and idle_no_progress_escalate:
+                        _real_act = self._idle_no_progress_real_activity(
+                            role, project_name, pane, now
+                        )
+                        if _real_act:
+                            if (now - ps_ck.idle_defer_log_ts) >= 300:
+                                _log_event(
+                                    "stuck_recover_deferred_real_activity",
+                                    role=role,
+                                    project=project_name,
+                                    no_progress_for_s=int(idle_no_progress_for),
+                                    reason=_real_act,
+                                )
+                                ps_ck.idle_defer_log_ts = now
+                            continue
                     self._auto_recover_stuck(
                         role,
                         project_name,

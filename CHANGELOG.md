@@ -4,6 +4,28 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 
 ## [vNEXT]
 
+## [v2.1.15] - 2026-09-17
+
+### Fixed (แก้)
+
+- **#655 — watchdog ฆ่า pane ที่กำลังคิดยาว (extended thinking) ทิ้งตอนครบ 40 นาทีพอดี**
+  เคสจริง 2026-09-17: kill-event ของตัวเองยังแนบ snapshot "✶ Philosophising… (40m 0s · ↓ 109.5k
+  tokens · thinking)" อยู่เลย — คิดยาวไม่มี tool marker/ไฟล์/child process ให้ `_real_progress_ts`
+  เห็น เลยโดนตัดสินว่า idle_no_progress · แก้ 2 ชั้น: (1) ตัวเลข token counter บนจอที่**ขยับ**
+  (`_STREAM_TOKENS_RE` + `PaneState.last_stream_tokens_ts`) นับเป็น progress จริง — marquee #570
+  เลขไม่ขยับจึงยังโดนจับตามเดิม (2) ก่อน kill สาย idle-no-progress ให้ recheck
+  `_idle_no_progress_real_activity` (#599 เดิมกันแค่ notice 20 นาที ไม่กัน kill 40 นาที) —
+  pane ที่ยังเขียนไฟล์ใน cwd ได้ defer + log `stuck_recover_deferred_real_activity`
+  · **gap ที่รู้**: provider ที่ busy-UI ไม่มีเลข token (gemini-agy/opencode/cursor spinner เปล่า)
+  ไม่ได้ประโยชน์จากชั้น (1) — พฤติกรรมเดิมทุกอย่าง ยังพึ่ง tool marker/children/file writes
+- **#656 — Settings crash `AttributeError: _provider_model_combos`** เปิด Settings หน้าอื่น
+  (ไม่ใช่ Providers & Roles ที่เป็น lazy-build) แล้ว background model-catalog refresh เสร็จก่อน —
+  handler `_on_model_catalog_refreshed` แตะ combo dicts ที่ยังไม่ถูกสร้าง · แก้เป็น
+  `getattr(..., {})` ตาม contract เดียวกับ `_collect_pending_from_widgets` (หน้า build ทีหลัง
+  อ่าน catalog สดเองอยู่แล้ว)
+- **`__init__.__version__` ค้างที่ 2.1.13** — release 2.1.14 bump แค่ pyproject/package.json
+  ทำให้ auto-issue จากเครื่อง 2.1.14 รายงาน version ผิด · เพิ่มเทส sync สามไฟล์กันลืมรอบหน้า
+
 ## [v2.1.14] - 2026-09-17
 
 ### Added (เพิ่ม)

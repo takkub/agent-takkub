@@ -838,6 +838,24 @@ class PaneState:
     # banner (a stuck marquee / repaint loop) can't keep the clock fresh
     # forever (see `_check_stuck_panes`).
     _tool_marker_was_active: bool = False
+    # #655: streaming-token-counter progress signal. `stream_tokens_sig` is
+    # the signature (joined regex matches) of every "N tokens" counter
+    # visible on the pane's screen last watchdog tick;
+    # `last_stream_tokens_ts` is the wall-clock of the last tick that
+    # signature CHANGED. A provider spinner's token counter ("↓ 109.5k
+    # tokens") only moves when tokens actually stream from the API — a
+    # 40-minute extended-thinking turn has no tool marker, no file write and
+    # no child process, but its counter climbs the whole time, while the
+    # #570 marquee's counter (if any) stays frozen. Field case 2026-09-17:
+    # watchdog killed two panes mid-think at exactly IDLE_NO_PROGRESS_ESCALATE_S
+    # with "↓ 109.5k tokens / ↓ 206.8k tokens" sitting right in the kill
+    # event's own snapshot.
+    stream_tokens_sig: str | None = None
+    last_stream_tokens_ts: float = 0.0
+    # #655: throttle for the `stuck_recover_deferred_real_activity` log line
+    # (the escalate-time last-chance probe fires every watchdog tick while
+    # real activity persists — log the episode, not every 5s tick).
+    idle_defer_log_ts: float = 0.0
     # _last_spawn_resumed: True when the last spawn used --resume (not --session-id)
     last_spawn_resumed: bool = False
     # throughput watchdog (issue #35) — snapshot of pane._tp_total_bytes taken

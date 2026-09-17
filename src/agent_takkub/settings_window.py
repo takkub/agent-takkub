@@ -1061,14 +1061,21 @@ class SettingsWindow(
         """Repopulate every model combo whose provider just got a fresh
         catalog, preserving whatever value (preset or free-typed) it
         currently holds — same pattern as the CLI-combo-changed handlers
-        that already call `_fill_model_combo` this way."""
+        that already call `_fill_model_combo` this way.
+
+        The combo dicts belong to the lazily-built Providers & Roles page
+        (H3 / #515): a Settings session that never navigated there has no
+        combos yet when this background signal lands (#656) — nothing to
+        repopulate, and the page's builder reads the just-refreshed catalog
+        itself when (if) it is built."""
         if not results:
             return
-        for provider, combo in self._provider_model_combos.items():
+        for provider, combo in getattr(self, "_provider_model_combos", {}).items():
             if provider in results:
                 _fill_model_combo(combo, provider, _combo_model(combo) or None)
-        for role, combo in self._role_model_combos.items():
-            provider_combo = self._role_provider_combos.get(role)
+        role_provider_combos = getattr(self, "_role_provider_combos", {})
+        for role, combo in getattr(self, "_role_model_combos", {}).items():
+            provider_combo = role_provider_combos.get(role)
             role_provider = (
                 provider_combo.currentData() if provider_combo else None
             ) or provider_config.CLAUDE

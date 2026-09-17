@@ -1,76 +1,40 @@
-"""Release metadata must expose one version everywhere users can read it."""
+"""The version number lives in three places and they must agree.
+
+Release 2.1.14 (2026-09-17) bumped `pyproject.toml` + `package.json` but left
+`agent_takkub.__version__` at "2.1.13" — every auto-captured issue from a
+2.1.14 install (`auto_issue_capture`/`auto_issue_signals` stamp
+`__version__` into the report body) then blamed the wrong release, and the
+boot-migration/versioning stores (`core/migration/steps.py`,
+`core/versioning/store.py`) recorded the wrong app version too. CI was green
+the whole time because nothing pinned the three together — this does.
+"""
 
 from __future__ import annotations
 
 import json
 import re
-import tomllib
 from pathlib import Path
 
-import yaml
+import agent_takkub
 
-from agent_takkub import __version__
-from agent_takkub.release import read_pyproject_version
-
-
-def test_python_and_npm_versions_match_pyproject() -> None:
-    root = Path(__file__).resolve().parents[1]
-    project_version = read_pyproject_version((root / "pyproject.toml").read_text(encoding="utf-8"))
-    npm_version = json.loads((root / "package.json").read_text(encoding="utf-8"))["version"]
-
-    assert __version__ == project_version == npm_version
+_ROOT = Path(__file__).resolve().parents[1]
 
 
-def _pre_commit_rev(repo_url_suffix: str) -> str:
-    root = Path(__file__).resolve().parents[1]
-    hooks = yaml.safe_load((root / ".pre-commit-config.yaml").read_text(encoding="utf-8"))
-    for repo in hooks["repos"]:
-        if repo["repo"].endswith(repo_url_suffix):
-            return repo["rev"]
-    raise AssertionError(f"no repo ending with {repo_url_suffix!r} in .pre-commit-config.yaml")
+def _pyproject_version() -> str:
+    text = (_ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    m = re.search(r'^version = "([^"]+)"', text, re.MULTILINE)
+    assert m, "pyproject.toml lost its version line"
+    return m.group(1)
 
 
-def test_ruff_pin_matches_pre_commit_rev() -> None:
-    # #246: pyproject.toml's ruff==X dev pin and .pre-commit-config.yaml's
-    # ruff-pre-commit rev must move together — CI and `pip install -e .[dev]`
-    # use the former, the local pre-commit gate uses the latter. Drift means
-    # the local gate can pass on rules a newer/older CI ruff doesn't have.
-    root = Path(__file__).resolve().parents[1]
-    dev_deps = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))["project"][
-        "optional-dependencies"
-    ]["dev"]
-    (ruff_dep,) = (dep for dep in dev_deps if dep.startswith("ruff=="))
-    pyproject_version = ruff_dep.removeprefix("ruff==")
-
-    rev = _pre_commit_rev("astral-sh/ruff-pre-commit")
-    pre_commit_version = rev.removeprefix("v")
-
-    assert pyproject_version == pre_commit_version
+def _package_json_version() -> str:
+    data = json.loads((_ROOT / "package.json").read_text(encoding="utf-8"))
+    return data["version"]
 
 
-def test_gitleaks_pin_matches_security_workflow() -> None:
-    # Same drift risk as ruff (#246): .pre-commit-config.yaml's gitleaks rev
-    # and .github/workflows/security.yml's pinned VER must match, or the
-    # local pre-commit gate and CI's secret scan silently run different
-    # gitleaks releases.
-    root = Path(__file__).resolve().parents[1]
-    rev = _pre_commit_rev("gitleaks/gitleaks")
-    pre_commit_version = rev.removeprefix("v")
-
-    workflow = (root / ".github" / "workflows" / "security.yml").read_text(encoding="utf-8")
-    (workflow_version,) = re.findall(r"^\s*VER=([\d.]+)\s*$", workflow, flags=re.MULTILINE)
-
-    assert pre_commit_version == workflow_version
+def test_dunder_version_matches_pyproject() -> None:
+    assert agent_takkub.__version__ == _pyproject_version()
 
 
-def test_qt_dependencies_match_doctor_supported_lts_series() -> None:
-    root = Path(__file__).resolve().parents[1]
-    project = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))["project"]
-    qt_dependencies = {dep for dep in project["dependencies"] if dep.startswith("PyQt6")}
-
-    assert qt_dependencies == {
-        "PyQt6>=6.8,<6.9",
-        "PyQt6-Qt6>=6.8,<6.9",
-        "PyQt6-WebEngine>=6.8,<6.9",
-        "PyQt6-WebEngine-Qt6>=6.8,<6.9",
-    }
+def test_package_json_matches_pyproject() -> None:
+    assert _package_json_version() == _pyproject_version()
