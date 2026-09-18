@@ -172,6 +172,17 @@ def save(payload: dict) -> bool:
     target.parent.mkdir(parents=True, exist_ok=True)
     ok = config._write_json_atomic(target, payload)
     _reset_cache()
+    # Writer invalidates the readers' cache (same contract 2.1.18 gave
+    # `cached_read`): `core.scheduling.facade` keys its parsed-policy cache
+    # on the file's mtime, and two same-size writes inside one Windows
+    # filesystem timestamp tick are indistinguishable by stat alone
+    # (CI windows-latest 2026-09-18: a policy save was silently ignored).
+    try:
+        from agent_takkub.core.scheduling.facade import invalidate_policy_cache
+
+        invalidate_policy_cache()
+    except Exception:
+        pass
     return ok
 
 

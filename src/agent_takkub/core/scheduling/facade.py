@@ -20,12 +20,27 @@ from .priority_queue import order_by_priority
 
 _log = logging.getLogger(__name__)
 
-# (settings file mtime, converted SlotPolicy) — reload only when the Settings
-# UI actually rewrote core-v2-settings.json, not on every call. `mtime` is
+# (settings file stat key, converted SlotPolicy) — reload only when the
+# Settings UI actually rewrote core-v2-settings.json, not on every call. The
+# key is `st_mtime_ns` (not the float `st_mtime`: two writes inside one
+# Windows clock tick share the float and went stale — CI 2026-09-18) and is
 # `None` when the file doesn't exist yet (the common case — most machines
 # never opened Settings → Scheduler), a stable key so the parse result still
-# caches instead of re-parsing `_default_payload()` every call.
-_policy_cache: tuple[float | None, SlotPolicy] | None = None
+# caches instead of re-parsing `_default_payload()` every call. Same-process
+# writers don't rely on the timestamp at all: `core_v2_settings.save()`
+# calls `invalidate_policy_cache()` below on every write.
+_policy_cache: tuple[int | None, SlotPolicy] | None = None
+
+
+def invalidate_policy_cache() -> None:
+    """Drop the parsed-policy cache so the next `effective_slot_policy()`
+    re-reads the settings file. Called by `core_v2_settings.save()` (writer
+    invalidates the readers' cache — the same contract 2.1.18 gave
+    `cached_read`): an mtime key alone cannot tell two same-size writes
+    apart when they land inside one filesystem timestamp tick."""
+    global _policy_cache
+    _policy_cache = None
+
 
 # #364 lever 3: one active pane/subagent measured at ~540MB (claude/codex CLI)
 # + ~99MB (QtWebEngineProcess for a pane's xterm.js) ≈ 650MB, the same figure
@@ -101,7 +116,7 @@ def effective_slot_policy() -> SlotPolicy:
         from agent_takkub import core_v2_settings
 
         try:
-            mtime = core_v2_settings.path().stat().st_mtime
+            mtime = core_v2_settings.path().stat().st_mtime_ns
         except OSError:
             mtime = None
         if _policy_cache is not None and _policy_cache[0] == mtime:
