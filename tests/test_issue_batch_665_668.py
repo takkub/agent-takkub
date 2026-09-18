@@ -178,6 +178,29 @@ class TestDoneKeptPaneHygiene:
         monkeypatch.setenv("TAKKUB_CLOSE_ON_DONE", "1")
         assert ap_mod._close_on_done_env() is True
 
+    def test_idle_clear_skips_done_kept_pane_in_reuse_mode(self, qapp, monkeypatch):
+        """The 10-min idle clear must not black out a pane the reuse keep
+        window (30 min) is deliberately holding — provider-agnostic, the
+        clear lives in AgentPane which every provider shares."""
+        from agent_takkub import agent_pane as ap_mod
+        from agent_takkub.roles import Role
+
+        monkeypatch.delenv("TAKKUB_CLOSE_ON_DONE", raising=False)
+        pane = ap_mod.AgentPane.__new__(ap_mod.AgentPane)
+        pane.role = Role(name="backend", label="Backend", color="#fff", column=1, row=0)
+        pane.model = MagicMock()
+        pane.state = "done"
+        pane._keepalive_active = False
+        pane._idle_auto_cleared = False
+        pane._last_output_ts = time.time() - ap_mod._IDLE_AUTO_CLEAR_THRESHOLD_S - 60
+        pane._clear_pane_view = MagicMock()
+        pane._check_idle_auto_clear()
+        pane._clear_pane_view.assert_not_called()
+        # opt-in auto-close mode keeps the old behaviour
+        monkeypatch.setenv("TAKKUB_CLOSE_ON_DONE", "1")
+        pane._check_idle_auto_clear()
+        pane._clear_pane_view.assert_called_once()
+
 
 # ── #665: mcp handshake config read goes through the stat cache ────────────
 

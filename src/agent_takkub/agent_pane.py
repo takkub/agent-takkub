@@ -1194,6 +1194,12 @@ class AgentPane(QFrame):
             return
         if self.state == "empty" or self._idle_auto_cleared:
             return
+        # Pane reuse: a done-kept pane (any provider) waits up to
+        # DONE_PANE_TTL_S (30 min) for its role's next task — longer than
+        # this 10-min idle clear, which would black it out mid-keep exactly
+        # like the done-clear this gate's sibling in set_state() removed.
+        if self.state == "done" and not _close_on_done_env():
+            return
         if self._last_output_ts <= 0:
             return
         if time.time() - self._last_output_ts < _IDLE_AUTO_CLEAR_THRESHOLD_S:
