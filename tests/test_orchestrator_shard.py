@@ -893,6 +893,15 @@ class TestShardRespawnCappedLeadDown:
 
 
 class TestShardSpawnFail:
+    @pytest.fixture(autouse=True)
+    def _no_substitute_provider(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # 2.1.17 provider ring: a spawn failure re-runs the assign on the next
+        # enabled provider when one exists. These tests are about the shard
+        # bookkeeping of a FINAL failure, so leave nothing to hop to.
+        from agent_takkub import provider_config
+
+        monkeypatch.setattr(provider_config, "_provider_available", lambda p: p == "claude")
+
     def test_spawn_fail_records_failed_shard(self, orch: Orchestrator) -> None:
         """When assign() fails to spawn a shard, group.failed gets the shard key."""
         lead = _make_lead()

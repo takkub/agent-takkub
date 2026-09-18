@@ -61,6 +61,9 @@ def orch(qapp, tmp_path, monkeypatch) -> Orchestrator:
     monkeypatch.setattr(orch_mod, "RUNTIME_DIR", tmp_path)
     monkeypatch.setattr(orch_mod, "EVENTS_LOG", tmp_path / "events.log")
     monkeypatch.setattr(orch_mod, "ensure_runtime", lambda: None)
+    # 2.1.17 keeps panes alive after done by default; the auto-close race
+    # this file reproduces only exists on the opt-in auto-close.
+    monkeypatch.setattr(orch_mod, "CLOSE_ON_DONE", True)
 
     with patch("agent_takkub.orchestrator.Orchestrator._load_pending_cc", lambda self: None):
         o = Orchestrator.__new__(Orchestrator)

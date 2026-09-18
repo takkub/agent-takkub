@@ -195,7 +195,11 @@ class TestCwdSwitchOnReuse:
             patch.object(orch, "_send_when_ready") as send,
         ):
             ok, msg = orch._assign_dispatch(
-                "frontend", str(new), "task in new wt", project=TEST_PROJECT
+                "frontend",
+                str(new),
+                "task in new wt",
+                project=TEST_PROJECT,
+                worktree={"path": str(new), "branch": "wt/frontend-2"},
             )
         assert ok and "respawning in" in msg
         close.assert_called_once()
@@ -228,10 +232,37 @@ class TestCwdSwitchOnReuse:
         pane = _pane("working", str(old), at_prompt=False)
         orch._panes_by_project.setdefault(TEST_PROJECT, {})["backend"] = pane
         with patch.object(orch, "_send_when_ready") as send:
-            ok, msg = orch._assign_dispatch("backend", str(new), "x", project=TEST_PROJECT)
+            ok, msg = orch._assign_dispatch(
+                "backend",
+                str(new),
+                "x",
+                project=TEST_PROJECT,
+                worktree={"path": str(new), "branch": "wt/backend-2"},
+            )
         assert ok is False
         assert "#162" in msg
         send.assert_not_called()
+
+    def test_plain_reassign_with_other_cwd_still_pastes_into_running_pane(self, orch, tmp_path):
+        old = tmp_path / "a"
+        new = tmp_path / "b"
+        old.mkdir()
+        new.mkdir()
+        pane = _pane("working", str(old), at_prompt=False)
+        orch._panes_by_project.setdefault(TEST_PROJECT, {})["backend"] = pane
+        with (
+            patch.object(orch, "spawn", return_value=(True, "backend already running")),
+            patch.object(orch, "_send_when_ready") as send,
+            patch.object(orch, "_notify_lead"),
+        ):
+            ok, _ = orch._assign_dispatch("backend", str(new), "x", project=TEST_PROJECT)
+        assert ok
+        send.assert_called_once()
+
+    def test_bare_mock_pane_is_not_idle(self, orch):
+        # #162 guard tests register a bare MagicMock as "some live pane" —
+        # unknown state/aliveness must never read as idle.
+        assert orch._pane_idle_for_reassign(MagicMock()) is False
 
     def test_worktree_collision_guard_ignores_idle_pane(self, orch, tmp_path):
         pane = _pane("done", str(tmp_path), at_prompt=True)

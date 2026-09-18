@@ -3335,7 +3335,7 @@ class Orchestrator(
         """True when a live pane's screen reads "ready prompt, no background
         work" right now (#661's classification, cached — no render)."""
         session = getattr(pane, "session", None)
-        if session is None or not getattr(session, "is_alive", False):
+        if session is None or getattr(session, "is_alive", False) is not True:
             return False
         try:
             at_prompt = session.is_at_ready_prompt_cached()
@@ -3344,17 +3344,20 @@ class Orchestrator(
             return False
         return at_prompt is True and background is not True
 
+    # Pane states #603 treats as "not mid-turn" — a new assignment may take
+    # the pane over. Deliberately a closed list: an unknown/absent state
+    # (a bare test double, a pane still constructing) is NOT idle.
+    _IDLE_PANE_STATES = frozenset({"done", "empty", "exited", "active", "error"})
+
     def _pane_idle_for_reassign(self, pane) -> bool:
         """A live pane a new assignment may take over without clobbering an
-        in-flight turn: finished (done/empty/exited) or declared working but
-        genuinely parked at its prompt (#664: finished with `progress`, or
-        died mid-response)."""
+        in-flight turn: finished/idle by state (`_IDLE_PANE_STATES`) or
+        declared working but genuinely parked at its prompt (#664: finished
+        with `progress`, or died mid-response)."""
         session = getattr(pane, "session", None)
-        if session is None or not getattr(session, "is_alive", False):
+        if session is None or getattr(session, "is_alive", False) is not True:
             return False
-        # #603's rule: anything but "working" (active/done/error/empty/…)
-        # is not mid-turn.
-        if getattr(pane, "state", None) != "working":
+        if getattr(pane, "state", None) in self._IDLE_PANE_STATES:
             return True
         return self._pane_idle_at_prompt(pane)
 
@@ -3581,10 +3584,13 @@ class Orchestrator(
         # routinely meets a live pane parked in the PREVIOUS worktree. Its
         # cwd is fixed at process start — pasting the task in would run it in
         # the old checkout (#162) — so a different cwd on an idle pane means
-        # close+respawn, same shape as the provider switch below.
+        # close+respawn, same shape as the provider switch below. Only for
+        # worktree assigns: a plain re-assign with another cwd keeps pasting
+        # into the running pane as it always has (the pane can `cd`).
         _pane_cwd_now = getattr(existing_pane, "_session_cwd", None) if pane_is_running else None
         _cwd_switch_wanted = bool(
-            cwd
+            worktree
+            and cwd
             and isinstance(_pane_cwd_now, str)
             and _pane_cwd_now
             and os.path.normcase(os.path.abspath(_pane_cwd_now))
