@@ -13,6 +13,8 @@ import time
 from datetime import datetime
 from pathlib import Path
 
+from . import cached_read
+
 _log = logging.getLogger(__name__)
 
 _SAFE_NAME = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
@@ -132,6 +134,9 @@ def _write_json_atomic(path: Path, data: dict, *, durable: bool = False) -> bool
             time.sleep(delay)
         try:
             tmp.replace(path)
+            # #658: readers go through `cached_read`'s stat-skip TTL — an
+            # in-process save must be visible on the very next read.
+            cached_read.invalidate(path)
         except PermissionError:
             if attempt < 3:
                 continue

@@ -88,7 +88,9 @@ def read_cached(
             _cache.pop(key, None)
         return missing
     sig = (st.st_mtime_ns, st.st_size, st.st_ino)
-    recent = (time.time() - st.st_mtime) < _RECENT_WRITE_S
+    # abs(): a filesystem timestamp slightly AHEAD of time.time() (clock/FS
+    # skew, seen on CI runners) is still "just written", not "old".
+    recent = abs(time.time() - st.st_mtime) < _RECENT_WRITE_S
     if not recent and hit is not None and hit[0] == sig:
         with _lock:
             _cache[key] = (sig, hit[1], mono, False)

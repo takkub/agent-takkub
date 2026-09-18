@@ -392,6 +392,7 @@
       "module": "agent_takkub.cached_read",
       "imports": [],
       "imported_by": [
+        "agent_takkub.config",
         "agent_takkub.core.storage.legacy_reader",
         "agent_takkub.core.storage.v2_target",
         "agent_takkub.provider_config",
@@ -399,7 +400,7 @@
         "agent_takkub.task_ledger",
         "agent_takkub.user_profile"
       ],
-      "fan_in": 6,
+      "fan_in": 7,
       "fan_out": 0
     },
     {
@@ -616,6 +617,7 @@
     {
       "module": "agent_takkub.config",
       "imports": [
+        "agent_takkub.cached_read",
         "agent_takkub.core.storage.layout"
       ],
       "imported_by": [
@@ -730,7 +732,7 @@
         "agent_takkub.worktree_manager"
       ],
       "fan_in": 109,
-      "fan_out": 1
+      "fan_out": 2
     },
     {
       "module": "agent_takkub.core",
