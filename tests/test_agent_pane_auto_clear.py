@@ -85,6 +85,14 @@ def _fake_terminal(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _legacy_close_on_done(monkeypatch):
+    # 2.1.19 pane reuse: kept panes are never auto-cleared (done or idle) in
+    # the default mode — the clears this file pins only run in the opt-in
+    # TAKKUB_CLOSE_ON_DONE=1 auto-close mode.
+    monkeypatch.setenv("TAKKUB_CLOSE_ON_DONE", "1")
+
+
+@pytest.fixture(autouse=True)
 def _stop_done_clear_timer(monkeypatch):
     # set_state("done") arms a real 5s _done_clear_timer regardless of
     # _keepalive_active (#344) — several tests here assert it got armed and

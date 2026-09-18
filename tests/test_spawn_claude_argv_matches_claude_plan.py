@@ -139,8 +139,14 @@ def _spawn_claude_and_capture_argv(qapp, monkeypatch, role_name: str = "backend"
 
 
 def test_assemble_claude_argv_reproduces_live_branch_argv(qapp, monkeypatch):
+    from agent_takkub import spawn_engine as spawn_engine_mod
     from agent_takkub.provider_spec import TEAMMATE_DEFAULT_BUILTIN_TOOLS
     from agent_takkub.spawn_engine import _teammate_autocompact
+
+    # #666 drops `Skill` when the fake curated config dir has no skills —
+    # policy is pinned in test_issue_batch_665_668.py; THIS test is about
+    # argv assembly parity, so hold the tool list constant.
+    monkeypatch.setattr(spawn_engine_mod, "_skill_catalog_unused", lambda env, plug: False)
 
     # Resolved, not hardcoded: the window ships off (so no flag at all), and
     # this test must track whatever the live branch actually does either way.
