@@ -2,6 +2,32 @@
 
 All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses [SemVer](https://semver.org/).
 
+## [v2.1.20] - 2026-09-18
+
+### Fixed (แก้)
+
+- **#671 — pane viewport วาดเป็น 'empty slot' ทั้งที่ pane ยังอยู่และ buffer มีเนื้อหา** (regression จาก pane-reuse
+  2.1.17): `AgentPane.set_state` สลับ body ไป placeholder ทุก state ที่ไม่ใช่ active/working — รวม `done` ด้วย ซึ่งสมัย
+  pane ปิดใน 2.5 วิไม่มีใครทันเห็น แต่โหมด reuse เก็บ pane ไว้ทั้ง TTL ทำให้ done pane โชว์ "empty slot" ค้างทั้งที่
+  CLI เห็น buffer จริง (user แยกไม่ออกว่า pane ตายหรือ UI ไม่วาด) · ตอนนี้ `done` ที่ session ยังอยู่วาด terminal ต่อ
+  (export/zoom ใช้ได้ ปุ่ม spawn ซ่อน) · placeholder เหลือเฉพาะช่องที่ไม่มี session จริง (ยังไม่เคย spawn / ปิดแล้ว /
+  crash) · เทส `test_agent_pane_done_viewport.py`
+- **#670 — auto scope จัด deep เพราะเจอ keyword คำเดียว ทับ signal read-only/งานเล็กทั้งหมด** (#650/#602 กลับมาบน
+  2.1.19): `task_scope.classify` ถ่วงน้ำหนักแทนให้ deep ชนะเดี่ยวๆ — (1) งานที่ประกาศ read-only/ห้ามแก้โค้ด ชัดๆ
+  ไม่ escalate เป็น deep จาก keyword (คำว่า schema เป็นสิ่งที่จะไปอ่าน ไม่ใช่แก้) → normal · (2) แยกบริบทอ่าน/เขียน
+  ด้วยกริยารอบ keyword (query/ดู/อ่าน vs แก้/migrate/drop) — deep keyword ในบริบทอ่าน + มี signal งานเล็กแข่ง → normal
+  · (3) ทิศกลับกัน: งานตรวจ read-only ไม่จัด tiny จากคำ 'แค่' โดดๆ (เคส prod audit 12 นาทีโดนจัด tiny) → normal ·
+  (4) reason บอก signal ที่แข่งกันทุกตัว ไม่ใช่บอกแค่ตัวชนะ · ข้อห้ามเฉพาะจุด ("ห้ามแก้ไฟล์ config", "ห้าม commit เอง")
+  ไม่นับเป็น read-only — งานเขียนโค้ดจริงยังจัด deep ตามเดิม
+- **#669 — pane ลืม `takkub done` → ledger ค้าง working + `takkub wait` รอเก้อ (detection มีแล้วแต่ไม่มี auto-recovery)**:
+  reminder เดิมโดน 2 อย่างกดจนไม่เคยยิงในเคสจริง — content-hash "progress" ที่ footer repaint ทำให้สดตลอด + 3 รอบแรก
+  เป็น UI notice ที่ไม่ถึง pane/Lead · ตอนนี้ใช้นาฬิกา classification ของ #661 (`ready_since_ts` = ready prompt ต่อเนื่อง
+  ไม่มี background work) เป็น fast path: idle-at-prompt ครบ `TAKKUB_IDLE_AT_PROMPT_NUDGE_S` (default 60s) → เตือน pane
+  ทาง PTY ทันที (ข้าม progress gate) · retry ตาม cooldown สูงสุด `TAKKUB_IDLE_AT_PROMPT_PTY_NUDGES` (default 2) ·
+  เงียบครบ → notice `[idle-at-prompt] <role>` เข้า Lead ครั้งเดียว ซึ่ง **ปลุก `takkub wait`** ที่ block รอ role นั้นอยู่
+  (ผ่าน `_pending_system_notice_for_watched`) แทนที่จะนั่งรอจน timeout · `wait` ที่ยัง pending รายงาน "น่าจะลืม takkub
+  done" แทน "ยังทำงานอยู่" เมื่อ display_state เป็น idle-at-prompt · event: `idle_at_prompt_lead_escalation`
+
 ## [v2.1.19] - 2026-09-18
 
 ### Fixed (แก้)

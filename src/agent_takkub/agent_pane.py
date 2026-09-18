@@ -491,7 +491,14 @@ class AgentPane(QFrame):
         self._dot.setStyleSheet(
             f"color: {STATUS_COLORS.get(state, cockpit_theme.TEXT_FAINT)}; font-size: 14px;"
         )
-        if state in ("active", "working"):
+        # #671: a "done" pane with a live session (pane reuse, 2.1.17 —
+        # done no longer closes the pane) must keep showing its terminal:
+        # switching to the placeholder here left a living pane rendered as
+        # "empty slot" for its whole keep window while `takkub status`
+        # still saw the real screen buffer. The placeholder is only for
+        # slots with no session behind them (never spawned, closed, or
+        # exited — detach_session resets the terminal for those anyway).
+        if state in ("active", "working") or (state == "done" and self.session is not None):
             self._stack.setCurrentIndex(1)
             self._btn_spawn.hide()
             self._btn_export.show()

@@ -190,6 +190,54 @@ class TestPollWait:
 
         assert result["ok"] is True
         assert result["pending"] == {"backend": "ยังทำงานอยู่"}
+
+    def test_idle_at_prompt_role_reports_forgot_done_shape(
+        self, orch: Orchestrator, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """#669: a watched role whose display_state is `idle-at-prompt`
+        (#661) must not read as a bare "ยังทำงานอยู่" — Lead reading a wait
+        timeout needs to see the forgot-`takkub done` shape."""
+        _register_working(orch, "backend")
+        begin = orch.begin_wait(PROJECT, ["backend"], 60.0)
+        monkeypatch.setattr(
+            orch,
+            "list_status_detailed",
+            lambda project=None: {
+                "backend": {"state": "working", "display_state": "idle-at-prompt"}
+            },
+        )
+
+        result = orch.poll_wait(PROJECT, begin["wait_id"])
+
+        assert result["ok"] is True
+        detail = result["pending"]["backend"]
+        assert "ลืม takkub done" in detail
+
+    def test_idle_at_prompt_escalation_notice_interrupts_wait(
+        self, orch: Orchestrator, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """#669: the watchdog's `[idle-at-prompt] <role>` Lead escalation must
+        wake a wait blocked on that role instead of letting it run out the
+        full --timeout (the reported deadlock: pane forgot done, Lead blind
+        inside `takkub wait`)."""
+        _register_working(orch, "backend")
+        begin = orch.begin_wait(PROJECT, ["backend"], 60.0)
+        notice = (
+            "⚠️ [idle-at-prompt] backend นั่งที่ prompt ว่างต่อเนื่อง ~2m "
+            "ทั้งที่ ledger ยัง working — เตือนทาง pane ไป 2 ครั้งแล้วเงียบ"
+        )
+        monkeypatch.setattr(
+            orch, "_inbox_report_raw", lambda project=None: [{"role": "system", "body": notice}]
+        )
+
+        result = orch.poll_wait(PROJECT, begin["wait_id"])
+
+        assert result["ok"] is True
+        assert result["interrupt"] is not None
+        assert result["interrupt"]["role"] == "backend"
+        assert "idle-at-prompt" in result["interrupt"]["detail"]
+        # The interrupt ends the registration like any other resolution.
+        assert PROJECT not in orch._active_waits
         assert not result["done"]
         assert not result["failed"]
 

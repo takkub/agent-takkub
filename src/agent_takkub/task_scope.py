@@ -378,6 +378,59 @@ def _clean_analysis(text: str) -> str:
     return "\n".join(lines)
 
 
+# ── Read-only / investigate-only intent (#670) ───────────────────────────────
+# An explicit "this task writes nothing" declaration — "read-only",
+# "ห้ามแก้โค้ด", "อ่านอย่างเดียว", ... Searched on the RAW text (before
+# `_clean_analysis` cuts prohibition tails), because the declaration usually
+# IS a prohibition. Deliberately narrow:
+# - a commit-only ban ("ห้าม commit") does NOT count — worktree tasks say
+#   "ห้าม commit เอง รอ Lead" while still editing code;
+# - file-scoped bans ("ห้ามแก้ไฟล์ config", "ห้ามแก้ไฟล์อื่น") do NOT count —
+#   only the blanket code ban (ห้าม/ไม่/ไม่ต้อง + แก้โค้ด) qualifies, since a
+#   code ban is blanket by nature while a file ban is usually a boundary
+#   inside a task that DOES write.
+_READ_ONLY_INTENT_RE = re.compile(
+    r"read[\s_-]?only|investigate[\s_-]?only"
+    r"|\bno\s+code\s+changes?\b"
+    r"|(?:ห้าม|ไม่|ไม่ต้อง)แก้(?:โค้ด|code)"
+    r"|อ่านอย่างเดียว|ดูอย่างเดียว|ตรวจ(?:สอบ)?อย่างเดียว",
+    re.I,
+)
+
+# #670 item 2: verbs that mark a deep keyword as something the task will READ
+# (query the schema, ดู schema) versus MODIFY (แก้ schema, migrate). A deep
+# keyword only loses its unconditional escalation when its own line reads as a
+# read action — a read verb appears before it on the line and no write verb
+# appears anywhere on that line.
+_READ_VERB_RE = re.compile(
+    r"\b(?:query|select|list|view|show|inspect|read|check|compare|audit)\b"
+    r"|ดู|อ่าน|เช็ค|ตรวจ|เทียบ|แสดง",
+    re.I,
+)
+_WRITE_VERB_RE = re.compile(
+    r"\b(?:migrate|alter|drop|update|insert|delete|create|add|modify|change|write|fix)\b"
+    r"|แก้|เพิ่ม|ลบ|สร้าง|เปลี่ยน|ปรับ|ย้าย|เขียน|รื้อ|อัปเดต",
+    re.I,
+)
+
+
+def _deep_matches_all_read_context(analyzed: str) -> bool:
+    """True when EVERY deep-pattern match in *analyzed* sits in a read
+    context: its line has a read verb before the match and no write verb at
+    all. One write-context (or verb-less) occurrence keeps deep authority —
+    conservative on purpose: "ดู schema แล้วแก้ mapping" still sizes deep."""
+    saw_any = False
+    for line in analyzed.split("\n"):
+        for _name, pattern in _DEEP_PATTERNS:
+            for m in pattern.finditer(line):
+                saw_any = True
+                if _WRITE_VERB_RE.search(line):
+                    return False
+                if not _READ_VERB_RE.search(line[: m.start()]):
+                    return False
+    return saw_any
+
+
 # ── Explicit scope marker (#620) ──────────────────────────────────────────────
 # A task's first line sometimes already states its own tier ("scope=deep",
 # "scope: tiny", or a bare "(deep)"/"(scope normal)" aside in a heading) —
@@ -425,14 +478,23 @@ def _deep_categories(text: str) -> tuple[set[str], tuple[str, str] | None]:
 def classify(task_text: str) -> ScopeDecision:
     """Classify *task_text* into a ScopeDecision ("tiny" | "normal" | "deep").
 
-    Precedence (#602):
+    Precedence (#602, weighted per #670):
       1. deep signal inside the *action region* (what the task says it will
          do/fix, excluding context/facts headings, backtick references, and
-         text after "ห้าม/ไม่ต้อง/อย่า/never/don't") -> deep.
-         If only >= 2 *distinct* deep categories exist anywhere in the cleaned
-         text, that is also deep (multi-risk task even if phrased in passing).
-      2. tiny signals match explicit user size limits (unless forbidden verbs match)
+         text after "ห้าม/ไม่ต้อง/อย่า/never/don't") -> deep, UNLESS (#670)
+         the task declares itself read-only (a keyword can't make a task
+         that writes nothing "deep"), or an explicit small-size signal
+         competes AND every deep keyword sits in a read context (query/ดู,
+         not แก้/migrate). If only >= 2 *distinct* deep categories exist
+         anywhere in the cleaned text, that is also deep (multi-risk task
+         even if phrased in passing) — same read-only exemption.
+      2. tiny signals match explicit user size limits (unless forbidden
+         verbs match); a read-only task never sizes tiny off a bare "แค่"
+         (#670's reverse miss — a 12-minute prod audit sized tiny) — it
+         stays normal.
       3. normal is the fallback for everything else
+    Every decision that had competing signals names them in the reason
+    instead of only the winner (#670 item 4).
     """
     text = strip_budget((task_text or "").strip())
     if not text:
@@ -445,18 +507,55 @@ def classify(task_text: str) -> ScopeDecision:
     analyzed = _clean_analysis(_action_region(text))
     full_analyzed = _clean_analysis(text)
 
+    # #670: opposing size/intent signals, collected up front so every branch
+    # below can weigh (and name) them.
+    read_only = _READ_ONLY_INTENT_RE.search(text)
+    small_match = None
+    small_name = ""
+    if not _FORBIDDEN_TINY_RE.search(analyzed):
+        for signal_name, pattern in _TINY_KEYWORD_PATTERNS:
+            m = pattern.search(analyzed)
+            if m:
+                small_match, small_name = m, signal_name
+                break
+
+    def _competing() -> str:
+        parts = []
+        if read_only:
+            parts.append(f"read-only intent ('{read_only.group(0).strip()}')")
+        if small_match:
+            parts.append(f"ขนาดเล็ก '{small_match.group(0).strip()}' ({small_name})")
+        return " + ".join(parts)
+
     # 1. Deep check — action-region signals win; >= 2 distinct categories anywhere also count.
     action_cats, action_first = _deep_categories(analyzed)
     if action_cats:
         name, sample = action_first or ("deep", "")
-        return ScopeDecision(
-            "deep",
-            f"ตรวจพบ signal deep: '{sample}' ({name}) ในส่วนที่ต้องทำ — ชนะทุก signal",
-        )
+        if read_only:
+            return ScopeDecision(
+                "normal",
+                f"signal deep '{sample}' ({name}) แพ้ {_competing()} — "
+                "งานประกาศห้ามเขียน/read-only: keyword deep เป็นสิ่งที่จะไปอ่าน ไม่ escalate",
+            )
+        if small_match and _deep_matches_all_read_context(analyzed):
+            return ScopeDecision(
+                "normal",
+                f"signal deep '{sample}' ({name}) อยู่ในบริบทอ่าน (query/ดู ไม่ใช่แก้) "
+                f"และแข่งกับ {_competing()} — จัด normal",
+            )
+        reason = f"ตรวจพบ signal deep: '{sample}' ({name}) ในส่วนที่ต้องทำ"
+        reason += f" — ชนะ signal ที่แข่ง: {_competing()}" if small_match else " — ชนะทุก signal"
+        return ScopeDecision("deep", reason)
 
     full_cats, full_first = _deep_categories(full_analyzed)
     if len(full_cats) >= 2:
         names = ", ".join(sorted(full_cats))
+        if read_only:
+            return ScopeDecision(
+                "normal",
+                f"พบ {len(full_cats)} signal deep ต่างหมวด ({names}) แต่แพ้ {_competing()} — "
+                "งานประกาศห้ามเขียน/read-only ไม่ escalate จาก keyword",
+            )
         return ScopeDecision(
             "deep",
             f"พบ {len(full_cats)} signal deep ต่างหมวด ({names}) — ถือเป็นงานระดับ deep",
@@ -468,15 +567,19 @@ def classify(task_text: str) -> ScopeDecision:
             f"งานทั่วไป — signal '{sample}' ({name}) อยู่ในส่วนบริบท/อ้างอิง/หลังข้อห้าม ไม่ถือเป็น deep",
         )
 
-    # 2. Forbidden tiny check (blocks tiny tier from refactor/rewrite/move/etc.)
-    if not _FORBIDDEN_TINY_RE.search(analyzed):
-        for signal_name, pattern in _TINY_KEYWORD_PATTERNS:
-            match = pattern.search(analyzed)
-            if match:
-                return ScopeDecision(
-                    "tiny",
-                    f"ตรวจพบคำระบุขนาดงานเล็ก: '{match.group(0).strip()}' ({signal_name})",
-                )
+    # 2. Tiny check (forbidden verbs already filtered when small_match was collected).
+    if small_match:
+        if read_only:
+            return ScopeDecision(
+                "normal",
+                f"งานตรวจสอบ read-only ('{read_only.group(0).strip()}') — "
+                f"คำ '{small_match.group(0).strip()}' ({small_name}) ไม่พอจัด tiny "
+                "เพราะขนาดงานตรวจไม่ได้วัดจากจำนวนบรรทัดที่แก้",
+            )
+        return ScopeDecision(
+            "tiny",
+            f"ตรวจพบคำระบุขนาดงานเล็ก: '{small_match.group(0).strip()}' ({small_name})",
+        )
 
     # 3. Default
     return ScopeDecision("normal", "งานทั่วไป (default tier)")

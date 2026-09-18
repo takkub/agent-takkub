@@ -441,6 +441,17 @@ class LeadWaitMixin:
                     blocked = None
                 if blocked:
                     return "pending", f"ค้างที่ prompt: {blocked}"
+            # #669: surface the #661 classification instead of a bare
+            # "ยังทำงานอยู่" — the pane is provably parked at its prompt, so
+            # Lead reading a wait timeout knows this is a forgot-done shape
+            # (the watchdog is already nudging it; its escalation notice
+            # wakes this wait via `_pending_system_notice_for_watched`).
+            if info.get("display_state") == "idle-at-prompt":
+                return (
+                    "pending",
+                    "pane นั่งที่ prompt ว่างทั้งที่ยังนับว่า working — น่าจะลืม takkub done "
+                    "(auto-nudge กำลังเตือน pane อยู่)",
+                )
             stall_min = info.get("stall_minutes")
             if stall_min is not None:
                 return "pending", f"ยังทำงานอยู่ แต่ไม่มีความคืบหน้า {stall_min}m"

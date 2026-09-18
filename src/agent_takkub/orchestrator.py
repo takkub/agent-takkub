@@ -629,6 +629,22 @@ QUEUE_DRAIN_IDLE_S = max(0.0, float(os.environ.get("TAKKUB_QUEUE_DRAIN_IDLE_S", 
 IDLE_REMIND_ESCALATE_AFTER_ROUNDS = max(
     0, int(os.environ.get("TAKKUB_IDLE_REMIND_ESCALATE_ROUNDS", "3"))
 )
+# #669: fast-path auto-recovery for the forgot-`takkub done` shape. A pane
+# whose #661 classification clock (`PaneState.ready_since_ts` — "ready
+# prompt, no background work", continuously) has run for this long is past
+# every "maybe still busy" doubt, so the reminder goes to the pane over PTY
+# immediately (skipping the 3 UI-only rounds nobody reads and the
+# content-hash progress gate that footer repaints keep fresh). After
+# IDLE_AT_PROMPT_PTY_NUDGES ignored nudges, Lead gets one durable
+# `[idle-at-prompt]` notice — which also wakes a blocked `takkub wait`
+# watching that role (see `_pending_system_notice_for_watched`). Set the
+# nudge threshold to 0 to disable the fast path (the slow UI-round path
+# above still applies).
+IDLE_AT_PROMPT_NUDGE_S = max(0.0, float(os.environ.get("TAKKUB_IDLE_AT_PROMPT_NUDGE_S", "60")))
+IDLE_AT_PROMPT_PTY_NUDGES = max(0, int(os.environ.get("TAKKUB_IDLE_AT_PROMPT_PTY_NUDGES", "2")))
+# The Lead-notice shape `_warn_lead_idle_at_prompt` emits and
+# `_pending_system_notice_for_watched` matches back (wakes `takkub wait`).
+_IDLE_AT_PROMPT_NOTICE_RE = re.compile(r"\[idle-at-prompt\]\s+(\S+)", re.IGNORECASE)
 
 # Fallback that arms the forgot-done reminder even when the watchdog never
 # caught the pane mid-turn. The `seen_working` latch (set when a tick observes
@@ -8986,10 +9002,23 @@ class Orchestrator(
         Only checked against *pending_roles* (this tick's still-pending
         watched roles, passed by the caller) — a role that already
         resolved this tick doesn't need waking.
+
+        #669: also matches the watchdog's own `[idle-at-prompt] <role>`
+        escalation notice (see `_warn_lead_idle_at_prompt`) — a watched role
+        provably sitting at its prompt after every auto-nudge was ignored
+        will never call done()/failed() either, so without this a
+        `takkub wait` on it sat blind to the full --timeout (the exact
+        deadlock #669 reports). Deliberately matched here with its own
+        pattern rather than added to `_SYSTEM_MARKER_ROLE_RE`: that set
+        feeds the inbox staleness re-check whose semantics are about
+        delivery health, which this notice is not.
         """
         for item in self._inbox_report_raw(project=project_ns):
             body = str(item.get("body", ""))
             role = _system_marker_role(body)
+            if not role:
+                m = _IDLE_AT_PROMPT_NOTICE_RE.search(body)
+                role = m.group(1) if m else None
             if not role or role not in pending_roles:
                 continue
             first_line = body.strip().splitlines()[0] if body.strip() else ""
@@ -11698,6 +11727,10 @@ class Orchestrator(
                         entry["last_reminder_ts"] = 0.0
                         entry["notice_rounds"] = 0
                         entry["escalated"] = False
+                        # #669: a genuine busy turn ends the idle episode —
+                        # the fast-path nudge budget starts over with it.
+                        entry["prompt_pty_nudges"] = 0
+                        entry["prompt_lead_escalated"] = False
                         continue
 
                     # Still in a provider startup / message-queue phase (idle
@@ -11757,12 +11790,33 @@ class Orchestrator(
                     _progress_recent = bool(
                         _last_progress_ts and (now - _last_progress_ts) < STALL_THRESHOLD_SEC
                     )
-                    if _has_bg_work or _tool_marker is not None or _progress_recent:
+                    # #669: the #661 classification clock outranks the
+                    # content-hash progress gate. `ready_since_ts` only runs
+                    # while the screen reads "ready prompt, no background
+                    # work" (reset by `_check_stuck_panes` on the same tick
+                    # the moment either changes), so once it has run for
+                    # IDLE_AT_PROMPT_NUDGE_S the pane is genuinely idle no
+                    # matter what the hash clock says — footer repaints and
+                    # decoration keep that hash "recent" indefinitely
+                    # (the exact starvation in #669's field case: a finished
+                    # codex pane never got a single reminder).
+                    _ps_rd = getattr(self, "_pane_state", {}).get(key)
+                    _ready_since = _ps_rd.ready_since_ts if _ps_rd is not None else 0.0
+                    _idle_at_prompt = bool(
+                        IDLE_AT_PROMPT_NUDGE_S > 0
+                        and _ready_since
+                        and (now - _ready_since) >= IDLE_AT_PROMPT_NUDGE_S
+                    )
+                    if (
+                        _has_bg_work or _tool_marker is not None or _progress_recent
+                    ) and not _idle_at_prompt:
                         entry["seen_working"] = True
                         entry["first_idle_ts"] = None
                         entry["last_reminder_ts"] = 0.0
                         entry["notice_rounds"] = 0
                         entry["escalated"] = False
+                        entry["prompt_pty_nudges"] = 0
+                        entry["prompt_lead_escalated"] = False
                         continue
 
                     # Issue #59: pane is idle — check for malformed tool-call XML
@@ -11793,8 +11847,13 @@ class Orchestrator(
                         )
 
                     if entry["first_idle_ts"] is None:
-                        entry["first_idle_ts"] = now
-                        continue
+                        # #669: when the classification clock already proves a
+                        # continuous idle episode, backdate the streak to its
+                        # start so the first nudge lands at the nudge
+                        # threshold, not threshold + IDLE_REMIND_AFTER_S.
+                        entry["first_idle_ts"] = _ready_since if _idle_at_prompt else now
+                        if not _idle_at_prompt:
+                            continue
 
                     idle_for = now - entry["first_idle_ts"]
                     since_last_reminder = now - entry["last_reminder_ts"]
@@ -11802,18 +11861,41 @@ class Orchestrator(
                     # that began and ended between two ticks so the latch never
                     # flipped — once the pane has been idle well past any
                     # provider boot/queue window (see the constant's comment).
-                    armed = entry.get("seen_working") or idle_for >= IDLE_REMIND_UNLATCHED_AFTER_S
+                    # #669: the idle-at-prompt classification also arms — its
+                    # clock only runs past the startup-marker gate above, so a
+                    # booting/queued pane can never reach it.
+                    armed = (
+                        entry.get("seen_working")
+                        or idle_for >= IDLE_REMIND_UNLATCHED_AFTER_S
+                        or _idle_at_prompt
+                    )
                     if (
                         armed
                         and idle_for >= IDLE_REMIND_AFTER_S
                         and since_last_reminder >= IDLE_REMIND_COOLDOWN_S
                     ):
                         notice_round = int(entry.get("notice_rounds") or 0) + 1
-                        escalate = bool(
-                            IDLE_REMIND_ESCALATE_AFTER_ROUNDS > 0
-                            and notice_round > IDLE_REMIND_ESCALATE_AFTER_ROUNDS
-                            and not entry.get("escalated")
-                        )
+                        _pty_done = int(entry.get("prompt_pty_nudges") or 0)
+                        if _idle_at_prompt and _pty_done < IDLE_AT_PROMPT_PTY_NUDGES:
+                            # #669 auto-recovery round 1..N: nudge the pane
+                            # itself over PTY right away — it is provably
+                            # sitting at its prompt, so the reminder text is
+                            # actionable now, not after 3 unread UI rounds.
+                            escalate = True
+                            entry["prompt_pty_nudges"] = _pty_done + 1
+                        elif _idle_at_prompt and not entry.get("prompt_lead_escalated"):
+                            # #669 final step: every nudge ignored — tell Lead
+                            # once, durably (also wakes a blocked
+                            # `takkub wait` watching this role).
+                            self._warn_lead_idle_at_prompt(project_name, name, idle_for)
+                            entry["prompt_lead_escalated"] = True
+                            escalate = False
+                        else:
+                            escalate = bool(
+                                IDLE_REMIND_ESCALATE_AFTER_ROUNDS > 0
+                                and notice_round > IDLE_REMIND_ESCALATE_AFTER_ROUNDS
+                                and not entry.get("escalated")
+                            )
                         self._inject_idle_reminder(
                             project_name,
                             name,
@@ -14510,6 +14592,28 @@ class Orchestrator(
             role=role_name,
             project=project_name,
             round=notice_round,
+        )
+
+    def _warn_lead_idle_at_prompt(self, project_ns: str, role_name: str, idle_s: float) -> None:
+        """#669 escalation: PTY nudges exhausted on a pane the #661
+        classification reads as idle-at-prompt while the ledger still says
+        working. One durable Lead notice; its `[idle-at-prompt] <role>` shape
+        is what `_pending_system_notice_for_watched` matches, so a `takkub
+        wait` blocked on this role wakes instead of running out its timeout."""
+        mins = max(1, int(idle_s // 60))
+        msg = (
+            f"⚠️ [idle-at-prompt] {role_name} นั่งที่ prompt ว่างต่อเนื่อง ~{mins}m "
+            f"ทั้งที่ ledger ยัง working — เตือนทาง pane ไป {IDLE_AT_PROMPT_PTY_NUDGES} ครั้งแล้วเงียบ "
+            f"(น่าจะตายกลางงาน/ลืม takkub done) · ดูจอแล้วตัดสิน: "
+            f"takkub harvest --role {role_name} เก็บงานที่ทำไว้ "
+            f"หรือ takkub close --role {role_name}"
+        )
+        self._notify_lead(project_ns, msg, kind="idle-at-prompt")
+        _log_event(
+            "idle_at_prompt_lead_escalation",
+            role=role_name,
+            project=project_ns,
+            idle_s=int(idle_s),
         )
 
     def _maybe_surface_malformed_xml(

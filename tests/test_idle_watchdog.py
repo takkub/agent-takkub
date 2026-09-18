@@ -1095,6 +1095,117 @@ class TestMalformedXmlWatchdog:
         lead.session.write.assert_not_called()
 
 
+class TestIdleAtPromptFastPath:
+    """#669: a pane the #661 classification clock (`PaneState.ready_since_ts`)
+    reads as continuously idle-at-prompt while the ledger still says working
+    gets PTY nudges right away (bypassing the content-hash progress gate that
+    footer repaints keep fresh, and the 3 UI-only rounds), then one durable
+    `[idle-at-prompt]` Lead escalation after the nudges are ignored."""
+
+    def _idle_at_prompt_pane(self, orch: Orchestrator, clock: list) -> MagicMock:
+        pane = _make_pane(state="working", at_ready_prompt=True)
+        orch.panes["backend"] = pane
+        # The classification clock is maintained by `_check_stuck_panes`
+        # (same tick, from real screen probes a MagicMock can't fake) —
+        # neutralize it and drive `ready_since_ts` directly.
+        ps = orch._ps(_key("backend"))
+        ps.ready_since_ts = clock[0] - (orch_mod.IDLE_AT_PROMPT_NUDGE_S + 1)
+        return pane
+
+    def test_pty_nudge_fires_despite_recent_content_hash_progress(
+        self, orch: Orchestrator, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The exact #669 starvation: the content-delta progress clock stayed
+        'recent' (footer repaints), so the finished pane never got a single
+        reminder while `takkub wait` ran out its timeout."""
+        clock = [1000.0]
+        monkeypatch.setattr(orch_mod.time, "time", lambda: clock[0])
+        monkeypatch.setattr(orch, "_check_stuck_panes", lambda now: None)
+        monkeypatch.setattr(orch_mod.QTimer, "singleShot", lambda *_a, **_kw: None)
+        pane = self._idle_at_prompt_pane(orch, clock)
+        orch._ps(_key("backend")).last_content_change_ts = clock[0] - 5.0  # "recent progress"
+
+        orch._check_idle_teammates()
+
+        pane.session.write.assert_called_once_with(IDLE_REMINDER_TEXT)
+        assert orch._idle_state[_key("backend")]["prompt_pty_nudges"] == 1
+
+    def test_retry_then_lead_escalation_wakes_wait(
+        self, orch: Orchestrator, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        clock = [1000.0]
+        monkeypatch.setattr(orch_mod.time, "time", lambda: clock[0])
+        monkeypatch.setattr(orch, "_check_stuck_panes", lambda now: None)
+        monkeypatch.setattr(orch_mod.QTimer, "singleShot", lambda *_a, **_kw: None)
+        pane = self._idle_at_prompt_pane(orch, clock)
+        notify_lead = MagicMock()
+        monkeypatch.setattr(orch, "_notify_lead", notify_lead)
+
+        def _tick_past_cooldown() -> None:
+            clock[0] += orch_mod.IDLE_REMIND_COOLDOWN_S + 1
+            orch._ps(_key("backend")).ready_since_ts = 900.0  # still the same episode
+            orch._check_idle_teammates()
+
+        orch._check_idle_teammates()  # nudge 1
+        _tick_past_cooldown()  # nudge 2
+        assert pane.session.write.call_count == 2
+        notify_lead.assert_not_called()
+
+        _tick_past_cooldown()  # nudges exhausted -> Lead escalation
+        assert pane.session.write.call_count == 2  # no third PTY nudge
+        notify_lead.assert_called_once()
+        msg = notify_lead.call_args.args[1]
+        assert "[idle-at-prompt] backend" in msg
+        assert "takkub harvest --role backend" in msg
+
+        _tick_past_cooldown()  # escalation is one-shot
+        notify_lead.assert_called_once()
+
+        # The escalation notice's shape is what wakes a blocked wait.
+        monkeypatch.setattr(
+            orch, "_inbox_report_raw", lambda project=None: [{"role": "system", "body": msg}]
+        )
+        interrupt = orch._pending_system_notice_for_watched(TEST_PROJECT, {"backend"})
+        assert interrupt is not None
+        assert interrupt["role"] == "backend"
+
+    def test_busy_turn_resets_the_fast_path_budget(
+        self, orch: Orchestrator, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        clock = [1000.0]
+        monkeypatch.setattr(orch_mod.time, "time", lambda: clock[0])
+        monkeypatch.setattr(orch, "_check_stuck_panes", lambda now: None)
+        monkeypatch.setattr(orch_mod.QTimer, "singleShot", lambda *_a, **_kw: None)
+        pane = self._idle_at_prompt_pane(orch, clock)
+
+        orch._check_idle_teammates()  # nudge 1
+        assert orch._idle_state[_key("backend")]["prompt_pty_nudges"] == 1
+
+        # A genuine work turn (nudge worked / new task): budget starts over.
+        pane.session.is_at_ready_prompt.return_value = False
+        orch._ps(_key("backend")).ready_since_ts = 0.0
+        clock[0] += 1
+        orch._check_idle_teammates()
+        assert orch._idle_state[_key("backend")]["prompt_pty_nudges"] == 0
+        assert orch._idle_state[_key("backend")]["prompt_lead_escalated"] is False
+
+    def test_disabled_when_threshold_zero(
+        self, orch: Orchestrator, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        clock = [1000.0]
+        monkeypatch.setattr(orch_mod.time, "time", lambda: clock[0])
+        monkeypatch.setattr(orch, "_check_stuck_panes", lambda now: None)
+        monkeypatch.setattr(orch_mod, "IDLE_AT_PROMPT_NUDGE_S", 0)
+        pane = self._idle_at_prompt_pane(orch, clock)
+        orch._ps(_key("backend")).last_content_change_ts = clock[0] - 5.0
+
+        orch._check_idle_teammates()
+
+        # Fast path off: the recent-progress gate suppresses as before.
+        pane.session.write.assert_not_called()
+        assert orch._idle_state[_key("backend")]["first_idle_ts"] is None
+
+
 class TestWatchdogExceptionLogging:
     """The per-pane watchdog body's catch-all used to log a bare role/project
     with NO exception detail, re-firing every 5s tick (3279 blind entries in one
