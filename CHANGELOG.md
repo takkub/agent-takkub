@@ -2,6 +2,28 @@
 
 All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses [SemVer](https://semver.org/).
 
+## [v2.1.19] - 2026-09-18
+
+### Fixed (แก้)
+
+- **จอดำหลัง done ทั้งที่ pane ยังอยู่ (พิสูจน์บน prod 2.1.18)** — auto clear-view ตัวเก่า (ล้างจอ 5 วิหลัง done + ส่ง Ctrl+L
+  เข้า pane) ถูกออกแบบสมัย pane ปิดตามใน 2.5 วิ พอ 2.1.17 เก็บ pane ไว้ reuse เลยเหลือจอดำค้างดูเหมือนตาย และ Ctrl+L ล้าง
+  footer จน watchdog มองไม่เห็น prompt (event จริง 13:14:25 `ready_marker_possibly_stale footer:""` unirecon/backend) ·
+  โหมด reuse (default) เลิก clear — transcript อ่านย้อนได้ตลอดช่วงเก็บ · `TAKKUB_CLOSE_ON_DONE=1` ยัง clear แบบเดิม ·
+  `_reap_done_panes` ปิด pane เก็บไว้ที่ session ตายจริงทันที ไม่รอครบ TTL (tab ผี)
+- **#665 — UI ค้างชุด 3 (spawn path)**: `_extract_plugin_skills` memoize ต่อ plugin dir TTL 300s (เดิมเดิน stat ทั้ง tree
+  ทุก spawn — 1.8s บน main thread) · `describe_mcp_handshake` อ่าน config ผ่าน `cached_read` (เดิม read_text ดิบ 891ms) ·
+  ก้อน Qt exec loop ที่เหลือรอวัดบน 2.1.19 ด้วย `takkub ma` (จุด Python แก้หมดแล้ว)
+- **#666 — ลด prefix ตอน boot**: วัดจริงจาก JSONL 5,739 sessions: first-turn prefix p50 **50,306 tok/boot** (min 30.1k
+  max 87.6k) · pane ที่ curated config ไม่มี skill และไม่มี --plugin-dir → ตัด `Skill` ออกจาก `--tools` (−6,819 tok/turn วัดแล้ว
+  2026-09-12; event `spawn_skill_tool_dropped`) · คู่กับ pane-reuse (2.1.17 ตัด ~24 boot/วัน ≈ 1.2M tok/วัน ที่ p50 จริง)
+- **#667 — ledger close + คิวหาย (ต่อจาก #664 ข้อ 4-5)**: `takkub task close --role X` เช็คจาก pane ที่ busy จริง
+  (`_busy_roles` = live ลบ idle-at-prompt/done) — pane ว่างที่ยัง live ปิด row ได้แล้ว ไม่ต้องฆ่า pane · `close` ที่ทิ้งคิว
+  เขียนข้อความครบทุกใบลง `runtime/tasks/<project>/dropped-<role>-<ts>.md` แล้วบอก path ใน notice (เดิมใบ 2+ หายถาวร)
+- **#668 — cursor เหลืองเด้งขึ้นลงใน codex pane ตอน idle**: cursor คือของ xterm ตาม escape ของ codex TUI ที่ repark
+  cursor ทุก repaint ของ status bar (สี #facc15 คือ theme cockpit เอง) · ตั้ง `cursorInactiveStyle: 'none'` — pane ที่ไม่ได้
+  focus ไม่วาด cursor เลย โฟกัสเมื่อไหร่ค่อยกลับมา
+
 ## [v2.1.18] - 2026-09-18
 
 ### Fixed (แก้)

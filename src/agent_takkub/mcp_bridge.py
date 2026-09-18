@@ -479,8 +479,13 @@ def describe_mcp_handshake(provider_name: str, mcp_argv: list[str]) -> dict:
         cfg_path = mcp_argv[mcp_argv.index("--mcp-config") + 1]
         server_names: list[str] = []
         try:
-            data = json.loads(pathlib.Path(cfg_path).read_text(encoding="utf-8"))
-            servers = data.get("mcpServers")
+            # #665: stat-validated cache — this runs on the Qt main thread at
+            # every spawn and the raw read_text was captured blocking 891 ms
+            # on a wedged disk.
+            from .cached_read import read_cached
+
+            data = read_cached(pathlib.Path(cfg_path), json.loads, missing=None)
+            servers = data.get("mcpServers") if isinstance(data, dict) else None
             if isinstance(servers, dict):
                 server_names = sorted(servers)
         except (OSError, json.JSONDecodeError, IndexError):

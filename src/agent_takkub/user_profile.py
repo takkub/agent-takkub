@@ -679,6 +679,14 @@ def _find_plugin_dir(base_dir: Path, plugin_key: str, dest_dir: Path | None = No
     return None
 
 
+# #665: a plugin tree's skill set changes on plugin-install timescales, but
+# `_extract_plugin_skills` walks it with pathlib stat/is_dir per file and is
+# called per enabled plugin on EVERY curated-config-dir refresh — captured at
+# 1.8 s on the Qt main thread during a spawn. Memoized per plugin dir.
+_PLUGIN_SKILLS_TTL_S = 300.0
+_plugin_skills_cache: dict[str, tuple[float, frozenset[str]]] = {}
+
+
 def _extract_plugin_skills(plugin_dir: Path) -> set[str]:
     """Return set of skill names provided by the plugin at *plugin_dir*.
 
@@ -686,7 +694,18 @@ def _extract_plugin_skills(plugin_dir: Path) -> set[str]:
     1. Manifest (``.claude-plugin/plugin.json`` or ``plugin.json``) for a ``skills`` path
     2. Standard ``skills`` or ``.claude/skills`` directories
     Returns empty set if no skills are defined or skills are explicitly disabled.
+    Results are memoized for ``_PLUGIN_SKILLS_TTL_S`` (#665).
     """
+    cache_key = str(plugin_dir)
+    hit = _plugin_skills_cache.get(cache_key)
+    if hit is not None and time.monotonic() - hit[0] < _PLUGIN_SKILLS_TTL_S:
+        return set(hit[1])
+    result = _extract_plugin_skills_uncached(plugin_dir)
+    _plugin_skills_cache[cache_key] = (time.monotonic(), frozenset(result))
+    return result
+
+
+def _extract_plugin_skills_uncached(plugin_dir: Path) -> set[str]:
     if not plugin_dir.is_dir():
         return set()
 

@@ -6149,16 +6149,21 @@ class Orchestrator(
             if _ps_close is not None:
                 _ps_close.last_assigned_task = _dropped_queue_close[0]["task"]
                 _ps_close.task_delivered = False
+            # #667: EVERY dropped item's full text goes to a file — `task
+            # show` only ever carried item [0], items 2+ used to vanish.
+            _dropped_file = self._save_dropped_queue(project_ns, role_name, _dropped_queue_close)
             _log_event(
                 "close_dropped_pending_queue",
                 role=role_name,
                 project=project_ns,
                 count=_dropped_n,
+                saved_to=_dropped_file,
             )
+            _saved_note = f" · ข้อความครบทุกใบ: {_dropped_file}" if _dropped_file else ""
             self._notify_lead(
                 project_ns,
                 f"🗑️ [close] ทิ้งงานคิว {_dropped_n} ใบของ {role_name} (task id {_dropped_ids}) — "
-                f"ดูข้อความได้ที่ `takkub task show --role {role_name}`",
+                f"ดูข้อความได้ที่ `takkub task show --role {role_name}`{_saved_note}",
                 from_role=role_name,
                 note="close_dropped_queue",
                 kind="close-dropped-queue",
@@ -10697,6 +10702,34 @@ class Orchestrator(
             msg = f"{msg}\n{ledger_msg}"
         return True, msg
 
+    def _save_dropped_queue(self, project_ns: str, role_name: str, items: list[dict]) -> str:
+        """#667: persist every queued task text a close is about to drop.
+        Returns the file path (repo-relative-ish absolute) or "" on failure."""
+        try:
+            dest_dir = RUNTIME_DIR / "tasks" / project_ns
+            dest_dir.mkdir(parents=True, exist_ok=True)
+            dest = dest_dir / f"dropped-{role_name}-{datetime.now():%Y%m%d-%H%M%S}.md"
+            parts = [f"# งานคิวที่ถูกทิ้งตอนปิด pane {role_name} ({datetime.now():%Y-%m-%d %H:%M:%S})\n"]
+            for i, item in enumerate(items, 1):
+                tid = (item.get("_queued_task_id") or "")[:8]
+                parts.append(f"\n## {i}. task {tid}\n\n{item.get('task', '')}\n")
+            dest.write_text("".join(parts), encoding="utf-8")
+            return str(dest)
+        except Exception:
+            return ""
+
+    def _busy_roles(self, project_ns: str) -> frozenset[str]:
+        """Live roles genuinely mid-turn — `_live_roles` minus panes that are
+        idle by `_pane_idle_for_reassign` (done/parked at prompt). The set
+        `task_close_role` (#667) checks: an idle pane's ledger row may be
+        closed without killing the pane."""
+        return frozenset(
+            role
+            for role, pane in self._project_panes(project_ns).items()
+            if getattr(getattr(pane, "session", None), "is_alive", False)
+            and not self._pane_idle_for_reassign(pane)
+        )
+
     def _live_roles(self, project_ns: str) -> frozenset[str]:
         """Roles in *project_ns* with a currently-alive pane session — the
         set `task_ledger`'s reconcile/close guards check before ever
@@ -10747,7 +10780,11 @@ class Orchestrator(
 
         project_ns = self._resolve_project(project)
         role = self.resolve_pane_role(role, project_ns)
-        live_roles = self._live_roles(project_ns)
+        # #667: only a pane that is actually mid-turn blocks a ledger close.
+        # A live-but-idle pane (finished with `progress`, parked at its
+        # prompt) used to force "close the pane first", and closing the pane
+        # dropped its queue — the only way out destroyed work (#664).
+        live_roles = self._busy_roles(project_ns)
         if dry_run:
             state = task_ledger.load_state(project_ns)
             ptr = state.get("open", {}).get(role)
@@ -12953,12 +12990,17 @@ class Orchestrator(
                 key = f"{project_name}::{role}"
                 ps = self._pane_state.get(key)
                 kept_since = getattr(ps, "done_kept_since", 0.0) if ps is not None else 0.0
-                if not kept_since or now - kept_since < DONE_PANE_TTL_S:
-                    continue
-                if getattr(self, "_pending_assignments", {}).get(key):
+                if not kept_since:
                     continue
                 session = getattr(pane, "session", None)
-                if session is None or not getattr(session, "is_alive", False):
+                session_dead = session is None or not getattr(session, "is_alive", False)
+                # A kept pane whose provider process has DIED is a zombie tab
+                # — it can never take a task, so close it now regardless of
+                # TTL (field report 2026-09-18: black Backend pane lingering
+                # after claude exited).
+                if not session_dead and now - kept_since < DONE_PANE_TTL_S:
+                    continue
+                if not session_dead and getattr(self, "_pending_assignments", {}).get(key):
                     continue
                 ps.done_kept_since = 0.0
                 _log_event(

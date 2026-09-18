@@ -42,6 +42,10 @@
       lineHeight: 1.2,
       cursorBlink: true,
       cursorStyle: 'block',
+      // #668: no cursor at all while the terminal is unfocused. TUI providers
+      // (codex's ratatui status bar) repark the cursor on every idle repaint,
+      // so an unfocused pane showed a yellow block bouncing between rows.
+      cursorInactiveStyle: 'none',
       scrollback: 500,
       allowProposedApi: true,
       windowsMode: false,  // we feed bytes already from a Windows pty, no normalisation

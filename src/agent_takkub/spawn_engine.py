@@ -1195,6 +1195,28 @@ def _fanout_tool_lists(
     return out_tools, out_disallowed
 
 
+def _skill_catalog_unused(env: dict, plugin_dir_argv: list[str]) -> bool:
+    """#666: True when this pane demonstrably has NO skills to load — its
+    (curated, #563/#580) ``CLAUDE_CONFIG_DIR`` has an empty/absent ``skills``
+    dir AND no ``--plugin-dir`` is being passed (plugins can also ship
+    skills). The ``Skill`` tool then carries a catalogue of nothing for
+    +6.8k tokens of prompt (measured 2026-09-12), so the caller drops it.
+    Anything uncertain (no config dir in env, unreadable dir) keeps the
+    tool — dropping it wrongly would break real skill use."""
+    if plugin_dir_argv:
+        return False
+    cfg = env.get("CLAUDE_CONFIG_DIR")
+    if not cfg:
+        return False
+    skills_dir = pathlib.Path(cfg) / "skills"
+    try:
+        if not skills_dir.is_dir():
+            return True
+        return next(iter(skills_dir.iterdir()), None) is None
+    except OSError:
+        return False
+
+
 def _teammate_builtin_tools() -> list[str]:
     """Tools allowlisted for teammate panes via provider's ``tools_flag`` (e.g. claude ``--tools``).
 
@@ -3660,6 +3682,12 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
                 _tools = _teammate_builtin_tools()
                 # #641: fan-out pane gets the Agent tool appended.
                 _tools, _ = _fanout_tool_lists(_tools, [], int(_ps_initial.subagent_fanout or 0))
+                # #666: the `Skill` tool carries the whole skill catalogue
+                # (+6.8k tokens, measured 2026-09-12) — drop it for a pane
+                # whose curated config dir has no skills and no plugins.
+                if "Skill" in _tools and _skill_catalog_unused(env, plugin_dir_argv):
+                    _tools = [t for t in _tools if t != "Skill"]
+                    _log_event("spawn_skill_tool_dropped", role=role_name, project=project_ns)
                 if _tools:
                     tools_argv.extend([_claude_tools_flag, ",".join(_tools)])
 

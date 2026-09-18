@@ -63,6 +63,12 @@ _IDLE_AUTO_CLEAR_THRESHOLD_S = 600  # 10 minutes
 _DISCARD_STREAMING_GUARD_S = 10
 
 
+def _close_on_done_env() -> bool:
+    """Same knob orchestrator.CLOSE_ON_DONE reads (duplicated here — this
+    module must not import orchestrator)."""
+    return os.environ.get("TAKKUB_CLOSE_ON_DONE", "0").strip() == "1"
+
+
 def _env_pane_discard_override(persisted: bool) -> bool:
     """TAKKUB_PANE_DISCARD env var wins over the persisted Settings >
     Performance toggle when set; same disable-token vocabulary as
@@ -509,7 +515,13 @@ class AgentPane(QFrame):
         # leaving it (e.g. respawned before the delay elapsed). Lead is never
         # auto-cleared — it's the user's main screen and manages its own
         # context via /compact.
-        if state == "done" and self.role.name != LEAD.name:
+        if state == "done" and self.role.name != LEAD.name and _close_on_done_env():
+            # Pane reuse (2.1.19, #667/#664 follow-up): with panes kept alive
+            # after `done` (the default), clearing the view left a live pane
+            # showing a dead-looking black screen for its whole keep window —
+            # the transcript stays readable now. The clear only still runs in
+            # the opt-in TAKKUB_CLOSE_ON_DONE=1 mode where the pane is about
+            # to vanish anyway.
             self._pending_auto_clear = False
             self._done_clear_timer.start(_DONE_AUTO_CLEAR_DELAY_MS)
         else:
