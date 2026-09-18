@@ -1015,27 +1015,60 @@ def _two_question_state() -> dict:
     }
 
 
+RIGHT = "\x1b[C"
+
+
 class TestBuildPickerKeySequence:
-    """Remote AskUserQuestion fix: proven live (docs/audit/2026-08-20-remote-askuserquestion.md) —
-    a bare 1-based digit selects AND submits a single-select question
-    immediately (no Enter needed); a multi-question call auto-advances
-    tabs on its own and only needs one trailing Enter to confirm the
-    "Review your answers" screen that appears after the LAST question."""
+    """Remote AskUserQuestion fix: proven live (docs/audit/2026-08-20-remote-askuserquestion.md,
+    multiSelect addendum 2026-09-18 #660) — a bare 1-based digit selects
+    AND submits a single-select question immediately (no Enter needed); a
+    multi-question call auto-advances tabs on its own and only needs one
+    trailing Enter to confirm the "Review your answers" screen that appears
+    after the LAST question. A multiSelect question: digits TOGGLE, Right
+    arrow moves to the next tab, and the review screen always appears.
+    The builder returns ONE KEY PER ELEMENT — the orchestrator paces them
+    (a burst write drops keys at the terminal)."""
 
     def test_single_question_is_a_bare_digit_no_trailing_enter(self):
         state = _one_question_state()
         seq = api._build_picker_key_sequence(state["questions"], [[1]])
-        assert seq == "2"  # 0-based index 1 -> 1-based digit key "2"
+        assert seq == ["2"]  # 0-based index 1 -> 1-based digit key "2"
 
     def test_multi_question_appends_trailing_enter_to_confirm_review_screen(self):
         state = _two_question_state()
         seq = api._build_picker_key_sequence(state["questions"], [[0], [1]])
-        assert seq == "1" + "2" + "\r"
+        assert seq == ["1", "2", "\r"]
 
-    def test_multi_select_question_is_rejected(self):
+    def test_single_multi_select_toggles_then_right_then_enter(self):
+        # Proven 2026-09-18: "1","3" toggled Cheese+Olives, Right opened
+        # "Review your answers", Enter submitted -> "Olives, Cheese".
+        state = _one_question_state(multi_select=True)
+        seq = api._build_picker_key_sequence(state["questions"], [[0, 2]])
+        assert seq == ["1", "3", RIGHT, "\r"]
+
+    def test_multi_select_then_single_select(self):
+        state = _two_question_state()
+        state["questions"][0]["multiSelect"] = True
+        seq = api._build_picker_key_sequence(state["questions"], [[0, 1], [1]])
+        assert seq == ["1", "2", RIGHT, "2", "\r"]
+
+    def test_single_select_then_multi_select(self):
+        state = _two_question_state()
+        state["questions"][1]["multiSelect"] = True
+        seq = api._build_picker_key_sequence(state["questions"], [[1], [0]])
+        assert seq == ["2", "1", RIGHT, "\r"]
+
+    def test_multi_select_needs_at_least_one_selection(self):
         state = _one_question_state(multi_select=True)
         with pytest.raises(api.RemoteApiError) as excinfo:
-            api._build_picker_key_sequence(state["questions"], [[0]])
+            api._build_picker_key_sequence(state["questions"], [[]])
+        assert excinfo.value.status == 400
+
+    def test_multi_select_rejects_duplicate_index(self):
+        # a repeated digit would toggle the option back OFF at the terminal
+        state = _one_question_state(multi_select=True)
+        with pytest.raises(api.RemoteApiError) as excinfo:
+            api._build_picker_key_sequence(state["questions"], [[0, 0]])
         assert excinfo.value.status == 400
 
     def test_answer_count_mismatch_is_rejected(self):
@@ -1081,7 +1114,7 @@ class TestAnswerPicker:
         assert len(srv.received) == 1
         sent = srv.received[0]
         assert sent["cmd"] == "answer-picker"
-        assert sent["key_sequence"] == "2"
+        assert sent["key_sequence"] == ["2"]
         assert sent["from"] == "remote"
         assert sent["from_project"] == "proj"
 

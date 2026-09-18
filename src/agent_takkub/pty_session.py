@@ -1679,6 +1679,53 @@ class _ReaderThread(QThread):
         self._stop = False
         self._batch_sec = max(0.001, batch_ms / 1000.0)
         self._batch_bytes = max(1024, int(batch_bytes))
+        # #659 (Part 3): lock and background timer to guarantee buffered tail
+        # bytes flush promptly even when the reader thread is blocked inside
+        # proc.read() waiting for future child-process output.
+        self._lock = threading.Lock()
+        self._pending = bytearray()
+        self._flush_timer: threading.Timer | None = None
+        self._last_flush = time.monotonic()
+
+    def _flush(self) -> None:
+        with self._lock:
+            if self._flush_timer is not None:
+                try:
+                    self._flush_timer.cancel()
+                except Exception:
+                    pass
+                self._flush_timer = None
+            if not self._pending:
+                return
+            batch = bytes(self._pending)
+            self._pending.clear()
+            self._last_flush = time.monotonic()
+
+        # Call on_data and emit outside self._lock to avoid lock inversion
+        if self._on_data is not None:
+            try:
+                self._on_data(batch)
+            except Exception:
+                pass
+        self.bytesReceived.emit(batch)
+
+    def _arm_flush_timer(self) -> None:
+        with self._lock:
+            if self._flush_timer is None and self._pending:
+                timer = threading.Timer(self._batch_sec, self._flush)
+                timer.daemon = True
+                self._flush_timer = timer
+                timer.start()
+
+    def request_stop(self) -> None:
+        self._stop = True
+        with self._lock:
+            if self._flush_timer is not None:
+                try:
+                    self._flush_timer.cancel()
+                except Exception:
+                    pass
+                self._flush_timer = None
 
     def run(self) -> None:
         # pywinpty 3.x semantics: read(size) returns whatever is buffered, but
@@ -1689,19 +1736,6 @@ class _ReaderThread(QThread):
         import time
 
         consecutive_errors = 0
-        pending = bytearray()
-        last_flush = time.monotonic()
-
-        def _flush() -> None:
-            nonlocal last_flush
-            if not pending:
-                return
-            batch = bytes(pending)
-            pending.clear()
-            if self._on_data is not None:
-                self._on_data(batch)
-            self.bytesReceived.emit(batch)
-            last_flush = time.monotonic()
 
         while not self._stop:
             # Snapshot once per iteration: `_teardown_resources` can null
@@ -1716,16 +1750,14 @@ class _ReaderThread(QThread):
             try:
                 data = proc.read(4096)
             except EOFError:
-                if pending and time.monotonic() - last_flush >= self._batch_sec:
-                    _flush()
+                self._flush()
                 if not proc.isalive():
                     break
                 time.sleep(0.04)
                 continue
             except Exception as e:
                 print(f"[pty_session] read error: {e!r}", flush=True)
-                if pending and time.monotonic() - last_flush >= self._batch_sec:
-                    _flush()
+                self._flush()
                 if not proc.isalive():
                     break
                 consecutive_errors += 1
@@ -1736,8 +1768,7 @@ class _ReaderThread(QThread):
 
             consecutive_errors = 0
             if not data:
-                if pending and time.monotonic() - last_flush >= self._batch_sec:
-                    _flush()
+                self._flush()
                 if not proc.isalive():
                     break
                 time.sleep(0.02)
@@ -1745,17 +1776,22 @@ class _ReaderThread(QThread):
 
             if isinstance(data, str):
                 data = data.encode("utf-8", "replace")
-            pending.extend(data)
-            if (
-                len(pending) >= self._batch_bytes
-                or time.monotonic() - last_flush >= self._batch_sec
-            ):
-                _flush()
-        _flush()
-        self.finished_clean.emit()
 
-    def request_stop(self) -> None:
-        self._stop = True
+            with self._lock:
+                self._pending.extend(data)
+                now = time.monotonic()
+                should_flush = (
+                    len(self._pending) >= self._batch_bytes
+                    or now - self._last_flush >= self._batch_sec
+                )
+
+            if should_flush:
+                self._flush()
+            else:
+                self._arm_flush_timer()
+
+        self._flush()
+        self.finished_clean.emit()
 
 
 class PtySession(QObject):
@@ -2324,7 +2360,18 @@ class PtySession(QObject):
         return list(self._display_lines_cache)
 
     def display_lines(self) -> list[str]:
-        """Return the visible screen as a list of rows (top → bottom)."""
+        """Return the visible screen as a list of rows (top → bottom).
+
+        #658: lock-free fast path. `_feed_and_log` refreshes the memo tuple
+        under `_screen_lock` on every batch and only THEN bumps
+        `_display_cache_generation` (see `_display_lines_locked`), so a
+        generation match observed here means the tuple is at least that
+        fresh — a tuple rebind is atomic under the GIL. The Qt main thread
+        (watchdog ticks, `takkub status`, ready-state polls) used to sit up
+        to ~0.8 s behind N reader threads each holding the lock across a
+        full pyte render; now it only takes the lock on a genuine miss."""
+        if self._display_cache_generation == self._output_generation:
+            return list(self._display_lines_cache)
         with self._screen_lock:
             return self._display_lines_locked()
 

@@ -531,6 +531,11 @@ class TerminalWidget(QWidget):
         else:
             text = data
         if not text:
+            # #659: the incremental decoder is holding a partial multi-byte
+            # char (Thai / box-drawing / spinner glyphs split at a chunk
+            # boundary). Anything already queued must still flush now —
+            # nothing else re-arms the timer until the NEXT chunk arrives.
+            self._arm_flush()
             return
         # Answer OSC 10/11 fg/bg queries right away — before the page-ready
         # gate, so a program that asks during its very first paint gets the
@@ -543,7 +548,10 @@ class TerminalWidget(QWidget):
             self._pending_writes.append(text)
             return
         self._write_buf.append(text)
-        if not self._flush_timer.isActive():
+        self._arm_flush()
+
+    def _arm_flush(self) -> None:
+        if self._write_buf and not self._flush_timer.isActive():
             self._flush_timer.start()
 
     def _flush_writes(self) -> None:
@@ -553,8 +561,12 @@ class TerminalWidget(QWidget):
         self._write_buf.clear()
         # M3#14: drop OSC 52 clipboard-set escapes before they reach the renderer.
         # A trailing incomplete sequence is held back (re-buffered) and combined
-        # with the next batch; the next write_bytes restarts the flush timer, so a
-        # never-terminated partial simply never renders (harmless, no busy-loop).
+        # with the next batch. #659: the timer is single-shot and has just
+        # fired, so re-arm it here — otherwise the held-back bytes render only
+        # when the NEXT PTY chunk happens to call write_bytes (seen as "my
+        # keystroke shows up when I type the next one"). A never-terminated
+        # partial re-flushes once, finds no cleaned text, and stops (the carry
+        # cap in _strip_osc52 bounds how much can ever sit here).
         cleaned, carry = _strip_osc52(joined)
         if carry:
             self._write_buf.append(carry)
@@ -797,10 +809,12 @@ class TerminalWidget(QWidget):
     def _heartbeat_poke(self) -> None:
         if not self._page_ready:
             return
-        # Cheap no-op that nonetheless forces Chromium to tick the JS task
-        # queue and schedule a frame; xterm.js's render service will flush
-        # any pending DOM writes on that tick.
-        self._view.page().runJavaScript("void 0;")
+        # #659: `void 0` only ticked the JS task queue — it dirtied nothing,
+        # so Chromium was free to skip the frame and PTY output already
+        # inside xterm.js stayed unpainted until a real input event (typing
+        # the next key, moving the mouse). termPoke asks xterm.js to redraw
+        # the viewport, which is a paint Chromium cannot elide.
+        self._view.page().runJavaScript("termPoke();")
 
     def set_keepalive(self, active: bool) -> None:
         """Enable/suspend the background paint keep-alive for this pane.

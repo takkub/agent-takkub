@@ -16,12 +16,12 @@ import shutil
 import subprocess
 import tempfile
 from collections.abc import Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import yaml
 
-from . import config
+from . import config, token_estimate
 from ._win_console import SUBPROCESS_NO_WINDOW
 from .worktree_manager import _make_link, _remove_link
 
@@ -43,6 +43,11 @@ class SkillInfo:
     name: str
     description: str
     path: Path
+    # #658: boot-token estimate of the file `scan_skills` already read — the
+    # Settings skill matrix used to re-read every SKILL.md a second time (3.4 s
+    # on the Qt main thread with a big catalog). 0 = unknown (constructed
+    # elsewhere); consumers fall back to `estimate_file_tokens`.
+    tokens: int = field(default=0, compare=False)
 
 
 def _parse_frontmatter(text: str) -> dict:
@@ -93,7 +98,12 @@ def scan_skills(roots: Path | list[Path]) -> list[SkillInfo]:
                 continue
             description = fm.get("description")
             description = description.strip() if isinstance(description, str) else ""
-            seen[name] = SkillInfo(name=name, description=description, path=f)
+            seen[name] = SkillInfo(
+                name=name,
+                description=description,
+                path=f,
+                tokens=token_estimate.estimate_tokens(text),
+            )
     return sorted(seen.values(), key=lambda s: s.name)
 
 

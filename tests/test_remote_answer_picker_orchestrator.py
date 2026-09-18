@@ -8,6 +8,7 @@ submits whatever option was already highlighted).
 
 from __future__ import annotations
 
+import time
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -104,6 +105,42 @@ class TestAnswerPicker:
         ok, msg = orch.answer_picker("1", project="p")
         assert ok is False
         assert "not running" in msg
+
+    def test_key_list_is_written_one_key_per_gap_tick(self, orch: Orchestrator, qapp) -> None:
+        # #660: a burst write drops keys at the terminal (proven live on
+        # Claude Code 2.1.268) -- a list is paced PICKER_KEY_GAP_MS apart:
+        # first key synchronously, the rest on single-shot QTimer ticks.
+        pane = _make_pane(session=_make_alive_session())
+        orch._panes_by_project.setdefault("p", {})[LEAD.name] = pane
+        keys = ["1", "3", "\x1b[C", "\r"]
+        ok, msg = orch.answer_picker(list(keys), project="p")
+        assert (ok, msg) == (True, "ok")
+        assert [c.args[0] for c in pane.session.write.call_args_list] == ["1"]
+        deadline = time.monotonic() + 3.0
+        while len(pane.session.write.call_args_list) < len(keys) and time.monotonic() < deadline:
+            qapp.processEvents()
+            time.sleep(0.01)
+        assert [c.args[0] for c in pane.session.write.call_args_list] == keys
+
+    def test_pacing_stops_when_session_dies_mid_sequence(self, orch: Orchestrator, qapp) -> None:
+        session = _make_alive_session()
+        pane = _make_pane(session=session)
+        orch._panes_by_project.setdefault("p", {})[LEAD.name] = pane
+        orch.answer_picker(["1", "2", "\r"], project="p")
+        session.is_alive = False  # picker gone -> no stray digits
+        deadline = time.monotonic() + 1.0
+        while time.monotonic() < deadline:
+            qapp.processEvents()
+            time.sleep(0.01)
+        assert [c.args[0] for c in session.write.call_args_list] == ["1"]
+
+    def test_empty_key_list_rejected(self, orch: Orchestrator) -> None:
+        pane = _make_pane(session=_make_alive_session())
+        orch._panes_by_project.setdefault("p", {})[LEAD.name] = pane
+        ok, msg = orch.answer_picker([], project="p")
+        assert ok is False
+        assert "empty" in msg
+        pane.session.write.assert_not_called()
 
     def test_only_ever_targets_the_lead_pane_not_teammates(self, orch: Orchestrator) -> None:
         # There is no such thing as a teammate-pane picker (#103,

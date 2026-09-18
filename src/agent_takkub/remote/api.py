@@ -363,39 +363,56 @@ def lead_say(orch, text: str, from_project: str | None) -> dict:
     }
 
 
-# remote AskUserQuestion fix (docs/audit/2026-08-20-remote-askuserquestion.md):
-# AskUserQuestion's single-select options answer with a bare 1-based
-# digit keypress — no Enter needed, it selects AND submits immediately
-# (proven live, docs/audit/2026-08-20-remote-askuserquestion.md). A
-# multi-question tool call auto-advances to the next question's tab on its
-# own after each digit; only once every question has an answer does the CLI
-# show an extra "Review your answers" screen that needs one more Enter to
-# actually finalize — single-question calls never show that screen, so the
-# trailing Enter is added only when there's more than one question.
-def _build_picker_key_sequence(questions: list[dict], answers: list) -> str:
-    if any(bool(q.get("multiSelect")) for q in questions):
-        raise RemoteApiError(
-            400, "multi-select picker not supported on mobile yet — answer on desktop"
-        )
+# remote AskUserQuestion fix (docs/audit/2026-08-20-remote-askuserquestion.md,
+# multiSelect + per-key pacing proven live 2026-09-18, #660):
+#   * single-select question: a bare 1-based digit selects AND advances (or
+#     submits outright when it is the only question — no review screen).
+#   * multiSelect question: each digit TOGGLES that option (never submits);
+#     Right-arrow then moves to the next tab (next question, or the
+#     "Review your answers" screen when it was the last one).
+#   * the review screen (shown whenever there is >1 question OR any
+#     multiSelect question) is confirmed with one Enter ("1. Submit
+#     answers" is the default).
+#   * keys MUST be written one at a time with a short gap: a single burst
+#     write (digit, digit, Right, Enter in one chunk) lost every second key
+#     at the terminal (only the first digit toggled, Enter never landed) -
+#     proven on Claude Code 2.1.268; 50ms and 120ms gaps both landed every
+#     key. Orchestrator.answer_picker paces a list of keys for that reason.
+_PICKER_KEY_NEXT_TAB = "\x1b[C"  # Right arrow: multiSelect -> next question / review
+_PICKER_KEY_CONFIRM = "\r"
+
+
+def _build_picker_key_sequence(questions: list[dict], answers: list) -> list[str]:
+    """One terminal key per list element, in press order (see the module
+    comment above for the proven semantics of each key)."""
     if len(answers) != len(questions):
         raise RemoteApiError(400, "answers count does not match questions")
     keys: list[str] = []
     for q, chosen in zip(questions, answers, strict=True):
         options = q.get("options") or []
-        if not isinstance(chosen, list) or len(chosen) != 1:
+        multi = bool(q.get("multiSelect"))
+        if not isinstance(chosen, list) or not chosen:
+            raise RemoteApiError(400, "each question needs at least one selected option")
+        if not multi and len(chosen) != 1:
             raise RemoteApiError(400, "each question needs exactly one selected option")
-        idx = chosen[0]
-        if not isinstance(idx, int) or isinstance(idx, bool) or not (0 <= idx < len(options)):
-            raise RemoteApiError(400, "invalid option index")
-        if idx >= 9:
-            # the picker's own numbered list never shows a 2-digit index
-            # (_MAX_ASK_OPTIONS caps at 6) -- defensive, unreachable via the
-            # normal payload shape.
-            raise RemoteApiError(400, "option index out of digit-key range")
-        keys.append(str(idx + 1))
-    if len(questions) > 1:
-        keys.append("\r")  # "Review your answers" -> "1. Submit answers" (default)
-    return "".join(keys)
+        seen: set[int] = set()
+        for idx in chosen:
+            if not isinstance(idx, int) or isinstance(idx, bool) or not (0 <= idx < len(options)):
+                raise RemoteApiError(400, "invalid option index")
+            if idx >= 9:
+                # the picker's own numbered list never shows a 2-digit index
+                # (_MAX_ASK_OPTIONS caps at 6) -- defensive, unreachable via the
+                # normal payload shape.
+                raise RemoteApiError(400, "option index out of digit-key range")
+            if idx in seen:
+                raise RemoteApiError(400, "duplicate option index")
+            seen.add(idx)
+            keys.append(str(idx + 1))
+        if multi:
+            keys.append(_PICKER_KEY_NEXT_TAB)
+    if len(questions) > 1 or any(bool(q.get("multiSelect")) for q in questions):
+        keys.append(_PICKER_KEY_CONFIRM)  # "Review your answers" -> "1. Submit answers" (default)
+    return keys
 
 
 def answer_picker(orch, from_project: str | None, answers: object) -> dict:
@@ -406,9 +423,10 @@ def answer_picker(orch, from_project: str | None, answers: object) -> dict:
     typed text is silently discarded by the picker, and Enter alone submits
     whatever option was already highlighted, not what the user tapped).
 
-    `answers` is a list of one-selection-per-question lists of 0-based
-    option indices (`state["questions"][i]["options"][j]["index"]`), in the
-    same order the picker payload listed the questions. Re-derives the
+    `answers` is a list of per-question lists of 0-based option indices
+    (`state["questions"][i]["options"][j]["index"]`), in the same order the
+    picker payload listed the questions — exactly one index for a
+    single-select question, one or more for a multiSelect one (#660). Re-derives the
     *current* question/option shape from `notify.current_ask_state` rather
     than trusting whatever the phone cached from the SSE push — the picker
     may have moved on since that push arrived, and this is the guard that
@@ -418,12 +436,12 @@ def answer_picker(orch, from_project: str | None, answers: object) -> dict:
     state = notify.current_ask_state(orch, from_project)
     if state is None:
         raise RemoteApiError(409, "no active picker — it may already be answered on desktop")
-    key_sequence = _build_picker_key_sequence(state["questions"], answers)
+    keys = _build_picker_key_sequence(state["questions"], answers)
     resp = _lead_frame(
         orch,
         {
             "cmd": "answer-picker",
-            "key_sequence": key_sequence,
+            "key_sequence": keys,
             "from": "remote",
             "from_project": from_project,
         },

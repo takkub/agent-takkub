@@ -605,6 +605,13 @@ _POST_COMPACT_DETECT_SEC = 5 * 60
 # rounds to 0 to keep reminders permanently UI-only.
 IDLE_REMIND_AFTER_S = 45
 IDLE_REMIND_COOLDOWN_S = 90
+# #661: a *working* pane that has sat continuously at its ready prompt (no
+# background work) for this long is reported as `idle-at-prompt` by
+# `_derive_display_state` instead of "working". Field case 2026-09-18: a
+# claude pane died mid-response ("API Error: Connection lost"), returned to
+# an empty `>`, and `takkub status` said "working · last progress 3s ago"
+# for 7+ minutes because the footer repaint kept the content hash moving.
+IDLE_AT_PROMPT_S = max(0.0, float(os.environ.get("TAKKUB_IDLE_AT_PROMPT_S", "120")))
 IDLE_REMIND_ESCALATE_AFTER_ROUNDS = max(
     0, int(os.environ.get("TAKKUB_IDLE_REMIND_ESCALATE_ROUNDS", "3"))
 )
@@ -1461,6 +1468,9 @@ class Orchestrator(
     # once it has an answer, so the actual park decision runs on the Qt
     # thread instead of the fetch's daemon thread. (project, role, confirmed)
     limitUsageConfirmed = pyqtSignal(str, str, bool)
+    # #663: (provider, probed reset_at, verdict, new_reset_at) from the
+    # background quota re-probe thread → Qt thread (`_on_quota_reprobed`).
+    quotaReprobed = pyqtSignal(str, float, str, float)
     paneRequested = pyqtSignal(
         str, str
     )  # role_name, project — main_window adds pane to the matching tab
@@ -1904,6 +1914,7 @@ class Orchestrator(
         # thread and reports back via this signal so the park decision itself
         # always executes on the Qt thread.
         self.limitUsageConfirmed.connect(self._on_limit_usage_confirmed)
+        self.quotaReprobed.connect(self._on_quota_reprobed)
 
         # Periodic snapshot of cockpit state to `<vault>/hot.md`. Skipped
         # silently when no vault is configured (see `_resolve_vault_dir`).
@@ -5067,32 +5078,72 @@ class Orchestrator(
         self.reportShared.emit(project_ns, payload)
         return True, f"pushed {name!r} to project {project_ns}"
 
-    def answer_picker(self, key_sequence: str, project: str | None = None) -> tuple[bool, str]:
-        """Remote mobile AskUserQuestion fix: write a raw key
-        sequence straight into the Lead pane's PTY, bypassing `send()`'s
-        chat-message pipeline entirely — `_sanitize_pane_text`/
-        `_paste_payload` are built for prose a human typed, not control
-        keystrokes, and `send()`'s delayed-Enter self-heal would double-fire
-        Enter into a picker that already advanced on its own.
+    # #660: gap between consecutive picker keys. Proven live on Claude Code
+    # 2.1.268 (docs/audit/2026-08-20-remote-askuserquestion.md, 2026-09-18
+    # addendum): a burst write of digit+digit+Right+Enter in ONE chunk lost
+    # every second key (only the first digit toggled, Enter never landed);
+    # 50 ms and 120 ms gaps both landed every key. 100 ms sits inside the
+    # proven band with margin on the slow side.
+    PICKER_KEY_GAP_MS = 100
+
+    def answer_picker(
+        self, key_sequence: str | list[str], project: str | None = None
+    ) -> tuple[bool, str]:
+        """Remote mobile AskUserQuestion fix: write raw picker keys straight
+        into the Lead pane's PTY, bypassing `send()`'s chat-message pipeline
+        entirely — `_sanitize_pane_text`/`_paste_payload` are built for
+        prose a human typed, not control keystrokes, and `send()`'s
+        delayed-Enter self-heal would double-fire Enter into a picker that
+        already advanced on its own.
 
         `key_sequence` is caller-built (`remote/api.py::_build_picker_key_
         sequence`) from a *fresh* re-read of the pane's actual current
-        AskUserQuestion state — every character in it is a plain ASCII
-        digit ('1'-'9', selecting an option) or '\\r' (confirming the
-        multi-question "Review your answers" screen), never an escape
-        sequence, so no sanitization is needed or wanted here. Lead-pane
-        only, same as every other write this orchestrator makes into a
-        picker: there is no such thing as a teammate-pane picker (#103,
+        AskUserQuestion state. A `list` is one terminal key per element —
+        a digit ('1'-'9': select / toggle an option), Right-arrow
+        (`ESC [ C`, multiSelect → next tab) or '\\r' (confirm the "Review
+        your answers" screen) — written one at a time `PICKER_KEY_GAP_MS`
+        apart on the Qt thread (the terminal drops keys from a burst write,
+        #660). A plain `str` is written as-is in one go (legacy single
+        digit). No sanitization is needed or wanted here. Lead-pane only,
+        same as every other write this orchestrator makes into a picker:
+        there is no such thing as a teammate-pane picker (#103,
         `spawn_engine.py` denies teammates the `AskUserQuestion` tool
         outright)."""
-        if not key_sequence:
+        if isinstance(key_sequence, str):
+            keys = [key_sequence] if key_sequence else []
+        elif isinstance(key_sequence, list):
+            keys = [k for k in key_sequence if isinstance(k, str) and k]
+        else:
+            keys = []
+        if not keys:
             return False, "empty key sequence"
         project_ns = self._resolve_project(project)
         pane = self._project_panes(project_ns).get(LEAD.name)
         if pane is None or pane.session is None or not pane.session.is_alive:
             return False, "lead is not running"
-        pane.session.write(key_sequence)
+        session = pane.session
+        session.write(keys[0])
+        if len(keys) > 1:
+            self._pace_picker_keys(session, keys[1:])
         return True, "ok"
+
+    def _pace_picker_keys(self, session, keys: list[str]) -> None:
+        """Write `keys` one per `PICKER_KEY_GAP_MS` tick via a single-shot
+        QTimer chain (cli_server dispatches on the Qt thread — never sleep
+        there). Stops silently if the session dies mid-sequence: a picker
+        that is gone must not receive stray digits."""
+        if not keys:
+            return
+        rest = list(keys)
+
+        def _next() -> None:
+            if not rest or not getattr(session, "is_alive", False):
+                return
+            session.write(rest.pop(0))
+            if rest:
+                QTimer.singleShot(self.PICKER_KEY_GAP_MS, _next)
+
+        QTimer.singleShot(self.PICKER_KEY_GAP_MS, _next)
 
     # ------------------------------------------------------------------
     # Pane health (#280) — watchdog observations are accumulated per pane
@@ -9152,6 +9203,7 @@ class Orchestrator(
         quota_stalled: bool = False,
         resource_wait_reason: str | None = None,
         waiting_for_lead: bool = False,
+        ready_since_ts: float = 0.0,
     ) -> str:
         """(#263) Combine the 3 disagreeing sources of truth the issue names —
         `pane.state` (orchestrator-declared at dispatch), the ready-marker
@@ -9341,6 +9393,20 @@ class Orchestrator(
         if base_state == "working" and waiting_for_lead:
             return "waiting-lead"
 
+        # #661: declared working, but the screen has read "ready prompt, no
+        # background work" continuously for IDLE_AT_PROMPT_S — a pane that
+        # died mid-response (API error) or finished and forgot `done`. The
+        # clock is the *classification* staying True, so footer repaints
+        # can't refresh it the way they refresh the content hash. Provider-
+        # agnostic: every ProviderSpec has ready markers.
+        if (
+            base_state == "working"
+            and ready_since_ts
+            and IDLE_AT_PROMPT_S > 0
+            and (time.time() - ready_since_ts) >= IDLE_AT_PROMPT_S
+        ):
+            return "idle-at-prompt"
+
         if base_state == "working":
             return "waiting-delivery" if delivery_unconfirmed else base_state
 
@@ -9481,6 +9547,7 @@ class Orchestrator(
                     quota_stalled,
                     resource_wait_reason=(resource_wait["reason"] if resource_wait else None),
                     waiting_for_lead=waiting_for_lead,
+                    ready_since_ts=(ps.ready_since_ts if ps is not None else 0.0),
                 )
             except Exception:
                 display_state = display_state_base
@@ -11135,6 +11202,9 @@ class Orchestrator(
         # wedged arbiter is caught even with no new spawn() call arriving to
         # trip over it.
         self._check_spawn_queue_stuck(now)
+        # #663: quota-stalled providers get re-probed on this tick too (one
+        # background probe per provider per QUOTA_REPROBE_INTERVAL_S).
+        self._maybe_reprobe_quota_stalls(now)
         # Flush durable done-notices for any project whose Lead is now idle.
         # Handles the case where notices spilled to _pending_done_notices while
         # Lead was busy — delivers them without requiring a Lead restart.
@@ -12688,6 +12758,19 @@ class Orchestrator(
                         ):
                             ps_ck.last_stream_tokens_ts = now
                         ps_ck.stream_tokens_sig = _tok_sig
+                        # #661: continuous at-ready-prompt clock (see
+                        # PaneState.ready_since_ts). Reset the instant the
+                        # pane stops reading as idle-at-prompt.
+                        try:
+                            _at_prompt = bool(
+                                pane.session.is_at_ready_prompt_cached()
+                            ) and not bool(pane.session.has_background_work())
+                        except Exception:
+                            _at_prompt = False
+                        if _at_prompt:
+                            ps_ck.ready_since_ts = ps_ck.ready_since_ts or now
+                        else:
+                            ps_ck.ready_since_ts = 0.0
                     except Exception:
                         # display_lines() failed (session torn down mid-tick); fall
                         # back to initialising the ts from last raw byte time.

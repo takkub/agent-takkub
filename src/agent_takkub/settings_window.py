@@ -4561,7 +4561,7 @@ class SettingsWindow(
         skill = next((s for s in self._catalog_skills if s.name == name), None)
         if skill is None:
             return
-        cost = token_estimate.estimate_file_tokens(skill.path)
+        cost = skill.tokens or token_estimate.estimate_file_tokens(skill.path)
         self._catalog_name.setText(f"{skill.name}  ·  {token_estimate.format_tokens(cost)}")
         self._catalog_desc.setText(skill.description or "(ไม่มี description ใน frontmatter)")
         refs = self._roles_referencing_skill(skill.name)
@@ -4693,7 +4693,8 @@ class SettingsWindow(
         items = [s.name for s in skills]
         # #516: per-skill boot-token cost, read straight from each skill's own
         # SKILL.md — cheap and exact (no marketplace-cache walk needed here).
-        costs = {s.name: token_estimate.estimate_file_tokens(s.path) for s in skills}
+        # #658: `scan_skills` already read each file — reuse its estimate.
+        costs = {s.name: (s.tokens or token_estimate.estimate_file_tokens(s.path)) for s in skills}
         roles = skill_policy.skill_matrix_roles()
         self._orig_skill_items = {role: skill_policy.effective_skills(role) for role in roles}
         matrix = pane_tools_dialog.build_matrix(roles, items, self._orig_skill_items)

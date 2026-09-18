@@ -498,6 +498,13 @@ _STALL_KNOWN_WAIT_FRAMES: tuple[tuple[str, str | None], ...] = (
     ("socket.py", "recvfrom"),
     ("socket.py", "recv_into"),
     ("socket.py", "accept"),
+    # #658: pywinpty's `PtyProcess.read` (loopback `socket.recv`, a builtin
+    # with no Python frame) and its `_read_in_thread` (native read + 1 ms
+    # sleep), plus POSIX ptyprocess's blocking read — every frame in that
+    # module is wait-shaped. Without this they were reported as the "busy"
+    # threads of a GIL convoy they were not part of, sending the diagnosis
+    # after the wrong suspect.
+    ("ptyprocess.py", None),
 )
 # Threads other than the watchdog itself that are named, not this-thread
 # excluded — kept as a name fallback in case this is ever called from a

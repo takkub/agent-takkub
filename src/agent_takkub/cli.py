@@ -28,7 +28,7 @@ from pathlib import Path
 
 from . import config
 from .config import read_port
-from .orchestrator_text import _clean_progress_line
+from .orchestrator_text import _clean_progress_line, _human_duration
 
 # Commands that orchestrate the cockpit (spawn/route/close panes). Only the
 # Lead pane is allowed to invoke these; teammates must work on their assigned
@@ -2528,6 +2528,14 @@ def _print_status_report(report: object) -> None:
             wait_msg = info.get("resource_wait_message") or ""
             if wait_msg:
                 print(f"    ⏳ {wait_msg}")
+        # (#661) declared working but parked at an empty ready prompt for
+        # minutes: it died mid-turn (API error) or finished without `done`.
+        # Say so — "last progress: 3s ago" above is the footer repaint, not work.
+        if state == "idle-at-prompt":
+            print(
+                "    ⚠ pane นั่งที่ prompt ว่างต่อเนื่องทั้งที่ยังนับว่า working —"
+                " น่าจะตายกลางงาน (API error) หรือลืม `takkub done` · ดูจอแล้วสั่งต่อ"
+            )
         model = info.get("model")
         if model:
             print(f"    model: {model}")
@@ -4088,6 +4096,44 @@ def cmd_provider(args: argparse.Namespace) -> dict:
             lines.append(f"  {name:<10} {state}")
         _utf8_print("\n".join(lines) or "  (no providers registered)")
         return {"ok": True, "msg": f"{len(lines)} provider(s)"}
+
+    if args.provider_cmd == "probe":
+        # #663: ask the provider itself whether its quota is usable NOW and
+        # drop the recorded quota-hit if so — the cockpit's routing reads
+        # provider-quota.json on every decision, so no restart is needed.
+        from . import provider_state
+        from .limit_autoresume import quota_reprobe_verdict
+        from .provider_usage import fetch_provider_usage
+
+        name = args.name
+        if name not in PROVIDER_REGISTRY:
+            msg = f"unknown provider: {name!r}"
+            _utf8_print(f"✗ {msg}")
+            return {"ok": False, "msg": msg}
+        recorded = provider_state.quota_reset_at(name)
+        usage = fetch_provider_usage(name)
+        util = usage.utilization
+        util_str = f"{util:.0f}%" if isinstance(util, (int, float)) else "?"
+        resets = usage.resets_at.isoformat(timespec="minutes") if usage.resets_at else "?"
+        _utf8_print(f"  {name}: status={usage.status} used={util_str} resets_at={resets}")
+        if usage.error:
+            _utf8_print(f"  {usage.error}")
+        if not recorded:
+            msg = f"{name} ไม่ได้ถูกบันทึกว่าติดโควตา"
+            _utf8_print(f"✓ {msg}")
+            return {"ok": True, "msg": msg}
+        verdict, new_reset_at = quota_reprobe_verdict(usage, recorded, time.time())
+        if verdict == "clear":
+            provider_state.clear_quota_reset(name)
+            msg = f"{name} ใช้ได้แล้ว — ปลดสถานะติดโควตา (งานใหม่ route กลับได้ทันที)"
+            _utf8_print(f"✓ {msg}")
+            return {"ok": True, "msg": msg}
+        if verdict == "extend":
+            provider_state.set_quota_reset_at(name, new_reset_at)
+        left = _human_duration(max(0.0, provider_state.quota_reset_at(name) - time.time()))
+        msg = f"{name} ยังติดโควตา — reset อีก ~{left}"
+        _utf8_print(f"⏳ {msg}")
+        return {"ok": True, "msg": msg}
 
     if args.provider_cmd == "model":
         name = args.name
@@ -6518,6 +6564,11 @@ def build_parser() -> argparse.ArgumentParser:
     spm.add_argument("name", help="provider name (e.g. claude, kimi, cursor)")
     spm.add_argument("model", nargs="?", help="model id; omit to show the current value")
     spm.add_argument("--clear", action="store_true", help="clear the model and use CLI default")
+    spp = sprv_sub.add_parser(
+        "probe",
+        help="ask a provider whether its quota is usable now; clears a recorded quota-hit (#663)",
+    )
+    spp.add_argument("name", help="provider name (e.g. codex)")
     sprv.set_defaults(func=cmd_provider)
 
     sprov = sub.add_parser(

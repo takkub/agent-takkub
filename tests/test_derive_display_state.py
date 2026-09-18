@@ -30,12 +30,13 @@ tests and `_resolve_role_wait_status` (lead_wait.py) both depend on
 from __future__ import annotations
 
 import collections
+import time
 import types
 
 import pytest
 from PyQt6.QtCore import QCoreApplication, QObject
 
-from agent_takkub.orchestrator import TOOL_STUCK_TIMEOUT_SEC, Orchestrator
+from agent_takkub.orchestrator import IDLE_AT_PROMPT_S, TOOL_STUCK_TIMEOUT_SEC, Orchestrator
 from agent_takkub.provider_spec import AUTH_TRANSIENT_GRACE_SEC
 from agent_takkub.pty_session import PtySession
 from agent_takkub.spawn_engine import PaneState
@@ -287,6 +288,47 @@ class TestPriorityOrder:
             None, pane, "working", True, waiting_for_lead=True
         )
         assert result == "waiting-lead"
+
+    def test_idle_at_prompt_after_threshold_beats_bare_working(self) -> None:
+        # #661: claude pane died mid-response ("API Error: Connection lost"),
+        # sat at an empty `>` for 7 minutes, and status still said "working"
+        # because the footer repaint kept the content hash moving. The
+        # continuous at-prompt clock (PaneState.ready_since_ts) is the
+        # repaint-proof signal.
+        session = _StubSession()
+        pane = _pane("working", session=session)
+        old = time.time() - IDLE_AT_PROMPT_S - 1
+        result = Orchestrator._derive_display_state(
+            None, pane, "working", False, ready_since_ts=old
+        )
+        assert result == "idle-at-prompt"
+
+    def test_idle_at_prompt_needs_the_full_threshold(self) -> None:
+        session = _StubSession()
+        pane = _pane("working", session=session)
+        recent = time.time() - 5
+        result = Orchestrator._derive_display_state(
+            None, pane, "working", False, ready_since_ts=recent
+        )
+        assert result == "working"
+
+    def test_waiting_lead_beats_idle_at_prompt(self) -> None:
+        # a pane that self-reported via progress() and ended its turn is
+        # legitimately parked at the prompt — that is waiting-lead, not idle.
+        session = _StubSession()
+        pane = _pane("working", session=session)
+        old = time.time() - IDLE_AT_PROMPT_S - 1
+        result = Orchestrator._derive_display_state(
+            None, pane, "working", False, waiting_for_lead=True, ready_since_ts=old
+        )
+        assert result == "waiting-lead"
+
+    def test_idle_at_prompt_only_applies_to_working(self) -> None:
+        session = _StubSession()
+        pane = _pane("active", session=session)
+        old = time.time() - IDLE_AT_PROMPT_S - 1
+        result = Orchestrator._derive_display_state(None, pane, "active", False, ready_since_ts=old)
+        assert result == "active"
 
     def test_waiting_lead_does_not_apply_when_flag_is_false(self) -> None:
         session = _StubSession()

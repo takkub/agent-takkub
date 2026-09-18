@@ -1126,6 +1126,53 @@ class TestLeadOutputTailAskQuestion:
         finally:
             notifier.stop()
 
+    def test_picker_after_reply_text_in_the_same_batch_is_still_pushed(
+        self, qapp, tmp_path, config_dir
+    ):
+        # #660 (live 2026-09-18): Lead wrote "4 things to decide" and opened
+        # the picker in one turn -> both records landed in one poll tick and
+        # the old `and not pushed_text` guard swallowed the picker: the phone
+        # showed neither options nor a banner.
+        orch = _FakeOrch()
+        broadcaster = _FakeBroadcaster()
+        _write_jsonl(tmp_path, "C--proj", "uuid-1", [])
+        path = config_dir / "projects" / "C--proj" / "uuid-1.jsonl"
+
+        notifier = LeadNotifier(orch, broadcaster)
+        try:
+            orch.set_lead("proj", "uuid-1")
+            orch.statusChanged.emit()
+
+            with path.open("a", encoding="utf-8") as fh:
+                fh.write(_assistant_line("มี 4 เรื่องรอคุณเคาะ") + "\n")
+                fh.write(_ask_user_question_line("เลือกข้อไหน?") + "\n")
+            notifier._poll_all()
+            names = [e[0] for e in broadcaster.events]
+            assert "lead" in names
+            assert names[-1] == "blocked_on_picker"
+            assert broadcaster.events[-1][1]["questions"][0]["prompt"] == "เลือกข้อไหน?"
+        finally:
+            notifier.stop()
+
+    def test_reply_text_after_the_picker_still_supersedes_it(self, qapp, tmp_path, config_dir):
+        orch = _FakeOrch()
+        broadcaster = _FakeBroadcaster()
+        _write_jsonl(tmp_path, "C--proj", "uuid-1", [])
+        path = config_dir / "projects" / "C--proj" / "uuid-1.jsonl"
+
+        notifier = LeadNotifier(orch, broadcaster)
+        try:
+            orch.set_lead("proj", "uuid-1")
+            orch.statusChanged.emit()
+
+            with path.open("a", encoding="utf-8") as fh:
+                fh.write(_ask_user_question_line("q") + "\n")
+                fh.write(_assistant_line("answered on desktop") + "\n")
+            notifier._poll_all()
+            assert [e[0] for e in broadcaster.events] == ["lead"]
+        finally:
+            notifier.stop()
+
     def test_answer_text_in_same_batch_supersedes_the_picker_signal(
         self, qapp, tmp_path, config_dir
     ):

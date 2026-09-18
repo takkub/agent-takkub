@@ -32,6 +32,15 @@ RELIMIT_GRACE_S = 10 * 60
 # windows sometimes lag a few seconds/minutes past what the banner claims.
 WAKE_BUFFER_S = 3 * 60
 
+# #663: while a provider is recorded quota-hit, ask it (usage/rate-limit
+# probe, no model turn) this often whether it has actually recovered instead
+# of trusting the banner's "resets in Xh" until it expires — the banner is a
+# provider estimate, not a contract. Field case 2026-09-17: codex was usable
+# again mid-window but every new assign kept substituting claude all day.
+QUOTA_REPROBE_INTERVAL_S = 20 * 60
+# Utilization (percent) at or above which a probe still counts as exhausted.
+QUOTA_REPROBE_EXHAUSTED_PERCENT = 95.0
+
 # Signal (b): the profile's own limit_status telemetry must independently
 # confirm the five-hour window is (near-)exhausted before we park. Guards
 # against a false-positive banner match parking a pane that can still work.
