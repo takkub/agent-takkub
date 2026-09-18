@@ -317,7 +317,7 @@ class TestEffectiveProviderForQuotaSkip:
     burning a full pane boot only to immediately re-hit the same wall
     (the #514 post-hit reroute only fires AFTER that boot)."""
 
-    def test_quota_hit_provider_falls_back_to_next_priority_candidate(
+    def test_quota_hit_provider_falls_back_to_next_ring_candidate(
         self, monkeypatch: pytest.MonkeyPatch, redirect_config_path: Path
     ) -> None:
         import agent_takkub.provider_state as provider_state
@@ -327,7 +327,9 @@ class TestEffectiveProviderForQuotaSkip:
         provider_state.set_quota_reset_at("codex", time.time() + 3600)
 
         assert provider_config.provider_for("reviewer") == "codex"
-        assert provider_config.effective_provider_for("reviewer") == "claude"
+        # Ring, not priority list: the walk starts just AFTER codex, so the
+        # substitute is gemini — claude is no longer everyone's fallback.
+        assert provider_config.effective_provider_for("reviewer") == "gemini"
 
     def test_quota_ready_provider_is_unaffected(
         self, monkeypatch: pytest.MonkeyPatch, redirect_config_path: Path
@@ -347,13 +349,13 @@ class TestEffectiveProviderForQuotaSkip:
 
         redirect_config_path.write_text('{"reviewer": "codex"}', encoding="utf-8")
         monkeypatch.setattr(provider_config, "_provider_available", lambda p: True)
-        # _REROUTE_PRIORITY is (claude, codex, gemini, kimi, opencode, cursor)
-        # — codex is desired/excluded, so claude (first candidate) wins
-        # unless claude itself is also quota-hit.
+        # PROVIDER_RING is (claude, codex, gemini, kimi, opencode, cursor)
+        # walked from just after codex — gemini is next; if gemini is also
+        # quota-hit the walk continues to kimi.
         provider_state.set_quota_reset_at("codex", time.time() + 3600)
-        provider_state.set_quota_reset_at("claude", time.time() + 3600)
+        provider_state.set_quota_reset_at("gemini", time.time() + 3600)
 
-        assert provider_config.effective_provider_for("reviewer") == "gemini"
+        assert provider_config.effective_provider_for("reviewer") == "kimi"
 
     def test_forced_identity_role_is_never_quota_rerouted(
         self, monkeypatch: pytest.MonkeyPatch
@@ -419,7 +421,7 @@ class TestProviderQuotaSkipInfo:
         provider_state.set_quota_reset_at("codex", reset_at)
 
         result = provider_config.provider_quota_skip_info("reviewer")
-        assert result == ("codex", "claude", reset_at)
+        assert result == ("codex", "gemini", reset_at)
 
     def test_none_for_forced_identity_role(self, monkeypatch: pytest.MonkeyPatch) -> None:
         import agent_takkub.provider_state as provider_state

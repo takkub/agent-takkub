@@ -37,7 +37,7 @@ takkub goal "<objective>"                              # ตั้งเป้�
 takkub goal                                            # โชว์ goal ปัจจุบัน
 takkub goal --clear                                    # ล้าง goal
 takkub harvest --role <role>                           # กู้งานของ pane ที่ทำเสร็จแต่ลืม takkub done (scan artifacts)
-takkub close --role qa                                 # ปิด pane เดียว
+takkub close --role qa                                 # ปิด pane เดียว — 2.1.17: pane ไม่ปิดเองหลัง done แล้ว (นั่งรอ 30 นาที) assign role เดิมซ้ำ = paste เข้า session เดิม ไม่ boot ใหม่ · close เองเฉพาะจะเปลี่ยน provider/model หรือเลิกใช้ (เปลี่ยน worktree ระบบปิด+เปิดใหม่ให้เอง)
 takkub close-all                                       # ปิด teammate ทั้งหมด (Lead รอด)
 takkub end-session --note "<สรุป>"                     # เขียน session summary ลง runtime/sessions + vault mirror
 takkub qa-gate                                         # canonical gate (#325): venv-check → full pytest → ruff check src/tests/ → lint-imports, 1 table + exit code, report → `<DATA_HOME>/runtime/qa-reports/` (ไม่เขียนใน repo, #436) · pure-local (cockpit ปิดก็รันได้) · ทุก role/CI/มือ user เรียกตัวเดียวกัน — ห้ามพิมพ์ pytest/ruff/lint-imports ดิบ

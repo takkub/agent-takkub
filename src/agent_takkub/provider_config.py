@@ -70,15 +70,17 @@ _FORCED_PROVIDER = {
 # Roles whose CLI is fixed and must not be offered as an override in the UI.
 FORCED_ROLES = frozenset(_FORCED_PROVIDER)
 
-# #572: fixed priority order the quota-skip picker (below) and
-# `limit_autoresume.AutoResumeMixin._pick_reroute_provider` (mid-task reroute
-# after a pane has already hit its wall) both walk — claude first (the
-# cockpit's always-available baseline), then the rest in registry order.
-# Single source of truth so a fresh assign and a post-hit reroute agree on
-# where work lands; `limit_autoresume` imports this instead of keeping its
-# own copy. Whichever candidates are disabled/uninstalled/still quota-hit
-# get skipped.
-_REROUTE_PRIORITY: tuple[str, ...] = (CLAUDE, CODEX, GEMINI, KIMI, OPENCODE, CURSOR)
+# The substitute ring every picker walks — the pre-spawn quota/availability
+# skip (`effective_provider_for`), the mid-task reroute
+# (`limit_autoresume.AutoResumeMixin._pick_reroute_provider`) and the
+# spawn-failure hop (`spawn_engine`). It is a RING, not a priority list:
+# the walk starts just after the provider that hit/failed and wraps, so
+# work spreads across whatever the operator has enabled+installed instead
+# of every degrade landing on the same favourite. (Until 2.1.16 this was
+# `(claude, …)` walked from the head, which made claude the universal
+# fallback on any machine where it was merely present.) Candidates that
+# are disabled, not installed or still quota-hit are skipped.
+PROVIDER_RING: tuple[str, ...] = (CLAUDE, CODEX, GEMINI, KIMI, OPENCODE, CURSOR)
 
 
 def config_path(project: str | None = None) -> Path:
@@ -433,18 +435,24 @@ def _provider_cli_installed_uncached(provider: str) -> bool:
     return True
 
 
-def _pick_quota_fallback(exclude: str) -> str | None:
-    """The next candidate in `_REROUTE_PRIORITY` (skipping `exclude`) that is
-    both available and not itself recorded quota-hit right now, or `None`
-    when nothing qualifies. Pure aside from the `_provider_available`/
-    `provider_state` reads — no logging, no notification; callers that need
-    those wrap this (`effective_provider_for` for the silent substitution,
-    `provider_quota_skip_info` for the one-shot log/notice detail)."""
+def pick_substitute_provider(exclude: Iterable[str], after: str | None = None) -> str | None:
+    """The next provider on `PROVIDER_RING` after `after` (wrapping) that is
+    not in `exclude`, is enabled+installed and is not recorded quota-hit
+    right now — or `None` when nothing qualifies. Pure aside from the
+    `_provider_available`/`provider_state` reads: no logging, no notice;
+    callers that need those wrap this (`effective_provider_for` for the
+    silent substitution, `provider_quota_skip_info` for the one-shot
+    log/notice detail, `_pick_reroute_provider` for the mid-task move)."""
     from . import provider_state
 
+    excluded = {str(p or "").strip().lower() for p in exclude}
+    ring = list(PROVIDER_RING)
+    if after in ring:
+        start = ring.index(after) + 1
+        ring = ring[start:] + ring[:start]
     now = time.time()
-    for candidate in _REROUTE_PRIORITY:
-        if candidate not in VALID_PROVIDERS or candidate == exclude:
+    for candidate in ring:
+        if candidate not in VALID_PROVIDERS or candidate in excluded:
             continue
         if not _provider_available(candidate):
             continue
@@ -457,12 +465,13 @@ def _pick_quota_fallback(exclude: str) -> str | None:
 def effective_provider_for(role: str, project: str | None = None) -> str:
     """Resolve which CLI will *actually* back the role this spawn.
 
-    Like `provider_for()` but degrades a codex/gemini role to `claude`
-    when that provider is unavailable — toggled off OR not installed.
-    The role keeps its identity (a "gemini" pane is still a "gemini"
-    pane); only the engine behind it changes. This is the "Claude รับ
-    ตำแหน่งแทน" substitution: an assigned codex/gemini slot never fails
-    or refuses — Claude fills it instead.
+    Like `provider_for()` but degrades a role whose provider is unavailable
+    — toggled off OR not installed — to the next enabled+installed provider
+    on `PROVIDER_RING` (walked from just after the configured one, so no
+    single CLI is everyone's fallback). The role keeps its identity (a
+    "gemini" pane is still a "gemini" pane); only the engine behind it
+    changes: an assigned slot never fails or refuses while any other
+    provider is usable.
 
     `provider_for()` answers "which CLI is *configured* for this role"
     (static identity); this answers "which CLI is *usable* right now"
@@ -488,18 +497,18 @@ def effective_provider_for(role: str, project: str | None = None) -> str:
         # than being quietly moved onto a CLI the user did not choose.
         return CLAUDE
     if not _provider_available(desired):
-        # #639: was `return CLAUDE` unconditionally. Pick the best AVAILABLE
-        # substitute instead; `or desired` keeps the configured provider (and
-        # a loud spawn failure) when nothing qualifies — never a silent swap
-        # onto a CLI that is not installed or was switched off.
-        return _pick_quota_fallback(desired) or desired
+        # #639: was `return CLAUDE` unconditionally. Pick the next AVAILABLE
+        # provider on the ring instead; `or desired` keeps the configured
+        # provider (and a loud spawn failure) when nothing qualifies — never
+        # a silent swap onto a CLI that is not installed or was switched off.
+        return pick_substitute_provider({desired}, after=desired) or desired
     if role.lower().strip() in FORCED_ROLES:
         return desired
     from . import provider_state
 
     if provider_state.is_quota_ready(desired):
         return desired
-    return _pick_quota_fallback(desired) or desired
+    return pick_substitute_provider({desired}, after=desired) or desired
 
 
 def provider_quota_skip_info(
@@ -527,7 +536,7 @@ def provider_quota_skip_info(
 
     if provider_state.is_quota_ready(desired):
         return None
-    fallback = _pick_quota_fallback(desired)
+    fallback = pick_substitute_provider({desired}, after=desired)
     if fallback is None:
         return None
     return desired, fallback, provider_state.quota_reset_at(desired)
@@ -555,7 +564,7 @@ def provider_unavailable_substitution_info(
     desired = provider_for(stripped, project)
     if desired == CLAUDE or _provider_available(desired):
         return None
-    substitute = _pick_quota_fallback(desired)
+    substitute = pick_substitute_provider({desired}, after=desired)
     if substitute is None or substitute == desired:
         return None
     return desired, substitute

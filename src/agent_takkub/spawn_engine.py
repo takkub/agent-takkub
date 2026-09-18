@@ -719,6 +719,18 @@ class PaneState:
     # instead of staying degraded forever. Mirrors model_override's
     # shape/precedent immediately above.
     provider_override: str | None = None
+    # Provider ring: how many times an assign already re-ran on the next
+    # ring provider after a spawn failure (0 = never; capped at 1 by
+    # `Orchestrator._spawn_failure_provider_hop`). Reset on a successful
+    # spawn+delivery.
+    spawn_provider_hops: int = 0
+    # Pane reuse: wall-clock since this pane finished (`done`) and was kept
+    # alive for the role's next task (0.0 = not kept / got a new task).
+    # `_reap_done_panes` closes it after DONE_PANE_TTL_S.
+    done_kept_since: float = 0.0
+    # #664: last time the idle-drain tick tried to dispatch this role's
+    # pending queue (once a minute at most).
+    queue_drain_attempt_ts: float = 0.0
     # #323: per-assign reasoning-effort override, set the same way as
     # model_override immediately above (`_assign_dispatch`, cleared on a
     # fresh assign that doesn't repeat it, ignored on an already-running

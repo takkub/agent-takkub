@@ -2,6 +2,42 @@
 
 All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses [SemVer](https://semver.org/).
 
+## [v2.1.17] - 2026-09-18
+
+### Changed (เปลี่ยน)
+
+- **pane ไม่ปิดเองหลัง `takkub done` แล้ว — งานถัดไปของ role เดิมส่งเข้า session เดิม ไม่ boot ใหม่**
+  วัดจาก prod 2026-09-18: teammate spawn 24 ครั้ง/วัน ทุกครั้ง `resumed: false` และ close/spawn เท่ากัน 1:1 —
+  `done()` ปิด pane เองหลัง 2.5 วิ (`orchestrator.py` `_close_if_same_session`) แล้ว assign ถัดไป boot ใหม่จ่าย prefix
+  ~35k token (Claude Code base 22.9k + skill catalog 6.8k + CLAUDE.md/role/task) ≈ 0.8M token/วันแค่ค่าเปิด ทั้งที่ทาง
+  reuse (`spawn()` short-circuit "already running" → `_send_when_ready`) มีอยู่แล้วแต่ไม่เคยได้ใช้ · ตอนนี้ pane อยู่ในสถานะ
+  done รอ `DONE_PANE_TTL_S` (`TAKKUB_DONE_PANE_TTL_S` default 1800) แล้ว watchdog tick ปิดให้ (`done_pane_ttl_closed`) ·
+  `TAKKUB_CLOSE_ON_DONE=1` = พฤติกรรมเดิม · slot governor/worktree ถูกคืน/finalize ใน done() อยู่แล้วจึงไม่ค้าง cap ·
+  **worktree ต่อ assign**: pane ว่างที่ยังอยู่ใน worktree เก่า → ปิดแล้วเปิดใหม่ที่ cwd ใหม่ให้เอง (`assign_cwd_switch_idle`
+  รูปเดียวกับ #603 provider switch) แทนที่จะ paste เข้า checkout ผิด (#162) · pane ที่ยัง busy อยู่ cwd อื่น = ปฏิเสธพร้อมบอก
+  (`assign_cwd_switch_refused_busy`) · `_worktree_bare_role_collision` ไม่นับ pane ว่างเป็นชน
+- **provider substitute เป็น "วงแหวน" ไม่มีตัวหลัก** — เดิม `_REROUTE_PRIORITY = (claude, …)` เดินจากหัวลิสต์ทุกครั้ง
+  claude จึงเป็น fallback สากล (assign ตอน provider ติดโควตา/ปิด, reroute กลางงาน #514, ข้อความ "[system] X DISABLED.
+  Claude will substitute") · ตอนนี้ `provider_config.PROVIDER_RING` + `pick_substitute_provider(exclude, after=)` เดินจาก
+  "ตัวถัดจากตัวที่ติด/ล้ม" วนรอบ ข้ามตัวที่ปิด/ไม่ได้ติดตั้ง/ยังติดโควตา — เครื่องไม่มี claude ก็วน codex→gemini→… ได้เอง ·
+  ทุกจุดเรียก (`effective_provider_for`, `provider_quota_skip_info`, `provider_unavailable_substitution_info`,
+  `_pick_reroute_provider`, system notice ตอน toggle provider, Settings badge) ใช้ ring เดียวกัน · role ที่ชื่อเป็น CLI
+  (codex/gemini/opencode/kimi/cursor) ยังไม่สลับตามเดิม
+- **spawn ล้ม → กระโดดไป provider ถัดไป 1 hop** (`_spawn_failure_provider_hop`): เดิม `spawn_native_failed` แค่รายงานล้ม
+  ตอนนี้ assign ทั้งใบรันใหม่บน provider ถัดไปในวง (task file/ledger/delivery ทำใหม่ครบ) + แจ้ง Lead (`spawn-provider-hop`)
+  hop ครั้งเดียวต่อ assign (`PaneState.spawn_provider_hops`) ล้มซ้ำ = ดังเหมือนเดิม · Lead ไม่ hop
+
+### Fixed (แก้)
+
+- **#664 — assign บอก queued แต่งานไม่เคยถึง pane แล้วถูกทิ้งตอนปิด** ต้นเหตุ: busy-guard ใน `_assign_dispatch` ตัดสินจาก
+  `last_assigned_task` (done() ไม่เคยเคลียร์) + `pane.state == "working"` (ไม่มีใคร demote) → pane ที่จบด้วย `progress`
+  หรือตายกลาง response อ่านเป็น busy ตลอด งานใหม่เข้าคิว `_pending_assignments` ซึ่งระบายได้แค่ใน done()/close() เท่านั้น ·
+  แก้ 3 ชั้น: (1) busy-guard ปล่อยผ่านเมื่อ pane นั่งที่ ready prompt จริง (`_pane_idle_at_prompt` = classification #661)
+  → งานใหม่ paste เข้า pane เลย (2) watchdog tick ระบายคิวเองเมื่อ pane ว่างที่ prompt ≥ `TAKKUB_QUEUE_DRAIN_IDLE_S` (10s)
+  (`queued_assignment_idle_drain`, ลองซ้ำทุก 60s) (3) ตอนเข้าคิวจริง (pane busy) แจ้ง Lead ทันที
+  (`assign_queued_behind_busy_pane` / kind `queued-assignment`) พร้อมวิธีแทนที่ ไม่ใช่เงียบจน close · ยังไม่ทำ: ข้อ 4-5
+  ในใบ (`task close` บน pane live, ถามก่อนทิ้งคิวตอน close)
+
 ## [v2.1.16] - 2026-09-18
 
 ### Fixed (แก้)

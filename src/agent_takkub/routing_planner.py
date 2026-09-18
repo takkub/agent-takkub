@@ -912,10 +912,11 @@ def _classify_core(user_message: str, context: dict | None = None) -> RoutingAct
             ``disabled_providers`` (set[str]) — provider names the user has
             disabled via Settings → Providers & Roles. These are NO LONGER
             refused: routing proceeds normally and the spawn layer backs the
-            unavailable codex/gemini role with claude ("Claude รับตำแหน่งแทน").
-            The only effect here is a substitution note in ``reason`` and a
-            disabled FIRE_ONESHOT degrading to FIRE_ASSIGN (a claude-backed
-            pane — one-shot has no substitute path).
+            unavailable role with the next enabled provider on
+            ``provider_config.PROVIDER_RING``. The only effect here is a
+            substitution note in ``reason`` and a disabled FIRE_ONESHOT
+            degrading to FIRE_ASSIGN (a substitute-backed pane — one-shot has
+            no substitute path).
             ``disabled_roles`` (set[str]) — role names OFF via
             ``pipeline_config.rolesEnabled`` (#510) for the current project.
             Unlike ``disabled_providers`` these have NO substitute — the role

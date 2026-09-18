@@ -612,6 +612,19 @@ IDLE_REMIND_COOLDOWN_S = 90
 # an empty `>`, and `takkub status` said "working · last progress 3s ago"
 # for 7+ minutes because the footer repaint kept the content hash moving.
 IDLE_AT_PROMPT_S = max(0.0, float(os.environ.get("TAKKUB_IDLE_AT_PROMPT_S", "120")))
+# Pane reuse (2.1.17): a teammate pane is KEPT ALIVE after `takkub done` so the
+# role's next task is pasted into the same session instead of paying a fresh
+# ~35k-token boot (prod 2026-09-18: 24 fresh boots/day, every one of them a
+# close→respawn of a role that had just finished). Set TAKKUB_CLOSE_ON_DONE=1
+# to restore the old 2.5 s auto-close. A kept pane that gets no new task for
+# TAKKUB_DONE_PANE_TTL_S is closed by the 5 s watchdog tick (RAM bound).
+CLOSE_ON_DONE = os.environ.get("TAKKUB_CLOSE_ON_DONE", "0").strip() == "1"
+DONE_PANE_TTL_S = max(0.0, float(os.environ.get("TAKKUB_DONE_PANE_TTL_S", "1800")))
+# #664: a queued assignment for a *working* pane that is really sitting at
+# its ready prompt (finished with `progress` instead of `done`, or died
+# mid-response) is force-dispatched after this much continuous idle, instead
+# of waiting for a `done()` that never comes.
+QUEUE_DRAIN_IDLE_S = max(0.0, float(os.environ.get("TAKKUB_QUEUE_DRAIN_IDLE_S", "10")))
 IDLE_REMIND_ESCALATE_AFTER_ROUNDS = max(
     0, int(os.environ.get("TAKKUB_IDLE_REMIND_ESCALATE_ROUNDS", "3"))
 )
@@ -3299,7 +3312,15 @@ class Orchestrator(
         if _split_shard(role_name)[1] is not None:
             return None
         project_ns = self._resolve_project(project)
-        if self._project_panes(project_ns).get(role_name) is None:
+        existing = self._project_panes(project_ns).get(role_name)
+        if existing is None:
+            return None
+        # A pane that is idle (done, or a working pane really sitting at its
+        # prompt) is not a collision: `_assign_dispatch` closes it and
+        # respawns into the new worktree (2.1.17 pane-reuse — panes stay
+        # alive after `done`, so this used to block every second worktree
+        # assign of a role).
+        if self._pane_idle_for_reassign(existing):
             return None
         return (
             f"[{role_name}] มี pane อยู่แล้วใน project นี้ (bare role name ไม่มี #N) — "
@@ -3308,6 +3329,75 @@ class Orchestrator(
             f"ใช้ '{role_name}#N' (เช่น {role_name}#2) เพื่อได้ pane อิสระจริง "
             f"หรือปิด/รอ {role_name} ปัจจุบันให้เสร็จก่อน (takkub close --role {role_name})"
         )
+
+    @staticmethod
+    def _pane_idle_at_prompt(pane) -> bool:
+        """True when a live pane's screen reads "ready prompt, no background
+        work" right now (#661's classification, cached — no render)."""
+        session = getattr(pane, "session", None)
+        if session is None or not getattr(session, "is_alive", False):
+            return False
+        try:
+            at_prompt = session.is_at_ready_prompt_cached()
+            background = session.has_background_work()
+        except Exception:
+            return False
+        return at_prompt is True and background is not True
+
+    def _pane_idle_for_reassign(self, pane) -> bool:
+        """A live pane a new assignment may take over without clobbering an
+        in-flight turn: finished (done/empty/exited) or declared working but
+        genuinely parked at its prompt (#664: finished with `progress`, or
+        died mid-response)."""
+        session = getattr(pane, "session", None)
+        if session is None or not getattr(session, "is_alive", False):
+            return False
+        # #603's rule: anything but "working" (active/done/error/empty/…)
+        # is not mid-turn.
+        if getattr(pane, "state", None) != "working":
+            return True
+        return self._pane_idle_at_prompt(pane)
+
+    def _spawn_failure_provider_hop(
+        self,
+        role_name: str,
+        project_ns: str,
+        failed_provider: str,
+        reason: str,
+        ps: PaneState,
+    ) -> str | None:
+        """Provider ring, spawn-failure leg: the next enabled+installed+
+        quota-ready provider after `failed_provider` this role's assign
+        should re-run on, or None (Lead, a forced-identity role, the one
+        allowed hop already spent, or nothing else usable). Logs + tells
+        Lead when it picks one — never a silent swap."""
+        from .provider_config import FORCED_ROLES, pick_substitute_provider
+
+        if role_name == LEAD.name or _split_shard(role_name)[0].lower() in FORCED_ROLES:
+            return None
+        if ps.spawn_provider_hops >= 1:
+            return None
+        substitute = pick_substitute_provider({failed_provider}, after=failed_provider)
+        if not substitute or substitute == failed_provider:
+            return None
+        ps.spawn_provider_hops += 1
+        _log_event(
+            "spawn_failed_provider_hop",
+            role=role_name,
+            project=project_ns,
+            from_provider=failed_provider,
+            to_provider=substitute,
+            err=reason[:160],
+        )
+        self._notify_lead(
+            project_ns,
+            f"🔀 [{role_name}] spawn บน {failed_provider} ล้ม ({reason[:120]}) → "
+            f"ส่งงานเดิมไปเปิดบน {substitute} แทนอัตโนมัติ (provider ถัดไปที่เปิดอยู่)",
+            from_role=role_name,
+            note="spawn_provider_hop",
+            kind="spawn-provider-hop",
+        )
+        return substitute
 
     def _dispatch_next_assignment(self, project: str, role: str) -> bool:
         key = _exit_key(project, role)
@@ -3384,14 +3474,38 @@ class Orchestrator(
         current_state = self._ps(key)
         # Keep the active task's identity, delivery and done metadata intact.
         # A starting pane also owns its assignment before its first ready prompt.
+        # #664: `last_assigned_task` is never cleared by done() and nothing
+        # demotes `pane.state` from "working", so a pane that finished with
+        # `takkub progress` (or died mid-response) used to read busy forever
+        # and every new assign queued behind it — a queue that only drained
+        # on done()/close(). A pane genuinely parked at its ready prompt is
+        # delivered to directly (the task supersedes), never queued.
         if (
             current_state.last_assigned_task
             and current_pane is not None
             and current_pane.state not in ("done", "empty", "exited")
+            and not self._pane_idle_at_prompt(current_pane)
         ):
             if not hasattr(self, "_pending_assignments"):
                 self._pending_assignments = {}
             pending_id = _queued_task_id or _uuid.uuid4().hex
+            if _queued_task_id is None:
+                _log_event(
+                    "assign_queued_behind_busy_pane",
+                    role=role_name,
+                    project=project_ns,
+                    task_id=pending_id[:8],
+                )
+                self._notify_lead(
+                    project_ns,
+                    f"⏳ [{role_name}] pane ยัง busy (งานเดิม: "
+                    f"{(current_state.last_assigned_task or '')[:80]!r}) → งานใหม่ "
+                    f"{pending_id[:8]} เข้าคิว จะส่งเองเมื่อ pane ว่างที่ prompt หรือ done · "
+                    f"ถ้าจะแทนที่ทันที: takkub close --role {role_name} แล้ว assign ใหม่",
+                    from_role=role_name,
+                    note="queued_assignment",
+                    kind="queued-assignment",
+                )
             pending_item = dict(
                 role_name=role_name,
                 cwd=cwd,
@@ -3462,11 +3576,35 @@ class Orchestrator(
                 or effective_provider_for(settings_role_a, project=project_ns)
             )
         )
-        if (
-            _provider_switch_wanted
-            and existing_pane is not None
-            and existing_pane.state == "working"
-        ):
+        _pane_idle = pane_is_running and self._pane_idle_for_reassign(existing_pane)
+        # 2.1.17 pane reuse: panes outlive `done`, so a worktree assign now
+        # routinely meets a live pane parked in the PREVIOUS worktree. Its
+        # cwd is fixed at process start — pasting the task in would run it in
+        # the old checkout (#162) — so a different cwd on an idle pane means
+        # close+respawn, same shape as the provider switch below.
+        _pane_cwd_now = getattr(existing_pane, "_session_cwd", None) if pane_is_running else None
+        _cwd_switch_wanted = bool(
+            cwd
+            and isinstance(_pane_cwd_now, str)
+            and _pane_cwd_now
+            and os.path.normcase(os.path.abspath(_pane_cwd_now))
+            != os.path.normcase(os.path.abspath(cwd))
+        )
+        if _cwd_switch_wanted and not _pane_idle:
+            _log_event(
+                "assign_cwd_switch_refused_busy",
+                role=role_name,
+                project=project_ns,
+                pane_cwd=_pane_cwd_now,
+                requested_cwd=cwd,
+            )
+            return (
+                False,
+                f"[{role_name}] pane ยังทำงานอยู่ใน {_pane_cwd_now} — ส่งงานที่ต้องใช้ "
+                f"{cwd} เข้าไปไม่ได้ (จะไปรันผิด checkout #162) · รอให้ done หรือ "
+                f"takkub close --role {role_name} ก่อน",
+            )
+        if _provider_switch_wanted and not _pane_idle:
             # Reaching here at all means the busy-queue check above didn't
             # fire (no `last_assigned_task` recorded yet, e.g. mid-delivery
             # race) even though the pane reports itself mid-turn right now —
@@ -3487,7 +3625,7 @@ class Orchestrator(
                 provider=provider,
                 reason="pane-already-running",
             )
-        elif _provider_switch_wanted:
+        elif _provider_switch_wanted or _cwd_switch_wanted:
             # #603: the pane is idle (active/done/error, not mid-turn) — no
             # in-flight turn a close would clobber. Used to only warn
             # "ไม่มีผล" and leave the old provider running until Lead closed
@@ -3498,17 +3636,33 @@ class Orchestrator(
             old_provider = ps_assign.provider_override or effective_provider_for(
                 settings_role_a, project=project_ns
             )
-            _log_event(
-                "assign_provider_switch_idle",
-                role=role_name,
-                project=project_ns,
-                from_provider=old_provider,
-                to_provider=provider,
-            )
+            if _provider_switch_wanted:
+                _log_event(
+                    "assign_provider_switch_idle",
+                    role=role_name,
+                    project=project_ns,
+                    from_provider=old_provider,
+                    to_provider=provider,
+                )
+                switch_msg = (
+                    f"🔀 [{role_name}] --provider {provider!r}: pane ว่างอยู่ (ไม่มีงานค้าง) "
+                    f"→ ปิดแล้วเปิดใหม่บน {provider} ให้อัตโนมัติ (เดิม {old_provider})"
+                )
+            else:
+                _log_event(
+                    "assign_cwd_switch_idle",
+                    role=role_name,
+                    project=project_ns,
+                    pane_cwd=_pane_cwd_now,
+                    requested_cwd=cwd,
+                )
+                switch_msg = (
+                    f"🔀 [{role_name}] pane ว่างอยู่ใน {_pane_cwd_now} แต่งานใหม่ต้องรันใน "
+                    f"{cwd} → ปิดแล้วเปิดใหม่ที่นั่นให้อัตโนมัติ"
+                )
             self._notify_lead(
                 project_ns,
-                f"🔀 [{role_name}] --provider {provider!r}: pane ว่างอยู่ (ไม่มีงานค้าง) "
-                f"→ ปิดแล้วเปิดใหม่บน {provider} ให้อัตโนมัติ (เดิม {old_provider})",
+                switch_msg,
                 from_role=role_name,
                 note="",
                 kind="assign-provider-switch",
@@ -3540,7 +3694,11 @@ class Orchestrator(
                     scope=scope,
                 ),
             )
-            return True, f"{role_name}: idle pane closing, respawning on provider {provider!r}"
+            return True, (
+                f"{role_name}: idle pane closing, respawning on provider {provider!r}"
+                if _provider_switch_wanted
+                else f"{role_name}: idle pane closing, respawning in {cwd}"
+            )
         elif not pane_is_running:
             # Same "clear on a plain re-assign, survive gate/FIFO/respawn
             # otherwise" contract as model_override below. A watchdog-set
@@ -3723,6 +3881,39 @@ class Orchestrator(
             ps_assign.spawn_initial_task_fallback = None
             ps_assign.spawn_initial_prompt_file = None
             ps_assign.spawn_initial_task_state = ""
+            # Provider ring: a CLI that cannot even launch (binary broken,
+            # auth dead, native spawn timeout) is walked past once — the whole
+            # assign re-runs on the next enabled+installed provider so the
+            # task file/ledger/delivery all happen for the CLI that actually
+            # comes up. One hop; a second failure stays loud.
+            substitute = self._spawn_failure_provider_hop(
+                role_name, project_ns, effective_provider, msg, ps_assign
+            )
+            if substitute is not None:
+                QTimer.singleShot(
+                    1_500,
+                    lambda: self._assign_dispatch(
+                        role_name,
+                        cwd,
+                        raw_task_for_ledger,
+                        requires_commit=requires_commit,
+                        auto_chain=auto_chain,
+                        shard_total=shard_total,
+                        plan=plan,
+                        project=project_ns,
+                        worktree=worktree,
+                        feature=feature,
+                        model=model,
+                        provider=substitute,
+                        effort=effort,
+                        distinct_from=distinct_from,
+                        scope=scope,
+                    ),
+                )
+                return (
+                    True,
+                    f"{role_name}: spawn on {effective_provider} failed, retrying on {substitute}",
+                )
             # The CLI already acked "task queued" to the Lead's shell before
             # this async spawn ran, so a failure here is invisible unless we
             # say so. Tell the Lead the task never landed (#26).
@@ -3756,6 +3947,8 @@ class Orchestrator(
         ps_assign.last_assigned_task = delivery_task
         ps_assign.last_assigned_task_file = task_file
         ps_assign.last_assigned_scope = scope
+        ps_assign.spawn_provider_hops = 0
+        ps_assign.done_kept_since = 0.0
         # #484: a fresh assignment always starts undelivered, even when this
         # PaneState object is being reused from an earlier assignment that
         # DID deliver (or from close()'s new "kept, never delivered" retention
@@ -6005,12 +6198,20 @@ class Orchestrator(
             return False, f"could not persist provider state: {e}"
 
         word = "DISABLED" if disabled else "ENABLED"
-        suffix = (
-            f"Claude will substitute for the {provider} role (same slot, claude-backed); "
-            "you may still propose/fire it — just note the substitution to the user."
-            if disabled
-            else f"{provider} CLI available again — it will back its role natively."
-        )
+        if disabled:
+            from .provider_config import pick_substitute_provider
+
+            substitute = pick_substitute_provider({provider}, after=provider)
+            suffix = (
+                f"{substitute} will substitute for the {provider} role (same slot, "
+                f"{substitute}-backed); you may still propose/fire it — just note the "
+                "substitution to the user."
+                if substitute
+                else f"no other provider is enabled+installed — assigning the {provider} "
+                "role will fail at spawn until one is."
+            )
+        else:
+            suffix = f"{provider} CLI available again — it will back its role natively."
         notice = f"[system] {provider} provider {word}. {suffix}"
 
         # Broadcast to every Lead pane across all project tabs. Iterate
@@ -8047,8 +8248,21 @@ class Orchestrator(
 
         if getattr(self, "_pending_assignments", {}).get(key):
             QTimer.singleShot(0, lambda: self._dispatch_next_assignment(project_ns, from_role))
-        else:
+        elif CLOSE_ON_DONE:
             QTimer.singleShot(2_500, _close_if_same_session)
+        else:
+            # Pane reuse: keep the finished pane alive so the role's next
+            # task is pasted into this session (`_assign_dispatch` →
+            # `_send_when_ready`) instead of paying a fresh boot; the slot
+            # and worktree were already released/finalized above. Reaped by
+            # `_reap_done_panes` after DONE_PANE_TTL_S without a new task.
+            session_state.done_kept_since = time.time()
+            _log_event(
+                "done_pane_kept",
+                role=from_role,
+                project=project_ns,
+                ttl_s=int(DONE_PANE_TTL_S),
+            )
         _log_event(
             "done",
             role=from_role,
@@ -11189,6 +11403,7 @@ class Orchestrator(
         # recover (which closes the pane) doesn't fight with reminder
         # injection on the same pane.
         self._check_stuck_panes(now)
+        self._reap_done_panes(now)
         # #308: independent stuck-tool watchdog — see its own docstring for
         # why this can't be folded into `_check_stuck_panes` above (that
         # detector's content-hash clock has the SAME false-idle blind spot
@@ -12667,6 +12882,43 @@ class Orchestrator(
                 if isinstance(last_out, (int, float)) and last_out > 0:
                     pane._last_output_ts = last_out + gap
 
+    def _reap_done_panes(self, now: float) -> None:
+        """Close teammate panes kept alive after `done` (pane reuse) that got
+        no new task for DONE_PANE_TTL_S — bounds RAM without giving up the
+        boot-cost saving for the common back-to-back assign."""
+        if DONE_PANE_TTL_S <= 0:
+            return
+        for project_name, project_panes in list(self._panes_by_project.items()):
+            for role, pane in list(project_panes.items()):
+                if role == LEAD.name or getattr(pane, "state", None) != "done":
+                    continue
+                key = f"{project_name}::{role}"
+                ps = self._pane_state.get(key)
+                kept_since = getattr(ps, "done_kept_since", 0.0) if ps is not None else 0.0
+                if not kept_since or now - kept_since < DONE_PANE_TTL_S:
+                    continue
+                if getattr(self, "_pending_assignments", {}).get(key):
+                    continue
+                session = getattr(pane, "session", None)
+                if session is None or not getattr(session, "is_alive", False):
+                    continue
+                ps.done_kept_since = 0.0
+                _log_event(
+                    "done_pane_ttl_closed",
+                    role=role,
+                    project=project_name,
+                    idle_s=int(now - kept_since),
+                )
+                try:
+                    self.close(
+                        role,
+                        project=project_name,
+                        suppress_pipeline=True,
+                        suppress_auto_chain=True,
+                    )
+                except Exception:
+                    _log_event("done_pane_ttl_close_error", role=role, project=project_name)
+
     def _check_stuck_panes(self, now: float) -> None:
         """Walk every teammate pane and auto-recover any that's been
         sitting in `working` state with no PTY output for longer than
@@ -12771,6 +13023,28 @@ class Orchestrator(
                             ps_ck.ready_since_ts = ps_ck.ready_since_ts or now
                         else:
                             ps_ck.ready_since_ts = 0.0
+                        # #664: a queue behind a pane that is really idle at
+                        # its prompt would otherwise wait for a done() that
+                        # never comes — dispatch it (the busy-guard lets an
+                        # idle-at-prompt pane through). Retried once a minute
+                        # so a failing dispatch can't spam the Lead.
+                        if (
+                            _at_prompt
+                            and now - ps_ck.ready_since_ts >= QUEUE_DRAIN_IDLE_S
+                            and getattr(self, "_pending_assignments", {}).get(key)
+                            and now - ps_ck.queue_drain_attempt_ts >= 60.0
+                        ):
+                            ps_ck.queue_drain_attempt_ts = now
+                            _log_event(
+                                "queued_assignment_idle_drain",
+                                role=role,
+                                project=project_name,
+                                idle_s=int(now - ps_ck.ready_since_ts),
+                            )
+                            QTimer.singleShot(
+                                0,
+                                lambda p=project_name, r=role: self._dispatch_next_assignment(p, r),
+                            )
                     except Exception:
                         # display_lines() failed (session torn down mid-tick); fall
                         # back to initialising the ts from last raw byte time.

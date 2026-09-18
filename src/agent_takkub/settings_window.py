@@ -2081,8 +2081,8 @@ class SettingsWindow(
         lay.addWidget(self._build_secondary_brains_panel(view))
 
         banner = QLabel(
-            "provider ที่ปิดหรือยังไม่ติดตั้ง -> Claude รับตำแหน่งแทนอัตโนมัติ "
-            "(role เดิม, engine เปลี่ยนเป็น claude — เสีย model diversity)",
+            "provider ที่ปิดหรือยังไม่ติดตั้ง -> provider ถัดไปที่เปิดอยู่รับตำแหน่งแทนอัตโนมัติ "
+            "(role เดิม, engine เปลี่ยน — วนตามลำดับ claude → codex → gemini → kimi → opencode → cursor)",
             view,
         )
         banner.setObjectName("infoBanner")
@@ -2848,9 +2848,9 @@ class SettingsWindow(
         # Gemini #12 — surface when the role's configured provider would
         # actually be substituted by Claude right now (toggled off or not
         # installed), as a styled badge rather than plain banner text.
-        badge = QLabel("-> Claude", row)
+        badge = QLabel("-> substitute", row)
         badge.setObjectName("substituteBadge")
-        badge.setToolTip("provider นี้ปิดหรือยังไม่ติดตั้ง — Claude รับตำแหน่งแทน")
+        badge.setToolTip("provider นี้ปิดหรือยังไม่ติดตั้ง — provider ถัดไปที่เปิดอยู่รับตำแหน่งแทน")
         row_lay.addWidget(badge)
         self._role_provider_badges[role] = badge
 

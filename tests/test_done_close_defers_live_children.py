@@ -44,6 +44,9 @@ def orch(qapp: QCoreApplication, monkeypatch: pytest.MonkeyPatch) -> Orchestrato
         "_resolve_project",
         staticmethod(lambda project: project or TEST_PROJECT),
     )
+    # 2.1.17 keeps panes alive after done by default (pane reuse); the
+    # deferred-close logic under test only runs on the opt-in auto-close.
+    monkeypatch.setattr("agent_takkub.orchestrator.CLOSE_ON_DONE", True)
     o = Orchestrator()
     o.shutdown_timers()
     return o

@@ -90,7 +90,9 @@ class TestAssignSkipsQuotaHitProvider:
         ]
         assert len(skip_events) == 1
         assert skip_events[0].kwargs["from_provider"] == "codex"
-        assert skip_events[0].kwargs["to_provider"] == "claude"
+        # provider ring: the substitute is the next enabled provider AFTER
+        # codex, not claude-by-default.
+        assert skip_events[0].kwargs["to_provider"] == "gemini"
 
         skip_notices = [
             c for c in mock_notify.call_args_list if c.kwargs.get("note") == "provider_quota_skip"

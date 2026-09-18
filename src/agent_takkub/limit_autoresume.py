@@ -52,7 +52,7 @@ from .config import RUNTIME_DIR
 from .lead_inbox import _delayed_enter
 from .limit_status import UsageData, fetch_usage_shared
 from .orchestrator_text import _human_duration, _log_event
-from .provider_config import _REROUTE_PRIORITY, CLAUDE, effective_provider_for
+from .provider_config import CLAUDE, effective_provider_for
 from .spawn_engine import PaneState
 
 
@@ -86,13 +86,12 @@ def quota_reprobe_verdict(usage, recorded_reset_at: float, now: float) -> tuple[
     return "keep", 0.0
 
 
-# #514/#572: fixed priority order the reroute picker walks — claude first
-# (the cockpit's always-available baseline), then the rest in registry
-# order. Whichever candidates are disabled/uninstalled/still quota-hit/the
-# --distinct-from counterpart's provider get skipped; see
-# AutoResumeMixin._pick_reroute_provider. Defined once in `provider_config`
-# (also used by `effective_provider_for`'s pre-spawn quota-skip picker) so
-# a fresh assign and a post-hit reroute agree on fallback order.
+# #514/#572: the reroute picker walks `provider_config.PROVIDER_RING` starting
+# just after the provider that hit — no fixed favourite. Candidates that are
+# disabled/uninstalled/still quota-hit/the --distinct-from counterpart's
+# provider get skipped; see AutoResumeMixin._pick_reroute_provider. One ring
+# shared with `effective_provider_for`'s pre-spawn skip and the spawn-failure
+# hop so a fresh assign, a post-hit reroute and a failed launch all agree.
 
 
 def _usage_confirms_limit(
@@ -375,14 +374,12 @@ class AutoResumeMixin:
         no other provider it could legitimately run as. Every other role
         (lead, backend, frontend, qa, reviewer, critic, custom roles, ...)
         can move to any registered provider that's actually usable."""
-        from . import provider_state
-        from .provider_config import FORCED_ROLES, VALID_PROVIDERS, _provider_available
+        from .provider_config import FORCED_ROLES, pick_substitute_provider
 
         base_role = role.split("#", 1)[0].strip().lower()
         if base_role in FORCED_ROLES:
             return None
 
-        now = time.time()
         exclude = {hit_provider}
         if ps.distinct_from:
             counterpart_key = f"{project}::{ps.distinct_from}"
@@ -396,15 +393,7 @@ class AutoResumeMixin:
                 counterpart_provider = effective_provider_for(ps.distinct_from, project)
             exclude.add(counterpart_provider)
 
-        for candidate in _REROUTE_PRIORITY:
-            if candidate not in VALID_PROVIDERS or candidate in exclude:
-                continue
-            if not _provider_available(candidate):
-                continue
-            if not provider_state.is_quota_ready(candidate, now):
-                continue
-            return candidate
-        return None
+        return pick_substitute_provider(exclude, after=hit_provider)
 
     def _reroute_pane_to_provider(
         self,
