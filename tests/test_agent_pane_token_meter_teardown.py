@@ -123,14 +123,8 @@ def test_worker_routes_through_the_guard(qapp, monkeypatch) -> None:
     calls: list[tuple] = []
     monkeypatch.setattr(pane, "_emit_token_meter", lambda *a: calls.append(a))
 
-    class _InlineThread:
-        def __init__(self, target=None, daemon=None, name=None):
-            self._target = target
-
-        def start(self) -> None:
-            self._target()
-
-    monkeypatch.setattr(agent_pane_mod.threading, "Thread", _InlineThread)
+    # #658: the worker runs on the shared `bg_pool` now — run it inline.
+    monkeypatch.setattr(agent_pane_mod.bg_pool, "submit", lambda fn, *a, **kw: fn(*a, **kw))
 
     pane._refresh_token_meter()
 

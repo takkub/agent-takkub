@@ -8,7 +8,18 @@ import json
 import os
 import time
 
+import pytest
+
 from agent_takkub import cached_read
+
+
+@pytest.fixture(autouse=True)
+def _exact_stat(monkeypatch: pytest.MonkeyPatch):
+    """The #386 contracts below are about the stat-validated cache being
+    EXACT; #658's stat-skip TTL (tested separately in `TestStatTtl`) is
+    switched off here so a rewrite/delete is observed on the very next read."""
+    monkeypatch.setattr(cached_read, "_STAT_TTL_S", 0.0)
+    cached_read.invalidate()
 
 
 def _old(path, seconds=10) -> None:
@@ -99,3 +110,50 @@ def test_invalidate(tmp_path) -> None:
     cached_read.invalidate()
     cached_read.read_cached(p, parse)
     assert len(calls) == 3
+
+
+class TestStatTtl:
+    """#658: a file whose last stat showed no recent write is served for
+    `_STAT_TTL_S` without touching the filesystem — the main thread re-reads
+    the same few config files many times per tick, and on a wedged disk even
+    the stat blocked ~1 s."""
+
+    def test_old_file_served_without_stat_inside_ttl(self, tmp_path, monkeypatch) -> None:
+        monkeypatch.setattr(cached_read, "_STAT_TTL_S", 3.0)
+        p = tmp_path / "a.json"
+        p.write_text('{"x": 1}', encoding="utf-8")
+        _old(p)
+        assert cached_read.read_cached(p, json.loads) == {"x": 1}
+        stats = []
+        real_stat = os.stat
+
+        def counting_stat(path, *a, **kw):
+            stats.append(path)
+            return real_stat(path, *a, **kw)
+
+        monkeypatch.setattr(cached_read.os, "stat", counting_stat)
+        assert cached_read.read_cached(p, json.loads) == {"x": 1}
+        assert cached_read.read_cached(p, json.loads) == {"x": 1}
+        assert stats == []
+
+    def test_recently_written_file_never_skips_the_stat(self, tmp_path, monkeypatch) -> None:
+        monkeypatch.setattr(cached_read, "_STAT_TTL_S", 3.0)
+        p = tmp_path / "a.json"
+        p.write_text('{"x": 1}', encoding="utf-8")  # mtime = now → "recent"
+        assert cached_read.read_cached(p, json.loads) == {"x": 1}
+        p.write_text('{"x": 2}', encoding="utf-8")
+        assert cached_read.read_cached(p, json.loads) == {"x": 2}
+
+    def test_invalidate_makes_an_in_process_write_visible_at_once(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        monkeypatch.setattr(cached_read, "_STAT_TTL_S", 3.0)
+        p = tmp_path / "a.json"
+        p.write_text('{"x": 1}', encoding="utf-8")
+        _old(p)
+        assert cached_read.read_cached(p, json.loads) == {"x": 1}
+        p.write_text('{"x": 2}', encoding="utf-8")
+        _old(p, 5)
+        # inside the TTL, without invalidate the stale parse would be served
+        cached_read.invalidate(p)
+        assert cached_read.read_cached(p, json.loads) == {"x": 2}

@@ -117,12 +117,15 @@ def _read_routing() -> dict:
 def _write_routing(global_data: dict, projects: dict) -> None:
     import time
 
+    from .cached_read import invalidate
     from .core.migration.registry_copy_step import write_json_atomic
 
+    target = _routing_target()
     write_json_atomic(
-        _routing_target(),
+        target,
         {"schema": 1, "updated_at": time.time(), "global": global_data, "projects": projects},
     )
+    invalidate(target)
 
 
 def _sanitize_providers(data: dict) -> dict[str, str]:

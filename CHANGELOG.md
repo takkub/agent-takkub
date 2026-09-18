@@ -2,6 +2,25 @@
 
 All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses [SemVer](https://semver.org/).
 
+## [v2.1.18] - 2026-09-18
+
+### Fixed (แก้)
+
+- **#658 (ชุดที่ 2) — UI ค้าง: prod 2.1.15 (3 pane) วัดจริง 09:45-12:15 stall 378 ครั้ง สูงสุด 14 วิ · dev ที่รันชุดแรก 10 ครั้ง ≤1.2 วิ**
+  ไล่จาก stack ของจริง 3 ก้อนที่เหลือ: (1) **psutil scan process ลูก** (`_live_non_scaffolding_child_procs` → `children(recursive)` +
+  `status/name/cmdline/parent` ต่อตัว = เดิน process snapshot ของ Windows ×101 stall 0.9-3 วิ) — watchdog หลายทางถามต้นไม้เดียวกันทุก
+  tick 5 วิ · ตอนนี้ cache ต่อ pid 6 วิ ครั้งแรกสแกน inline ครั้งถัดไป serve จาก cache แล้ว refresh บน `bg_pool` (thread pool
+  ส่วนกลางใหม่) · จุด close/done ที่ต้องรู้ของสดใช้ `sync=True` (2) **อ่านไฟล์ config ซ้ำบน main thread** (`routing.json`,
+  `role-models` projects bucket, `user-profiles.json` — ×80 stall แม้ `cached_read` มี stat-cache แล้ว เพราะบนดิสก์ที่ AV/OneDrive ค้าง
+  ตัว `stat` เองก็บล็อก ~1 วิ) — `cached_read` เพิ่ม `_STAT_TTL_S` 3 วิ: ไฟล์ที่ stat ล่าสุดไม่ใช่ "เพิ่งเขียน" ไม่แตะ filesystem เลยใน 3 วิ ·
+  writer ในโปรเซส (`v2_target.write_data`, `provider_config._write_routing`, `user_profile._atomic_write`) เรียก `invalidate()` เห็นทันที ·
+  `read_data` เลิก `exists()` ซ้อน (stat ที่สอง) · `_load_registry` เข้า cache (3) **`threading.Thread.start()` บน Qt thread**
+  (`agent_pane._refresh_token_meter` ×9 ~1 วิ — start() รอ thread ใหม่ตื่นภายใต้ GIL convoy) → `bg_pool.submit` · ที่ยังเหลือและแก้จาก
+  Python ไม่ได้: stall ที่ main stack จบใน Qt exec loop เอง (82 บน prod = QtWebEngine/compositor) · เกณฑ์ผ่านวัดบน dev หลัง restart ด้วย
+  `takkub ma --since-hours 24`
+- **#659 — หลักฐานชั้น PTY:** harness ของจริง (ConPTY + cmd.exe, 25 คีย์) คีย์เดี่ยวถึง `display_lines()` p50 0ms สูงสุด 16ms ไม่มี timeout
+  → reader tail-flush (`_flush_timer`, 2.1.16) ใช้ได้ ส่วน xterm/webview (`_arm_flush` + `termPoke`) ต้องยืนยันด้วยตาบน codex pane
+
 ## [v2.1.17] - 2026-09-18
 
 ### Changed (เปลี่ยน)

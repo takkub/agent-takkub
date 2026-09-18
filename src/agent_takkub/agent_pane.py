@@ -13,7 +13,6 @@ buttons). The body switches between QStackedWidget pages.
 from __future__ import annotations
 
 import os
-import threading
 import time
 from datetime import datetime
 
@@ -30,7 +29,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from . import cockpit_theme, performance_settings
+from . import bg_pool, cockpit_theme, performance_settings
 from .agent_pane_model import AgentPaneModel
 from .config import RUNTIME_DIR
 from .pty_session import PtySession
@@ -891,7 +890,10 @@ class AgentPane(QFrame):
                 # Hand back to the GUI thread (queued — emitter != receiver thread).
                 self._emit_token_meter(cand, usage)
 
-        threading.Thread(target=_worker, daemon=True, name="token-meter").start()
+        # #658: a per-refresh `Thread.start()` on the Qt thread waits for the
+        # new thread to come up — ~1 s under PTY-reader GIL contention (×9
+        # captured on prod). The shared pool's workers already exist.
+        bg_pool.submit(_worker)
 
     def _emit_token_meter(self, cand, usage) -> None:
         """Emit `_tokenMeterReady` from the worker thread, tolerating a pane

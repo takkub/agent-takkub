@@ -29,6 +29,7 @@ from datetime import datetime
 
 from PyQt6.QtCore import QObject, QProcess, QTimer, pyqtSignal
 
+from . import bg_pool
 from .agent_pane import AgentPane
 from .claude_auth_config import apply_claude_auth_overrides
 from .config import (
@@ -5619,7 +5620,18 @@ class Orchestrator(
             msg += f" · could not kill: {', '.join(failed[:5])}"
         return not failed, msg
 
-    def _live_non_scaffolding_child_procs(self, project_ns: str, role_name: str, session) -> list:
+    # #658: a psutil process-tree scan (`children(recursive=True)`, then
+    # status/name/cmdline/parent per child) is a Windows process-snapshot walk
+    # per call — captured at 0.9-3 s on prod, ×101 in one afternoon — and the
+    # idle/stuck watchdogs ask for the same pane's tree several times per 5 s
+    # tick. The first probe for a pid runs inline (fresh when it matters:
+    # `sync=True` at close/done), later ones are served from this cache and
+    # refreshed on the shared background pool.
+    _CHILD_SCAN_TTL_S = 6.0
+
+    def _live_non_scaffolding_child_procs(
+        self, project_ns: str, role_name: str, session, *, sync: bool = False
+    ) -> list:
         """`psutil.Process` objects for the children running under *session*
         that represent real work — provider launcher scaffolding and
         already-exited children filtered out (#412). Shared by
@@ -5627,10 +5639,44 @@ class Orchestrator(
         and :meth:`_live_non_scaffolding_children_cpu_snapshot` (per-pid CPU
         time, for #554 idle detection) so the filtering rules can't drift
         between the two. Returns ``[]`` on any probe failure.
+
+        `sync=True` always scans inline; otherwise a result younger than
+        `_CHILD_SCAN_TTL_S` is reused and a stale one is handed back while a
+        background refresh replaces it.
         """
         pid = getattr(session, "_pid", None)
         if not pid:
             return []
+        cache = getattr(self, "_child_scan_cache", None)
+        if cache is None:
+            cache = self._child_scan_cache = {}
+        inflight = getattr(self, "_child_scan_inflight", None)
+        if inflight is None:
+            inflight = self._child_scan_inflight = set()
+        hit = cache.get(pid)
+        if hit is not None and not sync and time.monotonic() - hit[0] < self._CHILD_SCAN_TTL_S:
+            return list(hit[1])
+        if sync or hit is None:
+            procs = self._scan_child_procs(project_ns, role_name, pid)
+            cache[pid] = (time.monotonic(), procs)
+            return list(procs)
+        if pid not in inflight:
+            inflight.add(pid)
+
+            def _refresh() -> None:
+                try:
+                    procs = self._scan_child_procs(project_ns, role_name, pid)
+                    cache[pid] = (time.monotonic(), procs)
+                except Exception:
+                    pass
+                finally:
+                    inflight.discard(pid)
+
+            bg_pool.submit(_refresh)
+        return list(hit[1])
+
+    def _scan_child_procs(self, project_ns: str, role_name: str, pid: int) -> list:
+        """The uncached scan behind `_live_non_scaffolding_child_procs`."""
         try:
             import psutil
 
@@ -5752,7 +5798,9 @@ class Orchestrator(
             procs.append(child)
         return procs
 
-    def _live_non_scaffolding_children(self, project_ns: str, role_name: str, session) -> list[str]:
+    def _live_non_scaffolding_children(
+        self, project_ns: str, role_name: str, session, *, sync: bool = False
+    ) -> list[str]:
         """Names of the processes running under *session* that represent real
         work, with the provider's own launcher scaffolding filtered out AND
         any child that has already exited excluded (#412).
@@ -5776,7 +5824,9 @@ class Orchestrator(
         assumed to cover both.
         """
         names: list[str] = []
-        for child in self._live_non_scaffolding_child_procs(project_ns, role_name, session):
+        for child in self._live_non_scaffolding_child_procs(
+            project_ns, role_name, session, sync=sync
+        ):
             try:
                 names.append(child.name())
             except Exception:
@@ -5846,7 +5896,7 @@ class Orchestrator(
         unfinished work varies with the work. Check events.log's
         `close_kills_live_children` history before adding a name here.
         """
-        names = self._live_non_scaffolding_children(project_ns, role_name, session)
+        names = self._live_non_scaffolding_children(project_ns, role_name, session, sync=True)
         if not names:
             return
         detail = f" ({', '.join(names[:5])}{'…' if len(names) > 5 else ''})" if names else ""
@@ -8146,7 +8196,9 @@ class Orchestrator(
             # with only an after-the-fact warning. Defer the close (bounded by
             # DONE_CLOSE_LIVE_CHILD_GRACE_S) while such work is still visible,
             # polling instead of blocking so the Qt event loop stays free.
-            names = self._live_non_scaffolding_children(project_ns, from_role, _pp.session)
+            names = self._live_non_scaffolding_children(
+                project_ns, from_role, _pp.session, sync=True
+            )
             if names:
                 now = time.time()
                 since = _deferred_since if _deferred_since is not None else now

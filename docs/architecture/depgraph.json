@@ -1,6 +1,6 @@
 {
   "generated_by": "grimp 3.14",
-  "module_count": 344,
+  "module_count": 345,
   "modules": [
     {
       "module": "agent_takkub",
@@ -134,6 +134,7 @@
       "module": "agent_takkub.agent_pane",
       "imports": [
         "agent_takkub.agent_pane_model",
+        "agent_takkub.bg_pool",
         "agent_takkub.cockpit_theme",
         "agent_takkub.config",
         "agent_takkub.performance_settings",
@@ -153,7 +154,7 @@
         "agent_takkub.spawn_engine"
       ],
       "fan_in": 6,
-      "fan_out": 10
+      "fan_out": 11
     },
     {
       "module": "agent_takkub.agent_pane_model",
@@ -274,6 +275,16 @@
       "fan_out": 1
     },
     {
+      "module": "agent_takkub.bg_pool",
+      "imports": [],
+      "imported_by": [
+        "agent_takkub.agent_pane",
+        "agent_takkub.orchestrator"
+      ],
+      "fan_in": 2,
+      "fan_out": 0
+    },
+    {
       "module": "agent_takkub.bm25_search",
       "imports": [
         "agent_takkub.chatlog_scanner",
@@ -382,10 +393,13 @@
       "imports": [],
       "imported_by": [
         "agent_takkub.core.storage.legacy_reader",
+        "agent_takkub.core.storage.v2_target",
+        "agent_takkub.provider_config",
         "agent_takkub.role_messages",
-        "agent_takkub.task_ledger"
+        "agent_takkub.task_ledger",
+        "agent_takkub.user_profile"
       ],
-      "fan_in": 3,
+      "fan_in": 6,
       "fan_out": 0
     },
     {
@@ -2422,6 +2436,7 @@
     {
       "module": "agent_takkub.core.storage.v2_target",
       "imports": [
+        "agent_takkub.cached_read",
         "agent_takkub.config",
         "agent_takkub.core.migration.registry_copy_step",
         "agent_takkub.core.storage.legacy_reader"
@@ -2441,7 +2456,7 @@
         "agent_takkub.skill_policy"
       ],
       "fan_in": 12,
-      "fan_out": 3
+      "fan_out": 4
     },
     {
       "module": "agent_takkub.core.versioning",
@@ -3238,6 +3253,7 @@
       "module": "agent_takkub.orchestrator",
       "imports": [
         "agent_takkub.agent_pane",
+        "agent_takkub.bg_pool",
         "agent_takkub.browser_chrome",
         "agent_takkub.chatlog_scanner",
         "agent_takkub.claude_auth_config",
@@ -3305,7 +3321,7 @@
         "agent_takkub.user_actions"
       ],
       "fan_in": 6,
-      "fan_out": 58
+      "fan_out": 59
     },
     {
       "module": "agent_takkub.orchestrator_text",
@@ -3721,6 +3737,7 @@
     {
       "module": "agent_takkub.provider_config",
       "imports": [
+        "agent_takkub.cached_read",
         "agent_takkub.config",
         "agent_takkub.core.migration.registry_copy_step",
         "agent_takkub.core.storage.layout",
@@ -3761,7 +3778,7 @@
         "agent_takkub.user_profile"
       ],
       "fan_in": 28,
-      "fan_out": 8
+      "fan_out": 9
     },
     {
       "module": "agent_takkub.provider_install",
@@ -5423,6 +5440,7 @@
     {
       "module": "agent_takkub.user_profile",
       "imports": [
+        "agent_takkub.cached_read",
         "agent_takkub.config",
         "agent_takkub.lead_context",
         "agent_takkub.limit_status",
@@ -5456,7 +5474,7 @@
         "agent_takkub.worktree_manager"
       ],
       "fan_in": 22,
-      "fan_out": 7
+      "fan_out": 8
     },
     {
       "module": "agent_takkub.vault_graph",

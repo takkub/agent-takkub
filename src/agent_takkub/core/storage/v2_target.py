@@ -25,6 +25,7 @@ from pathlib import Path
 from typing import Any
 
 from agent_takkub import config
+from agent_takkub.cached_read import invalidate
 
 from ..migration.registry_copy_step import write_json_atomic
 from .legacy_reader import read_json
@@ -196,13 +197,16 @@ def write_data(target: Path, data: Any) -> None:
     used (``core.migration.steps_v1``'s ``RegistryCopyStep``/fan-out steps
     write the same shape on first migration)."""
     write_json_atomic(target, {"schema": 1, "updated_at": time.time(), "data": data})
+    invalidate(target)
 
 
 def read_data(target: Path) -> Any | None:
     """Unwrap a V2 target's ``.data`` field. ``None`` on a missing target or
-    a present-but-unreadable/unwrapped one — never raises."""
-    if not target.exists():
-        return None
+    a present-but-unreadable/unwrapped one — never raises.
+
+    No `exists()` pre-check (#658): that is a second `stat` on the main
+    thread per call; `read_json`'s stat-validated cache already reads a
+    missing file as ``{}``."""
     raw = read_json(target)
     if not isinstance(raw, dict) or "data" not in raw:
         return None

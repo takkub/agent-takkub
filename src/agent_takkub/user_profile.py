@@ -30,6 +30,7 @@ import time
 from collections.abc import Callable
 from pathlib import Path
 
+from . import cached_read
 from .config import SETTINGS_HOME as _BASE_DIR
 from .config import default_claude_config_dir as _default_claude_config_dir
 
@@ -81,6 +82,7 @@ def _atomic_write(path: Path, data: object) -> None:
                 time.sleep(delay)
             try:
                 Path(tmp).replace(path)
+                cached_read.invalidate(path)
                 return
             except OSError as exc:
                 last_exc = exc
@@ -95,10 +97,12 @@ def _atomic_write(path: Path, data: object) -> None:
 
 
 def _load_registry() -> list[dict]:
-    """Load stored profiles; return [] on missing/corrupt."""
+    """Load stored profiles; return [] on missing/corrupt. Stat-validated
+    cache (#658): the status header resolves the active profile on every
+    refresh from the Qt main thread — this used to be a fresh `read_text`
+    each time (781 ms captured on a wedged disk)."""
     try:
-        raw = _REGISTRY_PATH.read_text(encoding="utf-8")
-        data = json.loads(raw)
+        data = cached_read.read_cached(_REGISTRY_PATH, json.loads, missing=[])
     except (OSError, json.JSONDecodeError):
         return []
     if not isinstance(data, list):

@@ -41,13 +41,23 @@ from typing import Any
 # Files modified this recently are never served from cache (see module doc).
 _RECENT_WRITE_S = 2.0
 
+# #658: even the `os.stat` blocks for ~1 s on a wedged disk, and the main
+# thread re-reads the same handful of files many times per 5 s tick (status
+# header + idle watchdog + pane labels each resolve providers/models). An
+# entry whose file was NOT recently written is served without touching the
+# filesystem at all for this long after its last stat; in-process writers
+# call `invalidate()` so their own saves are visible immediately, and a
+# write from another process (the `takkub` CLI) shows up within this bound.
+_STAT_TTL_S = 3.0
+
 # Bounded so a long-running cockpit that touches many per-project files can't
 # grow this without limit. Way above the real working set (a few dozen).
 _MAX_ENTRIES = 512
 
 _lock = threading.Lock()
-# path -> (signature, parsed value)
-_cache: dict[str, tuple[tuple[int, int, int], Any]] = {}
+# path -> (signature, parsed value, monotonic time of the last stat that
+# confirmed the signature, True when that stat saw a recent write)
+_cache: dict[str, tuple[tuple[int, int, int], Any, float, bool]] = {}
 
 
 def read_cached(
@@ -66,6 +76,11 @@ def read_cached(
     helper only removes the redundant I/O.
     """
     key = os.fspath(path)
+    mono = time.monotonic()
+    with _lock:
+        hit = _cache.get(key)
+    if hit is not None and not hit[3] and mono - hit[2] < _STAT_TTL_S:
+        return hit[1]
     try:
         st = os.stat(key)
     except FileNotFoundError:
@@ -74,18 +89,17 @@ def read_cached(
         return missing
     sig = (st.st_mtime_ns, st.st_size, st.st_ino)
     recent = (time.time() - st.st_mtime) < _RECENT_WRITE_S
-    if not recent:
+    if not recent and hit is not None and hit[0] == sig:
         with _lock:
-            hit = _cache.get(key)
-        if hit is not None and hit[0] == sig:
-            return hit[1]
+            _cache[key] = (sig, hit[1], mono, False)
+        return hit[1]
     with open(key, encoding=encoding) as fh:
         text = fh.read()
     value = parse(text)
     with _lock:
         if len(_cache) >= _MAX_ENTRIES:
             _cache.clear()
-        _cache[key] = (sig, value)
+        _cache[key] = (sig, value, mono, recent)
     return value
 
 
