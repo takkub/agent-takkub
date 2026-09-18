@@ -9,6 +9,7 @@ import uuid
 from collections import OrderedDict, deque
 from collections.abc import Callable
 from dataclasses import dataclass
+from dataclasses import replace as _dc_replace
 from enum import StrEnum
 
 import psutil
@@ -160,6 +161,19 @@ class QueuedTask:
 # same schedule since a line is only emitted when an attempt is actually made.
 _GATE_RETRY_BACKOFF_S: tuple[float, ...] = (1.0, 2.0, 5.0, 15.0)
 
+# #662: the three concurrency caps a user reaches for *while work is running*
+# ("เครื่องว่าง ขอ browser 5") are re-read from the environment on every
+# admit decision instead of only at boot — `performance_settings.py` calls
+# the env layer the "highest-priority emergency override", and an override
+# that needs a cockpit restart to take effect is not one. Only vars that are
+# actually present in the environment override; the CPU/RAM thresholds stay
+# boot-time because they feed the overload hysteresis latch in `sample()`.
+_LIVE_ENV_CAPS: dict[str, str] = {
+    "max_heavy_global": "TAKKUB_MAX_HEAVY_GLOBAL",
+    "max_heavy_per_project": "TAKKUB_MAX_HEAVY_PER_PROJECT",
+    "max_browser_global": "TAKKUB_MAX_BROWSER_GLOBAL",
+}
+
 # Issue #240 point 4: the #195 backoff above still floods events.log for a
 # task blocked a *long* time — once the backoff settles at its 15s floor, a
 # multi-hour wait still emits one resource_gate_block line every 15s forever
@@ -301,6 +315,9 @@ class ResourceGovernor:
         slot_policy: SlotPolicy | None = None,
     ) -> None:
         self.limits = limits or GovernorLimits.from_environment()
+        # #662: signature of the last effective (env-overridden) caps —
+        # see `_live_limits`.
+        self._live_caps_sig: tuple[int, ...] | None = None
         # slot_policy (epic #309 Phase 8a): all-defaults `SlotPolicy()` caps
         # nothing (see core.scheduling.models), and `_denial_reason` only
         # ever consults it via the flag-gated `scheduling_facade` — so a
@@ -369,10 +386,42 @@ class ResourceGovernor:
         except Exception:
             pass
 
+    def _live_limits(self) -> GovernorLimits:
+        """#662: `self.limits` with any `_LIVE_ENV_CAPS` var present in the
+        environment applied on top (same `max(1, int(...))` + swallow-invalid
+        semantics as `from_environment`, so a typo'd value falls back exactly
+        like it does at boot). Bumps `_capacity_epoch` when the effective
+        caps changed since the last call so queue heads sitting in the #195
+        retry backoff re-check at once instead of up to 15 s later.
+        Caller holds `self._lock`."""
+        overrides: dict[str, int] = {}
+        for field, var in _LIVE_ENV_CAPS.items():
+            raw = os.environ.get(var)
+            if raw is None:
+                continue
+            try:
+                value = max(1, int(raw))
+            except (TypeError, ValueError):
+                continue
+            if value != getattr(self.limits, field):
+                overrides[field] = value
+        effective = _dc_replace(self.limits, **overrides) if overrides else self.limits
+        sig = tuple(getattr(effective, f) for f in _LIVE_ENV_CAPS)
+        if sig != self._live_caps_sig:
+            if self._live_caps_sig is not None:
+                self._capacity_epoch += 1
+                self._emit(
+                    "resource_limits_env_override",
+                    **{f: getattr(effective, f) for f in _LIVE_ENV_CAPS},
+                )
+            self._live_caps_sig = sig
+        return effective
+
     def update_limits(self, limits: GovernorLimits) -> None:
         """Apply new limits without dropping active tokens or queued work."""
         with self._lock:
             self.limits = limits
+            self._live_caps_sig = None
             self._capacity_epoch += 1
         self._emit(
             "resource_limits_updated",
@@ -566,12 +615,13 @@ class ResourceGovernor:
                 return self._overload_state_reason()
         elif resource_class not in {ResourceClass.LIGHT, ResourceClass.NORMAL}:
             heavy, by_project, by_class, _holders = self._counts()
-            if heavy >= self.limits.max_heavy_global:
+            limits = self._live_limits()  # #662: env caps apply without a restart
+            if heavy >= limits.max_heavy_global:
                 return "heavy_global_limit"
-            if by_project.get(project_id, 0) >= self.limits.max_heavy_per_project:
+            if by_project.get(project_id, 0) >= limits.max_heavy_per_project:
                 return "heavy_project_limit"
             class_limits = {
-                ResourceClass.BROWSER: self.limits.max_browser_global,
+                ResourceClass.BROWSER: limits.max_browser_global,
                 ResourceClass.BUILD: self.limits.max_build_global,
                 ResourceClass.TEST: self.limits.max_test_global,
                 ResourceClass.PACKAGE_INSTALL: self.limits.max_package_install_global,
@@ -870,6 +920,7 @@ class ResourceGovernor:
 
     def snapshot(self) -> dict:
         with self._lock:
+            _eff = self._live_limits()  # #662: report the effective caps
             heavy, by_project, by_class, holders_by_class = self._counts()
             return {
                 "cpu_percent": self._cpu_percent,
@@ -909,7 +960,7 @@ class ResourceGovernor:
                     for item in queue
                 ],
                 "resource_limits": {
-                    field: getattr(self.limits, field) for field in self.limits.__dataclass_fields__
+                    field: getattr(_eff, field) for field in _eff.__dataclass_fields__
                 },
             }
 

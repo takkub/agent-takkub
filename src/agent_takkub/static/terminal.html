@@ -372,6 +372,13 @@
       term.write(text);
     };
 
+    // #659: forced repaint for the Python heartbeat (TerminalWidget
+    // _heartbeat_poke). Only rows that actually changed get redrawn by
+    // xterm.js, so this is cheap when nothing moved.
+    window.termPoke = function () {
+      try { term.refresh(0, term.rows - 1); } catch (e) {}
+    };
+
     // Resize the terminal to match the host widget size in cols/rows.
     // We rely on FitAddon to compute cols/rows from the host CSS box.
     window.termFit = function () {

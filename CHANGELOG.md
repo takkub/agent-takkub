@@ -2,7 +2,50 @@
 
 All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses [SemVer](https://semver.org/).
 
-## [vNEXT]
+## [v2.1.16] - 2026-09-18
+
+### Fixed (แก้)
+
+- **#660 — มือถือตอบ AskUserQuestion แบบ multiSelect ได้แล้ว + picker ที่มาหลังข้อความในรอบ poll เดียวกันไม่หายอีก + ถอนปุ่ม quick-reply**
+  เคสจริง 2026-09-18: Lead ถาม 4 ข้อแบบเลือกได้หลายข้อ มือถือไม่มีตัวเลือกให้กด (ไม่มีแม้ banner)
+  · (1) `notify.py` เดิม push `blocked_on_picker` เฉพาะเมื่อไม่มีข้อความใน batch — Lead ที่พูดก่อนแล้วค่อยเปิด picker
+  ในเทิร์นเดียวเลยโดนกลืน ตอนนี้ push เมื่อ picker เป็นสถานะล่าสุดของ batch
+  · (2) พิสูจน์คีย์ของ multiSelect ด้วย PTY จริง (Claude Code 2.1.268, 5 รอบ): เลข = toggle, ลูกศรขวา = ไป tab ถัดไป/หน้า Review,
+  Enter = ยืนยัน — `api._build_picker_key_sequence` คืน list คีย์ทีละตัว รองรับ multiSelect (≥1 ข้อ ห้ามซ้ำ)
+  · (3) ส่งคีย์รวดเดียวใน write เดียว **คีย์หายสลับตัว** (พิสูจน์แล้ว) — `Orchestrator.answer_picker` ส่งทีละคีย์ห่าง 100ms
+  บน QTimer chain (ครอบ path multi-question เดิมด้วย) หยุดเองถ้า session ตาย
+  · `app.js` ชิป multiSelect กด toggle ได้ มีป้าย "(เลือกได้หลายข้อ)" · **ถอนแถว quick-reply** ("ok ลุยเลย"/เดาเลขข้อ)
+  ทั้ง handler/markup/CSS — ไม่เคยถูกใช้และบังอาการ picker หาย · `sw.js` v43
+  · รายละเอียด `docs/audit/2026-08-20-remote-askuserquestion.md` (addendum 2026-09-18)
+- **#661 — `takkub status` บอก working ทั้งที่ pane ตายแล้ว** เคสจริง 2026-09-18: claude pane ขึ้น
+  "API Error: Connection lost mid-response" กลับไปนั่ง `>` ว่าง 7 นาที แต่ status ยังบอก working · last progress 3s ago —
+  เพราะ "last progress" มาจาก hash ของจอ ซึ่ง Claude Code วาด hint bar ใหม่เรื่อยๆ ตอน idle · เพิ่มนาฬิกา
+  `PaneState.ready_since_ts` (นับตั้งแต่ tick แรกที่จอเป็น ready prompt + ไม่มี background work ต่อเนื่อง — repaint
+  ไม่รีเซ็ตเพราะเป็น classification ไม่ใช่ hash) · `_derive_display_state` เพิ่ม tier `idle-at-prompt` เมื่อ working
+  แต่นั่ง prompt ≥ `TAKKUB_IDLE_AT_PROMPT_S` (default 120s; waiting-lead ยังชนะ) · status พิมพ์คำเตือนใต้บรรทัด
+  · ทุก provider (ใช้ ready marker ของ ProviderSpec) · ยังไม่ทำ: auto-resume งานเดิมหลัง connection error (ข้อ 4 ในใบ)
+- **#662 — TAKKUB_MAX_BROWSER_GLOBAL / HEAVY_PER_PROJECT / HEAVY_GLOBAL มีผลทันทีไม่ต้อง restart** เดิม
+  `GovernorLimits.from_environment()` อ่านครั้งเดียวตอน boot แล้ว cache ใน `ResourceGovernor.limits` — เจ้าของสั่ง "ขอ browser 5"
+  ระหว่างงานเดิน ค่าเงียบหายทั้งวัน · ตอนนี้ `_denial_reason` (ทุก admit decision) และ `snapshot()["resource_limits"]` อ่านผ่าน
+  `_live_limits()` ที่ทาบ env 3 ตัวนี้ทับทุกครั้ง (ค่าพิมพ์ผิด fallback เหมือน boot) และ bump `_capacity_epoch` เมื่อเพดานเปลี่ยน
+  เพื่อให้คิวที่ backoff อยู่ลองใหม่ทันที · CPU/RAM threshold ยังเป็น boot-time (ป้อน hysteresis latch) · เทส env 2 ตัว (เดิมไม่มีเลย)
+- **#663 — provider ติดโควตาถูก re-probe ทุก 20 นาที ไม่รอครบ "resets in Xh" ของ banner** เคสจริง 2026-09-17: codex กลับมาใช้ได้กลางวัน
+  แต่ cockpit substitute เป็น claude ทั้งวันเพราะมีแค่ QTimer เดียวยิงตอนครบเวลา · เพิ่ม `_maybe_reprobe_quota_stalls` บน idle tick 5s
+  (probe = `fetch_provider_usage` ใน thread เบื้องหลัง ไม่ใช่ model turn) → `quota_reprobe_verdict` clear/extend/keep →
+  signal `quotaReprobed` กลับ Qt thread → ปลด stall + แจ้ง Lead ผ่าน `_clear_provider_quota_stall` (tail เดียวกับ timer เดิม) ·
+  provider ที่ probe ไม่ได้ (error/unsupported) ไม่มีวันปลดเอง · ทำงานหลัง restart cockpit ด้วย (timer เดิมหายไปกับ process) ·
+  CLI ใหม่ `takkub provider probe <name>` ปลดสถานะเองได้ทันที (pure-local อ่าน/เขียน provider-quota.json) · เทส 7 ตัว
+- **#658 (ชุดแรก) — UI ค้าง ~23 ครั้ง/วัน** 5 จุดจาก stall dump จริง: (1) `PtySession.display_lines()` fast path ไม่ต้องรอ
+  `_screen_lock` เมื่อ generation ตรง (main thread เคยรอ 828ms หลัง N reader thread ที่ถือ lock ระหว่าง render) (2) watchdog เลิกนับ
+  thread ที่ค้างใน `ptyprocess.py` (native read/sleep ไม่มี Python frame) เป็น busy — ก่อนหน้านี้ dump ชี้ pywinpty ผิดตัวทุกครั้ง
+  (3) `_write_json_atomic` fsync เป็น opt-in `durable=` (rename ให้ atomic อยู่แล้ว; FlushFileBuffers บน Windows ติด AV ~1s ×2)
+  (4) `pane_guard` memo TTL foreign-cockpit 2s→30s (socket probe 1.5s ×3 บน main thread) (5) `SkillInfo.tokens` จากไฟล์ที่
+  `scan_skills` อ่านแล้ว — Settings skill matrix เลิกอ่าน SKILL.md ซ้ำรอบสอง (3.4s ×2) · ที่ยังไม่ทำ: `_extract_plugin_skills` ต่อ spawn
+- **#659 — จอ terminal ไม่ repaint จนกว่าจะพิมพ์/คลิกครั้งถัดไป / ท่อนท้ายพ่นออกมาไม่หมด** ปิดใบสมบูรณ์ 3 จุด:
+  (1) `TerminalWidget._flush_writes` ไม่ re-arm timer เมื่อกัก OSC 52 ที่ยังไม่จบ / decoder กัก multi-byte ค้าง (ตอนนี้ `_arm_flush` ทุกทาง)
+  (2) heartbeat 250ms ที่ยิง `void 0` ไม่ทำให้ Chromium วาดจริง → เปลี่ยนเป็น `termPoke()` = `term.refresh` ทั้ง viewport
+  (3) `_ReaderThread` ใน `pty_session.py`: batching กัก chunk ท้าย (tail) ไว้ใน `pending` เพราะไม่ครบ `PTY_BATCH_BYTES` (64KB) และยังไม่ครบ `PTY_BATCH_MS` (50ms) แล้วลูปถัดไปเรียก `proc.read()` ซึ่งเป็น blocking read — เมื่อ child process จบ turn และรอรับ user input `proc.read()` จะบล็อกค้าง ทำให้ tail bytes (รวมถึง escape code ล้าง spinner และ reset footer) ค้างอยู่ใน memory จนกว่าจะเคาะคีย์บอร์ด → เพิ่ม background timer (`_flush_timer`) สั่ง flush ทันทีเมื่อครบ `_batch_sec` (50ms) แม้ reader thread จะติดบล็อกอยู่ใน `proc.read()` ก็ตาม
+
 
 ## [v2.1.15] - 2026-09-17
 

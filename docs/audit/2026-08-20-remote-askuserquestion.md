@@ -150,3 +150,50 @@ dropped (multi-provider/gap-flagging convention, see `#103`).
   trailing `\r`; multiSelect present anywhere → rejected (400); guard
   returns 409 when `current_ask_state` reports no active picker; option
   index out of range → rejected (400).
+
+## Addendum 2026-09-18 (#660): multiSelect wired + per-key pacing + batch-ordering bug
+
+Reported live (project `saas_admin_amb`, 08:13): Lead fired a 4-option
+**multiSelect** `AskUserQuestion`; the phone showed no options and no banner
+at all — only the old canned quick-reply chips.
+
+Three findings, each proven with the same PTY method (`_pty_backend.spawn_pty`
++ `pyte`, Claude Code 2.1.268, scratch harness kept out of the repo):
+
+1. **notify.py batch ordering.** The Lead's turn was "reply text" followed by
+   the picker tool_use, and both records landed in ONE poll tick. `_poll_one`
+   only pushed `blocked_on_picker` when `not pushed_text`, so the picker was
+   swallowed whenever text preceded it in the same batch. `ask_payload` is
+   already cleared by text that comes AFTER the picker, so the surviving
+   payload is the batch's newest state — it is now pushed regardless of
+   earlier text (both the JSONL and the opencode branch).
+
+2. **multiSelect key semantics (proven, 5 runs):**
+   - a digit **toggles** that option (`[ ]` ↔ `[✔]`), it never submits;
+   - **Right-arrow** (`ESC [ C`) moves to the next tab — the next question,
+     or the "Review your answers" screen when it was the last question;
+   - the review screen is shown whenever there is more than one question
+     OR any multiSelect question; **Enter** confirms ("1. Submit answers" is
+     the default). Transcript lines confirmed each run
+     (`· Pick toppings? → Olives, Cheese`, `· Pick a drink? → Coffee`).
+   - single-select semantics are unchanged from the 2026-08-20 findings
+     (digit selects + auto-advances; a lone single-select question submits
+     outright with no review screen).
+
+3. **A burst write drops keys.** Writing `1 3 Right Enter` (or `1 4 Right
+   Enter`) as ONE PTY write toggled only the first digit and left the review
+   screen unconfirmed — every second key vanished. Writing one key per write
+   with a 50 ms gap and with a 120 ms gap both landed every key. The
+   orchestrator now paces a key LIST 100 ms apart on a single-shot QTimer
+   chain (cli_server dispatches on the Qt thread, so no sleeping) and stops
+   if the Lead session dies mid-sequence. This also hardens the pre-existing
+   multi-question single-select path, which used to send `digit digit Enter`
+   in one burst.
+
+Shipped: `api._build_picker_key_sequence` returns a list (one key each),
+accepts multiSelect (≥ 1 index, no duplicates — a repeated digit would toggle
+the option back off); `Orchestrator.answer_picker` accepts `str | list[str]`;
+`app.js` multiSelect chips toggle and stage a set per question; the always-on
+quick-reply row (canned chips + numbered-option guesses) is removed from
+`app.js`/`index.html` (never used, and it masked the missing picker);
+`sw.js` cache bumped v42 → v43.

@@ -55,6 +55,37 @@ from .orchestrator_text import _human_duration, _log_event
 from .provider_config import _REROUTE_PRIORITY, CLAUDE, effective_provider_for
 from .spawn_engine import PaneState
 
+
+def quota_reprobe_verdict(usage, recorded_reset_at: float, now: float) -> tuple[str, float]:
+    """#663: classify one usage probe of a quota-hit provider. Pure.
+
+    Returns `("clear", 0.0)` when the provider is usable again (active
+    status AND utilization below `QUOTA_REPROBE_EXHAUSTED_PERCENT`, or its
+    own reset time already passed), `("extend", ts)` when the provider
+    reports a LATER reset than the banner did (so the stall self-corrects
+    upward too), else `("keep", 0.0)` — including every error/unsupported
+    probe, which must never clear a stall on its own."""
+    from .provider_usage import STATUS_ACTIVE
+
+    if usage is None or getattr(usage, "status", None) != STATUS_ACTIVE:
+        return "keep", 0.0
+    resets_at = getattr(usage, "resets_at", None)
+    resets_ts = 0.0
+    if resets_at is not None:
+        try:
+            resets_ts = float(resets_at.timestamp())
+        except Exception:
+            resets_ts = 0.0
+    util = getattr(usage, "utilization", None)
+    if resets_ts and resets_ts <= now:
+        return "clear", 0.0
+    if isinstance(util, (int, float)) and util < auto_resume.QUOTA_REPROBE_EXHAUSTED_PERCENT:
+        return "clear", 0.0
+    if resets_ts > recorded_reset_at + 60:
+        return "extend", resets_ts
+    return "keep", 0.0
+
+
 # #514/#572: fixed priority order the reroute picker walks — claude first
 # (the cockpit's always-available baseline), then the rest in registry
 # order. Whichever candidates are disabled/uninstalled/still quota-hit/the
@@ -533,10 +564,90 @@ class AutoResumeMixin:
         # owns the notice instead.
         if provider_state.quota_reset_at(provider) != reset_at:
             return
+        self._clear_provider_quota_stall(project, provider, reason="window_elapsed")
+
+    def _clear_provider_quota_stall(self, project: str, provider: str, *, reason: str) -> None:
+        """Shared tail of the reset timer and the #663 re-probe: drop the
+        recorded quota-hit and tell Lead once, same event either way."""
+        from . import provider_state
+
         provider_state.clear_quota_reset(provider)
-        msg = f"⏰ [auto-resume] {provider} quota reset แล้ว — กลับมาใช้ปกติได้"
+        how = " (probe ยืนยันว่าใช้ได้ก่อนเวลาที่ banner บอก)" if reason == "reprobe" else ""
+        msg = f"⏰ [auto-resume] {provider} quota reset แล้ว{how} — กลับมาใช้ปกติได้"
         self._notify_lead(project, msg, note="quota_provider_reset", kind="quota-reset")
-        _log_event("provider_quota_reset", project=project, provider=provider)
+        _log_event("provider_quota_reset", project=project, provider=provider, reason=reason)
+
+    # ── #663: periodic re-probe of quota-stalled providers ─────────────
+    def _maybe_reprobe_quota_stalls(self, now: float) -> None:
+        """Rides the 5 s idle-watchdog tick. For every provider still
+        recorded quota-hit whose banner window has NOT elapsed yet (the
+        reset timer owns the elapsed case), fire one background usage probe
+        per `QUOTA_REPROBE_INTERVAL_S`. Hooked on the tick rather than on a
+        rate-limited pane because after a #514 reroute no such pane exists —
+        which is exactly why nothing re-probed before. Also re-arms after a
+        cockpit restart, where the in-memory reset timer is gone."""
+        from . import provider_state
+
+        try:
+            stalls = provider_state.load_quota_resets()
+        except Exception:
+            return
+        if not stalls:
+            return
+        probe_ts: dict[str, float] = self.__dict__.setdefault("_quota_probe_ts", {})
+        for provider, reset_at in stalls.items():
+            if reset_at <= now:
+                continue
+            if now - probe_ts.get(provider, 0.0) < auto_resume.QUOTA_REPROBE_INTERVAL_S:
+                continue
+            probe_ts[provider] = now
+            threading.Thread(
+                target=self._do_quota_reprobe,
+                args=(provider, reset_at),
+                daemon=True,
+                name=f"quota-reprobe-{provider}",
+            ).start()
+
+    def _do_quota_reprobe(self, provider: str, reset_at: float) -> None:
+        """Background thread — network I/O. Verdict is marshalled back to
+        the Qt thread through `quotaReprobed` (declared on Orchestrator)."""
+        from .provider_usage import fetch_provider_usage
+
+        try:
+            usage = fetch_provider_usage(provider)
+        except Exception:
+            return
+        verdict, new_reset_at = quota_reprobe_verdict(usage, reset_at, time.time())
+        _log_event(
+            "provider_quota_reprobe",
+            provider=provider,
+            verdict=verdict,
+            status=getattr(usage, "status", None),
+            utilization=getattr(usage, "utilization", None),
+        )
+        if verdict == "keep":
+            return
+        self.quotaReprobed.emit(provider, float(reset_at), verdict, float(new_reset_at))
+
+    def _on_quota_reprobed(
+        self, provider: str, reset_at: float, verdict: str, new_reset_at: float
+    ) -> None:
+        from . import provider_state
+
+        if provider_state.quota_reset_at(provider) != reset_at:
+            return  # a newer quota-hit superseded the one we probed
+        project = self._resolve_project(None)
+        if verdict == "clear":
+            self._clear_provider_quota_stall(project, provider, reason="reprobe")
+        elif verdict == "extend" and new_reset_at > reset_at:
+            provider_state.set_quota_reset_at(provider, new_reset_at)
+            self._schedule_provider_quota_reset_notice(project, provider, new_reset_at)
+            _log_event(
+                "provider_quota_reset_extended",
+                project=project,
+                provider=provider,
+                reset_at=new_reset_at,
+            )
 
     # ── signal (b) confirmation (background thread → Qt signal) ─────────
     def _confirm_limit_via_usage_async(self, project: str, role: str) -> None:

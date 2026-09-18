@@ -856,6 +856,14 @@ class PaneState:
     # event's own snapshot.
     stream_tokens_sig: str | None = None
     last_stream_tokens_ts: float = 0.0
+    # #661: wall-clock of the first consecutive watchdog tick on which this
+    # *working* pane read as sitting at its ready prompt with no background
+    # work (0.0 = not currently at the prompt). Repaint-proof by
+    # construction — the classification stays True across footer redraws,
+    # unlike the content hash — so `takkub status` can stop calling a pane
+    # that died mid-response ("API Error: Connection lost" → empty `>`)
+    # "working" just because Claude Code keeps redrawing its hint bar.
+    ready_since_ts: float = 0.0
     # #655: throttle for the `stuck_recover_deferred_real_activity` log line
     # (the escalate-time last-chance probe fires every watchdog tick while
     # real activity persists — log the episode, not every 5s tick).

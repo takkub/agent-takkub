@@ -2321,7 +2321,12 @@ class LeadNotifier(QObject):
                     activity = str(payload)
                 elif ev_type == "blocked_on_picker" and isinstance(payload, dict):
                     ask_payload = payload
-            if ask_payload is not None and not pushed_text:
+            # #660: `ask_payload` is already cleared by any reply text that
+            # came AFTER it, so a surviving payload is the batch's newest
+            # state — push it even when earlier text in the same batch was
+            # sent (a Lead that says "4 things to decide" and then opens the
+            # picker in one turn lands both in one poll tick).
+            if ask_payload is not None:
                 self._broadcaster.push("blocked_on_picker", ask_payload, project_ns)
             elif activity is not None and not pushed_text:
                 if not self._lead_working.get(project_ns, False):
@@ -2391,7 +2396,12 @@ class LeadNotifier(QObject):
         # "working" signal for the same batch (AskUserQuestion's tool_use
         # would otherwise also map to a coarse "working" activity — the
         # picker payload is the more specific, more useful signal).
-        if ask_payload is not None and not pushed_text:
+        # #660: reply text that arrives AFTER the picker clears `ask_payload`
+        # above; text that arrived BEFORE it in the same batch must not
+        # suppress the picker — that exact ordering ("here are 4 things to
+        # decide" + AskUserQuestion in one turn) left the phone with no
+        # options and no banner at all.
+        if ask_payload is not None:
             self._broadcaster.push("blocked_on_picker", ask_payload, project_ns)
         elif activity is not None and not pushed_text:
             # Only signal "working" when this batch showed activity but

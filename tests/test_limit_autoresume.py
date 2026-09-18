@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import time
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 from agent_takkub import auto_resume
@@ -709,6 +710,104 @@ class TestGiveUpAutoResume:
 
 
 # ── layer 5: quota-hit reroute (#514) ───────────────────────────────────────
+
+
+class TestQuotaReprobe:
+    """#663: a provider recorded quota-hit is re-probed (usage fetch, no
+    model turn) instead of being substituted blindly until the banner's
+    "resets in Xh" elapses."""
+
+    def _usage(self, status="active", utilization=None, resets_at=None):
+        return SimpleNamespace(status=status, utilization=utilization, resets_at=resets_at)
+
+    def test_verdict_clear_when_utilization_below_threshold(self) -> None:
+        from agent_takkub.limit_autoresume import quota_reprobe_verdict
+
+        now = time.time()
+        usage = self._usage(utilization=40.0)
+        assert quota_reprobe_verdict(usage, now + 3600, now) == ("clear", 0.0)
+
+    def test_verdict_clear_when_provider_reset_time_already_passed(self) -> None:
+        from datetime import UTC, datetime
+
+        from agent_takkub.limit_autoresume import quota_reprobe_verdict
+
+        now = time.time()
+        usage = self._usage(utilization=100.0, resets_at=datetime.fromtimestamp(now - 5, tz=UTC))
+        assert quota_reprobe_verdict(usage, now + 3600, now)[0] == "clear"
+
+    def test_verdict_keep_on_error_or_exhausted(self) -> None:
+        from agent_takkub.limit_autoresume import quota_reprobe_verdict
+
+        now = time.time()
+        assert quota_reprobe_verdict(self._usage(status="error"), now + 3600, now)[0] == "keep"
+        assert quota_reprobe_verdict(self._usage(utilization=100.0), now + 3600, now)[0] == "keep"
+        assert quota_reprobe_verdict(None, now + 3600, now)[0] == "keep"
+
+    def test_verdict_extend_when_provider_reports_later_reset(self) -> None:
+        from datetime import UTC, datetime
+
+        from agent_takkub.limit_autoresume import quota_reprobe_verdict
+
+        now = time.time()
+        later = now + 7200
+        usage = self._usage(utilization=100.0, resets_at=datetime.fromtimestamp(later, tz=UTC))
+        verdict, ts = quota_reprobe_verdict(usage, now + 3600, now)
+        assert verdict == "extend"
+        assert abs(ts - later) < 1.0
+
+    def test_tick_probes_once_per_interval_and_skips_elapsed_windows(self, monkeypatch) -> None:
+        from agent_takkub import limit_autoresume, provider_state
+
+        now = time.time()
+        monkeypatch.setattr(
+            provider_state,
+            "load_quota_resets",
+            lambda: {"codex": now + 3600, "gemini": now - 10},
+        )
+        started: list[str] = []
+
+        class _T:
+            def __init__(self, *a, **kw):
+                started.append(kw["name"])
+
+            def start(self):
+                pass
+
+        monkeypatch.setattr(limit_autoresume.threading, "Thread", _T)
+        o = _bare_orch()
+        o._maybe_reprobe_quota_stalls(now)
+        o._maybe_reprobe_quota_stalls(now + 60)  # inside the interval -> no second probe
+        assert started == ["quota-reprobe-codex"]
+        o._maybe_reprobe_quota_stalls(now + auto_resume.QUOTA_REPROBE_INTERVAL_S + 1)
+        assert started == ["quota-reprobe-codex", "quota-reprobe-codex"]
+
+    def test_clear_verdict_drops_stall_and_notifies_lead(self, monkeypatch) -> None:
+        from agent_takkub import provider_state
+
+        now = time.time()
+        reset_at = now + 3600
+        state = {"codex": reset_at}
+        monkeypatch.setattr(provider_state, "load_quota_resets", lambda: dict(state))
+        monkeypatch.setattr(provider_state, "clear_quota_reset", lambda p: state.pop(p, None))
+        o = _bare_orch()
+        o._resolve_project = lambda p=None: "proj"
+        o._on_quota_reprobed("codex", reset_at, "clear", 0.0)
+        assert "codex" not in state
+        o._notify_lead.assert_called_once()
+        assert "probe" in o._notify_lead.call_args.args[1]
+
+    def test_superseded_reset_is_ignored(self, monkeypatch) -> None:
+        from agent_takkub import provider_state
+
+        now = time.time()
+        state = {"codex": now + 9999}  # a NEWER quota-hit replaced the probed one
+        monkeypatch.setattr(provider_state, "load_quota_resets", lambda: dict(state))
+        o = _bare_orch()
+        o._resolve_project = lambda p=None: "proj"
+        o._on_quota_reprobed("codex", now + 3600, "clear", 0.0)
+        assert state == {"codex": now + 9999}
+        o._notify_lead.assert_not_called()
 
 
 class TestPickRerouteProvider:

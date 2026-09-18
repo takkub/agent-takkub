@@ -424,7 +424,7 @@
   /* #198: floating "jump to bottom" affordance. It lives as a sticky child
      inside the scrolling #lead-log itself (not an absolutely-positioned
      overlay) so it always tracks the true visible bottom of the message
-     list regardless of composer/quick-reply/picker height changes below
+     list regardless of composer/picker height changes below
      it — app.js keeps it appended as the last child so `sticky` has
      something to pin against. */
   #new-msg-wrap {
@@ -814,13 +814,6 @@
     color: var(--accent);
     border-color: var(--accent-dim);
   }
-  #quick-replies {
-    display: none;
-    flex-wrap: wrap;
-    gap: 8px;
-    padding: 0 12px 8px;
-  }
-  #quick-replies.show { display: flex; }
   .qr-chip {
     flex: none;
     background: var(--card2);
@@ -833,12 +826,6 @@
     cursor: pointer;
   }
   .qr-chip:active { background: var(--accent-dim); color: #dff8f3; border-color: var(--accent-dim); }
-  .qr-chip.qr-num {
-    font-family: var(--mono);
-    font-weight: 700;
-    color: var(--accent);
-    border-color: var(--accent-dim);
-  }
   #projects-list {
     flex: 1 1 auto;
     overflow-y: auto;
@@ -1417,7 +1404,6 @@
         </div>
       </div>
       <div id="lead-picker-banner"></div>
-      <div id="quick-replies"></div>
       <div id="view-control-note"></div>
       <form id="lead-composer">
         <input id="lead-image-input" type="file" accept="image/png,image/jpeg,image/webp,image/gif" hidden>

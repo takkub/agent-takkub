@@ -107,14 +107,23 @@ def slugify_project_name(raw: str) -> str:
     return "project-" + hashlib.sha1((raw or "").encode("utf-8")).hexdigest()[:8]
 
 
-def _write_json_atomic(path: Path, data: dict) -> bool:
+def _write_json_atomic(path: Path, data: dict, *, durable: bool = False) -> bool:
     """Write *data* to *path* via a temp file so a crash mid-write never
-    leaves a partial/corrupt JSON file behind. Return whether it persisted."""
+    leaves a partial/corrupt JSON file behind. Return whether it persisted.
+
+    Atomicity (no torn file) comes from the `tmp.replace(path)` rename, not
+    from fsync. `durable=True` additionally flushes the temp file to the
+    platform before the rename, guarding the write against a power cut in
+    that window — #658: on Windows that is a full FlushFileBuffers an AV
+    filter driver can hold for ~1 s, and every caller of this helper runs
+    on the Qt main thread for small settings files, so it is opt-in. The
+    migration ledger has its own durable writer (`_restore_fsync_batch`)."""
     tmp = path.with_suffix(path.suffix + ".tmp")
     with tmp.open("w", encoding="utf-8") as f:
         f.write(json.dumps(data, indent=2, ensure_ascii=False))
         f.flush()
-        os.fsync(f.fileno())
+        if durable:
+            os.fsync(f.fileno())
     # Windows can transiently reject replacement while an AV scanner or
     # another reader still has the destination open.  A bounded retry absorbs
     # that race without letting PermissionError escape a Qt save slot.

@@ -2306,7 +2306,11 @@ def get_own_data_home() -> pathlib.Path:
 
 _PROTECTED_DATA_HOMES_CACHE: tuple[float, tuple, frozenset[pathlib.Path]] | None = None
 _FOREIGN_PIDS_CACHE: tuple[float, tuple, frozenset[int]] | None = None
-_CACHE_TTL_S = 2.0
+# #658: foreign-cockpit topology (which other cockpits are alive, which data
+# homes they protect) changes on process-launch timescales, not UI-tick
+# timescales — every miss re-probes one loopback socket per port file /
+# protected home from the Qt main thread (1.5 s captured). 2 s was churn.
+_CACHE_TTL_S = 30.0
 
 
 def _get_cached_protected_data_homes(own_resolved: pathlib.Path) -> frozenset[pathlib.Path] | None:

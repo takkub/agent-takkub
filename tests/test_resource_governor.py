@@ -47,6 +47,30 @@ def test_global_per_project_and_class_limits_release_cleanly() -> None:
     assert _request(governor, "c", "heavy").allowed
 
 
+def test_env_caps_apply_live_without_restart(monkeypatch) -> None:
+    # #662: the owner exported TAKKUB_MAX_BROWSER_GLOBAL=5 while panes were
+    # running and nothing changed until a cockpit restart. Caps are now
+    # re-read on every admit decision.
+    governor = ResourceGovernor(_limits())  # browser cap 1, heavy-per-project 1
+    assert _request(governor, "a", "b1", ResourceClass.BROWSER).allowed
+    assert not _request(governor, "b", "b2", ResourceClass.BROWSER).allowed
+    monkeypatch.setenv("TAKKUB_MAX_BROWSER_GLOBAL", "3")
+    epoch_before = governor._capacity_epoch
+    assert _request(governor, "b", "b2", ResourceClass.BROWSER).allowed
+    assert governor._capacity_epoch > epoch_before  # backed-off queue heads retry now
+    assert governor.snapshot()["resource_limits"]["max_browser_global"] == 3
+    monkeypatch.delenv("TAKKUB_MAX_BROWSER_GLOBAL")
+    assert governor.snapshot()["resource_limits"]["max_browser_global"] == 1
+
+
+def test_env_cap_typo_falls_back_to_configured_value(monkeypatch) -> None:
+    governor = ResourceGovernor(_limits())
+    monkeypatch.setenv("TAKKUB_MAX_HEAVY_GLOBAL", "lots")
+    assert _request(governor, "a", "one").allowed
+    assert _request(governor, "b", "two").allowed
+    assert not _request(governor, "c", "three").allowed  # still 2
+
+
 def test_cpu_and_memory_hysteresis_is_non_blocking() -> None:
     samples = iter([(90.0, 50.0, 10), (70.0, 50.0, 10), (60.0, 50.0, 10)])
     governor = ResourceGovernor(_limits(), sampler=lambda: next(samples))

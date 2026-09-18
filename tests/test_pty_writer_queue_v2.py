@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import threading
 import time
 
 from agent_takkub.pty_session import (
@@ -131,3 +132,42 @@ def test_reader_batches_parser_and_render_delivery() -> None:
     reader.start()
     assert reader.wait(1000)
     assert batches == [b"a" * 600 + b"b" * 600]
+
+
+class _StallAfterTailProc:
+    def __init__(self) -> None:
+        self._chunks = iter([b"head", b"tail"])
+        self.block_event = threading.Event()
+
+    def read(self, _size: int) -> bytes:
+        try:
+            return next(self._chunks)
+        except StopIteration:
+            # Producer has finished turn and is waiting for input; read blocks
+            self.block_event.wait(2.0)
+            return b""
+
+    def isalive(self) -> bool:
+        return True
+
+
+def test_reader_flushes_tail_when_producer_stops_writing_without_exiting() -> None:
+    batches: list[bytes] = []
+    proc = _StallAfterTailProc()
+    reader = _ReaderThread(
+        proc,
+        on_data=batches.append,
+        batch_ms=50,
+        batch_bytes=65536,
+    )
+    reader.start()
+    try:
+        # Give enough time for batch_ms (50ms) flush timer to fire while proc.read is blocked
+        deadline = time.monotonic() + 1.0
+        while not batches and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert batches == [b"headtail"], "Buffered tail must flush even when proc.read() blocks"
+    finally:
+        proc.block_event.set()
+        reader.request_stop()
+        reader.wait(1000)

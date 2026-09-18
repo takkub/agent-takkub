@@ -1460,11 +1460,7 @@
     if (!skipScroll) {
       if (atBottom) scrollToBottom(log); else showNewMessagesButton();
     }
-    if (kind === "lead") {
-      lastLeadRawAccum = text;
-      hidePickerBanner();
-      renderQuickReplies();
-    }
+    if (kind === "lead") hidePickerBanner();
     // Keep the "…" alive *below* the message we just added whenever the Lead
     // is still working — a text block mid-turn must not read as "done".
     if (state.leadWorking) showThinking();
@@ -1478,8 +1474,7 @@
     if (project === visibleProject()) appendMsgDom(kind, text, ts);
   }
 
-  // Existing composer/quick-reply callers target the currently visible
-  // project. SSE handlers use appendProjectMessage with their captured
+  // Existing composer callers target the currently visible project. SSE handlers use appendProjectMessage with their captured
   // project namespace so background streams never paint into the wrong tab.
   function appendMsg(kind, text, ts) {
     appendProjectMessage(visibleProject(), kind, text, ts);
@@ -1497,10 +1492,6 @@
   var LEAD_MERGE_WINDOW_MS = 4000;
   var lastLeadBodyEl = null;
   var lastLeadAt = 0;
-  // Accumulated raw text of the *current* Lead reply group (reset each new
-  // group, appended on merge) — quick-reply numbered-option detection reads
-  // this rather than the rendered DOM.
-  var lastLeadRawAccum = "";
 
   function appendLeadLive(text, project, ts) {
     project = project || visibleProject();
@@ -1529,8 +1520,6 @@
       lastLeadBodyEl.insertAdjacentHTML("beforeend", renderMarkdown(text));
       hydrateImages(lastLeadBodyEl, text);
       lastLeadAt = now;
-      lastLeadRawAccum += "\n" + text;
-      renderQuickReplies();
       if (atBottom) scrollToBottom(log); else showNewMessagesButton();
       if (state.leadWorking) showThinking();
       return;
@@ -1583,7 +1572,6 @@
     lastMsgKind = null;
     lastLeadBodyEl = null;
     lastLeadAt = 0;
-    lastLeadRawAccum = "";
     var isWorking = !!lead.working;
     state.leadWorking = false;
     // skipScroll=true — the per-message atBottom heuristic would otherwise
@@ -1620,53 +1608,23 @@
       lastLeadBodyEl = bodies.length ? bodies[bodies.length - 1] : null;
       lastLeadAt = lead.lastLeadAt;
     }
-    renderQuickReplies();
   }
 
   // ---------------------------------------------------------------
-  // Quick-reply chips (W2a MVP) + AskUserQuestion picker fallback banner
+  // AskUserQuestion picker banner (option chips)
   // ---------------------------------------------------------------
+  // #660: the old always-on quick-reply row (canned "go / stop / show plan"
+  // chips + numbered-option guesses) is gone — it was never used and hid
+  // the fact that a real picker had no tappable options. Chips now exist only inside the picker
+  // banner, driven by the structured payload the server sends.
 
-  var STANDARD_QUICK_REPLIES = ["ok ลุยเลย", "ไม่เอา หยุดก่อน", "ขอดูแผนก่อน"];
-
-  // Numbered-option auto-detect: matches "1. ...", "2) ...", "ข้อ 3 ..." at
-  // the start of a line in the Lead's latest reply text, up to 6 distinct
-  // numbers, in first-seen order.
-  function detectNumberedOptions(text) {
-    if (typeof text !== "string" || !text) return [];
-    var re = /(?:^|\n)\s*(?:ข้อ\s*)?(\d{1,2})[.\)]\s+/g;
-    var nums = [];
-    var m;
-    while ((m = re.exec(text)) && nums.length < 6) {
-      if (nums.indexOf(m[1]) === -1) nums.push(m[1]);
-    }
-    return nums;
-  }
-
-  function makeQuickChip(label, isNum, onClick) {
+  function makeQuickChip(label, onClick) {
     var btn = document.createElement("button");
     btn.type = "button";
-    btn.className = "qr-chip" + (isNum ? " qr-num" : "");
+    btn.className = "qr-chip";
     btn.textContent = label;
     btn.addEventListener("click", onClick);
     return btn;
-  }
-
-  function renderQuickReplies() {
-    var wrap = $("quick-replies");
-    if (!wrap) return;
-    wrap.innerHTML = "";
-    if (state.mode !== "control") {
-      wrap.classList.remove("show");
-      return;
-    }
-    wrap.classList.add("show");
-    detectNumberedOptions(lastLeadRawAccum).forEach(function (n) {
-      wrap.appendChild(makeQuickChip(n, true, function () { sendLeadMessage(n); }));
-    });
-    STANDARD_QUICK_REPLIES.forEach(function (label) {
-      wrap.appendChild(makeQuickChip(label, false, function () { sendLeadMessage(label); }));
-    });
   }
 
   // B2 (remote AskUserQuestion fix): renders tappable option chips from the provider-neutral picker
@@ -1676,11 +1634,10 @@
   // *stages* a selection locally — nothing is sent to Lead until every
   // question has one, at which point "ส่งคำตอบ" submits all of them in one
   // /api/lead/answer-picker call (submitPickerAnswers), which replays the
-  // real key presses the terminal picker needs (a bare digit, proven live —
-  // see docs/audit/2026-08-20-remote-askuserquestion.md). Providers without
-  // structured options, and any multiSelect question (key sequence not
-  // proven safe yet, same doc), fall back to the plain "answer on desktop"
-  // banner instead of rendering chips that can't be submitted correctly.
+  // real key presses the terminal picker needs (proven live — see
+  // docs/audit/2026-08-20-remote-askuserquestion.md; multiSelect proven
+  // 2026-09-18, #660). Providers without structured options fall back to
+  // the plain "answer on desktop" banner.
   function showPickerBanner(payload) {
     var el = $("lead-picker-banner");
     if (!el) return;
@@ -1706,18 +1663,17 @@
   // a selection locally — nothing is sent to Lead until every question has
   // one, at which point "ส่งคำตอบ" submits all of them in one
   // /api/lead/answer-picker call (submitPickerAnswers), which replays the
-  // real key presses the terminal picker needs (a bare digit, proven live —
-  // see docs/audit/2026-08-20-remote-askuserquestion.md). Any multiSelect
-  // question in the payload falls back to the plain "answer on desktop"
-  // banner instead of rendering chips that can't be submitted correctly
-  // (key sequence not proven safe yet, same doc).
+  // real key presses the terminal picker needs (single-select: a bare
+  // digit; multiSelect: digits toggle, Right-arrow advances, Enter confirms
+  // the review screen — all proven live, see
+  // docs/audit/2026-08-20-remote-askuserquestion.md, #660). A multiSelect
+  // question stages a SET of indices (toggle chips) and needs at least one.
   function showMultiQuestionPickerBanner(el, questions) {
     var isControl = state.mode === "control";
     var hasOptions = questions.some(function (q) {
       return q && Array.isArray(q.options) && q.options.length;
     });
-    var hasMultiSelect = questions.some(function (q) { return !!(q && q.multiSelect); });
-    var interactive = hasOptions && !hasMultiSelect;
+    var interactive = hasOptions;
 
     var main = document.createElement("span");
     main.textContent = interactive
@@ -1738,22 +1694,27 @@
       return;
     }
 
-    // selections[i] = 0-based option index chosen for questions[i], or null
-    // until tapped. Kept as one flat array so submitPickerAnswers can wrap
-    // it straight into the API's `answers` shape with no extra bookkeeping.
-    var selections = questions.map(function () { return null; });
+    // selections[i] = list of 0-based option indices staged for
+    // questions[i] (exactly one for single-select, one or more for
+    // multiSelect); empty until tapped. Already in the API's `answers`
+    // shape so submitPickerAnswers posts it as-is.
+    var selections = questions.map(function () { return []; });
     var submitBtn = null;
+    function allAnswered() {
+      return selections.every(function (s) { return s.length > 0; });
+    }
     function refreshSubmit() {
       if (!submitBtn) return;
-      submitBtn.disabled = !isControl || selections.indexOf(null) !== -1;
+      submitBtn.disabled = !isControl || !allAnswered();
     }
 
     questions.forEach(function (q, qi) {
+      var multi = !!q.multiSelect;
       var prompt = (q.prompt || "").trim();
-      if (prompt) {
+      if (prompt || multi) {
         var qEl = document.createElement("span");
         qEl.className = "q";
-        qEl.textContent = prompt;
+        qEl.textContent = prompt + (multi ? " (เลือกได้หลายข้อ)" : "");
         el.appendChild(qEl);
       }
       var chipsWrap = document.createElement("div");
@@ -1763,11 +1724,17 @@
         var label = String((opt && opt.label) || "");
         if (!label) return;
         var idx = opt && typeof opt.index === "number" ? opt.index : i;
-        var chip = makeQuickChip((idx + 1) + ". " + label, false, function () {
+        var chip = makeQuickChip((idx + 1) + ". " + label, function () {
           if (state.mode !== "control") return;
-          selections[qi] = idx;
-          chipEls.forEach(function (c) { c.classList.remove("picked"); });
-          chip.classList.add("picked");
+          if (multi) {
+            var pos = selections[qi].indexOf(idx);
+            if (pos === -1) selections[qi].push(idx); else selections[qi].splice(pos, 1);
+            chip.classList.toggle("picked", pos === -1);
+          } else {
+            selections[qi] = [idx];
+            chipEls.forEach(function (c) { c.classList.remove("picked"); });
+            chip.classList.add("picked");
+          }
           refreshSubmit();
         });
         if (!isControl) chip.disabled = true;
@@ -1777,8 +1744,8 @@
       el.appendChild(chipsWrap);
     });
 
-    submitBtn = makeQuickChip("ส่งคำตอบ", false, function () {
-      if (state.mode !== "control" || selections.indexOf(null) !== -1) return;
+    submitBtn = makeQuickChip("ส่งคำตอบ", function () {
+      if (state.mode !== "control" || !allAnswered()) return;
       submitPickerAnswers(selections);
     });
     submitBtn.className += " picker-confirm";
@@ -1825,7 +1792,7 @@
         var label = String((opt && opt.label) || "");
         if (!label) return;
         var idx = opt && typeof opt.index === "number" ? opt.index : i;
-        var chip = makeQuickChip((idx + 1) + ". " + label, false, function () {
+        var chip = makeQuickChip((idx + 1) + ". " + label, function () {
           if (state.mode !== "control") return;
           if (multiSelect) {
             chip.classList.toggle("picked");
@@ -1840,7 +1807,7 @@
       });
       el.appendChild(chipsWrap);
       if (multiSelect) {
-        var confirmBtn = makeQuickChip("ยืนยัน", false, function () {
+        var confirmBtn = makeQuickChip("ยืนยัน", function () {
           if (state.mode !== "control" || !selected.length) return;
           sendLeadMessage(selected.join(", "));
         });
@@ -1866,7 +1833,8 @@
     }
     hidePickerBanner();
     showThinking();
-    var answers = selections.map(function (idx) { return [idx]; });
+    // selections is already [[idx, ...], ...] — one index list per question.
+    var answers = selections.map(function (s) { return s.slice(); });
     apiFetch("api/lead/answer-picker", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -1894,7 +1862,7 @@
     if (el) el.classList.remove("show");
   }
 
-  // Shared send path for both the composer submit and quick-reply chip taps.
+  // Shared send path for the composer submit and the legacy picker chips.
   function sendLeadMessage(text) {
     if (state.mode !== "control") return;
     text = (text || "").trim();
@@ -2394,7 +2362,6 @@
     var modePill = $("status-mode");
     modePill.textContent = isControl ? "CONTROL" : "VIEW";
     modePill.classList.toggle("control", isControl);
-    renderQuickReplies();
     // Picker chips (B2) were rendered with isControl baked in at showPickerBanner
     // time — if the mode toggles while a banner is still showing (no new picker
     // event to re-render it), flip their disabled state directly instead of
