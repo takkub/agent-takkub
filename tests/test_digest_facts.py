@@ -4,10 +4,74 @@ from __future__ import annotations
 
 from agent_takkub.digest_facts import (
     DigestFacts,
+    detect_investigate_task,
     detect_ops_task,
     format_digest_fact_line,
     union_files_touched,
 )
+
+
+class TestInvestigateTaskZeroFiles:
+    """#672: `ไฟล์ที่แตะ: 0` is the CORRECT result of an investigate/read-only
+    assignment — the ⚠️ #278 alarm must not fire there, and the suppression
+    must come from declared intent, not (only) from an ops side-effect guess."""
+
+    # The 2026-09-18 field shape (project unirecon): assignment header the
+    # digest warned about despite the pane doing exactly as told.
+    REPRO_TASK = (
+        "INVESTIGATE (read-only ห้ามแก้โค้ด ห้าม commit) — ไล่หาสาเหตุ report หาย\n"
+        "**ห้ามลงมือแก้** รอ Lead อนุมัติก่อน"
+    )
+
+    def test_detects_from_assignment_text(self):
+        assert detect_investigate_task(self.REPRO_TASK) is True
+
+    def test_detects_from_done_note_fallback(self):
+        assert (
+            detect_investigate_task("", "INVESTIGATE เสร็จ (read-only, ไม่แก้โค้ด/ไม่ commit)") is True
+        )
+
+    def test_headline_genre_words_count_only_on_first_line(self):
+        # "แก้ตาม review" deep inside an implementation task must not mute
+        # the #278 alarm...
+        assert detect_investigate_task("ทำหน้า settings ใหม่\nแล้วแก้ตาม review รอบก่อน") is False
+        # ...but a task whose first line IS the genre does.
+        assert detect_investigate_task("audit การใช้ token ของทุก role แล้วรายงาน") is True
+
+    def test_implementation_task_not_detected(self):
+        assert detect_investigate_task("เพิ่มปุ่มปิด session ใน header ของ pane") is False
+
+    def test_zero_files_renders_neutral_for_investigate_task(self):
+        facts = DigestFacts(
+            role="backend",
+            files_touched=0,
+            headline="INVESTIGATE เสร็จ: เจอสาเหตุที่ x.py:120",
+            investigate_task=True,
+        )
+        line = format_digest_fact_line(facts)
+        assert "งานตรวจสอบ/read-only" in line
+        assert "⚠️" not in line
+        assert "ยังไม่มีอะไรเปลี่ยน" not in line
+
+    def test_intent_outranks_ops_side_effect_guess(self):
+        # The repro's earlier sibling: an investigate pane that happened to
+        # start docker was only saved by the ops branch — intent must win
+        # and say so, docker or no docker.
+        facts = DigestFacts(
+            role="backend",
+            files_touched=0,
+            headline="start docker แล้ว query DB จริง",
+            ops_task=True,
+            investigate_task=True,
+        )
+        line = format_digest_fact_line(facts)
+        assert "งานตรวจสอบ/read-only" in line
+
+    def test_implementation_zero_still_warns(self):
+        # #278 stays loud for a real implementation task.
+        facts = DigestFacts(role="backend", files_touched=0, headline="ทำเสร็จแล้วครับ")
+        line = format_digest_fact_line(facts)
+        assert "⚠️ ไฟล์ที่แตะ:0 — ยังไม่มีอะไรเปลี่ยน" in line
 
 
 class TestFormatDigestFactLine:

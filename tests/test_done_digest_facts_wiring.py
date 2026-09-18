@@ -437,6 +437,34 @@ class TestOpsTaskWiring:
         assert facts.files_touched == 0
         assert facts.ops_task is False
 
+    def test_investigate_assignment_zero_files_flags_investigate_task(self, orch, monkeypatch):
+        """#672: `done()` derives `DigestFacts.investigate_task` from the
+        ASSIGNMENT text stored on PaneState (`last_assigned_task`), so an
+        investigate/read-only task's measured zero renders as the expected
+        outcome, not the #278 ⚠️ alarm — regardless of ops side-effects."""
+        proj = "proj"
+        _register_pane(orch, LEAD.name, proj, _make_alive_session())
+        _register_pane(orch, "backend", proj, _make_alive_session(), cwd="/repo/api")
+        orch._pane_state[f"{proj}::backend"] = PaneState(
+            last_assigned_task=(
+                "INVESTIGATE (read-only ห้ามแก้โค้ด ห้าม commit) — ไล่หาสาเหตุ report หาย"
+            ),
+            worktree=None,
+            assign_base_sha="abc123",
+            assign_git_root="/repo",
+            assign_dirty_snapshot={},
+        )
+        monkeypatch.setattr(wm_mod, "WorktreeManager", lambda *a, **k: self._ZeroDiffFake())
+
+        captured: list[tuple[str, dict]] = []
+        orch._notify_lead = lambda ns, notice, **kw: captured.append((notice, kw))  # type: ignore[assignment]
+
+        orch.done("backend", note="เจอสาเหตุแล้วที่ api/report.py:120 ไม่ได้แก้อะไรตามสั่ง", project=proj)
+
+        facts = next(kw["digest_facts"] for notice, kw in captured if notice.startswith("[backend"))
+        assert facts.files_touched == 0
+        assert facts.investigate_task is True
+
 
 class TestSharedTreePaneDigestFacts:
     def test_no_snapshot_reports_unverifiable_not_zero(self, orch):

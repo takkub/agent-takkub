@@ -7084,6 +7084,7 @@ class Orchestrator(
         assign_non_git: bool = False,
         git_facts: dict | None = None,
         ops_task: bool = False,
+        investigate_task: bool = False,
         sibling_files: frozenset[str] | None = None,
     ) -> tuple[object, dict | None]:
         """One-shot git-fact gather for the Lead Inbox Digest bullet (#245,
@@ -7171,6 +7172,7 @@ class Orchestrator(
                 report_path=report_path,
                 headline=headline,
                 ops_task=ops_task,
+                investigate_task=investigate_task,
             )
             precomputed = {
                 "commits": commits,
@@ -7201,6 +7203,7 @@ class Orchestrator(
                     headline=headline,
                     non_git=True,
                     ops_task=ops_task,
+                    investigate_task=investigate_task,
                 ),
                 None,
             )
@@ -7226,6 +7229,7 @@ class Orchestrator(
                         "HEAD ว่าง, หรืออ่าน git status ไม่สำเร็จ)"
                     ),
                     ops_task=ops_task,
+                    investigate_task=investigate_task,
                 ),
                 None,
             )
@@ -7261,6 +7265,7 @@ class Orchestrator(
                     headline=headline,
                     files_note="ตรวจไม่ได้ (อ่าน git status ตอน done ไม่สำเร็จ)",
                     ops_task=ops_task,
+                    investigate_task=investigate_task,
                 ),
                 None,
             )
@@ -7332,6 +7337,7 @@ class Orchestrator(
             report_path=report_path,
             headline=headline,
             ops_task=ops_task,
+            investigate_task=investigate_task,
             # #546: every currently-dirty shared-tree path already predates
             # this assignment (the assign-time snapshot diff is empty) —
             # the count is leftover from a sibling pane/Lead, not this task.
@@ -7907,9 +7913,16 @@ class Orchestrator(
                 raw_note.strip().splitlines()[0] if raw_note.strip() else "", 200
             )
             pane_cwd = getattr(pane, "_session_cwd", None)
-            from .digest_facts import detect_ops_task
+            from .digest_facts import detect_investigate_task, detect_ops_task
 
             ops_task = detect_ops_task(from_role, raw_note)
+            # #672: declared intent from the ASSIGNMENT itself (falls back to
+            # the done note) — an investigate/read-only task's zero files
+            # touched is the correct outcome, not the #278 alarm. Read from
+            # `_ps_done` (the pre-pop snapshot above): the live PaneState was
+            # already retired for this assignment earlier in done().
+            _assigned_task_text = getattr(_ps_done, "last_assigned_task", None) or ""
+            investigate_task = detect_investigate_task(_assigned_task_text, raw_note)
             try:
                 sibling_files = (
                     frozenset()
@@ -7934,6 +7947,7 @@ class Orchestrator(
                     assign_non_git=had_assign_non_git,
                     git_facts=git_facts,
                     ops_task=ops_task,
+                    investigate_task=investigate_task,
                     sibling_files=sibling_files,
                 )
             except Exception as exc:  # digest cosmetics must never break done()
@@ -7949,6 +7963,7 @@ class Orchestrator(
                     headline=headline,
                     files_note="ตรวจไม่ได้ (เกิด error ระหว่างคำนวณ)",
                     ops_task=ops_task,
+                    investigate_task=investigate_task,
                 )
                 _worktree_digest_precomputed = None
 

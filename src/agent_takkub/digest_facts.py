@@ -19,6 +19,7 @@ cursor pane as it does for claude.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 
@@ -76,6 +77,11 @@ class DigestFacts:
     # ops/infra action (deploy, migrate, restart a service, ...) whose real
     # effect lives outside the repo's working tree — see `_files_bit`.
     ops_task: bool = False
+    # #672: true when `detect_investigate_task` recognised the ASSIGNMENT
+    # itself as investigate/audit/review-only (INVESTIGATE / read-only /
+    # ห้ามแก้โค้ด / ห้ามลงมือแก้ ...) — for such a task `ไฟล์ที่แตะ: 0` is the
+    # CORRECT outcome, not an alarm; see `_files_bit`.
+    investigate_task: bool = False
     # #546: true when `uncommitted` is provably NOT this pane's own doing —
     # every currently-dirty path on the shared tree already predates this
     # assignment (the assign-time dirty snapshot vs now diff is empty), so
@@ -123,6 +129,38 @@ def detect_ops_task(role: str, note: str) -> bool:
     return any(kw in text for kw in _OPS_KEYWORDS)
 
 
+# #672: a task whose ASSIGNMENT declares it will change nothing — the digest's
+# ⚠️ zero-files alarm (#278) is for implementation work that stalled, and it
+# kept firing on investigate-only tasks that did exactly what they were told
+# (the #470 ops suppression only caught the ones that happened to have an ops
+# side-effect, i.e. intent was never consulted). Strong write-prohibition
+# markers count anywhere in the text; the weaker task-genre words
+# (investigate/audit/review) only count on the FIRST line — "แก้ตาม review"
+# deep inside an implementation task must not mute the #278 alarm.
+_INVESTIGATE_STRONG_RE = re.compile(
+    r"read[\s_-]?only|investigate[\s_-]?only"
+    r"|ห้ามแก้(?:โค้ด|code)|ไม่แก้(?:โค้ด|code)|ห้ามลงมือแก้"
+    r"|อ่านอย่างเดียว|ดูอย่างเดียว|ตรวจ(?:สอบ)?อย่างเดียว",
+    re.IGNORECASE,
+)
+_INVESTIGATE_HEADLINE_RE = re.compile(r"\b(?:investigate|audit|review)\b", re.IGNORECASE)
+
+
+def detect_investigate_task(task_text: str, note: str = "") -> bool:
+    """True when the assignment (or, as fallback, the done note) declares the
+    task investigate/read-only (#672) — `ไฟล์ที่แตะ: 0` is then the expected
+    result and `_files_bit` renders neutral status instead of the ⚠️ alarm."""
+    for text in (task_text or "", note or ""):
+        if not text:
+            continue
+        if _INVESTIGATE_STRONG_RE.search(text):
+            return True
+        first_line = text.strip().split("\n", 1)[0]
+        if _INVESTIGATE_HEADLINE_RE.search(first_line):
+            return True
+    return False
+
+
 def _ops_side_effects(note: str) -> list[str]:
     """Which `_OPS_KEYWORDS` the note actually mentions, in first-seen order
     — feeds `_files_bit`'s one-line side-effect summary. Best-effort/cosmetic
@@ -151,6 +189,11 @@ def _files_bit(facts: DigestFacts) -> str:
         return f"ไฟล์ที่แตะ:ตรวจไม่ได้{suffix}"
     note = f" · {facts.files_note}" if facts.files_note else ""
     if facts.files_touched == 0:
+        if facts.investigate_task:
+            # #672: the assignment itself said "change nothing" — a measured
+            # zero is the task done RIGHT. Checked before the ops branch:
+            # declared intent outranks a side-effect guess.
+            return f"ไฟล์ที่แตะ: 0 (งานตรวจสอบ/read-only — 0 คือผลลัพธ์ที่ถูกต้อง){note}"
         if facts.ops_task:
             # #470: same measured zero, but for a devops/ops action (deploy,
             # migrate, restart, ...) whose side effect lives outside the repo

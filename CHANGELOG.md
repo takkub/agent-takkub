@@ -2,6 +2,18 @@
 
 All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses [SemVer](https://semver.org/).
 
+## [v2.1.21] - 2026-09-18
+
+### Fixed (แก้)
+
+- **#672 — done digest เตือน `⚠️ ไฟล์ที่แตะ:0` กับงาน investigate-only ที่สั่งห้ามแก้โค้ด** (#651/#470/#601 ต่อเนื่อง):
+  การกดคำเตือนเดิมดูแค่ ops side-effect (#470) ไม่เคยดูเจตนาของ task เลย — งานตรวจที่ไม่ start อะไรนอก repo จึงโดนเตือน
+  ปลอมทุกใบ · เพิ่ม `detect_investigate_task`: อ่าน**เนื้อ assignment จริง** (`PaneState.last_assigned_task` — fallback
+  ไป done note) หา marker ห้ามเขียน (read-only / ห้ามแก้โค้ด / ห้ามลงมือแก้ / อ่านอย่างเดียว ฯลฯ นับทุกที่ในข้อความ) และ
+  คำบอกประเภทงาน (INVESTIGATE / audit / review — นับเฉพาะบรรทัดแรก กัน "แก้ตาม review" ในงาน implementation ไป
+  ปิด alarm #278) · เจอแล้ว `ไฟล์ที่แตะ: 0` วาดเป็น "(งานตรวจสอบ/read-only — 0 คือผลลัพธ์ที่ถูกต้อง)" · เจตนาชนะ
+  side-effect guess (เช็คก่อน ops branch) · งาน implementation ที่แตะ 0 ไฟล์ยังเตือนดังเหมือนเดิม
+
 ## [v2.1.20] - 2026-09-18
 
 ### Fixed (แก้)
