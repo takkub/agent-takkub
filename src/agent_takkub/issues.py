@@ -849,7 +849,27 @@ def cmd_issue_new(args: Any) -> dict:
     title: str = args.title
     body: str = args.body or ""
 
-    if not body:
+    # (#679) --body-file <path> or "-" (stdin): the file/stdin route bypasses
+    # shell interpolation entirely, so a body full of backticks/$() survives
+    # byte-for-byte — same contract as `assign --task-file` (#491). Resolved
+    # BEFORE the editor fallback: an explicit file that yields "" is a
+    # deliberate empty body, never a reason to open $EDITOR.
+    body_file = getattr(args, "body_file", None)
+    if body_file is not None:
+        if args.body is not None:
+            return {
+                "ok": False,
+                "msg": "--body and --body-file are mutually exclusive — pass one or the other",
+            }
+        if body_file == "-":
+            body = sys.stdin.read()
+        else:
+            try:
+                body = Path(body_file).read_text(encoding="utf-8")
+            except OSError as exc:
+                return {"ok": False, "msg": f"could not read --body-file {body_file}: {exc}"}
+
+    if not body and body_file is None:
         # #643: a cockpit pane IS a tty (ConPTY), so the isatty() check alone
         # let `takkub issue new` with no --body launch notepad inside a pane
         # with no human at it — the command sat silent past 120s. Any pane
@@ -862,8 +882,9 @@ def cmd_issue_new(args: Any) -> dict:
             return {
                 "ok": False,
                 "msg": (
-                    f'no --body provided and {why} — pass --body "<text>" explicitly '
-                    '(or --body "" for an empty body)'
+                    f'no --body provided and {why} — pass --body "<text>" explicitly, '
+                    '--body-file <path> (or "-" for stdin; survives backticks, #679), '
+                    'or --body "" for an empty body'
                 ),
             }
         import os

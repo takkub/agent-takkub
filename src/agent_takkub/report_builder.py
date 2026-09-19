@@ -61,6 +61,40 @@ CUSTOMER_FORBIDDEN = {
     "anthropic",
 }
 
+# (#676) Warn-level patterns for customer reports — things that slipped into
+# real customer manuals and had to be chased down by hand. Warnings never
+# block the build (unlike CUSTOMER_FORBIDDEN): each needs human judgement.
+CUSTOMER_WARN_PATTERNS: tuple[tuple[str, "re.Pattern[str]"], ...] = (
+    (
+        "การรับประกันเวลา (ระบบไม่ได้การันตี)",
+        re.compile(r"(?:ภายใน|ไม่เกิน)\s*\d+(?:\s*[-–]\s*\d+)?\s*(?:วินาที|นาที|ชั่วโมง|ชม\.?)"),
+    ),
+    (
+        "อ้างว่าอัตโนมัติ (ตรวจว่าจริงไหม — หลายขั้นตอนมีคนกดอนุมัติ)",
+        re.compile(r"อัตโนมัติ|ระบบจะ(?:ดำเนินการ)?(?:โอน|จ่าย|เติม)"),
+    ),
+    (
+        "อีเมล/โดเมนภายใน",
+        re.compile(r"@[\w.-]*\.local\b|@admin\.com\b", re.I),
+    ),
+    (
+        "ชื่อบัญชีทดสอบ",
+        re.compile(r"\b(?:QA|UAT|Regress(?:ion)?|Zero\s*Balance)\b|บัญชีทดสอบ", re.I),
+    ),
+    (
+        "host:port ภายใน",
+        re.compile(r"\b(?:localhost|127\.0\.0\.1|(?:\d{1,3}\.){3}\d{1,3}):\d{2,5}\b", re.I),
+    ),
+)
+
+# (#676) lint reads TEXT only — it cannot see pixels. A pane once reported
+# "no internal data leaked" off a clean grep while the screenshots showed 8
+# internal e-mail accounts. Every lint result must carry this line.
+LINT_TEXT_ONLY_DISCLAIMER = (
+    "⚠ lint ตรวจเฉพาะข้อความ ไม่ได้ตรวจเนื้อหาในภาพ — "
+    "ข้อมูลจริง/อีเมล/ชื่อทดสอบที่อยู่ในพิกเซลของรูปต้องเปิดดูด้วยตาเองทุกรูป"
+)
+
 # Extra CSS for all report types (mobile fixes, status badges, KPIs)
 EXTRA_CSS = """
   .status{display:inline-block;border-radius:999px;padding:1px 10px;font-size:.82rem;font-weight:700;white-space:nowrap}
@@ -80,6 +114,12 @@ EXTRA_CSS = """
   pre.ev{white-space:pre-wrap;overflow-wrap:break-word}
   @media (max-width:900px){section.sys{grid-template-columns:minmax(0,1fr)}}
   @media (max-width:640px){table{min-width:0}th,td{overflow-wrap:break-word;padding:10px 8px}td:first-child,.status{white-space:normal}.status{border-radius:8px;padding:2px 8px;line-height:1.4}}
+  figure img{cursor:zoom-in}
+  figcaption{padding:8px 12px;font-size:.88rem;color:var(--muted);line-height:1.5}
+  .imgpair{display:grid;gap:14px;grid-template-columns:repeat(2,minmax(0,1fr));align-items:start;margin:10px 0}
+  .imgpair .device{display:inline-block;background:var(--accent-soft);color:var(--accent);border-radius:999px;padding:1px 10px;font-size:.78rem;font-weight:700}
+  .imgpair .pair-cap{grid-column:1/-1;margin:0;color:var(--muted);font-size:.92rem;line-height:1.55}
+  @media (max-width:640px){.imgpair{grid-template-columns:minmax(0,1fr)}.imgpair .pair-cap{grid-column:auto}}
 """
 
 
@@ -215,18 +255,47 @@ class ReportBuilder:
         # Replace image placeholders
         missing = []
 
-        def replace_img(m: re.Match) -> str:
-            name = m.group(1)
+        def _src(name: str) -> str:
             if name not in self.images:
                 missing.append(name)
                 return ""
             return self.images[name]
 
+        def replace_img(m: re.Match) -> str:
+            return _src(m.group(1))
+
+        # (#676) `{{figure:name|คำบรรยาย}}` — a full figure with a real
+        # caption slot (a good caption says what is happening on screen, not
+        # the file name), and `{{imgpair:desk|mobile|คำบรรยาย}}` — the
+        # desktop/mobile pair every customer manual needs, laid out side by
+        # side with device chips and stacked on narrow screens. Both expand
+        # BEFORE the plain `{{img:}}` pass; `{{img:}}` stays byte-compatible.
+        def replace_figure(m: re.Match) -> str:
+            name, caption = m.group(1), (m.group(2) or "").strip()
+            cap_html = f"<figcaption>{caption}</figcaption>" if caption else ""
+            return f'<figure><img src="{_src(name)}" alt="{caption}" loading="lazy">{cap_html}</figure>'
+
+        def replace_imgpair(m: re.Match) -> str:
+            desk, mobile, caption = m.group(1), m.group(2), (m.group(3) or "").strip()
+            cap_html = f'<p class="pair-cap">{caption}</p>' if caption else ""
+            return (
+                '<div class="imgpair">'
+                f'<figure><img src="{_src(desk)}" alt="{caption} (จอคอมพิวเตอร์)" loading="lazy">'
+                '<figcaption><span class="device">💻 คอมพิวเตอร์</span></figcaption></figure>'
+                f'<figure><img src="{_src(mobile)}" alt="{caption} (จอมือถือ)" loading="lazy">'
+                '<figcaption><span class="device">📱 มือถือ</span></figcaption></figure>'
+                f"{cap_html}</div>"
+            )
+
+        body = re.sub(r"\{\{figure:([\w-]+)(?:\|([^}]*))?\}\}", replace_figure, body)
+        body = re.sub(r"\{\{imgpair:([\w-]+)\|([\w-]+)(?:\|([^}]*))?\}\}", replace_imgpair, body)
         body = re.sub(r"\{\{img:([\w-]+)\}\}", replace_img, body)
 
         if missing:
-            print(f"ERROR: Missing images: {', '.join(sorted(set(missing)))}", file=sys.stderr)
-            sys.exit(1)
+            # ValueError (not sys.exit) so cli.py's build wrapper reports it
+            # as an ordinary "build failed: ..." instead of a bare SystemExit
+            # escaping the except.
+            raise ValueError(f"Missing images: {', '.join(sorted(set(missing)))}")
 
         # Combine and return
         return head + "\n" + body + "\n" + tail
@@ -305,29 +374,95 @@ class ReportBuilder:
   figure{margin:0;background:var(--shot-bg);border:1px solid var(--line);border-radius:14px;overflow:hidden;display:flex;flex-direction:column}
   figure img{display:block;width:100%;height:auto;max-height:620px;object-fit:contain}
   footer{color:var(--muted);font-size:.88rem;margin-top:28px}
+  .lb{position:fixed;inset:0;background:rgba(0,0,0,.88);z-index:50;display:flex;flex-direction:column}
+  .lb[hidden]{display:none}
+  .lb-bar{display:flex;justify-content:flex-end;padding:10px 14px}
+  .lb-bar button{background:#2a2a28;color:#eee;border:1px solid #444;border-radius:8px;padding:6px 14px;font:inherit;cursor:pointer}
+  .lb-stage{flex:1;overflow:auto;display:flex;align-items:flex-start;justify-content:center;touch-action:pan-x pan-y pinch-zoom}
+  .lb-stage img{max-width:100%;height:auto;margin:auto}
 </style>
 </head>
 <body>
 </body>
-<div class="lb" id="lb" hidden role="dialog"></div>
+<div class="lb" id="lb" hidden role="dialog" aria-modal="true" aria-label="ภาพขยาย">
+  <div class="lb-bar"><button type="button" id="lb-close" aria-label="ปิด">ปิด ✕</button></div>
+  <div class="lb-stage" id="lb-stage"><img id="lb-img" alt=""></div>
+</div>
+<script>
+(function(){
+  var lb=document.getElementById('lb'), img=document.getElementById('lb-img');
+  function close(){ lb.hidden=true; document.body.style.overflow=''; img.removeAttribute('src'); }
+  document.addEventListener('click',function(e){
+    var t=e.target;
+    if(t && t.tagName==='IMG' && t.id!=='lb-img' && t.closest('figure')){
+      img.src=t.src; img.alt=t.alt||''; lb.hidden=false; document.body.style.overflow='hidden';
+    }
+  });
+  document.getElementById('lb-close').addEventListener('click',close);
+  document.getElementById('lb-stage').addEventListener('click',function(e){ if(e.target===e.currentTarget) close(); });
+  document.addEventListener('keydown',function(e){ if(!lb.hidden && e.key==='Escape') close(); });
+})();
+</script>
 </html>
 """
 
     def lint_customer(self) -> list[str]:
-        """Check for forbidden words in customer report."""
+        """Check for forbidden words in customer report (blockers only)."""
+        return self.lint_customer_full()[0]
+
+    def lint_customer_full(self) -> tuple[list[str], list[str]]:
+        """(#676) Full customer lint: `(blockers, warnings)`.
+
+        Blockers are the CUSTOMER_FORBIDDEN word hits (unchanged contract —
+        they abort the build). Warnings are the CUSTOMER_WARN_PATTERNS hits:
+        time guarantees, "automatic" claims, internal e-mails/test accounts/
+        host:port — real leaks from real manuals, but each needs a human
+        call, so they never block. Non-customer types return ([], [])."""
         if self.report_type != "customer":
-            return []
+            return [], []
 
         content = self._get_content()
-        issues = []
+        blockers: list[str] = []
+        warnings: list[str] = []
 
         content_lower = content.lower()
-        for word in CUSTOMER_FORBIDDEN:
-            # Simple case-insensitive search
+        for word in sorted(CUSTOMER_FORBIDDEN):
             if word.lower() in content_lower:
-                issues.append(f"Found forbidden word/phrase: '{word}'")
+                blockers.append(f"Found forbidden word/phrase: '{word}'")
 
-        return issues
+        for label, pattern in CUSTOMER_WARN_PATTERNS:
+            hits = pattern.findall(content)
+            if hits:
+                sample = str(hits[0]).strip()
+                warnings.append(f"{label}: พบ {len(hits)} จุด เช่น '{sample[:60]}'")
+
+        return blockers, warnings
+
+
+# (#676) Default size ceiling for a built report. When a build crossed the
+# team's 4 MB line before, the only "signal" was a pane silently DELETING a
+# whole section to squeeze under it — warn out loud instead, with the two
+# legitimate levers named.
+REPORT_SIZE_WARN_BYTES = 4 * 1024 * 1024
+
+
+def size_warning(html: str, max_bytes: int = REPORT_SIZE_WARN_BYTES) -> str:
+    """Return a loud advisory when the built HTML exceeds `max_bytes`, else ''.
+
+    Never blocks the build — the right response (lower JPEG quality, split
+    the manual, drop images) is the author's call, not the builder's, and
+    silently truncating content is exactly the failure this exists to stop.
+    """
+    if max_bytes <= 0:
+        return ""
+    size = len(html.encode("utf-8"))
+    if size <= max_bytes:
+        return ""
+    return (
+        f"⚠ ไฟล์ใหญ่ {size / (1024 * 1024):.2f} MB เกินเพดาน {max_bytes / (1024 * 1024):.2f} MB — "
+        "ลดคุณภาพ JPEG (--max-width ให้แคบลง) หรือแยกคู่มือเป็นหลายไฟล์ · "
+        "**ห้ามตัดหัวข้อทิ้งเงียบๆ เพื่อให้ไฟล์เล็กลง**"
+    )
 
 
 def check_mobile(html: str, viewports: list[int] | None = None) -> list[str]:
@@ -401,7 +536,11 @@ def report_asset_root() -> Path:
 
 
 def build_report(
-    report_type: str, content_dir: str, out_file: str | None = None, title: str | None = None
+    report_type: str,
+    content_dir: str,
+    out_file: str | None = None,
+    title: str | None = None,
+    max_width: int = 1440,
 ) -> str:
     """Build a report and optionally write to file.
 
@@ -410,11 +549,12 @@ def build_report(
         content_dir: directory with content.html, images.txt, etc.
         out_file: optional output file path
         title: optional HTML title
+        max_width: maximum embedded-image width in pixels (#676)
 
     Returns:
         HTML content as string
     """
-    builder = ReportBuilder(report_type, content_dir)
+    builder = ReportBuilder(report_type, content_dir, max_width=max_width)
     html = builder.build(title)
 
     if out_file:

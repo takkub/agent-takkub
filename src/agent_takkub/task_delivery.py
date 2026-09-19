@@ -529,8 +529,22 @@ def make_notice_id(
     role: str,
     task_id: str,
     completion_generation: str | int,
+    content_fingerprint: str = "",
 ) -> str:
-    raw = "\0".join((project_id, role, task_id, str(completion_generation)))
+    """At-most-once key for one completion notice.
+
+    (#678) `content_fingerprint` MUST identify this specific report (the
+    decision-note filename, or a hash of the note text). Without it, a pane
+    that reports done more than once in the same session for work handed to
+    it via `takkub send` (no fresh assign → no fresh task_id; PaneState was
+    popped by the previous done, so task_id falls back to the PREVIOUS id or
+    the stable `pane-<id>` marker, and the session generation never moves)
+    collapses every later report onto the first one's key — NoticeDeduper
+    then silently eats each new done notice. Field incident 2026-09-19:
+    three different devops reports (12:43 / 12:52 / 13:12) all hashed to the
+    same id; Lead never heard about any of them.
+    """
+    raw = "\0".join((project_id, role, task_id, str(completion_generation), content_fingerprint))
     return hashlib.sha256(raw.encode("utf-8", "replace")).hexdigest()
 
 

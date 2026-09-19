@@ -342,6 +342,9 @@ def _inbox_digest_window_ms() -> int:
 
 
 _DONE_NOTICE_RE = re.compile(r"^\[([^\]\r\n]+?)\s+done\](?:\s+(.*))?$", re.DOTALL)
+# (#680) every `[role done]` / `[role FAILED]` tag ANYWHERE in a delivered
+# body (a combined digest carries several) — feeds `_mark_done_notices_delivered`.
+_DONE_NOTICE_TAG_RE = re.compile(r"\[([\w][\w-]*)\s+(?:done|FAILED)\]", re.IGNORECASE)
 _CC_NOTICE_RE = re.compile(
     r"^\[CC\]\s*\[([^\]\r\n]+?)\s*→\s*([^\]\r\n]+?)\](?:\s+(.*))?$",
     re.DOTALL,
@@ -1001,6 +1004,21 @@ class LeadInboxMixin:
         _pending_done_notices so it is delivered when Lead next spawns."""
         self._notify_lead(project_ns, message, kind=log_event)
         _log_event(log_event, project=project_ns)
+
+    def _mark_done_notices_delivered(self, project_ns: str, body: str) -> None:
+        """(#680) Clear the `_done_unread` marker for every `[role done]` /
+        `[role FAILED]` report carried in *body* — called by the pump right
+        after the text was verifiably written into Lead's pane. A combined
+        digest clears every role it names in one pass. Safe on any partial
+        test double (plain dict access only, never raises)."""
+        unread = getattr(self, "_done_unread", None)
+        if not unread:
+            return
+        try:
+            for m in _DONE_NOTICE_TAG_RE.finditer(body or ""):
+                unread.pop((project_ns, m.group(1)), None)
+        except Exception:
+            pass
 
     # ------------------------------------------------------------------
     # Lead draft-typing guard (#3, 2026-07-09 core-upgrade plan)
@@ -4596,6 +4614,10 @@ class LeadInboxMixin:
             return
         # Write succeeded — now it is safe to dequeue.
         queue.popleft()
+        # #680: the notice text is now physically in Lead's pane — any
+        # `[role done]` / `[role FAILED]` report it carries flips that
+        # role's status from "done (unread)" back to plain "done".
+        self._mark_done_notices_delivered(project_ns, body)
         # #614: stamp when THIS notice landed in Lead's pane. The
         # proactive-compact watchdog uses it to keep the idle clock across
         # the brief not-ready stretch this injection itself causes (Lead

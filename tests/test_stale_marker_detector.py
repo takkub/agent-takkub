@@ -818,6 +818,106 @@ def test_liveness_dead_claude_pane_uses_definitive_wording(
     assert "อาจค้างจริง" in msg
 
 
+class TestIdleAfterTurnEndNotPaged:
+    """#673: a Lead that finished its turn and is waiting for its user to
+    answer got paged "provider ค้าง/ล่มเงียบ, ไม่ใช่แค่ idle ปกติ". The #588
+    exemption compares the turn-end stamp with the last PTY OUTPUT, and a
+    repaint (user scrolling the pane, tab switch) is output — real evidence
+    2026-09-18: turn ended 1900 s ago, last "output" 1225 s ago. A repaint
+    cannot write the transcript, so an untouched transcript since the turn
+    ended = no new turn = ordinary idle, never a page."""
+
+    TURN_END_TS = 500.0
+
+    def _lead_with_repaint_after_turn_end(self, orch: Orchestrator) -> str:
+        key = "projX::lead"
+        # quiet=30 → "last output" is always ~30 s before each tick's `now`
+        # (>= 1000), i.e. long after TURN_END_TS: the #588 exemption fails.
+        _add_pane(orch, "projX", "lead", _sess(quiet=STALE_MARKER_QUIET_S + 10))
+        orch._ps(key).last_turn_end_ts = self.TURN_END_TS
+        return key
+
+    def test_untouched_transcript_since_turn_end_is_idle_not_hung(
+        self, orch: Orchestrator, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(
+            "agent_takkub.provider_config.effective_provider_for", lambda *a, **k: "claude"
+        )
+        key = self._lead_with_repaint_after_turn_end(orch)
+        events = _capture_events(monkeypatch)
+        notify_calls = _capture_notify(monkeypatch)
+        # Transcript last written 5 s BEFORE the turn ended (a[5] is `now`).
+        turn_end = self.TURN_END_TS
+        monkeypatch.setattr(
+            Orchestrator,
+            "_stale_marker_liveness",
+            lambda _s, *a, **k: (False, "no_signal", a[5] - (turn_end - 5.0), []),
+        )
+
+        _tick_n_cooldowns(orch, _STALE_MARKER_ESCALATE_EVERY + 1)
+
+        assert not notify_calls
+        assert not [e for e in events if e[0] == "ready_marker_stale_prolonged"]
+        idle_logs = [e for e in events if e[0] == "watchdog_idle_after_turn_end"]
+        assert len(idle_logs) == 1
+        assert idle_logs[0][1]["role"] == "lead"
+        assert key not in orch._stale_marker_streak
+
+    def test_transcript_written_after_turn_end_still_escalates(
+        self, orch: Orchestrator, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A NEW turn began after the stamp (transcript moved) and then went
+        silent and unrecognised — that is the real hang shape; keep paging."""
+        monkeypatch.setattr(
+            "agent_takkub.provider_config.effective_provider_for", lambda *a, **k: "claude"
+        )
+        self._lead_with_repaint_after_turn_end(orch)
+        _capture_events(monkeypatch)
+        notify_calls = _capture_notify(monkeypatch)
+        # Transcript written 400 s AFTER the turn ended.
+        turn_end = self.TURN_END_TS
+        monkeypatch.setattr(
+            Orchestrator,
+            "_stale_marker_liveness",
+            lambda _s, *a, **k: (False, "no_signal", a[5] - (turn_end + 400.0), []),
+        )
+
+        _tick_n_cooldowns(orch, _STALE_MARKER_ESCALATE_EVERY + 1)
+
+        assert len(notify_calls) == 1
+        assert "อาจค้างจริง" in notify_calls[0][0][1]
+
+    def test_unreadable_footer_says_unverifiable_not_hung(
+        self, orch: Orchestrator, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """#673 item 2: a footer of nothing but box-drawing rules means the
+        probe could not read the screen — "ตรวจไม่ได้" must not be worded as
+        "อาจค้างจริง … ไม่ใช่แค่ idle ปกติ"."""
+        monkeypatch.setattr(
+            "agent_takkub.provider_config.effective_provider_for", lambda *a, **k: "claude"
+        )
+        _add_pane(
+            orch,
+            "projX",
+            "lead",
+            _sess(quiet=STALE_MARKER_QUIET_S + 10, lines=["", "─" * 120, ""]),
+        )
+        _capture_events(monkeypatch)
+        notify_calls = _capture_notify(monkeypatch)
+        monkeypatch.setattr(
+            Orchestrator,
+            "_stale_marker_liveness",
+            lambda self, *a, **k: (False, "no_signal", None, []),
+        )
+
+        _tick_n_cooldowns(orch, _STALE_MARKER_ESCALATE_EVERY + 1)
+
+        assert len(notify_calls) == 1
+        msg = notify_calls[0][0][1]
+        assert "ตรวจไม่ได้ ≠ ค้าง" in msg
+        assert "อาจค้างจริง" not in msg
+
+
 def test_liveness_dead_non_claude_provider_uses_softer_wording(
     orch: Orchestrator, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -33,6 +33,7 @@ takkub worktree merge --role <r> [--keep]              # merge --no-ff branch �
 takkub worktree clean [--force]                        # เก็บกวาด wt/* ที่เหลือค้าง — default ลบเฉพาะ clean+ไม่มี commit · --force ลบหมด (งาน dirty หาย!)
 takkub send --to backend "<message>"                   # peer message (CC Lead อัตโนมัติ)
 takkub send --to backend --from-file <path>            # (#491) อ่านข้อความจากไฟล์ (utf-8) แทน positional — เลี่ยง shell กิน backtick/$()/วงเล็บ; mutually exclusive กับ positional msg; `--from-file -` หรือ positional "-" = อ่านจาก stdin
+# ⚠ (#679) ข้อความ/สเปคที่มี backtick ทุกครั้ง **ต้องใช้ --from-file/--task-file/--body-file เสมอ** — ส่งเป็น argument ตรงๆ = shell รันคำสั่งใน backtick จริง (เคยรัน test suite โดยไม่ตั้งใจ + เนื้อหาหายเงียบ) · takkub issue new ก็มี --body-file <path|-> แล้ว
 takkub goal "<objective>"                              # ตั้งเป้าหมาย session — prepend เข้าทุก assign task หลังจากนี้
 takkub goal                                            # โชว์ goal ปัจจุบัน
 takkub goal --clear                                    # ล้าง goal

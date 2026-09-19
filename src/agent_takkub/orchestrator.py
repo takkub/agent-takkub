@@ -699,6 +699,18 @@ STALE_MARKER_TAIL_ROWS = 4
 # this exemption never fires for them — they still rely solely on the
 # text-marker table below.
 STALE_MARKER_TURN_END_SLACK_S = 10.0
+# (#673) The exemption above compares the turn-end stamp with the last PTY
+# OUTPUT — and a repaint is output: the user scrolling a finished Lead pane
+# to read it ("jump to bottom" banner), a tab switch, a statusline tick all
+# redraw the screen minutes after the turn ended, which voided the exemption
+# and paged "provider ค้าง/ล่มเงียบ" at a Lead that was just waiting for its
+# user to answer (field + dev evidence 2026-09-18: turn ended 1900 s ago, last
+# "output" 1225 s ago, nothing in between but a scroll). A repaint cannot
+# write the transcript, so that is what the escalation consults instead: a
+# transcript not touched since the turn ended (+ this slack for the final
+# flush landing just after the Stop hook) means no new turn ever began — the
+# pane is idle at its prompt whatever its footer looks like.
+STALE_MARKER_TRANSCRIPT_SLACK_S = 30.0
 
 # (#468) The loud stale-marker escalation below is a PTY-screen-text signal
 # only — it says nothing about whether the pane's underlying provider process
@@ -5204,6 +5216,26 @@ class Orchestrator(
         # as evidence the pane is still being monitored by the orchestrator.
         self._ps(f"{project_ns}::{to_role}").last_send_ts = time.time()
 
+        # (#677) A message into a done-kept pane IS its next unit of work —
+        # leaving state at "done" both lied to `takkub status` ("done" while
+        # the pane ground through a follow-up task, #680) and left the pane
+        # on `_reap_done_panes`' TTL clock, which then closed it MID-TASK
+        # (field incident 2026-09-19 10:40: devops killed 22 min into a UAT
+        # refresh Lead had sent at 10:18; nothing told anyone for 33 min).
+        if getattr(pane, "state", None) == "done":
+            ps_reuse = self._ps(f"{project_ns}::{to_role}")
+            ps_reuse.done_kept_since = 0.0
+            try:
+                pane.set_state("working", note=msg[:60])
+            except Exception:
+                pass
+            _log_event(
+                "done_pane_reactivated_by_send",
+                role=to_role,
+                project=project_ns,
+                from_=from_role or "lead",
+            )
+
         # CC Lead unless source was Lead and target was a teammate, or vice versa.
         # If Lead is not alive, queue the CC so it isn't silently lost — the
         # queue is flushed when Lead next spawns (see _flush_pending_lead_cc).
@@ -8051,16 +8083,36 @@ class Orchestrator(
             # and never injected while Lead is mid-generation (the root cause of the
             # "Lead goes silent after parallel dispatch" bug).
             completion_generation = int(getattr(pane, "_session_generation", 0))
+            # #678: fingerprint the REPORT itself into the dedupe key. The
+            # decision-note filename is unique per done() write (timestamped
+            # to the second); a true replay of the same completion re-sends
+            # the same file and still dedupes, while a genuinely new report
+            # from the same (task_id, generation) — the follow-up-via-send
+            # case — gets its own id instead of being eaten.
+            _content_fp = ""
+            if session_md_path:
+                _content_fp = pathlib.Path(str(session_md_path)).name
+            elif raw_note:
+                _content_fp = hashlib.sha256(raw_note.encode("utf-8", "replace")).hexdigest()[:16]
             notice_id = make_notice_id(
                 project_ns,
                 from_role,
                 had_task_id,
                 completion_generation,
+                _content_fp,
             )
             deduper = getattr(self, "_notice_deduper", None)
             if deduper is None:
                 deduper = self._notice_deduper = NoticeDeduper(RUNTIME_DIR / "notice-dedupe.json")
             if deduper.mark_once(notice_id):
+                # #680: this role now has a completion report Lead has not
+                # read yet — cleared by the notify pump the moment the notice
+                # text is actually written into Lead's pane
+                # (`_mark_done_notices_delivered`). `takkub status` renders
+                # it as "done (unread)".
+                if not hasattr(self, "_done_unread"):
+                    self._done_unread = {}
+                self._done_unread[(project_ns, from_role)] = time.time()
                 self._notify_lead(
                     project_ns,
                     notice,
@@ -9229,6 +9281,36 @@ class Orchestrator(
                     }
                 )
 
+        # (#678) reconcile net: a role marked done-unread whose notice is in
+        # NO queue above has had its report dropped somewhere between done()
+        # and Lead — the old behaviour was `inbox` swearing "0 pending" while
+        # a written report never arrived. Surface it instead of hiding it.
+        unread = getattr(self, "_done_unread", {})
+        if unread:
+            now_ts = time.time()
+            queued_roles = {it.get("role") for it in items}
+            for (u_proj, u_role), u_ts in list(unread.items()):
+                if u_proj != project_ns or (role and u_role != role):
+                    continue
+                if now_ts - u_ts > 24 * 3600:  # prune ancient markers
+                    unread.pop((u_proj, u_role), None)
+                    continue
+                if u_role in queued_roles or now_ts - u_ts < 120:
+                    continue  # still in a queue / normal debounce window
+                items.append(
+                    {
+                        "role": u_role,
+                        "queue": "missing",
+                        "body": (
+                            f"[{u_role} done] รายงานถูกเขียนแล้ว ({int((now_ts - u_ts) // 60)} นาทีที่แล้ว) "
+                            f"แต่ไม่อยู่ในคิวส่งใดๆ — อ่านไฟล์ล่าสุดใน runtime/sessions/**/{u_role}-*.md "
+                            "แล้วแจ้ง Lead เอง (สัญญาณว่า delivery หลุด, #678)"
+                        ),
+                        "origin_confirmed": None,
+                        "queued_ts": u_ts,
+                    }
+                )
+
         return items
 
     def inbox_report(self, project: str | None = None, role: str | None = None) -> list[dict]:
@@ -9291,7 +9373,36 @@ class Orchestrator(
         }
         status.update(self._pending_notice_roles(project_ns, status))
         status.update(self._queued_resource_roles(project_ns, status))
+        # getattr: test doubles (_FakeOrch) drive this method unbound.
+        _tombstones_fn = getattr(self, "_recent_exit_tombstones", None)
+        if callable(_tombstones_fn):
+            for role, label in _tombstones_fn(project_ns, status).items():
+                status[role] = label
         return status
+
+    # (#677) How long a closed/exited pane keeps a tombstone row in
+    # status output. A pane that vanished mid-day used to leave NO trace at
+    # all — Lead's main "who is doing what" tool showed it as never having
+    # existed, and the owner was the one who noticed 33 minutes later.
+    RECENT_EXIT_TOMBSTONE_TTL_S = 30 * 60
+
+    def _recent_exit_tombstones(self, project_ns: str, existing: dict) -> dict[str, str]:
+        """`role → "closed (HH:MM)"` for panes that exited recently and have
+        no live row (and no pending-notice/queued row) in *existing*."""
+        out: dict[str, str] = {}
+        now = time.time()
+        prefix = f"{project_ns}::"
+        for key, rec in getattr(self, "_recent_exits", {}).items():
+            if not key.startswith(prefix):
+                continue
+            role = key[len(prefix) :]
+            if role in existing or role == LEAD.name:
+                continue
+            ts = float(rec.get("ts", 0.0) or 0.0)
+            if not ts or now - ts > self.RECENT_EXIT_TOMBSTONE_TTL_S:
+                continue
+            out[role] = f"closed ({datetime.fromtimestamp(ts).strftime('%H:%M')})"
+        return out
 
     def _pane_display_state(self, pane: AgentPane) -> str:
         """Refine `pane.state == "active"` into spawning/active/ready (#248/#247).
@@ -9811,8 +9922,16 @@ class Orchestrator(
                 quota_stalled = True
                 quota_resets_at = ps.rate_limited_until
                 quota_marker = ps.quota_marker
-            if state == "working" and pane.session is not None and pane.session.is_alive:
+            # (#680) computed for EVERY pane, not only `working` — a ready/
+            # done/active pane used to report last_progress 0.0 and `takkub
+            # status` printed "last progress: unknown (unknown)" for every
+            # pane, every call, all day. Stall detection below stays scoped
+            # to working panes exactly as before.
+            try:
                 last_progress_ts = self._compute_last_progress_ts(role, project_ns, pane)
+            except Exception:
+                last_progress_ts = 0.0
+            if state == "working" and pane.session is not None and pane.session.is_alive:
                 if last_progress_ts > 0:
                     silent_for = now - last_progress_ts
                     if silent_for >= STALL_THRESHOLD_SEC:
@@ -9883,6 +10002,10 @@ class Orchestrator(
                 "quota_marker": quota_marker,
                 "model": model,
                 "resource_wait_message": resource_wait["message"] if resource_wait else None,
+                # #680: True while this role's latest done/FAILED report is
+                # still on its way to Lead's pane (queued/digesting) — lets
+                # `takkub status` render "done (unread)" vs plain "done".
+                "done_unread": (project_ns, role) in getattr(self, "_done_unread", {}),
             }
         for role, state in self._pending_notice_roles(project_ns, result).items():
             result[role] = {
@@ -9909,6 +10032,24 @@ class Orchestrator(
                 "quota_marker": "",
                 "model": None,
                 "resource_wait_message": state,
+            }
+        # (#677) recently-exited panes keep a visible tombstone row instead
+        # of vanishing without trace — see `_recent_exit_tombstones`.
+        # getattr: test doubles (_FakeOrch) drive this method unbound.
+        _tombstones_fn = getattr(self, "_recent_exit_tombstones", None)
+        _tombstones = _tombstones_fn(project_ns, result) if callable(_tombstones_fn) else {}
+        for role, state in _tombstones.items():
+            result[role] = {
+                "state": state,
+                "display_state": state,
+                "stall_minutes": None,
+                "last_progress_ts": 0.0,
+                "blocked_reason": None,
+                "delivery_unconfirmed": False,
+                "quota_resets_at": 0.0,
+                "quota_marker": "",
+                "model": None,
+                "resource_wait_message": None,
             }
         return result
 
@@ -10572,6 +10713,7 @@ class Orchestrator(
                 "last_screenshot": last_screenshot,
                 "done_events": done_events,
                 "resource_wait_message": info.get("resource_wait_message"),
+                "done_unread": info.get("done_unread", False),
             }
 
         if role:
@@ -12475,6 +12617,32 @@ class Orchestrator(
             self._stale_marker_streak.pop(key, None)
             return
 
+        # (#673) Turn ended and the transcript has not been written since →
+        # no new turn ever started: this pane is waiting for input, the most
+        # ordinary idle there is. PTY output after the turn end (what voided
+        # the #588 exemption in `_check_stale_markers`) was a repaint — see
+        # STALE_MARKER_TRANSCRIPT_SLACK_S. Logged quietly, never paged. A
+        # transcript that DID move after the turn end means a new turn began
+        # and then went silent — that still escalates below.
+        if (
+            last_turn_end_age_s is not None
+            and transcript_age_s is not None
+            and transcript_age_s >= last_turn_end_age_s - STALE_MARKER_TRANSCRIPT_SLACK_S
+        ):
+            _log_event(
+                "watchdog_idle_after_turn_end",
+                role=name,
+                project=project_name,
+                quiet_s=quiet_s,
+                streak=streak,
+                provider=provider,
+                last_turn_end_age_s=last_turn_end_age_s,
+                transcript_age_s=round(transcript_age_s, 1),
+                footer=tail,
+            )
+            self._stale_marker_streak.pop(f"{project_name}::{name}", None)
+            return
+
         last_progress_ts = 0.0
         try:
             last_progress_ts = self._compute_last_progress_ts(name, project_name, pane)
@@ -12507,7 +12675,18 @@ class Orchestrator(
             # proves the marker table can't see it, not that it is stuck, so
             # the wording says so and points at the transcript instead of
             # asserting a hang.
-            if provider == "claude":
+            # (#673) A footer that is nothing but box-drawing rules/blank
+            # cells means the probe could not READ the screen — "unverifiable"
+            # is not "hung", and saying "อาจค้างจริง … ไม่ใช่แค่ idle ปกติ" off
+            # an unreadable frame is a claim the evidence does not support.
+            footer_unreadable = not re.sub(r"[\s|─━│┃┌┐└┘├┤┬┴┼╭╮╯╰═║]+", "", tail or "")
+            if footer_unreadable:
+                msg = (
+                    f"[watchdog] {name} marker จับไม่ได้ {streak} ครั้งติดกัน (เงียบ {quiet_s}s) แต่ "
+                    f"footer อ่านไม่ได้เลย (มีแต่เส้นกรอบ/ว่าง) — ตรวจไม่ได้ ≠ ค้าง: ไม่มีหลักฐานว่า "
+                    f"provider={provider} ล่ม ดูจอ pane ก่อนตัดสิน (#673)"
+                )
+            elif provider == "claude":
                 msg = (
                     f"[watchdog] {name} เงียบต่อเนื่อง {quiet_s}s (ครั้งที่ {streak} ที่ marker "
                     f"จับไม่ได้เลยติดกัน, ไม่มีสัญญาณชีวิตอื่นเลย) — อาจค้างจริง: provider ค้าง/"
@@ -13091,11 +13270,23 @@ class Orchestrator(
                     continue
                 session = getattr(pane, "session", None)
                 session_dead = session is None or not getattr(session, "is_alive", False)
+                # (#677) TTL counts from the LAST sign of life, not from the
+                # original done: a `takkub send` after done (ps.last_send_ts)
+                # or real on-screen content since (last_content_change_ts,
+                # the same spinner-filtered clock the stuck watchdog trusts)
+                # each restart the clock. Belt-and-suspenders under the
+                # send()-reactivation fix — any future path that feeds work
+                # into a kept pane without flipping its state is still safe.
+                effective_since = max(
+                    kept_since,
+                    getattr(ps, "last_send_ts", 0.0) or 0.0,
+                    getattr(ps, "last_content_change_ts", 0.0) or 0.0,
+                )
                 # A kept pane whose provider process has DIED is a zombie tab
                 # — it can never take a task, so close it now regardless of
                 # TTL (field report 2026-09-18: black Backend pane lingering
                 # after claude exited).
-                if not session_dead and now - kept_since < DONE_PANE_TTL_S:
+                if not session_dead and now - effective_since < DONE_PANE_TTL_S:
                     continue
                 if not session_dead and getattr(self, "_pending_assignments", {}).get(key):
                     continue

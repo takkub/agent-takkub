@@ -2,6 +2,63 @@
 
 All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses [SemVer](https://semver.org/).
 
+## [v2.1.22] - 2026-09-19
+
+### Fixed (แก้)
+
+- **#677 — pane ตายเงียบกลางงาน หายจาก `takkub status` ไม่มีสัญญาณถึง Lead**: หลักฐานจาก events.log ของ prod —
+  ไม่ใช่ pane ตายเอง แต่ **cockpit ฆ่าเอง**: `done_pane_ttl_closed idle_s=1803` นับ TTL จาก done ฉบับเก่า (10:10)
+  ทั้งที่ Lead `takkub send` งานใหม่ให้ 2 ใบ (10:18, 10:28) และ pane กำลังทำงานอยู่จริง → โดนปิดกลางงานตอน 10:40
+  · แก้ 3 ชั้น: (1) `send()` เข้า done-kept pane = งานใหม่ → flip state กลับ `working` + ล้าง `done_kept_since`
+  (event `done_pane_reactivated_by_send`) (2) `_reap_done_panes` นับ TTL จากสัญญาณชีวิตล่าสุด
+  (`last_send_ts` / `last_content_change_ts`) ไม่ใช่จาก done เดิม (3) pane ที่เพิ่งปิด/exit เหลือแถว tombstone
+  `closed (HH:MM)` ใน status 30 นาที ไม่หายเงียบเหมือนไม่เคยมี · (`takkub wait` คืน "gone"/terminal เมื่อ pane
+  ตายอยู่แล้ว — #249/#524; crash แจ้ง Lead อยู่แล้ว #397)
+- **#678 — done report เขียนไฟล์สำเร็จแต่ไม่ถึง Lead, inbox บอก "0 pending"**: root cause พิสูจน์จาก log —
+  `done_notice_deduped` ×18: notice_id คำนวณจาก (project, role, task_id, generation) เท่านั้น — งานที่ส่งต่อผ่าน
+  `send` ไม่มี task_id ใหม่ → fallback ไป id เก่า/`pane-<id>` + generation เดิม → รายงานใหม่ 3 ฉบับ (12:43/12:52/13:12)
+  hash ชนกันแล้วโดน deduper กินเงียบ · แก้: `make_notice_id` รับ **content fingerprint** (ชื่อไฟล์ decision note
+  ซึ่ง unique ต่อ done — replay ของจริงยัง dedupe ได้, รายงานใหม่ไม่โดนกิน) · `takkub inbox` เพิ่มคิว `missing`:
+  role ที่ done-unread เกิน 2 นาทีแต่ไม่อยู่ในคิวส่งใดๆ = delivery หลุด บอกตรงๆ พร้อม path รายงาน ไม่โกหกว่า 0 pending
+- **#680 — `takkub status` เชื่อไม่ได้**: (1) ขึ้น done ทั้งที่ทำงานอยู่ = ปัญหาเดียวกับ #677 (send ไม่ flip state) —
+  แก้แล้วข้างบน (2) `last progress: unknown (unknown)` ตลอด — `last_progress_ts` เคยคำนวณเฉพาะ pane state
+  `working` → ตอนนี้คำนวณทุก pane (stall detection ยังจำกัดที่ working เหมือนเดิม) (3) แยก **`done (unread — รายงาน
+  ยังไม่ถึง Lead pane)`** กับ done ธรรมดา: done() ตั้ง marker, pump ล้างตอนข้อความถูกเขียนเข้า pane Lead จริง
+  (`_mark_done_notices_delivered` อ่านทุก `[role done]`/`[role FAILED]` ใน digest รวม) (4) pane ที่หาย = tombstone (#677)
+- **#681 — assign เดา scope ผิดเพราะคำว่า 'แค่' ในประโยคปฏิเสธ**: "ทดสอบเฉพาะ... **ไม่ใช่แค่**..." เคยทำงานระบบ
+  สำรองข้อมูลถูกจัด tiny · `explicit_small` เพิ่ม negation lookbehind (ไม่ใช่แค่/ไม่ได้แค่/ไม่แค่/มากกว่าแค่/ห้ามแค่)
+  · ส่วน `--scope tiny|normal|deep` ระบุเองชนะ auto และ read-only intent ถ่วงน้ำหนัก ship แล้วตั้งแต่ 2.1.20/2.1.21
+  (prod ที่รายงานใบนี้ยัง 2.1.18)
+- **#682 — assign ขึ้นคำเตือน "task สั่งให้ pane commit เอง" ทุกครั้ง 100%**: `_SELF_COMMIT_TASK_RE` match
+  boilerplate "**ห้าม** commit เอง"/"อย่า commit เอง"/"Lead commit เอง" โดยไม่ดูบริบท (คำเตือนที่ขึ้นเสมอ = ไม่มีใครอ่าน)
+  · ตอนนี้ดู 24 ตัวอักษรก่อน match ในบรรทัดเดียวกัน เจอ negation/ประธานเป็น Lead = ข้าม, เตือนเฉพาะคำสั่งจริง
+- **#674 — `report relink` เป็น no-op เงียบแต่รายงาน ok เมื่อ Remote ปิด**: relink ที่ออกลิงก์ได้ 0 ฉบับทั้งที่มี
+  report ค้าง → `ok: False` + บอกจำนวนที่รอ + วิธีแก้ (เปิด Remote ก่อนแล้วรันซ้ำ) · notice ตอนปิด Remote เลิกสั่งให้รัน
+  relink ทันที (รันตอนนั้นไม่มีทางได้ลิงก์) — บอกลำดับที่ถูก: เปิด Remote ก่อน ค่อย relink
+- **#673 — watchdog เตือน Lead "provider ค้าง/ล่มเงียบ ไม่ใช่แค่ idle ปกติ" ทั้งที่แค่รอ user ตอบ** (#588 กลับมา): ข้อยกเว้น
+  #588 เทียบ turn-end stamp กับ **PTY output ล่าสุด** — แต่จอ repaint ก็นับเป็น output (user เลื่อนอ่าน pane จนขึ้น
+  "jump to bottom", สลับ tab, statusline tick) ข้อยกเว้นเลยหลุดหลัง turn จบไปนานแล้ว · หลักฐานจริงบน dev 2026-09-18:
+  turn จบ 1900 วิก่อน, "output" ล่าสุด 1225 วิก่อน ไม่มีอะไรคั่นนอกจากการเลื่อนจอ · ตอนนี้ก่อน page จะดู transcript:
+  ถ้า**ไม่ถูกเขียนเพิ่มตั้งแต่ turn จบ** (+slack 30 วิ) = ไม่เคยเริ่ม turn ใหม่ = idle รอ input → log เงียบ
+  `watchdog_idle_after_turn_end` ไม่ page (repaint เขียน transcript ไม่ได้ จึงหลอกไม่ได้) · transcript ขยับหลัง turn จบ
+  แล้วเงียบ = ทรงค้างจริง ยัง page เหมือนเดิม · footer ที่มีแต่เส้นกรอบ/ว่าง เปลี่ยนคำเป็น "ตรวจไม่ได้ ≠ ค้าง" แทน
+  "อาจค้างจริง" · เทส 3 ตัวใน `test_stale_marker_detector.py`
+
+### Added (เพิ่ม)
+
+- **#675 — lightbox ใน `report build --type customer`**: template มี lightbox ครบอยู่แล้ว (ซูมนิ้ว/ปิด Esc/กดที่ว่าง)
+  แต่ JS bind เฉพาะ `figure button` ซึ่ง content ที่ pane เขียนไม่มี → เพิ่ม delegation: **ทุกรูปใน `<figure>` กดขยาย
+  เต็มจอได้** โดยไม่ต้องแก้ content · fallback template ได้ lightbox ขั้นต่ำด้วย · cursor zoom-in บอกว่ากดได้
+- **#676 — report builder ทำคู่มือลูกค้าครบจบในตัว**: `{{figure:name|คำบรรยาย}}` (figcaption จริง),
+  `{{imgpair:desk|mobile|คำบรรยาย}}` (ภาพคู่คอม/มือถือ ป้ายกำกับ + เรียงแนวตั้งบนจอแคบ), `--max-width <px>`
+  (เดิม hardcode 1440), เตือนดังๆ เมื่อไฟล์เกิน `--max-bytes` (default 4MB — ห้ามตัดหัวข้อทิ้งเงียบๆ),
+  lint เพิ่ม warn-tier 3 กลุ่มที่หลุดจริง (การันตีเวลา / อ้าง "อัตโนมัติ" / อีเมล-บัญชีทดสอบ-host:port ภายใน — warn
+  ไม่ block) + ทุกผล lint ประกาศชัด "ตรวจเฉพาะข้อความ ไม่เห็นเนื้อหาในภาพ" · ภาพหาย = ValueError ปกติ
+  (เดิม `sys.exit(1)` ทะลุ error handler ของ cli) · เทสชุดแรกของ report_builder ใน `test_issue_batch_673_682.py`
+- **#679 — `takkub issue new --body-file <path|->`**: ส่ง body ผ่านไฟล์/stdin เลี่ยง shell ตีความ backtick
+  (สัญญาเดียวกับ `assign --task-file`/`send --from-file` #491 ที่มีอยู่แล้วแต่ไม่มีใครรู้ — เพิ่มลง
+  `docs/lead/cli-reference.md` เป็นกฎ: ข้อความมี backtick ต้องใช้ file/stdin เสมอ)
+
 ## [v2.1.21] - 2026-09-18
 
 ### Fixed (แก้)

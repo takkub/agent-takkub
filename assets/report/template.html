@@ -401,6 +401,17 @@
   document.querySelectorAll('figure button').forEach(function(b){
     b.addEventListener('click',function(){ var i=b.querySelector('img'); open(i.src,b.getAttribute('data-cap')||i.alt); });
   });
+  /* #675: content authored by panes uses plain <figure><img> with no button
+     wrapper — delegate so EVERY figure image opens the lightbox, not just
+     the template's own button-wrapped ones. */
+  document.addEventListener('click',function(e){
+    var t=e.target;
+    if(!t || t.tagName!=='IMG' || t.id==='lb-img') return;
+    var fig=t.closest && t.closest('figure');
+    if(!fig || t.closest('button') || t.closest('#lb')) return;
+    var fc=fig.querySelector('figcaption');
+    open(t.src,(fc&&fc.textContent.trim())||t.alt||'');
+  });
   img.addEventListener('click',function(e){
     e.stopPropagation();
     var on=!stage.classList.contains('zoomed');

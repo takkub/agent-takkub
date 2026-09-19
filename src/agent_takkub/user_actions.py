@@ -787,10 +787,15 @@ class UserActionsMixin:
         except Exception:
             project_ns = None
         if project_ns:
+            # (#674) This notice fires at the exact moment Remote goes OFF —
+            # a bare "run relink" here told the user to run a command that
+            # cannot mint a single URL in this state. Name the prerequisite.
             self.orch._notify_lead(
                 project_ns,
                 f"⚠ ปิด Remote รีเซ็ต secret แล้ว — Report link เก่า {affected} ฉบับตายหมด "
-                "รัน `takkub report relink` เพื่อออกลิงก์ใหม่",
+                "เมื่อจะใช้ลิงก์อีกครั้ง: เปิด Remote ก่อน (Settings → Remote) "
+                "แล้วค่อยรัน `takkub report relink` เพื่อออกลิงก์ใหม่ "
+                "(รันตอน Remote ยังปิดจะออกลิงก์ไม่ได้)",
                 from_role="system",
                 note="remote_secret_rotated",
             )

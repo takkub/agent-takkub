@@ -165,8 +165,13 @@ _FORBIDDEN_TINY_RE = re.compile(
 _TINY_KEYWORD_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     (
         "explicit_small",
+        # (#681) `แค่` inside a negation/comparison is the OPPOSITE claim —
+        # "ทดสอบเฉพาะ... ไม่ใช่แค่..." classified a backup-restore drill as
+        # tiny on prod. Thai has no word boundaries, so each preceding-word
+        # exclusion is its own fixed-width lookbehind: ไม่ใช่แค่ / ไม่ได้แค่ /
+        # ไม่แค่ / มากกว่าแค่ ("more than just") / ห้ามแค่ ("must not only").
         re.compile(
-            r"แค่|นิดเดียว|เล็กน้อย|นิดๆ\s*หน่อยๆ",
+            r"(?<!ไม่ใช่)(?<!ไม่ได้)(?<!ไม่)(?<!กว่า)(?<!ห้าม)แค่|นิดเดียว|เล็กน้อย|นิดๆ\s*หน่อยๆ",
             re.I,
         ),
     ),

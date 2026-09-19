@@ -608,12 +608,35 @@ _SELF_COMMIT_TASK_RE = re.compile(
     re.I,
 )
 
+# (#682) The standard teammate-policy boilerplate is the PROHIBITION —
+# "ห้าม commit เอง", "อย่า commit เอง", "ไม่ต้อง commit เอง", "Lead commit เอง"
+# (Lead is the subject, not the pane) — and it appears in virtually every
+# task spec, so a bare substring match fired the warning on 100% of assigns
+# (a warning that always fires is one nobody reads). A match is real only
+# when none of these negation/subject tokens sit right before it.
+_SELF_COMMIT_NEGATION_RE = re.compile(
+    r"(?:ห้าม|หาม|อย่า|ไม่ต้อง|ไม่ให้|ไม่|no |not |don'?t |never |lead\s*(?:จะ|เป็นคน)?\s*)\s*$",
+    re.I,
+)
+
 
 def _self_commit_isolation_warning(task: str, isolation: str) -> str:
     """Empty string when nothing to warn about — see module comment above."""
     if isolation == "worktree":
         return ""
-    if not _SELF_COMMIT_TASK_RE.search(task or ""):
+    task = task or ""
+    real_match = False
+    for m in _SELF_COMMIT_TASK_RE.finditer(task):
+        # Look back a short window on the same line for a negation / a
+        # "Lead does it" subject; either one makes this occurrence policy
+        # boilerplate, not an instruction to the pane.
+        prefix = task[max(0, m.start() - 24) : m.start()]
+        prefix = prefix.rsplit("\n", 1)[-1]
+        if _SELF_COMMIT_NEGATION_RE.search(prefix):
+            continue
+        real_match = True
+        break
+    if not real_match:
         return ""
     return (
         "\n⚠️ task นี้ดูเหมือนสั่งให้ pane commit เอง แต่ isolation เป็น shared — "
@@ -2064,32 +2087,52 @@ def cmd_report(args: argparse.Namespace) -> dict:
 
     # Handle build action (doesn't need remote reports)
     if action == "build":
-        from agent_takkub.report_builder import ReportBuilder
+        from agent_takkub.report_builder import (
+            LINT_TEXT_ONLY_DISCLAIMER,
+            ReportBuilder,
+            size_warning,
+        )
 
         try:
-            builder = ReportBuilder(args.type, args.content)
+            builder = ReportBuilder(
+                args.type, args.content, max_width=int(getattr(args, "max_width", 1440) or 1440)
+            )
 
-            # Lint if requested
+            # Lint if requested — blockers abort; warnings print and continue;
+            # every lint run states the text-only limitation (#676).
+            lint_warn_lines: list[str] = []
             if args.lint:
-                issues = builder.lint_customer()
-                if issues:
+                blockers, warnings = builder.lint_customer_full()
+                if blockers:
                     lines = ["Linting issues found:"]
-                    for issue in issues:
+                    for issue in blockers:
                         lines.append(f"  - {issue}")
+                    for issue in warnings:
+                        lines.append(f"  - (warn) {issue}")
+                    lines.append(LINT_TEXT_ONLY_DISCLAIMER)
                     return {"ok": False, "msg": "\n".join(lines)}
+                if warnings:
+                    lint_warn_lines = [f"lint warn: {issue}" for issue in warnings]
+                lint_warn_lines.append(LINT_TEXT_ONLY_DISCLAIMER)
 
             # Build report
             html = builder.build(title=args.title)
+
+            size_note = size_warning(html, int(getattr(args, "max_bytes", 0) or 4 * 1024 * 1024))
 
             # Output
             if args.out:
                 Path(args.out).write_text(html, encoding="utf-8")
                 size_kb = round(len(html.encode("utf-8")) / 1024)
-                return {
-                    "ok": True,
-                    "msg": f"Built {args.type} report\nWrote {args.out} ({size_kb} KB)",
-                }
+                msg_lines = [f"Built {args.type} report", f"Wrote {args.out} ({size_kb} KB)"]
+                msg_lines.extend(lint_warn_lines)
+                if size_note:
+                    msg_lines.append(size_note)
+                return {"ok": True, "msg": "\n".join(msg_lines)}
             else:
+                for _ln in (*lint_warn_lines, size_note):
+                    if _ln:
+                        print(_ln, file=sys.stderr)
                 return {"ok": True, "msg": html}
         except Exception as e:
             return {"ok": False, "msg": f"build failed: {e}"}
@@ -2197,12 +2240,26 @@ def cmd_report(args: argparse.Namespace) -> dict:
             lines = [status_line]
             if not records:
                 lines.append("(no active published reports)")
+            relinked = 0
             for r in records:
                 url = _url(r.name, r.token)
                 if not url:
                     continue
+                relinked += 1
                 lines.append(f"  {r.name}  label={r.label or '-'}")
                 lines.append(f"    {url}")
+            # (#674) Remote off / secret reset → build_url returns "" for every
+            # record and the loop above emits nothing — reporting ok:True there
+            # said "success" for a command that did no work at all (and the
+            # notice that suggests relink fires exactly when Remote just went
+            # off). Fail loudly and say what to do instead.
+            if records and relinked == 0:
+                lines.append(
+                    f"ออกลิงก์ใหม่ไม่ได้เลย (report รออยู่ {len(records)} ฉบับ) — "
+                    "Remote ปิดอยู่/secret ยังไม่ถูกออกใหม่ ให้เปิด Remote ก่อน "
+                    "(เปิดคอกพิต → Settings → Remote) แล้วค่อยรัน `takkub report relink` ซ้ำ"
+                )
+                return {"ok": False, "msg": "\n".join(lines)}
             return {"ok": True, "msg": "\n".join(lines)}
         if action == "revoke":
             existed = reports_mod.revoke(args.name, project, delete=bool(args.delete))
@@ -2503,6 +2560,10 @@ def _print_status_report(report: object) -> None:
         # waiting-delivery/busy/unknown verdict — falls back to the raw
         # state for a report predating this key.
         state = info.get("display_state", info.get("state", "?"))
+        # #680: a done report still queued toward Lead reads "done (unread)"
+        # so Lead can tell a fresh unread report from an already-read done.
+        if info.get("done_unread") and "done" in str(state):
+            state = f"{state} (unread — รายงานยังไม่ถึง Lead pane)"
         stall = info.get("stall_minutes")
         human_ts = info.get("last_progress_human", "?")
         abs_ts = info.get("last_progress_abs", "?")
@@ -2566,6 +2627,7 @@ _INBOX_QUEUE_LABEL = {
     "live": "live (ready-prompt delivery queue)",
     "durable": "durable (survives a restart)",
     "cancelled": "cancelled (delivery ถูกยกเลิก)",
+    "missing": "missing (รายงานเขียนแล้วแต่หลุดจากคิวส่ง — #678)",
 }
 
 
@@ -5744,6 +5806,25 @@ def build_parser() -> argparse.ArgumentParser:
     sr_build.add_argument(
         "--lint", action="store_true", help="check content for issues before building"
     )
+    sr_build.add_argument(
+        "--max-width",
+        dest="max_width",
+        type=int,
+        default=1440,
+        metavar="PX",
+        help="maximum embedded-image width in pixels (default 1440) (#676)",
+    )
+    sr_build.add_argument(
+        "--max-bytes",
+        dest="max_bytes",
+        type=int,
+        default=4 * 1024 * 1024,
+        metavar="BYTES",
+        help=(
+            "warn (never fail) when the built HTML exceeds this size "
+            "(default 4194304 = 4 MB) (#676)"
+        ),
+    )
     sr_build.set_defaults(func=cmd_report)
 
     # Removal cleanup (docs/plans/remove-openviking-2026-08-24/) — reclaim a
@@ -6188,6 +6269,17 @@ def build_parser() -> argparse.ArgumentParser:
     sin.add_argument("--tag", default=None, metavar="a,b,c", help="comma-separated tags")
     sin.add_argument(
         "--body", default=None, metavar="TEXT", help="body text (opens $EDITOR if omitted on TTY)"
+    )
+    sin.add_argument(
+        "--body-file",
+        dest="body_file",
+        default=None,
+        metavar="PATH",
+        help=(
+            'read body text from a file, or "-" for stdin — bypasses shell '
+            "interpolation entirely, so backticks/$() in the body survive "
+            "byte-for-byte (#679; same contract as assign --task-file)"
+        ),
     )
     sin.add_argument(
         "--cockpit-bug",
