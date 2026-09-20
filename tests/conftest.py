@@ -353,6 +353,7 @@ _RUNTIME_DIR_MODULES = (
     "agent_takkub.tutorial_overlay",
     "agent_takkub.update_worker",
     "agent_takkub.disk_usage",
+    "agent_takkub.project_memory",  # #687 central memory, copies RUNTIME_DIR at import time
 )
 _EVENTS_LOG_MODULES = (
     "agent_takkub.config",
