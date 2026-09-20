@@ -97,6 +97,38 @@ class TestBacklogCommand:
         assert not ok and "role" in msg
 
 
+class TestDispatchToLead:
+    def _orch_with_inject(self):
+        from agent_takkub.orchestrator import Orchestrator
+
+        orch = _FakeOrch()
+        orch._backlog_dispatch_to_lead = Orchestrator._backlog_dispatch_to_lead.__get__(orch)
+        orch.injected = []
+        orch.inject_lead_prompt = lambda prompt, project=None: orch.injected.append(prompt) or True
+        return orch
+
+    def test_dispatch_injects_one_ordered_prompt(self, runtime) -> None:
+        orch = self._orch_with_inject()
+        _ok, _m, p1 = orch.backlog_command("add", {"title": "งานแรก"}, project="p")
+        _ok, _m, p2 = orch.backlog_command("add", {"title": "งานสอง"}, project="p")
+        ok, _msg, payload = orch.backlog_command(
+            "dispatch", {"ids": [p2["id"], p1["id"]]}, project="p"
+        )
+        assert ok and payload["count"] == 2
+        assert len(orch.injected) == 1
+        prompt = orch.injected[0]
+        # picked order preserved: p2 before p1
+        assert prompt.index("งานสอง") < prompt.index("งานแรก")
+        # Lead is told to route itself and keep the card linkage
+        assert "takkub backlog assign" in prompt
+        assert "role" in prompt
+
+    def test_dispatch_empty_ids_fails(self, runtime) -> None:
+        orch = self._orch_with_inject()
+        ok, _msg, _p = orch.backlog_command("dispatch", {"ids": []}, project="p")
+        assert not ok
+
+
 class TestOrderedSelection:
     def test_preserves_click_order(self) -> None:
         items = [{"id": "a"}, {"id": "b"}, {"id": "c"}]

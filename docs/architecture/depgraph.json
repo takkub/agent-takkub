@@ -293,14 +293,13 @@
       "module": "agent_takkub.backlog_dialog",
       "imports": [
         "agent_takkub.backlog",
-        "agent_takkub.cockpit_theme",
-        "agent_takkub.roles"
+        "agent_takkub.cockpit_theme"
       ],
       "imported_by": [
         "agent_takkub.main_window"
       ],
       "fan_in": 1,
-      "fan_out": 3
+      "fan_out": 2
     },
     {
       "module": "agent_takkub.bg_pool",
@@ -4352,7 +4351,6 @@
       "imported_by": [
         "agent_takkub.agent_pane",
         "agent_takkub.agent_pane_model",
-        "agent_takkub.backlog_dialog",
         "agent_takkub.custom_roles",
         "agent_takkub.doctor",
         "agent_takkub.headless_pane",
@@ -4374,7 +4372,7 @@
         "agent_takkub.spawn_engine",
         "agent_takkub.team_preset"
       ],
-      "fan_in": 23,
+      "fan_in": 22,
       "fan_out": 0
     },
     {

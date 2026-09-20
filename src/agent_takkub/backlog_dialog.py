@@ -19,7 +19,6 @@ from __future__ import annotations
 from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import (
     QCheckBox,
-    QComboBox,
     QDialog,
     QHBoxLayout,
     QLabel,
@@ -134,11 +133,9 @@ class BacklogDialog(QDialog):
         footer.addWidget(self._pick_lbl)
         footer.addStretch(1)
 
-        footer.addWidget(QLabel("assign ให้:"))
-        self._role_combo = QComboBox(self)
-        self._role_combo.addItems(self._roles())
-        footer.addWidget(self._role_combo)
-
+        # (owner 2026-09-20) no role picker here — sizing/routing is the
+        # Lead's job. ตกลง hands the picked items to the Lead, which chooses
+        # who does what and fires `takkub backlog assign` itself.
         self._btn_defer = cockpit_theme.secondary_button("พักไว้", self)
         self._btn_defer.clicked.connect(lambda: self._quick("defer"))
         footer.addWidget(self._btn_defer)
@@ -153,14 +150,6 @@ class BacklogDialog(QDialog):
 
         self._filter_btns[""].setChecked(True)
         self._refresh_order_ui()
-
-    def _roles(self) -> list[str]:
-        try:
-            from .roles import all_role_names
-
-            return [r for r in all_role_names(include_lead=False)]
-        except Exception:
-            return ["frontend", "backend", "devops", "qa"]
 
     # ── data ────────────────────────────────────────────────────────────────
     def _reload(self) -> None:
@@ -250,18 +239,19 @@ class BacklogDialog(QDialog):
         self._reload()
 
     def _confirm(self) -> None:
-        role = self._role_combo.currentText().strip()
         if self._order_mode:
             ids = list(self._picked)
         else:
             cur = self._current_id()
             ids = [cur] if cur else []
-        for item in ordered_selection(ids, self._items):
-            self._orch.backlog_command(
-                "assign",
-                {"id": item["id"], "role": role, "from": "lead"},
-                project=self._project,
-            )
+        ordered = [it["id"] for it in ordered_selection(ids, self._items)]
+        if not ordered:
+            return
+        # Hand the picked items to the Lead in the picked order — the Lead
+        # sizes/routes each one itself (no role picker here by owner request).
+        self._orch.backlog_command(
+            "dispatch", {"ids": ordered, "from": "lead"}, project=self._project
+        )
         self.accept()
 
     def _center_on_parent(self) -> None:

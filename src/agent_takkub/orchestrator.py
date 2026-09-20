@@ -10943,6 +10943,8 @@ class Orchestrator(
                 return self._backlog_result(item, req)
             if verb == "assign":
                 return self._backlog_assign(project_ns, req)
+            if verb == "dispatch":
+                return self._backlog_dispatch_to_lead(project_ns, req)
             if verb == "import":
                 created = backlog.import_markdown(
                     project_ns, req.get("text", ""), source=req.get("source", "")
@@ -10962,6 +10964,33 @@ class Orchestrator(
         if item is None:
             return False, f"ไม่พบ backlog id {req.get('id')}", {}
         return True, f"[{item['id']}] → {item['status']}", {"id": item["id"]}
+
+    def _backlog_dispatch_to_lead(self, project_ns: str, req: dict) -> tuple[bool, str, dict]:
+        """(#684 owner refinement) the popup's ตกลง hands the picked items to
+        the LEAD, in the picked order — the owner explicitly does not choose a
+        role ("เดี๋ยว lead จัดการ รู้เองว่างานนี้จะสั่งใครทำ"): sizing and
+        routing are the Lead's job, same as every other task in the cockpit.
+        The Lead is told to use `takkub backlog assign <id> --role <role>` so
+        the card↔ledger linkage (doing → review on done) stays intact.
+        Delivered live when the Lead pane is up, queued for its next spawn
+        otherwise (inject_lead_prompt's own contract)."""
+        from . import backlog
+
+        ids = [i for i in (req.get("ids") or []) if i]
+        items = [it for it in (backlog.get_item(project_ns, i) for i in ids) if it is not None]
+        if not items:
+            return False, "ไม่มีรายการที่เลือก", {}
+        lines = [
+            "📋 [backlog] เจ้าของเลือกงานจาก Backlog ให้ทำ ตามลำดับนี้ "
+            "(ประเมินขนาด+เลือก role เองตามปกติ แล้วสั่งด้วย "
+            "`takkub backlog assign <id> --role <role>` ทีละใบตามลำดับ — "
+            "คำสั่งนี้ผูกการ์ดกับ ledger ให้เอง ห้ามใช้ assign ตรง):",
+        ]
+        for n, it in enumerate(items, 1):
+            lines.append(f"\n{n}. [{it['id']}] {self._compose_backlog_task(it)}")
+        delivered = self.inject_lead_prompt("\n".join(lines), project=project_ns)
+        state = "ส่งให้ Lead แล้ว" if delivered else "คิวไว้ให้ Lead ตัวถัดไป (Lead ยังไม่เปิด)"
+        return True, f"{state} · {len(items)} งานตามลำดับ", {"count": len(items)}
 
     def _backlog_assign(self, project_ns: str, req: dict) -> tuple[bool, str, dict]:
         from . import backlog
