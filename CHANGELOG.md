@@ -2,6 +2,28 @@
 
 All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses [SemVer](https://semver.org/).
 
+## [v2.1.25] - 2026-09-20
+
+### Fixed (แก้ — เจอจาก live test v2.1.24 บน dev)
+
+- **backlog: read-after-write stale ในโปรเซสเดียวกัน** — `backlog block` แล้ว `backlog list --status blocked`
+  ทันทีคืน 0 รายการ ทั้งที่ store บนดิสก์ถูกต้อง: fast-path ≤3s ของ `cached_read` (#658) เสิร์ฟ parse เก่า
+  โดยไม่ stat และ contract ของมันระบุว่า in-process writer ต้องเรียก `invalidate()` เอง — `backlog._save`
+  ไม่ได้เรียก (บทเรียนเดิม "facade cache = writer ต้อง invalidate" ซ้ำรอย) → เรียกแล้ว + เทสจำลองหน้าต่าง
+  stale แบบ deterministic
+- **backlog list: บรรทัดผี `[?] · ?` งอกท้ายผลลัพธ์** — `cli.main()` มี generic renderer ที่จับ payload
+  ทุกตัวที่มี key `items` ไปพิมพ์ผ่าน printer ของ `takkub inbox` (แถม list ว่างพิมพ์ "(nothing pending —
+  every report has been delivered)") — เปลี่ยน key เป็น `backlog_items` + เทสกันถอยห้ามใช้ key `items`
+
+### Notes จาก live test (บันทึกเข้า backlog บน dev แล้ว — ของเดิมก่อน batch นี้ ไม่ใช่ regression)
+
+- `takkub harvest` รัน `scan_artifacts` sync บน Qt main thread → repo ใหญ่ค้าง ~60s CLI timeout ทั้งระบบ
+  (เห็น `main_thread_stall` ใน events.log) — backlog id f08162bc
+- `takkub send` เติม prefix `[lead → role]` → PowerShell ใน shell pane ตีเป็น type literal ParserError
+  ส่งคำสั่ง runnable เข้า shell pane ไม่ได้ — backlog id 9124dbac
+- ยืนยันจากจอจริง: #686 preview สะอาด (Lead + shell pane) · #685 ack โชว์ scope+เหตุผล · guard
+  `pane_poll_loop` ทำงาน · team-preset 'ทำเอง' บล็อก assign role อื่นตามดีไซน์
+
 ## [v2.1.24] - 2026-09-20
 
 ### Changed (เปลี่ยนพฤติกรรม)

@@ -119,7 +119,15 @@ def load(project: str) -> dict:
 
 def _save(project: str, store: dict) -> None:
     store["schema_version"] = SCHEMA_VERSION
-    _atomic_write(_store_path(project), json.dumps(store, ensure_ascii=False, indent=2))
+    path = _store_path(project)
+    _atomic_write(path, json.dumps(store, ensure_ascii=False, indent=2))
+    # cached_read's contract (#658): its ≤3s no-stat fast path makes an
+    # in-process writer's save invisible to its own next read unless the
+    # writer invalidates. Caught live 2026-09-20: `backlog block` then an
+    # immediate `backlog list --status blocked` returned 0 items.
+    from .cached_read import invalidate
+
+    invalidate(path)
 
 
 def list_items(project: str, *, status: str | None = None) -> list[dict]:

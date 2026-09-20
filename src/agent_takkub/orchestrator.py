@@ -10913,7 +10913,11 @@ class Orchestrator(
                     "ok",
                     {
                         "lines": [backlog.render_line(it) for it in items],
-                        "items": items,
+                        # NOT "items": cli.main()'s generic response renderer
+                        # treats any payload carrying an `items` key as
+                        # `takkub inbox` pending reports and prints each dict
+                        # as "[?] · ?" (caught live 2026-09-20).
+                        "backlog_items": items,
                         "done": done,
                         "total": total,
                     },

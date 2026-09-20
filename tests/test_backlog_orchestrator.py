@@ -61,6 +61,11 @@ class TestBacklogCommand:
         assert ok2
         assert any(item_id in ln for ln in p2["lines"])
         assert p2["total"] == 1
+        # Live-caught 2026-09-20: cli.main() renders ANY payload carrying an
+        # `items` key through the takkub-inbox printer ("[?] · ?" per dict).
+        # The backlog list payload must never use that key.
+        assert "items" not in p2
+        assert isinstance(p2["backlog_items"], list)
 
     def test_block_needs_reason(self, runtime) -> None:
         orch = _FakeOrch()

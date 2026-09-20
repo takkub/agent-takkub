@@ -109,6 +109,32 @@ class TestMarkdownImport:
         assert backlog.parse_markdown_table(md) == []
 
 
+class TestWriterInvalidatesReadCache:
+    def test_status_change_visible_through_cache_fast_path(
+        self, store, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Live-caught 2026-09-20: `backlog block` then an immediate
+        `backlog list --status blocked` returned 0 items — cached_read's ≤3s
+        no-stat fast path served the pre-write parse because `_save` didn't
+        invalidate. Reproduce the exact window deterministically: age the
+        file past _RECENT_WRITE_S, prime the cache (hit stored with
+        recent=False), write, read immediately."""
+        import os as _os
+        import time as _time
+
+        it = backlog.add_item("proj", "จะโดน block")
+        # age the store so the priming stat sees a non-recent file
+        p = backlog._store_path("proj")
+        old = _time.time() - 30
+        _os.utime(p, (old, old))
+        backlog.load("proj")  # primes the ≤3s no-stat fast path
+
+        backlog.block("proj", it["id"], "เหตุผล")
+
+        got = backlog.list_items("proj", status="blocked")
+        assert [x["id"] for x in got] == [it["id"]]
+
+
 class TestAge:
     def test_age_days(self, store) -> None:
         import time

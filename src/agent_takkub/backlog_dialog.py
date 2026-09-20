@@ -156,7 +156,7 @@ class BacklogDialog(QDialog):
         ok, _msg, payload = self._orch.backlog_command(
             "list", {"status": self._filter, "from": "lead"}, project=self._project
         )
-        self._items = payload.get("items", []) if ok else []
+        self._items = payload.get("backlog_items", []) if ok else []
         done = payload.get("done", 0)
         total = payload.get("total", 0)
         self._progress_lbl.setText(f"{done}/{total} เสร็จ")
