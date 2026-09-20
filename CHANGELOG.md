@@ -2,6 +2,33 @@
 
 All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses [SemVer](https://semver.org/).
 
+## [v2.1.24] - 2026-09-20
+
+### Changed (เปลี่ยนพฤติกรรม)
+
+- **#683 — pane ไม่ถูกถือค้างหลังงานจบอีกต่อไป (default flip)**: ตามที่เจ้าของสั่ง "ยังไงก็ได้ ต้องไม่เปิดค้างไว้
+  ทุกทาง" — `TAKKUB_CLOSE_ON_DONE` เปลี่ยน default เป็นปิด (เดิม keep-alive 2.1.17 ถือ pane ค้าง 30 นาที
+  กิน ~360MB โดยไม่ได้อุ่น prompt cache จริง เพราะ cache อยู่ฝั่ง API ไม่ใช่ในโปรเซส) การปิดถูกขับด้วย timer
+  ของ pane เอง **ไม่ผูกกับการที่ Lead ได้รับรายงาน done** — จึงปิดครบแม้รายงานหลุดคิวส่ง (#678 เคสที่เจ้าของ
+  เจอสด) · ค่า boot ที่ keep-alive เคยประหยัดถูกแทนด้วย **resume ด้วย session id**: `close()` แบบ done-driven
+  (`preserve_resume=True`) เก็บ session uuid ไว้ข้าม pop + arm `_recent_exits` → assign ถัดไปของ role เดิม
+  ภายใน `TAKKUB_RESUME_WINDOW_S` (default 5 นาที = prompt-cache TTL) rejoin conversation เดิมด้วย `--resume`
+  แทน cold boot · การปิดแบบ manual/user, provider-switch, quota-reroute ยังได้ session ใหม่ (preserve_resume
+  ไม่ตั้ง) · ตั้ง `TAKKUB_CLOSE_ON_DONE=0` เพื่อกลับไป keep-alive สำหรับเครื่องแรมเยอะ · pane ที่หมดรอบ
+  auto-respawn (ship ใน 2.1.23) ยัง close ตามเดิม
+
+### Added (เพิ่ม)
+
+- **#684 — Project Backlog (popup กลางจอ)**: ที่เก็บงานที่ "เจอแล้วยังไม่ได้สั่งทำ" ข้ามเซสชัน แยกจาก Task
+  Ledger (ledger = งานที่วิ่งอยู่ · backlog = ของที่ยังไม่ได้ทำ) เก็บที่ `runtime/backlog/<project>/backlog.json`
+  · **ปุ่ม 📋 Tasks เปิด popup กลางจอ** (แทน dock เดิม ที่ย้ายไป Ctrl+Shift+T): การ์ดรายการทางซ้าย +
+  รายละเอียดทางขวา + แถบชิปกรองตามสถานะ + แถบความคืบหน้า · **โหมดเลือกลำดับงาน**: ติ๊ก
+  checkbox แล้วคลิกการ์ดเพื่อเรียงลำดับ (โชว์เลข ⟨1⟩⟨2⟩) → กด **ตกลง** ยิง `takkub assign` ตามลำดับที่เลือก
+  พร้อม role picker · สถานะครบ: ยังไม่ทำ/กำลังทำ/รอยืนยัน/รอเจ้าของ/ติดอยู่/พักไว้/เสร็จ/ตั้งใจไม่ทำ · เมื่อ pane
+  รายงาน done งานที่สั่งจากการ์ดเด้งเป็น "รอยืนยัน" อัตโนมัติ (ไม่ปิดเงียบ) · **CLI ครบ**: `takkub backlog
+  add/list/show/done/block/defer/status/assign/import` — `import` ดูดตาราง markdown (คอลัมน์ไทย+อังกฤษ)
+  จากรายงานตรวจเข้ามาทีเดียว ไม่ต้องพิมพ์ซ้ำ · เพิ่ม `Ctrl+Shift+B` เปิด popup จากคีย์บอร์ด
+
 ## [v2.1.23] - 2026-09-20
 
 ### Fixed (แก้)

@@ -173,7 +173,11 @@ class TestDoneKeptPaneHygiene:
     def test_done_state_does_not_arm_auto_clear_in_reuse_mode(self, qapp, monkeypatch):
         from agent_takkub import agent_pane as ap_mod
 
+        # (#683) default flipped: close-on-done is now the default; keep-alive
+        # (reuse mode) is the explicit opt-out TAKKUB_CLOSE_ON_DONE=0.
         monkeypatch.delenv("TAKKUB_CLOSE_ON_DONE", raising=False)
+        assert ap_mod._close_on_done_env() is True
+        monkeypatch.setenv("TAKKUB_CLOSE_ON_DONE", "0")
         assert ap_mod._close_on_done_env() is False
         monkeypatch.setenv("TAKKUB_CLOSE_ON_DONE", "1")
         assert ap_mod._close_on_done_env() is True
@@ -185,7 +189,8 @@ class TestDoneKeptPaneHygiene:
         from agent_takkub import agent_pane as ap_mod
         from agent_takkub.roles import Role
 
-        monkeypatch.delenv("TAKKUB_CLOSE_ON_DONE", raising=False)
+        # (#683) keep-alive is now the opt-out mode — set it explicitly.
+        monkeypatch.setenv("TAKKUB_CLOSE_ON_DONE", "0")
         pane = ap_mod.AgentPane.__new__(ap_mod.AgentPane)
         pane.role = Role(name="backend", label="Backend", color="#fff", column=1, row=0)
         pane.model = MagicMock()

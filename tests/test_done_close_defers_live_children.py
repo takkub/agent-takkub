@@ -116,7 +116,7 @@ class TestDoneCloseDefersForLiveChildren:
         ):
             close_cb()  # fire the 2.5s auto-close callback
 
-        close_mock.assert_called_once_with("devops", project=TEST_PROJECT)
+        close_mock.assert_called_once_with("devops", project=TEST_PROJECT, preserve_resume=True)
 
     def test_live_children_defer_close_and_notify_lead_once(self, orch: Orchestrator) -> None:
         timers: list = []
@@ -176,7 +176,7 @@ class TestDoneCloseDefersForLiveChildren:
             patch.object(orch, "close") as close_mock2,
         ):
             poll_cb()
-        close_mock2.assert_called_once_with("backend", project=TEST_PROJECT)
+        close_mock2.assert_called_once_with("backend", project=TEST_PROJECT, preserve_resume=True)
 
     def test_grace_period_expiry_falls_back_to_kill(
         self, orch: Orchestrator, monkeypatch: pytest.MonkeyPatch
@@ -215,7 +215,10 @@ class TestDoneCloseDefersForLiveChildren:
             # must suppress `_warn_if_live_children`'s own notice so this
             # episode produces one Lead message total, not two.
             final_close_mock.assert_called_once_with(
-                "frontend", project=TEST_PROJECT, suppress_live_children_warning=True
+                "frontend",
+                project=TEST_PROJECT,
+                suppress_live_children_warning=True,
+                preserve_resume=True,
             )
 
     def test_reassigned_pane_aborts_deferred_close(self, orch: Orchestrator) -> None:
@@ -274,7 +277,7 @@ class TestDoneCloseSurvivesNaturalExit:
         ):
             close_cb()
 
-        close_mock.assert_called_once_with("devops", project=TEST_PROJECT)
+        close_mock.assert_called_once_with("devops", project=TEST_PROJECT, preserve_resume=True)
 
     def test_genuine_respawn_with_new_session_still_aborts_close(self, orch: Orchestrator) -> None:
         timers: list = []

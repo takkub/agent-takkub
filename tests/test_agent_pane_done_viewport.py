@@ -75,9 +75,18 @@ def _fake_terminal(monkeypatch):
     monkeypatch.setattr(agent_pane_mod, "TerminalWidget", _FakeTerminalWidget)
 
 
+@pytest.fixture(autouse=True)
+def _keep_mode(monkeypatch):
+    # #671 is a keep-alive-mode behaviour ("a kept-alive done pane keeps its
+    # terminal"). Close-on-done is now the default (#683), so pin keep mode
+    # explicitly here.
+    monkeypatch.setenv("TAKKUB_CLOSE_ON_DONE", "0")
+
+
 def _make_pane() -> AgentPane:
     pane = AgentPane(by_name("backend"))
     pane._idle_clear_timer.stop()
+    pane._done_clear_timer.stop()
     return pane
 
 

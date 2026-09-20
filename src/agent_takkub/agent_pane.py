@@ -64,9 +64,10 @@ _DISCARD_STREAMING_GUARD_S = 10
 
 
 def _close_on_done_env() -> bool:
-    """Same knob orchestrator.CLOSE_ON_DONE reads (duplicated here — this
+    """Same knob orchestrator.CLOSE_ON_DONE reads (default flipped to close
+    per #683; duplicated here — this
     module must not import orchestrator)."""
-    return os.environ.get("TAKKUB_CLOSE_ON_DONE", "0").strip() == "1"
+    return os.environ.get("TAKKUB_CLOSE_ON_DONE", "1").strip() == "1"
 
 
 def _env_pane_discard_override(persisted: bool) -> bool:
@@ -523,12 +524,13 @@ class AgentPane(QFrame):
         # auto-cleared — it's the user's main screen and manages its own
         # context via /compact.
         if state == "done" and self.role.name != LEAD.name and _close_on_done_env():
-            # Pane reuse (2.1.19, #667/#664 follow-up): with panes kept alive
-            # after `done` (the default), clearing the view left a live pane
-            # showing a dead-looking black screen for its whole keep window —
-            # the transcript stays readable now. The clear only still runs in
-            # the opt-in TAKKUB_CLOSE_ON_DONE=1 mode where the pane is about
-            # to vanish anyway.
+            # Close-on-done is now the default (#683): the pane is about to
+            # vanish, so clearing the view first avoids a flash of stale
+            # transcript. In the opt-out keep-alive mode
+            # (TAKKUB_CLOSE_ON_DONE=0) the pane lingers, so the clear is
+            # skipped and the transcript stays readable for its keep window
+            # (#667/#664 — a cleared live pane showed a dead-looking black
+            # screen the whole time).
             self._pending_auto_clear = False
             self._done_clear_timer.start(_DONE_AUTO_CLEAR_DELAY_MS)
         else:

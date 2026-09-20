@@ -1214,6 +1214,23 @@ class MainWindow(
         dock.setFloating(False)
 
     def _on_toggle_tasks(self, checked: bool | None = None) -> None:
+        # #684: the 📋 Tasks button now opens the Backlog popup (center-screen)
+        # — the owner's planning surface for noticed-but-not-done work, with a
+        # pick-order mode that fires assigns in the chosen order. The old
+        # right-hand Task-tree dock stays available via Ctrl+Shift+T (it shows
+        # RUNNING work from the ledger, a different view).
+        self._open_backlog_dialog()
+
+    def _open_backlog_dialog(self) -> None:
+        from .backlog_dialog import BacklogDialog
+
+        project = self._active_project_name()
+        if not project:
+            return
+        dlg = BacklogDialog(self.orch, project, parent=self)
+        dlg.exec()
+
+    def _toggle_tasks_dock(self, checked: bool | None = None) -> None:
         if checked is None:
             checked = not self._tasks_dock.isVisible()
         self._tasks_dock.setVisible(checked)
@@ -1285,10 +1302,14 @@ class MainWindow(
         QShortcut(QKeySequence("Ctrl+Shift+L"), self).activated.connect(
             lambda: self._on_toggle_logs(None)
         )
-        # Ctrl+Shift+T toggles the right-hand Task Tree dock (A8).
+        # Ctrl+Shift+T toggles the right-hand Task Tree dock (A8 — running
+        # work); the 📋 Tasks button opens the Backlog popup (#684 — planned
+        # work). Two different views, deliberately on different triggers.
         QShortcut(QKeySequence("Ctrl+Shift+T"), self).activated.connect(
-            lambda: self._on_toggle_tasks(None)
+            lambda: self._toggle_tasks_dock(None)
         )
+        # Ctrl+Shift+B opens the Backlog popup from the keyboard too.
+        QShortcut(QKeySequence("Ctrl+Shift+B"), self).activated.connect(self._open_backlog_dialog)
 
     # ──────────────────────────────────────────────────────────────
     # project switcher

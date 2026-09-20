@@ -132,18 +132,91 @@ class TestDoneKeepsPane:
         assert orch.done("backend", note="first finished", project=TEST_PROJECT)[0]
         return scheduled, key
 
-    def test_default_keeps_pane_alive_and_stamps_kept_since(self, orch, monkeypatch, tmp_path):
+    def test_keep_mode_keeps_pane_alive_and_stamps_kept_since(self, orch, monkeypatch, tmp_path):
+        # (#683) keep-alive is now the opt-out mode (TAKKUB_CLOSE_ON_DONE=0).
         monkeypatch.setattr(orch_mod, "CLOSE_ON_DONE", False)
         scheduled, key = self._finish(orch, monkeypatch, tmp_path)
         assert not any(ms == 2_500 for ms, _cb in scheduled)
         assert orch._ps(key).done_kept_since > 0
         assert orch._panes_by_project[TEST_PROJECT]["backend"].state == "done"
 
-    def test_env_opt_in_restores_auto_close(self, orch, monkeypatch, tmp_path):
+    def test_default_close_mode_schedules_auto_close(self, orch, monkeypatch, tmp_path):
+        # (#683) close-on-done is the default: the 2.5 s close timer fires.
         monkeypatch.setattr(orch_mod, "CLOSE_ON_DONE", True)
         scheduled, key = self._finish(orch, monkeypatch, tmp_path)
         assert any(ms == 2_500 for ms, _cb in scheduled)
         assert orch._ps(key).done_kept_since == 0.0
+
+    def test_close_on_done_defaults_on_when_env_unset(self, monkeypatch):
+        # (#683 owner requirement) the shipped default must be close, not
+        # keep — an opt-in close would never get used (#641 lesson).
+        import os as _os
+
+        monkeypatch.delenv("TAKKUB_CLOSE_ON_DONE", raising=False)
+        assert _os.environ.get("TAKKUB_CLOSE_ON_DONE", "1").strip() == "1"
+        from agent_takkub import agent_pane as ap_mod
+
+        assert ap_mod._close_on_done_env() is True
+
+
+class TestCloseArmsResumeWindow683:
+    """#683: the done-driven close (preserve_resume=True) must leave behind
+    exactly what spawn()'s auto-resume check needs — the popped PaneState's
+    session uuid reseeded under the same key, plus a fresh `_recent_exits`
+    stamp. A manual/user close (preserve_resume=False) must NOT, so the
+    user's next assign cold-boots a genuinely fresh session."""
+
+    UUID = "11111111-2222-3333-4444-555555555555"
+
+    def test_preserve_resume_reseeds_uuid_and_stamps_recent_exit(self, orch, tmp_path):
+        key = _exit_key(TEST_PROJECT, "backend")
+        pane = _pane("done", str(tmp_path), at_prompt=True)
+        orch._panes_by_project.setdefault(TEST_PROJECT, {})["backend"] = pane
+        ps = orch._ps(key)
+        ps.session_uuid = self.UUID
+        ps.session_uuid_cwd = str(tmp_path)
+
+        ok, _msg = orch.close("backend", project=TEST_PROJECT, preserve_resume=True)
+
+        assert ok
+        seeded = orch._pane_state.get(key)
+        assert seeded is not None
+        assert seeded.session_uuid == self.UUID
+        assert seeded.session_uuid_cwd == str(tmp_path)
+        exit_rec = orch._recent_exits.get(key)
+        assert exit_rec is not None
+        assert exit_rec["cwd"] == str(tmp_path)
+        assert time.time() - exit_rec["ts"] < 5
+
+    def test_manual_close_discards_uuid(self, orch, tmp_path):
+        # A user/manual close (no preserve_resume) keeps the pre-#683
+        # contract: uuid dies with the pop, next assign is fresh.
+        key = _exit_key(TEST_PROJECT, "reviewer")
+        pane = _pane("done", str(tmp_path), at_prompt=True)
+        orch._panes_by_project.setdefault(TEST_PROJECT, {})["reviewer"] = pane
+        ps = orch._ps(key)
+        ps.session_uuid = self.UUID
+        ps.session_uuid_cwd = str(tmp_path)
+
+        ok, _msg = orch.close("reviewer", project=TEST_PROJECT)
+
+        assert ok
+        assert key not in orch._recent_exits
+        seeded = orch._pane_state.get(key)
+        assert seeded is None or seeded.session_uuid is None
+
+    def test_preserve_resume_without_uuid_leaves_no_resume_state(self, orch, tmp_path):
+        key = _exit_key(TEST_PROJECT, "qa")
+        pane = _pane("done", str(tmp_path), at_prompt=True)
+        orch._panes_by_project.setdefault(TEST_PROJECT, {})["qa"] = pane
+        orch._ps(key)  # no uuid ever recorded
+
+        ok, _msg = orch.close("qa", project=TEST_PROJECT, preserve_resume=True)
+
+        assert ok
+        assert key not in orch._recent_exits
+        seeded = orch._pane_state.get(key)
+        assert seeded is None or seeded.session_uuid is None
 
 
 class TestReapDonePanes:

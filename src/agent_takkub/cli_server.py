@@ -498,7 +498,11 @@ class CliServer(QObject):
         # not "lead", reject lifecycle commands immediately.  This blocks
         # confused teammate panes that open the TCP socket directly and try to
         # call assign/spawn/close without the lead token (Gap B hardening).
-        if cmd in _LEAD_ONLY_CMDS:
+        # #684: every backlog verb is Lead's planning surface (and
+        # backlog-assign fires a real assign), so gate them like the rest —
+        # exact-set membership can't express the family, so add the prefix.
+        _is_lead_only = cmd in _LEAD_ONLY_CMDS or cmd.startswith("backlog-")
+        if _is_lead_only:
             from_role = (req.get("from") or "").lower().strip()
             if from_role != "lead":
                 self._reply(sock, ok=False, msg=f"role gate: only lead can {cmd}")
@@ -508,7 +512,7 @@ class CliServer(QObject):
         # process that spoofs `from: "lead"` cannot proceed without the token
         # injected into the Lead pane's env by the orchestrator.
         # secrets.compare_digest prevents timing-side-channel attacks.
-        if cmd in _LEAD_ONLY_CMDS:
+        if _is_lead_only:
             lead_token = getattr(self._orch, "_lead_token", None)
             caller_auth = req.get("auth") or ""
             if not lead_token or not secrets.compare_digest(
@@ -1563,6 +1567,14 @@ class CliServer(QObject):
                     req.get("role", ""),
                     project=from_project,
                 )
+            elif cmd.startswith("backlog-"):
+                # #684: project backlog verbs. All resolve project the same way
+                # and reply with a payload; the orchestrator owns the store.
+                ok_b, msg_b, payload_b = self._orch.backlog_command(
+                    cmd[len("backlog-") :], req, project=from_project
+                )
+                self._reply(sock, ok=ok_b, msg=msg_b, **payload_b)
+                return
             elif cmd == "harvest-done":
                 harvest_role = req.get("role", "")
                 harvest_note = req.get("note", "harvested by lead")

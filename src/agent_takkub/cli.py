@@ -65,6 +65,7 @@ LEAD_ONLY_COMMANDS = frozenset(
         "report",
         "tail",  # reads recent transcript output of other panes — #541
         "lead-edits",  # inspect / reset lead direct-edit counters — #585 round 4
+        "backlog",  # #684: project backlog is Lead/owner's planning surface
     }
 )
 
@@ -2537,6 +2538,115 @@ def cmd_task(args: argparse.Namespace) -> dict:
             _with_project({"cmd": "task-cancel", "role": args.role, "from": _from_role()})
         )
     return {"ok": False, "msg": f"unknown task subcommand: {args.t_cmd}"}
+
+
+def backlog_statuses() -> tuple[str, ...]:
+    from . import backlog
+
+    return backlog.STATUSES
+
+
+def backlog_impacts() -> tuple[str, ...]:
+    from . import backlog
+
+    return backlog.IMPACTS
+
+
+def backlog_severities() -> tuple[str, ...]:
+    from . import backlog
+
+    return backlog.SEVERITIES
+
+
+def cmd_backlog(args: argparse.Namespace) -> dict:
+    """`takkub backlog <add|list|show|done|block|defer|status|assign|import>`
+    — the project backlog (#684): work noticed but not yet done, kept across
+    sessions so nothing gets dropped when the Lead session ends."""
+    sub = args.b_cmd
+    if sub == "add":
+        payload = {
+            "cmd": "backlog-add",
+            "title": args.title,
+            "detail": args.detail or "",
+            "source": args.source or "",
+            "files": args.file or [],
+            "impact": args.impact,
+            "severity": args.severity,
+            "from": _from_role(),
+        }
+        return _request(_with_project(payload))
+    if sub == "list":
+        resp = _request(
+            _with_project(
+                {"cmd": "backlog-list", "status": args.status or "", "from": _from_role()}
+            )
+        )
+        if resp.get("ok"):
+            lines = resp.get("lines") or []
+            done, total = resp.get("done", 0), resp.get("total", 0)
+            print(f"backlog: {done}/{total} เสร็จ · {len(lines)} รายการที่แสดง")
+            for ln in lines:
+                print(f"  {ln}")
+        return resp
+    if sub == "show":
+        resp = _request(_with_project({"cmd": "backlog-show", "id": args.id, "from": _from_role()}))
+        if resp.get("ok"):
+            _utf8_print(resp.get("detail", ""))
+        return resp
+    if sub in ("done", "defer"):
+        return _request(
+            _with_project({"cmd": f"backlog-{sub}", "id": args.id, "from": _from_role()})
+        )
+    if sub == "block":
+        return _request(
+            _with_project(
+                {"cmd": "backlog-block", "id": args.id, "reason": args.reason, "from": _from_role()}
+            )
+        )
+    if sub == "status":
+        return _request(
+            _with_project(
+                {
+                    "cmd": "backlog-status",
+                    "id": args.id,
+                    "status": args.status,
+                    "reason": getattr(args, "reason", "") or "",
+                    "from": _from_role(),
+                }
+            )
+        )
+    if sub == "assign":
+        return _request(
+            _with_project(
+                {
+                    "cmd": "backlog-assign",
+                    "id": args.id,
+                    "role": args.role,
+                    "from": _from_role(),
+                }
+            )
+        )
+    if sub == "import":
+        import pathlib
+
+        try:
+            text = pathlib.Path(args.file).read_text(encoding="utf-8")
+        except OSError as e:
+            return {"ok": False, "msg": f"อ่านไฟล์ไม่ได้: {e}", "exit_code": 1}
+        resp = _request(
+            _with_project(
+                {
+                    "cmd": "backlog-import",
+                    "text": text,
+                    "source": args.source or args.file,
+                    "from": _from_role(),
+                }
+            )
+        )
+        if resp.get("ok"):
+            print(f"นำเข้า {resp.get('count', 0)} รายการจาก {args.file}")
+        return resp
+    return {"ok": False, "msg": f"unknown backlog subcommand: {sub}"}
 
 
 def cmd_list(_: argparse.Namespace) -> dict:
@@ -5936,6 +6046,43 @@ def build_parser() -> argparse.ArgumentParser:
     )
     stx.add_argument("--role", required=True, help="role name whose pending delivery to cancel")
     st.set_defaults(func=cmd_task)
+
+    # #684 — project backlog: cross-session store of noticed-but-not-done work.
+    bl = sub.add_parser("backlog", help="project backlog: work noticed but not yet done (#684)")
+    bl_sub = bl.add_subparsers(dest="b_cmd", required=True)
+    bla = bl_sub.add_parser("add", help="add a backlog item")
+    bla.add_argument("title", help="short title of the item")
+    bla.add_argument("--detail", default="", help="longer description")
+    bla.add_argument("--source", default="", help="where it came from (report/owner/reviewer/UAT)")
+    bla.add_argument("--file", action="append", default=[], help="related file[:line] (repeatable)")
+    bla.add_argument("--impact", choices=backlog_impacts(), default="internal")
+    bla.add_argument("--severity", choices=backlog_severities(), default="med")
+    bll = bl_sub.add_parser("list", help="list backlog items (newest first)")
+    bll.add_argument(
+        "--status",
+        default="",
+        help="filter: todo/doing/review/waiting/blocked/deferred/done/wont, or 'open'",
+    )
+    bls = bl_sub.add_parser("show", help="show one item's full detail")
+    bls.add_argument("id", help="item id")
+    bld = bl_sub.add_parser("done", help="mark an item done")
+    bld.add_argument("id", help="item id")
+    blk = bl_sub.add_parser("block", help="mark an item blocked (reason required)")
+    blk.add_argument("id", help="item id")
+    blk.add_argument("reason", help="what it is blocked on")
+    blf = bl_sub.add_parser("defer", help="park an item (พักไว้)")
+    blf.add_argument("id", help="item id")
+    blst = bl_sub.add_parser("status", help="set an item's status explicitly")
+    blst.add_argument("id", help="item id")
+    blst.add_argument("status", choices=backlog_statuses())
+    blst.add_argument("--reason", default="", help="reason (for blocked/wont)")
+    blas = bl_sub.add_parser("assign", help="fire `takkub assign` for an item and link it")
+    blas.add_argument("id", help="item id")
+    blas.add_argument("--role", required=True, help="role to assign the item to")
+    bli = bl_sub.add_parser("import", help="import a markdown table of items")
+    bli.add_argument("file", help="path to a .md file containing a pipe table")
+    bli.add_argument("--source", default="", help="source label (defaults to the file path)")
+    bl.set_defaults(func=cmd_backlog)
 
     # Internal — wired as the Stop/Notification hook `command` for every
     # cockpit-spawned claude pane (see hook_wiring.py). Not a user-facing

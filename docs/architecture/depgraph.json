@@ -1,6 +1,6 @@
 {
   "generated_by": "grimp 3.14",
-  "module_count": 346,
+  "module_count": 348,
   "modules": [
     {
       "module": "agent_takkub",
@@ -275,6 +275,34 @@
       "fan_out": 1
     },
     {
+      "module": "agent_takkub.backlog",
+      "imports": [
+        "agent_takkub.cached_read",
+        "agent_takkub.config",
+        "agent_takkub.path_safe"
+      ],
+      "imported_by": [
+        "agent_takkub.backlog_dialog",
+        "agent_takkub.cli",
+        "agent_takkub.orchestrator"
+      ],
+      "fan_in": 3,
+      "fan_out": 3
+    },
+    {
+      "module": "agent_takkub.backlog_dialog",
+      "imports": [
+        "agent_takkub.backlog",
+        "agent_takkub.cockpit_theme",
+        "agent_takkub.roles"
+      ],
+      "imported_by": [
+        "agent_takkub.main_window"
+      ],
+      "fan_in": 1,
+      "fan_out": 3
+    },
+    {
       "module": "agent_takkub.bg_pool",
       "imports": [],
       "imported_by": [
@@ -392,6 +420,7 @@
       "module": "agent_takkub.cached_read",
       "imports": [],
       "imported_by": [
+        "agent_takkub.backlog",
         "agent_takkub.config",
         "agent_takkub.core.storage.legacy_reader",
         "agent_takkub.core.storage.v2_target",
@@ -401,7 +430,7 @@
         "agent_takkub.task_ledger",
         "agent_takkub.user_profile"
       ],
-      "fan_in": 8,
+      "fan_in": 9,
       "fan_out": 0
     },
     {
@@ -450,6 +479,7 @@
       "module": "agent_takkub.cli",
       "imports": [
         "agent_takkub.auto_migrate_boot",
+        "agent_takkub.backlog",
         "agent_takkub.bm25_search",
         "agent_takkub.boot_flow_terminal",
         "agent_takkub.chatlog_scanner",
@@ -508,7 +538,7 @@
         "agent_takkub.__main__"
       ],
       "fan_in": 1,
-      "fan_out": 54
+      "fan_out": 55
     },
     {
       "module": "agent_takkub.cli_server",
@@ -542,6 +572,7 @@
       "imported_by": [
         "agent_takkub.agent_pane",
         "agent_takkub.app",
+        "agent_takkub.backlog_dialog",
         "agent_takkub.boot_flow_window",
         "agent_takkub.headless_window",
         "agent_takkub.logs_panel",
@@ -576,7 +607,7 @@
         "agent_takkub.usage_meter",
         "agent_takkub.user_actions"
       ],
-      "fan_in": 35,
+      "fan_in": 36,
       "fan_out": 0
     },
     {
@@ -628,6 +659,7 @@
         "agent_takkub.auto_issue_signals",
         "agent_takkub.auto_migrate_boot",
         "agent_takkub.auto_resume",
+        "agent_takkub.backlog",
         "agent_takkub.boot_context",
         "agent_takkub.boot_flow",
         "agent_takkub.boot_flow_window",
@@ -733,7 +765,7 @@
         "agent_takkub.vault_mirror",
         "agent_takkub.worktree_manager"
       ],
-      "fan_in": 110,
+      "fan_in": 111,
       "fan_out": 2
     },
     {
@@ -3099,6 +3131,7 @@
       "module": "agent_takkub.main_window",
       "imports": [
         "agent_takkub.agent_pane",
+        "agent_takkub.backlog_dialog",
         "agent_takkub.cli_server",
         "agent_takkub.cockpit_theme",
         "agent_takkub.config",
@@ -3130,7 +3163,7 @@
         "agent_takkub.app"
       ],
       "fan_in": 1,
-      "fan_out": 27
+      "fan_out": 28
     },
     {
       "module": "agent_takkub.maintenance",
@@ -3261,6 +3294,7 @@
       "module": "agent_takkub.orchestrator",
       "imports": [
         "agent_takkub.agent_pane",
+        "agent_takkub.backlog",
         "agent_takkub.bg_pool",
         "agent_takkub.browser_chrome",
         "agent_takkub.chatlog_scanner",
@@ -3329,7 +3363,7 @@
         "agent_takkub.user_actions"
       ],
       "fan_in": 6,
-      "fan_out": 59
+      "fan_out": 60
     },
     {
       "module": "agent_takkub.orchestrator_text",
@@ -3485,12 +3519,13 @@
       "module": "agent_takkub.path_safe",
       "imports": [],
       "imported_by": [
+        "agent_takkub.backlog",
         "agent_takkub.project_memory",
         "agent_takkub.project_nav",
         "agent_takkub.role_memory",
         "agent_takkub.task_ledger"
       ],
-      "fan_in": 4,
+      "fan_in": 5,
       "fan_out": 0
     },
     {
@@ -4317,6 +4352,7 @@
       "imported_by": [
         "agent_takkub.agent_pane",
         "agent_takkub.agent_pane_model",
+        "agent_takkub.backlog_dialog",
         "agent_takkub.custom_roles",
         "agent_takkub.doctor",
         "agent_takkub.headless_pane",
@@ -4338,7 +4374,7 @@
         "agent_takkub.spawn_engine",
         "agent_takkub.team_preset"
       ],
-      "fan_in": 22,
+      "fan_in": 23,
       "fan_out": 0
     },
     {

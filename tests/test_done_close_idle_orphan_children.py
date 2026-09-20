@@ -158,7 +158,10 @@ class TestIdleOrphanChildrenShortCircuit:
             # "live children" Lead notice — the deferred notice at tick 1
             # already told Lead once for this episode.
             close_mock3.assert_called_once_with(
-                "devops", project=TEST_PROJECT, suppress_live_children_warning=True
+                "devops",
+                project=TEST_PROJECT,
+                suppress_live_children_warning=True,
+                preserve_resume=True,
             )
 
     def test_active_cpu_usage_keeps_deferring(

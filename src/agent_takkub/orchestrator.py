@@ -613,13 +613,19 @@ IDLE_REMIND_COOLDOWN_S = 90
 # an empty `>`, and `takkub status` said "working · last progress 3s ago"
 # for 7+ minutes because the footer repaint kept the content hash moving.
 IDLE_AT_PROMPT_S = max(0.0, float(os.environ.get("TAKKUB_IDLE_AT_PROMPT_S", "120")))
-# Pane reuse (2.1.17): a teammate pane is KEPT ALIVE after `takkub done` so the
-# role's next task is pasted into the same session instead of paying a fresh
-# ~35k-token boot (prod 2026-09-18: 24 fresh boots/day, every one of them a
-# close→respawn of a role that had just finished). Set TAKKUB_CLOSE_ON_DONE=1
-# to restore the old 2.5 s auto-close. A kept pane that gets no new task for
-# TAKKUB_DONE_PANE_TTL_S is closed by the 5 s watchdog tick (RAM bound).
-CLOSE_ON_DONE = os.environ.get("TAKKUB_CLOSE_ON_DONE", "0").strip() == "1"
+# (#683, owner requirement) a finished pane must NOT be held open — the
+# 2.1.17 keep-alive bought nothing the prompt cache didn't already provide
+# (the cache lives API-side, not in the process) while costing ~360MB per
+# idle pane. Default is now the 2.5 s auto-close; the role's session uuid
+# survives close() so the next assign within TAKKUB_RESUME_WINDOW_S rejoins
+# the same conversation via `--resume` instead of paying a cold boot (the
+# boot-cost saving that keep-alive was really buying). A queued follow-up
+# that arrives before the 2.5 s timer still short-circuits into the live
+# pane (`_dispatch_next_assignment` runs first in `_close_if_same_session`).
+# Set TAKKUB_CLOSE_ON_DONE=0 to restore 2.1.17 keep-alive (RAM-rich
+# machines); kept panes are then reaped after TAKKUB_DONE_PANE_TTL_S as
+# before.
+CLOSE_ON_DONE = os.environ.get("TAKKUB_CLOSE_ON_DONE", "1").strip() == "1"
 DONE_PANE_TTL_S = max(0.0, float(os.environ.get("TAKKUB_DONE_PANE_TTL_S", "1800")))
 # #664: a queued assignment for a *working* pane that is really sitting at
 # its ready prompt (finished with `progress` instead of `done`, or died
@@ -5975,11 +5981,19 @@ class Orchestrator(
         suppress_auto_chain: bool = False,
         suppress_live_children_warning: bool = False,
         keep_queue: bool = False,
+        preserve_resume: bool = False,
     ) -> tuple[bool, str]:
         """Terminate a pane's session and remove it from the layout.
 
         force=True is for legitimate cockpit lifecycle (tab close, project switch).
         Never expose to CLI — teammates can only call `takkub done`.
+
+        preserve_resume=True (#683) keeps the role's session uuid alive past
+        the PaneState pop and stamps `_recent_exits`, so the role's next
+        assign within RESUME_WINDOW_SEC rejoins the same conversation via
+        `--resume` instead of cold-booting. Set only by the done-driven
+        auto-close — a manual/user close, a provider-switch, or a quota
+        reroute all want a genuinely fresh session, so they leave it False.
 
         keep_queue=True forwards any queued `_pending_assignments[key]` to a
         replacement pane after close (via `_resume_after_close`) — for a close
@@ -6217,7 +6231,29 @@ class Orchestrator(
                 kind="close-dropped-queue",
             )
         else:
-            getattr(self, "_pane_state", {}).pop(key, None)
+            _popped_ps_close = getattr(self, "_pane_state", {}).pop(key, None)
+            # (#683) the done-driven close (preserve_resume) keeps the popped
+            # state's session uuid alive past the pop — spawn()'s auto-resume
+            # check reads `_pane_state[key].session_uuid` + a `_recent_exits`
+            # entry inside RESUME_WINDOW_SEC to build `--resume <uuid>`, the
+            # boot-cost saving that keep-alive used to buy. A manual/user
+            # close, provider-switch, or quota reroute all want a fresh
+            # session, so they leave preserve_resume False and the uuid dies
+            # with the pop as before.
+            if (
+                preserve_resume
+                and role_name != LEAD.name
+                and _popped_ps_close is not None
+                and _popped_ps_close.session_uuid
+                and _popped_ps_close.session_uuid_cwd
+            ):
+                _seed_ps = self._ps(key)
+                _seed_ps.session_uuid = _popped_ps_close.session_uuid
+                _seed_ps.session_uuid_cwd = _popped_ps_close.session_uuid_cwd
+                self._recent_exits[key] = {
+                    "cwd": _popped_ps_close.session_uuid_cwd,
+                    "ts": time.time(),
+                }
         getattr(self, "_last_done_task_ids", {}).pop(key, None)
 
         if had_worktree_close and not recovery_close:
@@ -7699,6 +7735,18 @@ class Orchestrator(
             self._last_done_task_ids = {}
         had_task_id = _ps_done.task_id or self._last_done_task_ids.get(key) or f"pane-{id(pane)}"
         self._last_done_task_ids[key] = had_task_id
+        # #684: if this task was fired from a backlog card, flip that item to
+        # `review` (owner confirms) instead of leaving it stuck at `doing`.
+        try:
+            from . import backlog
+
+            backlog.on_ledger_done(project_ns, had_task_id)
+        except Exception:
+            import logging
+
+            logging.getLogger(__name__).exception(
+                "backlog.on_ledger_done failed for %s", had_task_id
+            )
         # #244: the issue/task ref shown to Lead must come from the ORIGINAL
         # assign spec Lead itself sent (last_assigned_task), never from the
         # agent's own done() note — an agent has mistyped the issue number
@@ -8342,7 +8390,12 @@ class Orchestrator(
                     # episode's first tick (deferred_for starts at 0, always
                     # < GRACE_S) — a second "about to be killed" notice here
                     # would just repeat what Lead was already told.
-                    self.close(from_role, project=project_ns, suppress_live_children_warning=True)
+                    self.close(
+                        from_role,
+                        project=project_ns,
+                        suppress_live_children_warning=True,
+                        preserve_resume=True,
+                    )
                     return
 
                 if deferred_for < DONE_CLOSE_LIVE_CHILD_GRACE_S:
@@ -8388,9 +8441,14 @@ class Orchestrator(
                 # #604: same reasoning as the idle short-circuit above — the
                 # deferred notice already covered this episode; don't repeat
                 # it as a second "closing" message for the same live children.
-                self.close(from_role, project=project_ns, suppress_live_children_warning=True)
+                self.close(
+                    from_role,
+                    project=project_ns,
+                    suppress_live_children_warning=True,
+                    preserve_resume=True,
+                )
                 return
-            self.close(from_role, project=project_ns)
+            self.close(from_role, project=project_ns, preserve_resume=True)
 
         if getattr(self, "_pending_assignments", {}).get(key):
             QTimer.singleShot(0, lambda: self._dispatch_next_assignment(project_ns, from_role))
@@ -10822,6 +10880,148 @@ class Orchestrator(
                 "artifacts": artifacts,
             },
         )
+
+    def backlog_command(
+        self, verb: str, req: dict, project: str | None = None
+    ) -> tuple[bool, str, dict]:
+        """Dispatch a `takkub backlog <verb>` request (#684). Returns
+        (ok, msg, payload). The backlog store is provider- and session-neutral
+        (`RUNTIME_DIR/backlog/<project>/`), so every verb just resolves the
+        project and delegates to the `backlog` module — except `assign`, which
+        also fires a real `takkub assign` and links the item to it."""
+        from . import backlog
+
+        project_ns = self._resolve_project(project)
+        try:
+            if verb == "add":
+                item = backlog.add_item(
+                    project_ns,
+                    req.get("title", ""),
+                    detail=req.get("detail", ""),
+                    source=req.get("source", ""),
+                    files=req.get("files", []),
+                    impact=req.get("impact", "internal"),
+                    severity=req.get("severity", "med"),
+                )
+                return True, f"เพิ่ม backlog [{item['id']}] {item['title']}", {"id": item["id"]}
+            if verb == "list":
+                status = (req.get("status") or "").strip() or None
+                items = backlog.list_items(project_ns, status=status)
+                done, total = backlog.progress(project_ns)
+                return (
+                    True,
+                    "ok",
+                    {
+                        "lines": [backlog.render_line(it) for it in items],
+                        "items": items,
+                        "done": done,
+                        "total": total,
+                    },
+                )
+            if verb == "show":
+                item = backlog.get_item(project_ns, req.get("id", ""))
+                if item is None:
+                    return False, f"ไม่พบ backlog id {req.get('id')}", {}
+                return True, "ok", {"detail": self._render_backlog_detail(item), "item": item}
+            if verb == "done":
+                return self._backlog_simple(backlog.mark_done, project_ns, req)
+            if verb == "defer":
+                return self._backlog_simple(backlog.defer, project_ns, req)
+            if verb == "block":
+                reason = (req.get("reason") or "").strip()
+                if not reason:
+                    return False, "block ต้องมีเหตุผล", {}
+                item = backlog.block(project_ns, req.get("id", ""), reason)
+                return self._backlog_result(item, req)
+            if verb == "status":
+                item = backlog.set_status(
+                    project_ns,
+                    req.get("id", ""),
+                    req.get("status", ""),
+                    reason=req.get("reason", ""),
+                )
+                return self._backlog_result(item, req)
+            if verb == "assign":
+                return self._backlog_assign(project_ns, req)
+            if verb == "import":
+                created = backlog.import_markdown(
+                    project_ns, req.get("text", ""), source=req.get("source", "")
+                )
+                return True, f"นำเข้า {len(created)} รายการ", {"count": len(created)}
+        except ValueError as e:
+            return False, str(e), {}
+        return False, f"unknown backlog verb: {verb}", {}
+
+    @staticmethod
+    def _backlog_simple(fn, project_ns: str, req: dict) -> tuple[bool, str, dict]:
+        item = fn(project_ns, req.get("id", ""))
+        return Orchestrator._backlog_result(item, req)
+
+    @staticmethod
+    def _backlog_result(item: dict | None, req: dict) -> tuple[bool, str, dict]:
+        if item is None:
+            return False, f"ไม่พบ backlog id {req.get('id')}", {}
+        return True, f"[{item['id']}] → {item['status']}", {"id": item["id"]}
+
+    def _backlog_assign(self, project_ns: str, req: dict) -> tuple[bool, str, dict]:
+        from . import backlog
+
+        item = backlog.get_item(project_ns, req.get("id", ""))
+        if item is None:
+            return False, f"ไม่พบ backlog id {req.get('id')}", {}
+        role = (req.get("role") or "").strip().lower()
+        if not role:
+            return False, "backlog assign ต้องระบุ --role", {}
+        # Compose a task spec from the card so the pane gets the source, files,
+        # and severity/impact context, not just a bare title.
+        task = self._compose_backlog_task(item)
+        ok, msg = self.assign(
+            role,
+            cwd=lead_cwd(project_ns),
+            task=task,
+            project=project_ns,
+            feature="backlog",
+        )
+        if not ok:
+            return False, msg, {}
+        key = _exit_key(project_ns, role)
+        ps = self._pane_state.get(key)
+        ledger_task_id = ps.task_id if ps is not None else None
+        backlog.assign_item(project_ns, item["id"], ledger_task_id)
+        return True, f"assign [{item['id']}] → {role}: {msg}", {"id": item["id"]}
+
+    @staticmethod
+    def _compose_backlog_task(item: dict) -> str:
+        lines = [item.get("title", "")]
+        if item.get("detail"):
+            lines.append("\n" + item["detail"])
+        if item.get("source"):
+            lines.append(f"\nที่มา: {item['source']}")
+        if item.get("files"):
+            lines.append("ไฟล์ที่เกี่ยว: " + ", ".join(item["files"]))
+        imp = "ลูกค้าเจอ" if item.get("impact") == "customer" else "ภายใน"
+        lines.append(f"ความรุนแรง: {item.get('severity', 'med')} · ผลกระทบ: {imp}")
+        return "\n".join(lines)
+
+    @staticmethod
+    def _render_backlog_detail(item: dict) -> str:
+        from . import backlog
+
+        lines = [
+            f"[{item.get('id')}] {item.get('title')}",
+            f"สถานะ: {backlog.STATUS_LABELS.get(item.get('status', ''), item.get('status'))}"
+            + (f" ({item['reason']})" if item.get("reason") else ""),
+            f"ความรุนแรง: {item.get('severity')} · ผลกระทบ: {item.get('impact')}",
+        ]
+        if item.get("source"):
+            lines.append(f"ที่มา: {item['source']}")
+        if item.get("files"):
+            lines.append("ไฟล์: " + ", ".join(item["files"]))
+        if item.get("detail"):
+            lines.append("\n" + item["detail"])
+        lines.append(f"\nเข้ามา: {backlog._fmt_ts(item.get('created_ts', 0))}")
+        lines.append(f"ดอง: {backlog.age_days(item)} วัน")
+        return "\n".join(lines)
 
     def task_show_info(self, role: str, project: str | None = None) -> tuple[bool, str, dict]:
         """Return the full text of the last task assigned to `role` for `takkub

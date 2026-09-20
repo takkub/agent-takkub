@@ -355,7 +355,14 @@ def _prune_stale_spawn_snapshots(
 
 # ── spawn constants ──────────────────────────────────────────────
 
-RESUME_WINDOW_SEC = 5 * 60  # respawn within this window → claude --resume <uuid>
+# Respawn/re-assign within this window → claude --resume <uuid>. (#683)
+# Close-on-done is now the default, so this window is what preserves the
+# boot-cost saving that 2.1.17's keep-alive used to buy: a follow-up assign
+# for the role rejoins the same conversation instead of cold-booting. The
+# default matches the API prompt-cache TTL (5 min) — raising it past the
+# cache TTL means a resume pays full input cost for the whole transcript,
+# which for a long conversation is MORE than a fresh boot.
+RESUME_WINDOW_SEC = max(0.0, float(os.environ.get("TAKKUB_RESUME_WINDOW_S", "300")))
 
 
 def _normalize_cwd_for_compare(cwd: str) -> str:
