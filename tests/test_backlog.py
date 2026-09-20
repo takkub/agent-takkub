@@ -134,6 +134,25 @@ class TestWriterInvalidatesReadCache:
         got = backlog.list_items("proj", status="blocked")
         assert [x["id"] for x in got] == [it["id"]]
 
+    def test_rapid_double_add_loses_nothing(self, store, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The WRITE-side casualty of the same stale window (found live
+        2026-09-20: item f08162bc vanished): add #2's load() served the
+        pre-add-#1 parse, so its save overwrote add #1 away — a lost
+        update. With _save invalidating, the second load re-reads fresh."""
+        import os as _os
+        import time as _time
+
+        a = backlog.add_item("proj", "ใบแรก")
+        p = backlog._store_path("proj")
+        old = _time.time() - 30
+        _os.utime(p, (old, old))
+        backlog.load("proj")  # primes the no-stat fast path (pre-fix trap)
+
+        b = backlog.add_item("proj", "ใบสอง")
+
+        ids = {it["id"] for it in backlog.list_items("proj")}
+        assert {a["id"], b["id"]} <= ids
+
 
 class TestAge:
     def test_age_days(self, store) -> None:
