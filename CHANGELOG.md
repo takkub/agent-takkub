@@ -2,6 +2,47 @@
 
 All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses [SemVer](https://semver.org/).
 
+## [v2.1.23] - 2026-09-20
+
+### Fixed (แก้)
+
+- **#685 — `takkub assign` จัด scope ผิดจากคำที่บังเอิญอยู่ในเนื้อ task**: 3 เคสจริงพลาดทั้งสองทิศ —
+  "เอาแค่ตัวกงล้อมาใช้" (ขอบเขตของสิ่งที่หยิบมา) ถูกอ่านเป็น `explicit_small` แล้วลดงานเขียนคอมโพเนนต์ใหม่
+  400+ บรรทัดเป็น `tiny`; "ระวังเคส 2 บรรทัด (wedgeLines คืน 2 ค่า)" (บรรยายข้อมูล) ถูกอ่านเป็น `line_budget`;
+  "ต้องล็อกอินสมาชิกก่อน" (บอกวิธีเข้าถึงหน้า) ถูกอ่านเป็น deep signal `auth` — ทั้งสามคำ trigger อยู่ใน
+  ประโยคที่กำลังบรรยายอย่างอื่น ไม่ใช่ประโยคสั่งงาน แก้โดย (1) จำกัด `แค่`/`line_budget` ให้ต้องผูกกับ verb
+  แก้ไข/budget ที่ชัดเจนแทนการจับคำลอยๆ (2) เพิ่มกลไก access-context (ต้อง…ก่อน / เข้าไปดู) ที่ทำให้ deep
+  keyword ในประโยคบอกวิธีเข้าถึงไม่ escalate — คู่กับกลไก read-context เดิม (3) ทุก reason ของ tiny โชว์
+  ตำแหน่งที่ trigger จับได้ ("พบที่: ...") ให้ตรวจย้อนได้ว่าเดาถูกหรือผิด — เทสกันถอย 6 เคส
+  (`tests/test_task_scope.py::TestIncidentalWordMisscope685`)
+- **#686 — บรรทัดพรีวิว pane ใน `takkub status` มีเศษ ANSI หลุด + ตัวอักษรต่อกันผิดลำดับ**: root cause คือ
+  พรีวิวอ่านจาก raw transcript byte stream ที่ตัดที่ offset ใดก็ได้ (มักตัดกลาง escape sequence เหลือ
+  `49h;3H` เป็นตัวอักษรโผล่มา) บวกกับ transcript writer ทิ้ง chunk ที่ซ้ำ (dedupe) ทำให้ ESC หายไปจาก
+  chunk หนึ่งขณะที่หางของ sequence ไปโผล่ chunk ถัดไป แก้โดยให้ pane ที่ยังมีชีวิตอ่านพรีวิวจาก
+  pyte-rendered screen (`pane.session.display_lines()`) แทน — เป็น terminal-emulated อยู่แล้ว หนึ่งบรรทัด
+  ต่อหนึ่ง row จริง ไม่มี escape sequence หลงเหลือ; pane ที่ exited แล้ว (ไม่มี live screen ให้อ่าน) ยัง fallback
+  ไปอ่าน transcript file เหมือนเดิม แต่ตัดบรรทัดแรกที่โดน capped-read ตัดกลางทางทิ้งก่อนเสมอ — เทสกันถอย 2 เคส
+  (`tests/test_orchestrator_stall.py`)
+- **#687 — memory ของ Lead ถูกกั๊กใน `claude-config` (provider claude เท่านั้น) สลับ provider แล้วความจำหาย
+  เงียบๆ**: เพิ่มโมดูลกลาง `project_memory.py` — home ใหม่ provider-neutral ที่
+  `runtime/memory/<project>/` แชร์ร่วมกันทุก provider พร้อม two-way newest-wins sync (ไม่ลบไฟล์ ตาม
+  invariant #504) กับ claude's native `<CLAUDE_CONFIG_DIR>/projects/<dir>/memory/` — sync รันตอน resolve
+  ทุกครั้ง ครั้งแรกที่รันคือการ migrate ของเดิมไปในตัว ไม่ต้องมี migration step แยก · Lead ที่ไม่ใช่ claude
+  (codex/gemini-agy/opencode/kimi/cursor) ได้รับ block ความจำนี้แทรกเข้า AGENTS.md ที่ spawn — ชี้ไปที่
+  index กลาง พร้อมสอนวิธีจดบทเรียนใหม่เป็นไฟล์ตรงๆ (provider พวกนี้ไม่มี auto-memory ของตัวเอง) · เพิ่ม
+  `ProviderSpec.supports_auto_memory` เข้า capability-gap warning ที่มีอยู่แล้ว (Settings Roles page) —
+  สลับ Lead ไปยัง provider ที่ไม่มี auto-memory ตอนนี้เห็นคำเตือนแทนความเงียบ — เทสใหม่
+  `tests/test_project_memory_central.py`
+- **#683 (บางส่วน) — pane ที่หมดรอบ auto-respawn (`AUTO_RESPAWN_MAX`) ค้างเป็น zombie ถาวร**: session ตายแล้ว
+  ไม่ respawn ต่อ แต่ไม่เคยถูกถอดออกจาก layout/`takkub status` เลย — แก้ให้ `close()` เมื่อหมดรอบ (pipeline/
+  auto-chain ยังจัดการเหมือนเดิม ไม่ยิงซ้ำ) เทสกันถอย `tests/test_lifecycle_recovery.py`. ส่วนที่เหลือของ
+  #683 (เปลี่ยน default ให้ปิด pane ทุกเส้นทางหลัง done + resume ด้วย session id) เป็นการเปลี่ยนพฤติกรรม
+  default ที่กระทบเทส/ฟีเจอร์ pane-reuse (2.1.17) เป็นวงกว้าง และเจ้าของ issue เองเตือนว่าเสี่ยง "พาระบบพัง"
+  ถ้าทำไม่รอบคอบ — ต้องแยกรอบทำพร้อม live-verify บน dev ก่อน ไม่รวมในรอบนี้
+- **#684 ยังไม่เริ่ม (UI ใหม่ ต้อง live-verify)** — เจ้าของปรับสเปคระหว่างคุย: ปุ่ม Tasks เปิด popup กลางจอ
+  การ์ดรายการทางซ้าย + รายละเอียดทางขวา + โหมดคลิกเลือกลำดับงานที่จะทำ + ปุ่มตกลงยิง assign ตามลำดับที่เลือก —
+  บันทึกสเปคไว้แล้ว รอรอบทำ UI ที่ตรวจภาพจริงได้
+
 ## [v2.1.22] - 2026-09-19
 
 ### Fixed (แก้)

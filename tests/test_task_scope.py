@@ -148,6 +148,43 @@ class TestReadOnlyIntentWeighting:
         assert decision.scope == "deep"
 
 
+class TestIncidentalWordMisscope685:
+    """#685: scope must not be decided by words that happen to appear in a
+    sentence describing something else — 3 real field cases (saas_admin_amb,
+    2026-09-20), wrong in both directions."""
+
+    def test_kae_scoping_a_noun_is_not_tiny(self) -> None:
+        # "เอาแค่ตัวกงล้อมาใช้" = take ONLY the wheel part (scope of the thing
+        # taken) — the work itself was a 400+ line new component.
+        decision = classify("เขียนคอมโพเนนต์กงล้อใหม่ในหน้าโปรโมชั่น เอาแค่ตัวกงล้อมาใช้ ไม่เอาพื้นหลัง")
+        assert decision.scope != "tiny"
+
+    def test_kae_before_small_edit_verb_still_tiny(self) -> None:
+        decision = classify("แค่เปลี่ยนข้อความปุ่มหน้าแรก")
+        assert decision.scope == "tiny"
+        # #685 item 4: the reason shows where the trigger fired.
+        assert "พบที่" in decision.reason
+
+    def test_data_line_count_is_not_a_line_budget(self) -> None:
+        # "ระวังเคส 2 บรรทัด" describes prize-label DATA (2 lines of text),
+        # not an edit budget.
+        decision = classify("แก้ป้ายรางวัลกงล้อ ระวังเคส 2 บรรทัด (wedgeLines คืน 2 ค่า)")
+        assert decision.scope != "tiny"
+
+    def test_bounded_line_budget_still_tiny(self) -> None:
+        assert classify("แก้ได้ไม่เกิน 2 บรรทัด ตรง label ปุ่ม").scope == "tiny"
+
+    def test_login_as_access_instruction_is_not_deep(self) -> None:
+        # "ต้องล็อกอินสมาชิกก่อน" tells the reader how to REACH the page —
+        # the task never touches auth.
+        decision = classify("ติดตั้งกงล้อในหน้าโปรโมชั่น หน้ากงล้ออยู่ในหน้าโปรโมชั่น ต้องล็อกอินสมาชิกก่อน")
+        assert decision.scope != "deep"
+        assert "เข้าถึง" in decision.reason
+
+    def test_login_as_work_target_still_deep(self) -> None:
+        assert classify("แก้ระบบล็อกอินให้รองรับ OTP").scope == "deep"
+
+
 class TestBudgetBlock:
     def test_tiny_prose(self) -> None:
         block = budget_block("tiny")

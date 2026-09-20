@@ -1869,16 +1869,32 @@ def _cwd_has_recent_file_activity(
     return False
 
 
-def _resolve_project_memory(cwd: str | None) -> pathlib.Path | None:
-    """Return the Lead's MEMORY.md path for the project rooted at *cwd*, or None.
+def _resolve_project_memory(cwd: str | None, project_ns: str | None = None) -> pathlib.Path | None:
+    """Return the Lead's MEMORY.md path for the project, or None.
 
-    Claude Code encodes the project directory as the key under
-    ``~/.claude/projects/`` by replacing every non-alphanumeric character
-    with ``-``. The canonical token-meter encoder is shared here so separators,
-    colons, underscores, and dots all match Claude's directory name.
+    (#687) The authoritative home is the provider-neutral central store
+    (``RUNTIME_DIR/memory/<project>/MEMORY.md``) — synced from/to claude's
+    native ``<CLAUDE_CONFIG_DIR>/projects/<dir>/memory/`` on every resolve,
+    so the pointer handed to a pane is valid no matter which provider the
+    Lead runs as. The first sync migrates legacy native-only files.
 
-    Returns None when *cwd* is absent or no memory file exists yet.
+    Legacy fallback (encoded-cwd under ``~/.claude/projects/``) is kept for
+    callers that pass only a cwd.
     """
+    if project_ns:
+        try:
+            from .project_memory import central_memory_md, sync
+
+            sync(project_ns, cwd=cwd)
+            mem = central_memory_md(project_ns)
+            if mem.exists():
+                return mem
+        except Exception:
+            import logging
+
+            logging.getLogger(__name__).exception(
+                "central project-memory resolve failed for %s", project_ns
+            )
     if not cwd:
         return None
     encoded = encode_path_for_claude(cwd)

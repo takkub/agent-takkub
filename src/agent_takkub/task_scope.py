@@ -170,15 +170,32 @@ _TINY_KEYWORD_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
         # tiny on prod. Thai has no word boundaries, so each preceding-word
         # exclusion is its own fixed-width lookbehind: ไม่ใช่แค่ / ไม่ได้แค่ /
         # ไม่แค่ / มากกว่าแค่ ("more than just") / ห้ามแค่ ("must not only").
+        # (#685) `แค่` in Thai more often means "only/just <this thing>"
+        # ("เอาแค่ตัวกงล้อมาใช้" = take only the wheel part) than "the work is
+        # small" — a 400-line new component was sized tiny off that word. It
+        # now counts only when tied to the WORK: directly before a small-edit
+        # verb (แค่เปลี่ยน/แค่แก้…) or directly after one (แก้แค่/ปรับแค่…),
+        # or as an explicit "งานเล็ก" claim.
         re.compile(
-            r"(?<!ไม่ใช่)(?<!ไม่ได้)(?<!ไม่)(?<!กว่า)(?<!ห้าม)แค่|นิดเดียว|เล็กน้อย|นิดๆ\s*หน่อยๆ",
+            r"(?<!ไม่ใช่)(?<!ไม่ได้)(?<!ไม่)(?<!กว่า)(?<!ห้าม)"
+            r"แค่(?=(?:จะ)?(?:แก้|เปลี่ยน|ปรับ|เพิ่ม|ลบ|อัป|ใส่|เติม|ซ่อน|สลับ))"
+            r"|(?:แก้|เปลี่ยน|ปรับ|เพิ่ม|ลบ|อัปเดต)\s*แค่"
+            r"|งานเล็ก|นิดเดียว|เล็กน้อย|นิดๆ\s*หน่อยๆ",
             re.I,
         ),
     ),
     (
         "line_budget",
+        # (#685) a bare number+บรรทัด is often DATA description, not a work
+        # budget — "ระวังเคส 2 บรรทัด (wedgeLines คืน 2 ค่า)" sized a task
+        # tiny. Only budget-shaped phrasings count now: bounded (ไม่เกิน/แค่/
+        # at most), verb-attached (แก้ 2 บรรทัด), or suffixed (2 บรรทัดก็พอ).
         re.compile(
-            r"(?:[1-5]\s*บรรทัด|\b[1-5]\s*lines?\b|\bone[_-]?line\b|\bsingle[_-]?line\b)",
+            r"(?:ไม่เกิน|ไม่ให้เกิน|เพียง|แค่|ประมาณ|no more than|at most|under|within|<=?|≤)\s*[1-5]\s*(?:บรรทัด|lines?\b)"
+            r"|(?:แก้|เปลี่ยน|ปรับ|เพิ่ม|ลบ|เติม)\s*[1-5]\s*บรรทัด"
+            r"|[1-5]\s*บรรทัด(?:ก็พอ|พอ|จบ|เท่านั้น)"
+            r"|\b[1-5][\s_-]*lines?\s+(?:change|fix|edit|diff)"
+            r"|\bone[_-]?line\b|\bsingle[_-]?line\b",
             re.I,
         ),
     ),
@@ -419,6 +436,41 @@ _WRITE_VERB_RE = re.compile(
 )
 
 
+# (#685 case 3) A deep keyword inside an ACCESS instruction — a sentence
+# telling the reader how to reach/view the thing ("หน้ากงล้ออยู่ในหน้า
+# โปรโมชั่น ต้องล็อกอินสมาชิกก่อน") — describes navigation, not work on the
+# auth system. Two shapes count, and only on lines with no write verb:
+#   - precondition: ต้อง/ให้ … ก่อน spanning the keyword
+#   - navigation verb on the same line (เข้าไปดู/เปิดหน้า/ไปที่หน้า/to view)
+_ACCESS_PRECOND_RE = re.compile(r"(?:ต้อง|ให้)[^\n]{0,50}?ก่อน", re.I)
+_ACCESS_VERB_RE = re.compile(
+    r"เข้า(?:ไป)?(?:ดู|ทดสอบ|เช็ค|หน้า)|เปิดหน้า|ไปที่หน้า|กดเข้า|วิธีเข้า"
+    r"|to\s+(?:view|see|reach|access)\b|open\s+the\s+page",
+    re.I,
+)
+
+
+def _deep_matches_all_access_context(analyzed: str) -> bool:
+    """True when EVERY deep-pattern match in *analyzed* sits in an access
+    instruction: its line has no write verb, and either a ต้อง…ก่อน
+    precondition covers the match or a navigation verb shares the line. One
+    work-context occurrence keeps deep authority."""
+    saw_any = False
+    for line in analyzed.split("\n"):
+        for _name, pattern in _DEEP_PATTERNS:
+            for m in pattern.finditer(line):
+                saw_any = True
+                if _WRITE_VERB_RE.search(line):
+                    return False
+                covered = any(
+                    pm.start() <= m.start() and m.end() <= pm.end() + 10
+                    for pm in _ACCESS_PRECOND_RE.finditer(line)
+                )
+                if not covered and not _ACCESS_VERB_RE.search(line):
+                    return False
+    return saw_any
+
+
 def _deep_matches_all_read_context(analyzed: str) -> bool:
     """True when EVERY deep-pattern match in *analyzed* sits in a read
     context: its line has a read verb before the match and no write verb at
@@ -459,6 +511,17 @@ def _explicit_scope_marker(text: str) -> str | None:
         return None
     tier = (m.group(1) or m.group(2) or "").lower()
     return tier if tier in SCOPE_TIERS else None
+
+
+def _near(text: str, m: re.Match[str], radius: int = 22) -> str:
+    """~1 phrase of context around match *m* in *text*, for reason lines —
+    (#685 item 4) the ack must show WHERE a trigger fired so a wrong guess is
+    checkable at a glance."""
+    lo, hi = max(0, m.start() - radius), min(len(text), m.end() + radius)
+    snippet = " ".join(text[lo:hi].split())
+    prefix = "…" if lo > 0 else ""
+    suffix = "…" if hi < len(text) else ""
+    return f"{prefix}{snippet}{suffix}"
 
 
 def _deep_categories(text: str) -> tuple[set[str], tuple[str, str] | None]:
@@ -542,6 +605,14 @@ def classify(task_text: str) -> ScopeDecision:
                 f"signal deep '{sample}' ({name}) แพ้ {_competing()} — "
                 "งานประกาศห้ามเขียน/read-only: keyword deep เป็นสิ่งที่จะไปอ่าน ไม่ escalate",
             )
+        if _deep_matches_all_access_context(analyzed):
+            reason = (
+                f"งานทั่วไป — signal deep '{sample}' ({name}) อยู่ในประโยคบอกวิธีเข้าถึง/"
+                "เงื่อนไขการเข้าดู (ต้อง…ก่อน / เข้าไปดู) ไม่ใช่สิ่งที่สั่งทำ — ไม่ escalate"
+            )
+            if small_match:
+                reason += f" · signal ที่แข่ง: {_competing()}"
+            return ScopeDecision("normal", reason)
         if small_match and _deep_matches_all_read_context(analyzed):
             return ScopeDecision(
                 "normal",
@@ -560,6 +631,11 @@ def classify(task_text: str) -> ScopeDecision:
                 "normal",
                 f"พบ {len(full_cats)} signal deep ต่างหมวด ({names}) แต่แพ้ {_competing()} — "
                 "งานประกาศห้ามเขียน/read-only ไม่ escalate จาก keyword",
+            )
+        if _deep_matches_all_access_context(full_analyzed):
+            return ScopeDecision(
+                "normal",
+                f"พบ signal deep ({names}) แต่ทั้งหมดอยู่ในประโยคบอกวิธีเข้าถึง/เงื่อนไขการเข้าดู — ไม่ escalate",
             )
         return ScopeDecision(
             "deep",
@@ -583,10 +659,16 @@ def classify(task_text: str) -> ScopeDecision:
             )
         return ScopeDecision(
             "tiny",
-            f"ตรวจพบคำระบุขนาดงานเล็ก: '{small_match.group(0).strip()}' ({small_name})",
+            f"ตรวจพบคำระบุขนาดงานเล็ก: '{small_match.group(0).strip()}' ({small_name}) "
+            f'— พบที่: "{_near(analyzed, small_match)}"',
         )
 
     # 3. Default
+    if read_only:
+        return ScopeDecision(
+            "normal",
+            f"งานทั่วไป — งานประกาศ read-only ('{read_only.group(0).strip()}')",
+        )
     return ScopeDecision("normal", "งานทั่วไป (default tier)")
 
 

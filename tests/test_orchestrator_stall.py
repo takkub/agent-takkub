@@ -442,6 +442,46 @@ class TestPaneStatusReport:
         tail = report["panes"]["gemini"]["transcript_tail"]
         assert tail == "? for shortcuts"
 
+    def test_live_pane_preview_prefers_rendered_screen_686(
+        self, runtime_tmp: pathlib.Path, tmp_path: pathlib.Path
+    ) -> None:
+        """#686: a LIVE pane's preview must come from the pyte-rendered
+        screen (display_lines), not the raw transcript byte stream — the raw
+        tail can start mid-escape-sequence, leaving printable residue like
+        "49h;3H" that no regex strip can recover from."""
+        transcript = tmp_path / "lead.transcript.log"
+        transcript.write_text("Zigzagging…49h;3H\n", encoding="utf-8")
+        orch = _FakeOrch()
+        pane = _FakePane(state="working", transcript_path=str(transcript))
+        pane.session.tool_running_marker.return_value = None
+        pane.session.display_lines.return_value = [
+            "Zigzagging… (2m 57s)",
+            "",
+            "> ",
+        ]
+        orch._panes_by_project["default"] = {"lead": pane}
+        report = orch.pane_status_report("default")
+        tail = report["panes"]["lead"]["transcript_tail"]
+        assert "Zigzagging… (2m 57s)" in tail
+        assert "49h;3H" not in tail
+
+    def test_truncated_transcript_drops_partial_first_line_686(
+        self, runtime_tmp: pathlib.Path, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """#686: a capped tail read starts at an arbitrary byte offset —
+        often inside an escape sequence whose ESC byte is now outside the
+        window. The partial first line must be dropped, not rendered."""
+        monkeypatch.setattr("agent_takkub.orchestrator._TRANSCRIPT_TAIL_BYTES", 32)
+        transcript = tmp_path / "backend.transcript.log"
+        transcript.write_text("X" * 40 + "49h;3H residue\nclean line\n", encoding="utf-8")
+        orch = _FakeOrch()
+        pane = _FakePane(state="working", transcript_path=str(transcript))
+        orch._panes_by_project["default"] = {"backend": pane}
+        report = orch.pane_status_report("default")
+        tail = report["panes"]["backend"]["transcript_tail"]
+        assert "49h" not in tail
+        assert "clean line" in tail
+
     def test_transcript_tail_strips_ansi(
         self, runtime_tmp: pathlib.Path, tmp_path: pathlib.Path
     ) -> None:

@@ -515,6 +515,30 @@ class TestRespawnCapWarnsLead:
 
         assert not (orch._pane_state.get(key) or PaneState()).auto_chain
 
+    def test_cap_closes_pane_instead_of_zombie_683(
+        self, orch: Orchestrator, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """#683: a pane that exhausts AUTO_RESPAWN_MAX used to stay
+        registered forever — dead session, no further attempts, never
+        removed from the layout/UI. It must be closed so the slot (and its
+        `takkub status` row) actually goes away instead of sitting as a
+        permanent zombie."""
+        closed: list[str] = []
+        monkeypatch.setattr(orch, "close", lambda role, **kw: closed.append(role))
+
+        key = _exit_key(TEST_PROJECT, "qa")
+        orch._ps(key).auto_respawn_attempts = AUTO_RESPAWN_MAX
+
+        pane = MagicMock()
+        pane.state = "exited"
+        pane.session = None
+        orch._panes_by_project.setdefault(TEST_PROJECT, {})["qa"] = pane
+
+        with patch("agent_takkub.orchestrator.QTimer"):
+            orch._on_session_exit("qa", "/proj", TEST_PROJECT)
+
+        assert closed == ["qa"]
+
     def test_cap_clears_last_assigned_task(self, orch: Orchestrator) -> None:
         key = _exit_key(TEST_PROJECT, "devops")
         orch._ps(key).auto_respawn_attempts = AUTO_RESPAWN_MAX

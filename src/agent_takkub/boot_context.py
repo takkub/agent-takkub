@@ -152,7 +152,7 @@ def measure_role_appendix(base_role: str, project_ns: str) -> list[CategoryMeasu
     spawn_cwd = default_cwd_for_role(base_role, project=project_ns) or str(staging)
 
     try:
-        mem_path = _resolve_project_memory(lead_cwd(project_ns) or spawn_cwd)
+        mem_path = _resolve_project_memory(lead_cwd(project_ns) or spawn_cwd, project_ns=project_ns)
     except Exception:
         mem_path = None
     if mem_path is not None:

@@ -10572,11 +10572,37 @@ class Orchestrator(
                 if finder is not None:
                     transcript_path = finder(project_ns, pane_role)
 
-            if transcript_path and pathlib.Path(str(transcript_path)).is_file():
+            # (#686) LIVE pane → preview from the pyte-rendered screen, not
+            # the raw transcript byte stream. The raw tail starts at an
+            # arbitrary byte offset (mid-escape-sequence → "49h;3H" printable
+            # fragments) and the transcript writer drops repainted chunks, so
+            # a chunk can lose its ESC while a later chunk keeps the
+            # sequence's tail — no amount of regex stripping fixes that.
+            # display_lines() is already terminal-emulated: one rendered row
+            # per line (same contract content_liveness_text relies on).
+            if pane is not None and pane.session is not None:
+                try:
+                    _rows = [r.rstrip() for r in pane.session.display_lines() if r.strip()]
+                    if _rows:
+                        transcript_tail = "\n".join(_clean_progress_line(r) for r in _rows[-5:])
+                except Exception:
+                    pass
+
+            if (
+                not transcript_tail
+                and transcript_path
+                and pathlib.Path(str(transcript_path)).is_file()
+            ):
                 try:
                     raw = _read_tail_bytes(
                         pathlib.Path(str(transcript_path)), _TRANSCRIPT_TAIL_BYTES
                     )
+                    # (#686) a capped read starts mid-line — often inside an
+                    # escape sequence whose ESC is now gone. Drop the partial
+                    # first line so its printable residue never reaches the
+                    # preview.
+                    if len(raw) >= _TRANSCRIPT_TAIL_BYTES and b"\n" in raw:
+                        raw = raw.split(b"\n", 1)[1]
                     clean_lines = _extract_transcript_lines(raw, max_lines=5)
                     transcript_tail = "\n".join(clean_lines)
                     if state == "exited" or display_state == "exited":
@@ -10584,15 +10610,13 @@ class Orchestrator(
                 except OSError:
                     pass
 
-            # #308: the transcript-file tail above is the last N raw
-            # rendered lines, which is dominated by whatever chrome sits
-            # at the BOTTOM of the screen — usually the composer/idle
-            # footer, even while a tool call is genuinely wedged higher
-            # up (agy's "? for shortcuts" stayed visible below "Running
-            # command..." the whole 13-minute #308 incident). When the
-            # LIVE screen shows a tool-running marker right now, surface
-            # that real line instead of the misleading empty-looking
-            # footer tail — cheap best-effort, never raises.
+            # #308: the tail above is dominated by whatever chrome sits at
+            # the BOTTOM of the screen — usually the composer/idle footer,
+            # even while a tool call is genuinely wedged higher up (agy's
+            # "? for shortcuts" stayed visible below "Running command..."
+            # the whole 13-minute #308 incident). When the LIVE screen shows
+            # a tool-running marker right now, surface that real line
+            # instead — cheap best-effort, never raises.
             if pane is not None and pane.session is not None:
                 try:
                     from .provider_config import effective_provider_for

@@ -872,6 +872,35 @@ def render_lead_agents_md(
     )
     if text is None:
         return None
+
+    # (#687) a non-Claude Lead has no native auto-memory (/memory is a
+    # claude-CLI feature keyed to CLAUDE_CONFIG_DIR) — before this block,
+    # switching Lead off claude silently lost every learned lesson. Point it
+    # at the provider-neutral central store (synced from claude's native
+    # dirs) and tell it how to WRITE new lessons (plain file writes).
+    try:
+        from .project_memory import central_memory_md, memory_entry_count, sync
+
+        if project:
+            sync(project, cwd=spawn_cwd)
+            _mem = central_memory_md(project)
+            if _mem.exists():
+                _n = memory_entry_count(project)
+                text += f"""
+
+## 🧠 Project memory (provider-neutral, auto-injected)
+
+โปรเจคนี้มีความจำ {_n} รายการ — บทเรียน/กฎของโปรเจคที่แลกมาด้วยความเสียหายจริง index อยู่ที่:
+
+`{_mem}`
+
+**อ่าน index นี้ก่อนเริ่มงานแรกของ session** แล้วเปิดเฉพาะ entry ที่เกี่ยวกับงานตรงหน้า
+ได้บทเรียนใหม่ที่ควรจำข้าม session → เขียนไฟล์ .md ใหม่ใน `{_mem.parent}` แล้วเติมบรรทัด index ใน MEMORY.md
+(provider นี้ไม่มีระบบ /memory อัตโนมัติแบบ claude — เขียนไฟล์ตรงๆ ได้เลย ทุก provider แชร์โฟลเดอร์นี้ร่วมกัน)
+"""
+    except Exception:
+        _log_event("lead_memory_inject_failed", project=project)
+
     from .codex_agents_md import TAKKUB_MARKER
 
     target = pathlib.Path(spawn_cwd) / "AGENTS.md"

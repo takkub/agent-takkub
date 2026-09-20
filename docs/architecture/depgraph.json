@@ -1,6 +1,6 @@
 {
   "generated_by": "grimp 3.14",
-  "module_count": 345,
+  "module_count": 346,
   "modules": [
     {
       "module": "agent_takkub",
@@ -686,6 +686,7 @@
         "agent_takkub.preview_controller",
         "agent_takkub.project_explorer",
         "agent_takkub.project_identity",
+        "agent_takkub.project_memory",
         "agent_takkub.project_nav",
         "agent_takkub.project_rules",
         "agent_takkub.project_wizard",
@@ -732,7 +733,7 @@
         "agent_takkub.vault_mirror",
         "agent_takkub.worktree_manager"
       ],
-      "fan_in": 109,
+      "fan_in": 110,
       "fan_out": 2
     },
     {
@@ -2952,6 +2953,7 @@
         "agent_takkub.pipeline_config",
         "agent_takkub.plan_tier",
         "agent_takkub.plugin_installer",
+        "agent_takkub.project_memory",
         "agent_takkub.provider_config",
         "agent_takkub.provider_state",
         "agent_takkub.response_language",
@@ -2975,7 +2977,7 @@
         "agent_takkub.user_profile"
       ],
       "fan_in": 13,
-      "fan_out": 13
+      "fan_out": 14
     },
     {
       "module": "agent_takkub.lead_draft_state",
@@ -3337,6 +3339,7 @@
         "agent_takkub.lead_context",
         "agent_takkub.pane_guard",
         "agent_takkub.plan_tier",
+        "agent_takkub.project_memory",
         "agent_takkub.provider_spec",
         "agent_takkub.roles",
         "agent_takkub.task_scope",
@@ -3367,7 +3370,7 @@
         "agent_takkub.spawn_engine"
       ],
       "fan_in": 21,
-      "fan_out": 10
+      "fan_out": 11
     },
     {
       "module": "agent_takkub.pane_env",
@@ -3482,11 +3485,12 @@
       "module": "agent_takkub.path_safe",
       "imports": [],
       "imported_by": [
+        "agent_takkub.project_memory",
         "agent_takkub.project_nav",
         "agent_takkub.role_memory",
         "agent_takkub.task_ledger"
       ],
-      "fan_in": 3,
+      "fan_in": 4,
       "fan_out": 0
     },
     {
@@ -3668,6 +3672,21 @@
       ],
       "fan_in": 3,
       "fan_out": 1
+    },
+    {
+      "module": "agent_takkub.project_memory",
+      "imports": [
+        "agent_takkub.config",
+        "agent_takkub.path_safe",
+        "agent_takkub.token_meter",
+        "agent_takkub.user_profile"
+      ],
+      "imported_by": [
+        "agent_takkub.lead_context",
+        "agent_takkub.orchestrator_text"
+      ],
+      "fan_in": 2,
+      "fan_out": 4
     },
     {
       "module": "agent_takkub.project_nav",
@@ -5315,6 +5334,7 @@
         "agent_takkub.core.conversation.ingest.claude_adapter",
         "agent_takkub.orchestrator",
         "agent_takkub.orchestrator_text",
+        "agent_takkub.project_memory",
         "agent_takkub.project_nav",
         "agent_takkub.remote.notify",
         "agent_takkub.settings_usage",
@@ -5322,7 +5342,7 @@
         "agent_takkub.status_header",
         "agent_takkub.task_dock"
       ],
-      "fan_in": 11,
+      "fan_in": 12,
       "fan_out": 5
     },
     {
@@ -5469,6 +5489,7 @@
         "agent_takkub.main_window",
         "agent_takkub.orchestrator",
         "agent_takkub.pane_env",
+        "agent_takkub.project_memory",
         "agent_takkub.provider_usage",
         "agent_takkub.remote.notify",
         "agent_takkub.settings_accounts",
@@ -5479,7 +5500,7 @@
         "agent_takkub.user_actions",
         "agent_takkub.worktree_manager"
       ],
-      "fan_in": 22,
+      "fan_in": 23,
       "fan_out": 8
     },
     {

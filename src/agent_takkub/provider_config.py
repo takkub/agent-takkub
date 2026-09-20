@@ -863,6 +863,11 @@ _LEAD_CAPABILITY_LABELS: tuple[tuple[str, str], ...] = (
     ("supports_remote_history", "remote-control history (มือถือดูประวัติแชท Lead ย้อนหลัง)"),
     ("supports_token_meter", "token/limit meter (usage แถบสถานะ อิง JSONL transcript)"),
     ("supports_hooks", "SessionStart hook (session-report auto session-uuid tracking)"),
+    (
+        "supports_auto_memory",
+        "auto-memory (จดบทเรียนอัตโนมัติ /memory — Lead นี้ยังอ่าน memory กลางได้ "
+        "ผ่าน AGENTS.md แต่ต้องจดเพิ่มเป็นไฟล์เอง #687)",
+    ),
 )
 
 

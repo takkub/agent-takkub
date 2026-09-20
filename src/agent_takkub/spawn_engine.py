@@ -2928,7 +2928,9 @@ class SpawnEngineMixin:
                 # read domain rules (package manager, ports, vendor patterns) on
                 # demand without relying on Lead to echo them in every task spec.
                 try:
-                    _mem_path = _resolve_project_memory(lead_cwd(project_ns) or spawn_cwd)
+                    _mem_path = _resolve_project_memory(
+                        lead_cwd(project_ns) or spawn_cwd, project_ns=project_ns
+                    )
                 except Exception:
                     _log.exception(
                         "could not resolve project memory for %s; spawning without role context",
@@ -4241,6 +4243,18 @@ MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง 
                     pl_run.hop_failed.add(role_name)
                     if not pl_run.hop_pending:
                         self._advance_pipeline(project, pl_key, pl_run)
+            # (#683) A capped pane used to stay registered forever — dead
+            # session, no further respawn attempts, but never removed from
+            # the layout/UI, so it sat as a permanent zombie slot. Pipeline
+            # and auto-chain were already resolved manually above (suppress
+            # both here so close() doesn't re-fire them).
+            self.close(
+                role_name,
+                project=project,
+                suppress_pipeline=True,
+                suppress_auto_chain=True,
+                keep_queue=True,
+            )
             return
         ps.auto_respawn_attempts = attempts + 1
         # Exponential back-off: a pane that keeps crashing (deterministic bug

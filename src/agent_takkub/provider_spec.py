@@ -183,6 +183,12 @@ class ProviderSpec:
     supports_resume: bool = False
     supports_slash_commands: bool = False
     supports_hooks: bool = False
+    # Native auto-memory: the CLI itself records lessons across sessions
+    # (claude's /memory → projects/<dir>/memory/). Providers without it get
+    # the provider-neutral central memory injected read/write via AGENTS.md
+    # instead (#687) — this flag drives the capability-gap warning so the
+    # user knows auto-capture is manual there.
+    supports_auto_memory: bool = False
     # Does this CLI's own agent harness expose a distinct structured
     # file-read tool, separate from raw shell/exec? (#273). Gates whether
     # `_task_handoff_pointer` may hand a long task off as "read this file
@@ -687,6 +693,7 @@ claude_spec = ProviderSpec(
     supports_resume=True,
     supports_slash_commands=True,
     supports_hooks=True,
+    supports_auto_memory=True,  # /memory → projects/<dir>/memory/ (#687)
     plugin_dirs=("TAKKUB_EXTRA_PLUGINS",),  # spawn_engine.py:1529-1536 (env var name)
     # Claude Code renamed its subagent tool Task → Agent (2.1.268 ships only
     # `AgentInput` in sdk-tools.d.ts). Probed on 2.1.268 (#641): the permission
