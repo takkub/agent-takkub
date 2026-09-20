@@ -832,6 +832,15 @@ class _ModelCatalogRefreshThread(QThread):
         self.resultReady.emit(provider_model_catalog.refresh_stale())
 
 
+# #688: keep-alive for running catalog threads, mirroring update_panel's
+# _NPM_THREADS. The thread must NOT be parented to the SettingsWindow: the
+# dialog is WA_DeleteOnClose, so a Cancel/Esc while discovery is still
+# shelling out destroyed the dialog AND its running QThread child →
+# Qt6 qFatal ("QThread: Destroyed while thread is still running") →
+# fail-fast 0xc0000409 that kills the whole cockpit with no Python trace.
+_CATALOG_THREADS: set[_ModelCatalogRefreshThread] = set()
+
+
 class _AutoskillsConfirmDialog(QDialog):
     """Confirms which of `autoskills`' proposed candidates actually get
     written — never auto-checked-and-fired. A skill under `.claude/skills/`
@@ -1052,8 +1061,15 @@ class SettingsWindow(
         that shells out to a provider CLI."""
         if os.environ.get("TAKKUB_SKIP_MODEL_CATALOG_REFRESH"):
             return
-        thread = _ModelCatalogRefreshThread(self)
+        # #688: unparented + module-level keep-alive (see _CATALOG_THREADS).
+        # A Cancel while discovery is mid-subprocess just lets the thread
+        # finish in the background and delete itself; the resultReady
+        # connection auto-drops when this (WA_DeleteOnClose) dialog is
+        # destroyed, so the late signal has nowhere unsafe to land.
+        thread = _ModelCatalogRefreshThread()
         thread.resultReady.connect(self._on_model_catalog_refreshed)
+        _CATALOG_THREADS.add(thread)
+        thread.finished.connect(lambda t=thread: _CATALOG_THREADS.discard(t))
         thread.finished.connect(thread.deleteLater)
         self._model_catalog_thread = thread
         thread.start()

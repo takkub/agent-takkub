@@ -2561,3 +2561,58 @@ class TestTeamPresetView:
         assert dlg._stack.currentIndex() == settings_window.VIEW_PROVIDERS_ROLES
         assert dlg._nav_buttons[settings_window.VIEW_PROVIDERS_ROLES].property("active") is True
         dlg.deleteLater()
+
+
+class TestCancelWhileCatalogThreadRuns688:
+    """#688 (prod crash 2026-09-20): Cancel/Esc on a freshly opened Settings
+    window while `_ModelCatalogRefreshThread` is still shelling out killed
+    the ENTIRE cockpit — the thread was parented to the WA_DeleteOnClose
+    dialog, so `deleteLater` destroyed a running QThread → Qt6 qFatal
+    fail-fast (0xc0000409) with zero Python-side trace. CI never saw it
+    because conftest sets TAKKUB_SKIP_MODEL_CATALOG_REFRESH, so the thread
+    never started in-suite. Hence a real subprocess: stub discovery to be
+    slow, open, close immediately, flush DeferredDelete — the process must
+    survive to print the sentinel."""
+
+    _SCRIPT = """
+import os, sys, time
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+os.environ.pop("TAKKUB_SKIP_MODEL_CATALOG_REFRESH", None)
+from PyQt6.QtCore import QCoreApplication, QEvent
+from PyQt6.QtWidgets import QApplication
+app = QApplication([])
+from agent_takkub import provider_model_catalog
+provider_model_catalog.refresh_stale = lambda *a, **k: (time.sleep(2.0), {})[1]
+from agent_takkub.settings_window import SettingsWindow
+dlg = SettingsWindow()
+dlg.show()
+dlg.close()  # the user's near-instant Cancel
+for _ in range(10):
+    app.processEvents()
+    QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+    time.sleep(0.05)
+print("SURVIVED", flush=True)
+os._exit(0)  # skip teardown; the stub worker may still be sleeping
+"""
+
+    def test_cockpit_survives_fast_cancel(self, tmp_path: Path) -> None:
+        import os
+        import subprocess
+        import sys
+
+        env = dict(os.environ)
+        env.pop("TAKKUB_SKIP_MODEL_CATALOG_REFRESH", None)
+        env["AGENT_TAKKUB_HOME"] = str(tmp_path / "home")
+        env["QT_QPA_PLATFORM"] = "offscreen"
+        proc = subprocess.run(
+            [sys.executable, "-c", self._SCRIPT],
+            capture_output=True,
+            text=True,
+            timeout=120,
+            env=env,
+        )
+        assert "SURVIVED" in proc.stdout, (
+            f"settings-cancel killed the process (exit {proc.returncode}) — "
+            f"#688 regressed\nstderr: {proc.stderr[-2000:]}"
+        )
+        assert proc.returncode == 0

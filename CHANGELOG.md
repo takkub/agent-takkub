@@ -2,6 +2,23 @@
 
 All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses [SemVer](https://semver.org/).
 
+## [v2.1.26] - 2026-09-20
+
+### Fixed (แก้ด่วน — prod crash)
+
+- **#688: เปิด Settings แล้วกด Cancel เร็วๆ ทำ cockpit ดับทั้งโปรแกรม** — `SettingsWindow` เป็น
+  `WA_DeleteOnClose` แต่ spawn `_ModelCatalogRefreshThread` แบบ parent กับตัว dialog เอง
+  (`run()` shell ออกไปถาม provider CLI ใช้เวลาหลายวินาทีเมื่อ catalog หมดอายุ) — Cancel/Esc
+  ระหว่างที่ thread ยังวิ่ง → `deleteLater` ทำลาย dialog พร้อม QThread ลูกที่ยังทำงาน →
+  Qt6 qFatal "QThread: Destroyed while thread is still running" → fail-fast `0xc0000409`
+  ใน Qt6Core.dll ดับทั้งโปรเซสแบบไร้ traceback (fail-fast ข้าม SEH — faulthandler/excepthook
+  จับไม่ได้เลย) · อาการเป็นๆ หายๆ เพราะตอน catalog ยังสด `refresh_stale()` คืนทันที thread จบ
+  ก่อนคนกด Cancel ทัน · CI ไม่เคยจับได้เพราะ conftest ตั้ง `TAKKUB_SKIP_MODEL_CATALOG_REFRESH`
+  ทำให้ thread นี้ไม่เคยถูก start ใน suite · แก้: เลิก parent กับ dialog + keep-alive ใน
+  module-level `_CATALOG_THREADS` (idiom เดียวกับ `_NPM_THREADS` ของ update_panel) —
+  connection ไปยัง dialog ที่ถูกทำลายแล้ว Qt ตัดให้เอง · เทสกันถอยรันเป็น subprocess จริง
+  (`TestCancelWhileCatalogThreadRuns688`) พิสูจน์แล้วว่าแดงบนโค้ดก่อนแก้/เขียวหลังแก้
+
 ## [v2.1.25] - 2026-09-20
 
 ### Fixed (แก้ — เจอจาก live test v2.1.24 บน dev)
