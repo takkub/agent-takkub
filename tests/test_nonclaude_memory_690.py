@@ -64,11 +64,16 @@ def _run(
 ):
     """Spawn `role` on `provider`; return (extra passed to ensure_agents_md,
     env handed to the PTY, delivered paste text or None, logged events)."""
+    from agent_takkub import gemini_helper, opencode_helper
     from agent_takkub import shared_dev_tools as sdt
 
     orch = _orch(monkeypatch)
     orch._panes_by_project[PROJECT] = {role: _pane(role)}
     monkeypatch.setattr(sdt, "SHARED_MCP_FILE", tmp_path / "shared-mcp.json")
+    # CI deliberately has no provider CLIs.  This is an argv/memory-wiring
+    # test, so pin discovery for every provider it exercises.
+    monkeypatch.setattr(gemini_helper, "find_agy_executable", lambda: "agy")
+    monkeypatch.setattr(opencode_helper, "find_opencode_executable", lambda: "opencode")
 
     mem_md = tmp_path / "central" / "MEMORY.md"
     mem_md.parent.mkdir(parents=True, exist_ok=True)
