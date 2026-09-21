@@ -4,6 +4,19 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 
 ## [vNEXT]
 
+## [v2.1.28] - 2026-09-21
+
+### Fixed
+
+- **#691:** Let an actively coordinating Lead enter the normal quota
+  reroute/park flow even without a teammate-style assigned task. Cross-provider
+  takeover now carries the previous Lead's live output, transcript location,
+  and in-flight role roster so coordination can continue after respawn.
+- **#692:** Poll and render every authenticated local Codex account as a
+  separate usage card, while keeping the legacy provider-level cache intact.
+  Gemini panes now label their unavailable per-session context explicitly
+  instead of showing an ambiguous `tokens n/a` badge.
+
 ## [v2.1.27] - 2026-09-21
 
 ### Fixed
