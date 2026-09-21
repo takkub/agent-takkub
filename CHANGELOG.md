@@ -2,6 +2,18 @@
 
 All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses [SemVer](https://semver.org/).
 
+## [vNEXT]
+
+## [v2.1.27] - 2026-09-21
+
+### Fixed
+
+- **#689:** Deduplicate Codex historical usage independently of a transient
+  account label, preventing one transcript from being counted for both
+  `default` and the resolved account.
+- **#690:** Give every non-Claude teammate the same project-memory and
+  role-memory pointers as Claude teammates.
+
 ## [v2.1.26] - 2026-09-20
 
 ### Fixed (แก้ด่วน — prod crash)
