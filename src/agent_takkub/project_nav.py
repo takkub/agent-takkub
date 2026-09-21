@@ -964,6 +964,16 @@ class ProjectNav(QWidget):
         return index
 
     def removeTab(self, index: int) -> None:
+        # Removing the CURRENT row makes QListWidget emit currentRowChanged
+        # with the row index from BEFORE the removal (measured: current=0,
+        # remove 0 of 2 -> emits row 1 while the stack already holds only 1
+        # widget). `_on_tab_switched` then gets `widget(1) is None`, returns
+        # silently, and projects.json's `active` stays on the project that was
+        # just closed — so every "restart Lead"/"switch provider" afterwards
+        # targets a project with no pane (prod 2026-09-21: `close_noop_no_pane`
+        # + `spawn_failed` x3 while `open_tabs` held only the other project).
+        # Suppress that stale emission and re-emit once with the real row.
+        was_current = index == self._list.currentRow()
         w = self._stack.widget(index)
         # The row's embedded explorer widget is owned (constructed, and torn
         # down) by the ProjectTab, not by this sidebar — hand it back before
@@ -976,11 +986,19 @@ class ProjectNav(QWidget):
             explorer.hide()
         if w is not None:
             self._stack.removeWidget(w)
-        item = self._list.takeItem(index)
+        self._list.blockSignals(True)
+        try:
+            item = self._list.takeItem(index)
+        finally:
+            self._list.blockSignals(False)
         if item is not None:
             del item
         self.refresh_pending_projects()  # closed project may reappear as pending
         self._schedule_fit_explorer()
+        if was_current:
+            # -1 when the list is now empty -> `_on_tab_switched(-1)` clears
+            # `active` (#102's contract), same as before for the last tab.
+            self._on_row_changed(self._list.currentRow())
 
     def setTabText(self, index: int, text: str) -> None:
         rw = self._row_widget(index)

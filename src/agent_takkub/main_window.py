@@ -1608,6 +1608,17 @@ class MainWindow(
             self._usage_corner.setParent(None)
             self._limit_label_host = None
         self.tabs.removeTab(index)
+        # Invariant, independent of whether the nav's currentChanged fired
+        # (it silently didn't on prod 2026-09-21 — see ProjectNav.removeTab):
+        # `active` must never name a project whose tab is gone, because
+        # "Restart Lead" and the provider switch both act on `active`, not on
+        # the tab the user is looking at.
+        if active_project()[0] == project:
+            current = self.tabs.currentWidget()
+            if isinstance(current, ProjectTab):
+                set_active_project(current.project_name)
+            else:
+                clear_active_project()
         # #365 phase 10: drop this project's registered diagnostic sources
         # (tab.explorer is about to be torn down with the tab) so a later
         # `takkub doctor --workspace` doesn't read from a deleted QObject.

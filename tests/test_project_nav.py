@@ -130,6 +130,67 @@ class TestProjectNavApi:
         # list rows still align with stack indices
         assert nav._list.count() == nav._stack.count()
 
+    def test_removing_the_current_first_row_reports_the_surviving_tab(self, qapp):
+        """Prod 2026-09-21: closing the selected FIRST project made Qt emit
+        currentRowChanged(1) while the stack already held one widget —
+        `widget(1)` was None, MainWindow's `_on_tab_switched` returned
+        silently, and projects.json's `active` stayed on the closed project,
+        so Restart Lead / provider switch hit a project with no pane."""
+        nav = ProjectNav()
+        a, b = _page("saas"), _page("unirecon")
+        nav.addTab(a, "saas")
+        nav.addTab(b, "unirecon")
+        nav.setCurrentIndex(0)
+        seen: list[int] = []
+        nav.currentChanged.connect(seen.append)
+
+        nav.removeTab(0)
+
+        assert seen == [0]  # exactly once, and a row that exists
+        assert nav.widget(seen[0]) is b
+        assert nav.currentWidget() is b
+
+    def test_removing_the_current_last_row_reports_the_surviving_tab(self, qapp):
+        nav = ProjectNav()
+        a, b = _page("a"), _page("b")
+        nav.addTab(a, "alpha")
+        nav.addTab(b, "beta")
+        nav.setCurrentIndex(1)
+        seen: list[int] = []
+        nav.currentChanged.connect(seen.append)
+
+        nav.removeTab(1)
+
+        assert seen == [0]
+        assert nav.widget(0) is a
+
+    def test_removing_the_only_tab_reports_minus_one(self, qapp):
+        """-1 is what makes MainWindow clear `active` (#102)."""
+        nav = ProjectNav()
+        nav.addTab(_page("a"), "alpha")
+        seen: list[int] = []
+        nav.currentChanged.connect(seen.append)
+
+        nav.removeTab(0)
+
+        assert seen == [-1]
+        assert nav.count() == 0
+
+    def test_removing_a_background_tab_does_not_emit(self, qapp):
+        """The selected project did not change — no spurious switch."""
+        nav = ProjectNav()
+        a, b = _page("a"), _page("b")
+        nav.addTab(a, "alpha")
+        nav.addTab(b, "beta")
+        nav.setCurrentIndex(1)
+        seen: list[int] = []
+        nav.currentChanged.connect(seen.append)
+
+        nav.removeTab(0)
+
+        assert seen == []
+        assert nav.currentWidget() is b
+
     def test_set_tab_text_and_usage_do_not_raise(self, qapp):
         nav = ProjectNav()
         nav.addTab(_page("a"), "alpha")

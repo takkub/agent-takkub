@@ -1091,9 +1091,11 @@ def classify(user_message: str, context: dict | None = None) -> RoutingAction:
     action = _classify_core(user_message, context)
     action.suggested_mode, action.mode_reason = suggest_assign_mode(user_message)
     try:
-        from . import task_scope
+        from . import decide
 
-        scope_dec = task_scope.classify(user_message)
+        # `decide.scope` == `task_scope.classify` with the engine off (default),
+        # and never blocks the Qt main thread when it is on — see decide.py.
+        scope_dec = decide.scope(user_message)
         action.scope = scope_dec.scope
         action.scope_reason = scope_dec.reason
     except Exception:

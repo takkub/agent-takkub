@@ -34,6 +34,24 @@ SCHEMA_VERSION = 1
 _CONTEXT_STRATEGIES: tuple[str, ...] = ("fast", "automatic", "deep")
 _DEFAULT_CONTEXT_STRATEGY = "automatic"
 
+# Scope-decision engine (`decide.py`) — "off" (regex tables only, free and
+# offline), "shadow" (regex still decides, the model is asked in parallel and
+# both are logged), "on" (the model decides, regex is the fallback/safety
+# floor). Spelled literally rather than imported from `decide` because that
+# module reads this one back (`decide.mode`) — importing it here would be a
+# cycle; `test_decide.py` pins the two tuples equal instead. Default "off":
+# the model costs money per call, so nothing may enable it implicitly.
+_DECIDE_MODES: tuple[str, ...] = ("off", "shadow", "on")
+_DEFAULT_DECIDE_MODE = "off"
+
+# TypeSafe API key for `decide.py`'s shadow/on modes, entered on the Usage
+# Settings page. Env (`typesafe_bridge.ENV_KEYS`) always wins over this.
+# Stored plaintext in this file's JSON — the same trust level as every CLI
+# credential already under DATA_HOME (codex auth.json, claude-config) — and
+# never committable: on a dev checkout DATA_HOME == REPO_ROOT, but the whole
+# `/v2/` tree is gitignored (.gitignore:27), verified 2026-09-21.
+_DEFAULT_TYPESAFE_API_KEY = ""
+
 
 @dataclass(frozen=True, slots=True)
 class SchedulerPolicyConfig:
@@ -86,6 +104,8 @@ def _default_payload() -> dict:
         "schema_version": SCHEMA_VERSION,
         "scheduler_policy": asdict(SchedulerPolicyConfig()),
         "context_strategy": _DEFAULT_CONTEXT_STRATEGY,
+        "decide_mode": _DEFAULT_DECIDE_MODE,
+        "typesafe_api_key": _DEFAULT_TYPESAFE_API_KEY,
     }
 
 
@@ -159,6 +179,12 @@ def load() -> dict:
             strategy = payload.get("context_strategy")
             if isinstance(strategy, str) and strategy in _CONTEXT_STRATEGIES:
                 merged["context_strategy"] = strategy
+            decide_mode = payload.get("decide_mode")
+            if isinstance(decide_mode, str) and decide_mode in _DECIDE_MODES:
+                merged["decide_mode"] = decide_mode
+            ts_key = payload.get("typesafe_api_key")
+            if isinstance(ts_key, str):
+                merged["typesafe_api_key"] = ts_key.strip()
         except (OSError, ValueError, json.JSONDecodeError):
             merged = _default_payload()
 
@@ -227,4 +253,33 @@ def save_context_strategy(value: str) -> bool:
         raise ValueError(f"unknown context strategy: {value!r}")
     payload = load()
     payload["context_strategy"] = value
+    return save(payload)
+
+
+def load_decide_mode() -> str:
+    """Persisted scope-decision mode. `decide.mode()` checks env first and
+    treats anything unrecognised here as the default, so a hand-edited file
+    cannot turn on a paid path by accident."""
+    return load().get("decide_mode", _DEFAULT_DECIDE_MODE)
+
+
+def save_decide_mode(value: str) -> bool:
+    if value not in _DECIDE_MODES:
+        raise ValueError(f"unknown decide mode: {value!r}")
+    payload = load()
+    payload["decide_mode"] = value
+    return save(payload)
+
+
+def load_typesafe_api_key() -> str:
+    """Stored TypeSafe key ("" = none). `typesafe_bridge.api_key()` checks the
+    env first; this is only the fallback it reads through its key loader."""
+    value = load().get("typesafe_api_key", _DEFAULT_TYPESAFE_API_KEY)
+    return value.strip() if isinstance(value, str) else ""
+
+
+def save_typesafe_api_key(value: str) -> bool:
+    """Persist (or clear, with "") the TypeSafe key from the Settings page."""
+    payload = load()
+    payload["typesafe_api_key"] = (value or "").strip()
     return save(payload)

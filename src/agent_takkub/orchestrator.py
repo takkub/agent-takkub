@@ -2928,10 +2928,14 @@ class Orchestrator(
             # so the next spawn is an ordinary (no-Agent) teammate pane.
             _fo_ps.subagent_fanout = 0
 
-        from . import task_scope
+        from . import decide, task_scope
 
         requested_scope = (scope or "auto").strip().lower()
-        auto_scope = task_scope.classify(task).scope
+        # Reaches here as "auto" only from callers that did not resolve a tier
+        # themselves (`cli.assign` already ships a concrete one). `decide.scope`
+        # never blocks this thread: on the Qt main thread it answers from the
+        # regex tables and probes the model in the background instead.
+        auto_scope = decide.scope(task).scope
         if requested_scope == "auto":
             resolved_scope = auto_scope
             source = "auto"
@@ -4132,8 +4136,17 @@ class Orchestrator(
             # instead of losing it silently.
             _pending_lang = ps_assign.pending_lang_directive
             ps_assign.pending_lang_directive = None
+            # #690: same fallback for the project/role memory pointers —
+            # after the language line, which stays the paste's first line.
+            _pending_mem = getattr(ps_assign, "pending_memory_note", None)
+            ps_assign.pending_memory_note = None
+            _prefix = []
             if _pending_lang:
-                paste_text = f"[ภาษาที่ตอบ (#621)] {_pending_lang}\n\n{paste_text}"
+                _prefix.append(f"[ภาษาที่ตอบ (#621)] {_pending_lang}")
+            if _pending_mem:
+                _prefix.append(_pending_mem)
+            if _prefix:
+                paste_text = "\n\n".join(_prefix) + f"\n\n{paste_text}"
             self._send_when_ready(role_name, paste_text, project=project)
         initial_delivery = ps_assign.spawn_initial_task_state or "pointer"
         if initial_delivery == "delivered":

@@ -313,6 +313,126 @@ def test_import_codex_reported_total_matches_provider_total_not_double_counted(t
     assert result["rows"][0]["total"] == 19421
 
 
+def _codex_token_count_line(ordinal=0, ts="2026-09-01T10:00:00Z", input_tokens=100):
+    return {
+        "timestamp": ts,
+        "ordinal": ordinal,
+        "type": "event_msg",
+        "payload": {
+            "type": "token_count",
+            "info": {"last_token_usage": {"input_tokens": input_tokens, "output_tokens": 7}},
+        },
+    }
+
+
+def test_import_codex_never_double_counts_a_shared_session_profile(tmp_path):
+    """#689: a named codex account (#505 stage 2) junctions `sessions/`+
+    `archived_sessions/` back into the default home — same physical rollouts
+    under two account names, every total doubled with identical `turns`.
+    Same contract as `test_import_claude_never_double_counts_...`."""
+    home = tmp_path / "codex-home"
+    _write_codex_rollout(home, lines=[_codex_token_count_line()])
+    profiles = [
+        {"name": "default", "config_dir": str(home)},
+        {"name": "monchai500", "config_dir": str(home)},  # alias == shared store
+    ]
+    stats = ul.import_codex(profiles)
+    assert stats["new_turns"] == 1
+    assert stats["scanned_files"] == 1
+    assert ul._read_jsonl(ul._turn_file("codex", "default", "2026-09"))
+    assert not ul._turn_file("codex", "monchai500", "2026-09").exists()
+
+
+def test_import_codex_alias_account_ledger_self_heals(tmp_path):
+    """Rows recorded under the alias BEFORE the guard existed are duplicates —
+    the next import drops that account's turn artifacts (month jsonl,
+    daily.json, cursor, seen-ids) but keeps its quota samples, which come from
+    the account's own auth and are real per-account data. Prod is hands-off,
+    so the report must heal without a manual cleanup step."""
+    home = tmp_path / "codex-home"
+    _write_codex_rollout(home, lines=[_codex_token_count_line()])
+
+    poisoned = ul.account_dir("codex", "monchai500")
+    poisoned.mkdir(parents=True, exist_ok=True)
+    (poisoned / "2026-08.jsonl").write_text("{}\n", encoding="utf-8")
+    (poisoned / "daily.json").write_text("{}", encoding="utf-8")
+    (poisoned / "_import_cursor.json").write_text("{}", encoding="utf-8")
+    (poisoned / "_seen_ids.json").write_text("{}", encoding="utf-8")
+    (poisoned / "quota-2026-08.jsonl").write_text("{}\n", encoding="utf-8")
+
+    stats = ul.import_codex(
+        [
+            {"name": "default", "config_dir": str(home)},
+            {"name": "monchai500", "config_dir": str(home)},
+        ]
+    )
+    assert stats["alias_accounts"] == 1
+    assert stats["alias_files_dropped"] == 4
+    assert not (poisoned / "2026-08.jsonl").exists()
+    assert not (poisoned / "daily.json").exists()
+    assert not (poisoned / "_import_cursor.json").exists()
+    assert not (poisoned / "_seen_ids.json").exists()
+    assert (poisoned / "quota-2026-08.jsonl").exists()  # per-account, kept
+    assert poisoned.is_dir()  # quota remains -> the account dir must survive
+
+
+def test_alias_cleanup_removes_the_dir_when_nothing_real_remains(tmp_path):
+    """No quota files -> the emptied dir goes too, or the next rollup's
+    `_all_accounts` walk resurrects an empty daily.json and the phantom
+    account lingers in every listing (seen live on dev)."""
+    home = tmp_path / "codex-home"
+    _write_codex_rollout(home, lines=[_codex_token_count_line()])
+    poisoned = ul.account_dir("codex", "monchai500")
+    poisoned.mkdir(parents=True, exist_ok=True)
+    (poisoned / "2026-08.jsonl").write_text("{}\n", encoding="utf-8")
+    (poisoned / "daily.json").write_text("{}", encoding="utf-8")
+
+    ul.import_codex(
+        [
+            {"name": "default", "config_dir": str(home)},
+            {"name": "monchai500", "config_dir": str(home)},
+        ]
+    )
+    assert not poisoned.exists()
+
+
+def test_alias_cleanup_never_touches_the_default_account(tmp_path):
+    """Structural guard: whatever order a caller feeds profiles in, the one
+    account whose daily.json may hold months with no surviving raw transcripts
+    can never be the cleanup target."""
+    target = ul.account_dir("codex", "default")
+    target.mkdir(parents=True, exist_ok=True)
+    (target / "daily.json").write_text("{}", encoding="utf-8")
+    stats: dict = {}
+    ul._drop_alias_turn_artifacts("codex", "default", stats)
+    assert (target / "daily.json").exists()
+    assert "alias_accounts" not in stats
+
+
+def test_import_codex_profile_with_its_own_store_keeps_its_own_rows(tmp_path):
+    """A codex profile pointed at a genuinely separate CODEX_HOME is not an
+    alias — it must keep its own attribution and never be swept up by the
+    self-heal."""
+    home_a = tmp_path / "codex-home"
+    home_b = tmp_path / "codex-home-b"
+    _write_codex_rollout(home_a, lines=[_codex_token_count_line()])
+    _write_codex_rollout(
+        home_b,
+        name="rollout-2026-09-01T11-00-00-def.jsonl",
+        lines=[_codex_token_count_line(ts="2026-09-01T11:00:00Z", input_tokens=55)],
+    )
+    stats = ul.import_codex(
+        [
+            {"name": "default", "config_dir": str(home_a)},
+            {"name": "work", "config_dir": str(home_b)},
+        ]
+    )
+    assert stats["new_turns"] == 2
+    assert "alias_accounts" not in stats
+    assert ul._read_jsonl(ul._turn_file("codex", "default", "2026-09"))
+    assert ul._read_jsonl(ul._turn_file("codex", "work", "2026-09"))
+
+
 # ── import_opencode ──────────────────────────────────────────────────────
 
 

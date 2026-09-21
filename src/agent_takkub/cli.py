@@ -702,10 +702,13 @@ def cmd_assign(args: argparse.Namespace) -> dict:
     args.task = task_text
     base_role = (getattr(args, "role", "") or "").split("#", 1)[0].strip().lower()
 
-    from . import task_scope
+    from . import decide
 
     requested_scope = (getattr(args, "scope", "auto") or "auto").strip().lower()
-    auto_decision = task_scope.classify(task_text)
+    # `decide.scope` is `task_scope.classify` unless the operator turned the
+    # decision engine on (default off) — see decide.py. This is the one caller
+    # that may block on it: `assign` runs in its own short-lived CLI process.
+    auto_decision = decide.scope(task_text)
     if requested_scope == "auto":
         scope = auto_decision.scope
         scope_reason = auto_decision.reason

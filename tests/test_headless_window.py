@@ -115,6 +115,36 @@ class TestOpenCloseProjectTab:
         assert window.orch._project_panes("proj").get(LEAD.name) is None
         assert config.get_open_tabs() == []
 
+    def test_close_project_tab_never_leaves_active_on_the_closed_project(
+        self,
+        window: HeadlessWindow,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: pathlib.Path,
+        seed_projects,
+    ) -> None:
+        """Prod 2026-09-21 (desktop twin in test_close_tab_active_project.py):
+        a stale `active` makes Restart Lead / provider switch act on a project
+        with no pane. Closing hands `active` to a survivor, or clears it."""
+        other = tmp_path / "other" / "api"
+        other.mkdir(parents=True)
+        seed_projects(
+            tmp_path,
+            {
+                "proj": {"paths": {"api": str(tmp_path / "proj" / "api")}},
+                "other": {"paths": {"api": str(other)}},
+            },
+        )
+        monkeypatch.setattr(window.orch, "spawn", MagicMock(return_value=(True, "ok")))
+        window._open_project_tab("other")
+        window._open_project_tab("proj")
+        assert config.active_project()[0] == "proj"
+
+        window._close_project_tab("proj")
+        assert config.active_project()[0] == "other"
+
+        window._close_project_tab("other")
+        assert config.active_project()[0] is None
+
     def test_close_project_tab_unknown_project(self, window: HeadlessWindow) -> None:
         ok, msg = window._close_project_tab("never-opened")
         assert ok is False

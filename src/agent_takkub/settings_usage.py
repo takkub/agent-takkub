@@ -33,6 +33,7 @@ from PyQt6.QtWidgets import (
     QGridLayout,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
     QVBoxLayout,
     QWidget,
 )
@@ -232,11 +233,175 @@ class UsageSettingsMixin:
         self._usage_rtk_label.setObjectName("panelHint")
         self._usage_rtk_label.setWordWrap(True)
         lay.addWidget(self._usage_rtk_label)
+
+        lay.addWidget(self._build_decide_panel(view))
         lay.addStretch(1)
 
         self._usage_import_thread: _CallableThread | None = None
         self._render_usage()
         return view
+
+    # ──────────────────────────────────────────────────────────
+    # Decision Engine — TypeSafe/Jev (#690-batch; engine itself: decide.py)
+    # ──────────────────────────────────────────────────────────
+
+    def _build_decide_panel(self, view: QWidget) -> QWidget:
+        """3-way mode switch + API-key entry + spend meter for `decide.py`.
+
+        Lives on the Usage page because every axis of the decision engine the
+        user cares about is a usage/cost axis (calls, tokens, per-process cap)
+        — and this page already owns the only spend meters in Settings.
+        """
+        from . import core_v2_settings, decide
+
+        panel = QWidget(view)
+        panel.setObjectName("panel")
+        lay = QVBoxLayout(panel)
+        lay.setContentsMargins(14, 12, 14, 12)
+        lay.setSpacing(8)
+        lay.addWidget(self._build_card_header("USAGE", "Scope sizing — TypeSafe (Jev)", "", panel))
+        hint = QLabel(
+            "ให้โมเดล Jev ช่วยตัดสินขนาดงาน (tiny/normal/deep) แทนตาราง keyword — "
+            "ตารางเดิมเป็นตัวสำรองเสมอ พังก็ตกกลับอัตโนมัติ · เสียเงินต่อครั้งที่ถาม "
+            "(วัดจริง ~0.1 สตางค์/ใบ) · โหมด Shadow = ตารางเดิมตัดสินตามปกติ "
+            "แต่เก็บผลเทียบลง events.log เพื่อดูว่าโมเดลเก่งกว่าจริงไหมก่อนกดเปิด",
+            panel,
+        )
+        hint.setObjectName("panelHint")
+        hint.setWordWrap(True)
+        lay.addWidget(hint)
+
+        mode_row = QHBoxLayout()
+        mode_row.addWidget(QLabel("โหมด:", panel))
+        self._decide_mode_combo = QComboBox(panel)
+        for value, label in (
+            ("off", "ปิด — ใช้ตารางเดิม (ค่าเริ่มต้น ฟรี ออฟไลน์)"),
+            ("shadow", "Shadow — เก็บผลเทียบเงียบๆ ยังไม่เปลี่ยนการตัดสิน"),
+            ("on", "เปิด — Jev ตัดสิน ตารางเดิมเป็นตัวสำรอง"),
+        ):
+            self._decide_mode_combo.addItem(label, value)
+        current_mode = core_v2_settings.load_decide_mode()
+        idx = self._decide_mode_combo.findData(current_mode)
+        self._decide_mode_combo.setCurrentIndex(idx if idx >= 0 else 0)
+        self._decide_mode_combo.currentIndexChanged.connect(self._on_decide_mode_changed)
+        mode_row.addWidget(self._decide_mode_combo, 1)
+        lay.addLayout(mode_row)
+
+        key_row = QHBoxLayout()
+        key_row.addWidget(QLabel("API key:", panel))
+        self._decide_key_edit = QLineEdit(panel)
+        self._decide_key_edit.setEchoMode(QLineEdit.EchoMode.Password)
+        self._decide_key_edit.setPlaceholderText(
+            "apikey_… (เก็บใน v2/config — gitignore แล้ว · env TAKKUB_TYPESAFE_API_KEY ชนะค่านี้)"
+        )
+        self._decide_key_edit.setText(core_v2_settings.load_typesafe_api_key())
+        key_row.addWidget(self._decide_key_edit, 1)
+        self._decide_key_show_btn = cockpit_theme.secondary_button("แสดง", panel)
+        self._decide_key_show_btn.setCheckable(True)
+        self._decide_key_show_btn.toggled.connect(
+            lambda show: self._decide_key_edit.setEchoMode(
+                QLineEdit.EchoMode.Normal if show else QLineEdit.EchoMode.Password
+            )
+        )
+        key_row.addWidget(self._decide_key_show_btn)
+        self._decide_key_save_btn = cockpit_theme.secondary_button("บันทึก key", panel)
+        self._decide_key_save_btn.clicked.connect(self._on_decide_key_save_clicked)
+        key_row.addWidget(self._decide_key_save_btn)
+        self._decide_test_btn = cockpit_theme.secondary_button("ทดสอบ", panel)
+        self._decide_test_btn.clicked.connect(self._on_decide_test_clicked)
+        key_row.addWidget(self._decide_test_btn)
+        lay.addLayout(key_row)
+
+        self._decide_status_label = QLabel("", panel)
+        self._decide_status_label.setObjectName("panelHint")
+        self._decide_status_label.setWordWrap(True)
+        lay.addWidget(self._decide_status_label)
+
+        self._decide_test_thread: _CallableThread | None = None
+        self._render_decide_status(decide.stats())
+        return panel
+
+    def _render_decide_status(self, stats: dict) -> None:
+        import os as _os
+
+        from . import decide as _decide
+
+        parts: list[str] = []
+        env_mode = (_os.environ.get(_decide.ENV_MODE) or "").strip().lower()
+        if env_mode in _decide.MODES:
+            parts.append(f"⚠ env {_decide.ENV_MODE}={env_mode} กำลังชนะค่าที่ตั้งในหน้านี้")
+        parts.append("key: " + ("มีแล้ว ✓" if stats.get("key_present") else "ยังไม่มี"))
+        calls = stats.get("calls", 0)
+        if calls:
+            parts.append(
+                f"ใช้ไป (session นี้): {calls}/{stats.get('max_calls')} ครั้ง · "
+                f"{stats.get('input_tokens', 0):,} tokens in · fail {stats.get('failures', 0)}"
+            )
+        else:
+            parts.append("ยังไม่มีการเรียกใน session นี้")
+        self._decide_status_label.setText(" · ".join(parts))
+
+    def _on_decide_mode_changed(self, _index: int) -> None:
+        from . import core_v2_settings, decide
+
+        value = self._decide_mode_combo.currentData() or "off"
+        core_v2_settings.save_decide_mode(value)
+        self._render_decide_status(decide.stats())
+
+    def _on_decide_key_save_clicked(self) -> None:
+        from . import core_v2_settings, decide
+
+        core_v2_settings.save_typesafe_api_key(self._decide_key_edit.text())
+        self._render_decide_status(decide.stats())
+        saved = "ล้าง key แล้ว" if not self._decide_key_edit.text().strip() else "บันทึก key แล้ว"
+        self._decide_status_label.setText(f"{saved} · {self._decide_status_label.text()}")
+
+    def _on_decide_test_clicked(self) -> None:
+        """One tiny live call to prove the key works — same double-click and
+        stale-thread guards as the Refresh button above (#550/#553)."""
+        try:
+            still_running = (
+                self._decide_test_thread is not None and self._decide_test_thread.isRunning()
+            )
+        except RuntimeError:
+            self._decide_test_thread = None
+            still_running = False
+        if still_running:
+            return
+        from . import typesafe_bridge
+
+        if not typesafe_bridge.available():
+            self._decide_status_label.setText("ยังไม่มี key — กรอกแล้วกด 'บันทึก key' ก่อน")
+            return
+        self._decide_test_btn.setEnabled(False)
+        self._decide_status_label.setText("กำลังทดสอบ (ยิงคำถามจิ๋ว 1 ครั้ง รันเบื้องหลัง)…")
+
+        def _probe() -> object:
+            return typesafe_bridge.ask(
+                "ping",
+                {"ok": {"type": "noul", "instructions": "Is this a test ping?"}},
+            )
+
+        thread = _CallableThread(_probe, self)
+        thread.resultReady.connect(self._on_decide_test_ready)
+        self._decide_test_thread = thread
+        thread.start()
+
+    def _on_decide_test_ready(self, result: object) -> None:
+        from . import decide, typesafe_bridge
+
+        self._decide_test_btn.setEnabled(True)
+        stats = decide.stats()
+        if result is None or isinstance(result, Exception):
+            reason = typesafe_bridge.last_error() or result
+            self._decide_status_label.setText(f"ทดสอบไม่ผ่าน: {reason}")
+            return
+        ms = getattr(result, "elapsed_ms", 0.0)
+        model = getattr(result, "model", "?")
+        self._render_decide_status(stats)
+        self._decide_status_label.setText(
+            f"ทดสอบผ่าน ✓ {model} ตอบใน {ms:.0f}ms · {self._decide_status_label.text()}"
+        )
 
     # ──────────────────────────────────────────────────────────
     # rendering (cheap — never scans transcripts, see module docstring)

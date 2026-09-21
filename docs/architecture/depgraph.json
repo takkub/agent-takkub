@@ -1,6 +1,6 @@
 {
   "generated_by": "grimp 3.14",
-  "module_count": 348,
+  "module_count": 351,
   "modules": [
     {
       "module": "agent_takkub",
@@ -306,9 +306,10 @@
       "imports": [],
       "imported_by": [
         "agent_takkub.agent_pane",
+        "agent_takkub.decide",
         "agent_takkub.orchestrator"
       ],
-      "fan_in": 2,
+      "fan_in": 3,
       "fan_out": 0
     },
     {
@@ -494,6 +495,7 @@
         "agent_takkub.core.secrets.manager",
         "agent_takkub.core.storage.paths",
         "agent_takkub.core.versioning.store",
+        "agent_takkub.decide",
         "agent_takkub.disk_usage",
         "agent_takkub.docs_verify",
         "agent_takkub.doctor",
@@ -526,7 +528,6 @@
         "agent_takkub.skill_policy",
         "agent_takkub.skill_scan",
         "agent_takkub.task_ledger",
-        "agent_takkub.task_scope",
         "agent_takkub.team_preset",
         "agent_takkub.usage_ledger",
         "agent_takkub.user_profile",
@@ -684,6 +685,7 @@
         "agent_takkub.core.versioning.probe",
         "agent_takkub.core_v2_settings",
         "agent_takkub.custom_roles",
+        "agent_takkub.decide",
         "agent_takkub.disk_usage",
         "agent_takkub.doctor",
         "agent_takkub.exec_mode",
@@ -764,7 +766,7 @@
         "agent_takkub.vault_mirror",
         "agent_takkub.worktree_manager"
       ],
-      "fan_in": 111,
+      "fan_in": 112,
       "fan_out": 2
     },
     {
@@ -2570,9 +2572,11 @@
         "agent_takkub.core.routing.flag",
         "agent_takkub.core.scheduling.facade",
         "agent_takkub.core.scheduling.flag",
-        "agent_takkub.settings_knowledge_design"
+        "agent_takkub.decide",
+        "agent_takkub.settings_knowledge_design",
+        "agent_takkub.settings_usage"
       ],
-      "fan_in": 7,
+      "fan_in": 9,
       "fan_out": 4
     },
     {
@@ -2618,6 +2622,24 @@
       ],
       "fan_in": 1,
       "fan_out": 0
+    },
+    {
+      "module": "agent_takkub.decide",
+      "imports": [
+        "agent_takkub.bg_pool",
+        "agent_takkub.config",
+        "agent_takkub.core_v2_settings",
+        "agent_takkub.task_scope",
+        "agent_takkub.typesafe_bridge"
+      ],
+      "imported_by": [
+        "agent_takkub.cli",
+        "agent_takkub.orchestrator",
+        "agent_takkub.routing_planner",
+        "agent_takkub.settings_usage"
+      ],
+      "fan_in": 4,
+      "fan_out": 5
     },
     {
       "module": "agent_takkub.delivery_readiness",
@@ -3208,6 +3230,15 @@
       "fan_out": 1
     },
     {
+      "module": "agent_takkub.memory_prompt",
+      "imports": [],
+      "imported_by": [
+        "agent_takkub.spawn_engine"
+      ],
+      "fan_in": 1,
+      "fan_out": 0
+    },
+    {
       "module": "agent_takkub.notice_facts",
       "imports": [],
       "imported_by": [
@@ -3307,6 +3338,7 @@
         "agent_takkub.core.context_sources.trace_store",
         "agent_takkub.core.conversation.facade",
         "agent_takkub.core.conversation.flag",
+        "agent_takkub.decide",
         "agent_takkub.design_actions",
         "agent_takkub.digest_facts",
         "agent_takkub.disk_usage",
@@ -3362,7 +3394,7 @@
         "agent_takkub.user_actions"
       ],
       "fan_in": 6,
-      "fan_out": 60
+      "fan_out": 61
     },
     {
       "module": "agent_takkub.orchestrator_text",
@@ -4378,6 +4410,7 @@
     {
       "module": "agent_takkub.routing_planner",
       "imports": [
+        "agent_takkub.decide",
         "agent_takkub.task_scope"
       ],
       "imported_by": [
@@ -4389,7 +4422,7 @@
         "agent_takkub.team_preset"
       ],
       "fan_in": 6,
-      "fan_out": 1
+      "fan_out": 2
     },
     {
       "module": "agent_takkub.rtk_helper",
@@ -4926,15 +4959,18 @@
       "module": "agent_takkub.settings_usage",
       "imports": [
         "agent_takkub.cockpit_theme",
+        "agent_takkub.core_v2_settings",
+        "agent_takkub.decide",
         "agent_takkub.settings_knowledge_design",
         "agent_takkub.token_meter",
+        "agent_takkub.typesafe_bridge",
         "agent_takkub.usage_ledger"
       ],
       "imported_by": [
         "agent_takkub.settings_window"
       ],
       "fan_in": 1,
-      "fan_out": 4
+      "fan_out": 7
     },
     {
       "module": "agent_takkub.settings_window",
@@ -5126,6 +5162,7 @@
         "agent_takkub.hook_wiring",
         "agent_takkub.lead_context",
         "agent_takkub.mcp_bridge",
+        "agent_takkub.memory_prompt",
         "agent_takkub.orchestrator_text",
         "agent_takkub.pane_env",
         "agent_takkub.permission_gates",
@@ -5157,7 +5194,7 @@
         "agent_takkub.remote.api"
       ],
       "fan_in": 3,
-      "fan_out": 43
+      "fan_out": 44
     },
     {
       "module": "agent_takkub.spawn_gate",
@@ -5260,7 +5297,7 @@
       "module": "agent_takkub.task_scope",
       "imports": [],
       "imported_by": [
-        "agent_takkub.cli",
+        "agent_takkub.decide",
         "agent_takkub.orchestrator",
         "agent_takkub.orchestrator_text",
         "agent_takkub.routing_planner",
@@ -5390,6 +5427,16 @@
       ],
       "fan_in": 1,
       "fan_out": 2
+    },
+    {
+      "module": "agent_takkub.typesafe_bridge",
+      "imports": [],
+      "imported_by": [
+        "agent_takkub.decide",
+        "agent_takkub.settings_usage"
+      ],
+      "fan_in": 2,
+      "fan_out": 0
     },
     {
       "module": "agent_takkub.update_helper",

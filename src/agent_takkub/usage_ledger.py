@@ -572,6 +572,62 @@ def _import_claude_file(
     _mark_file_scanned(cursor, key, st)
 
 
+def _drop_alias_turn_artifacts(provider: str, account: str, stats: dict) -> None:
+    """Self-heal a ledger poisoned by alias double-counting (#689): remove an
+    alias account's TURN artifacts — month `YYYY-MM.jsonl` files, `daily.json`,
+    the import cursor and seen-ids — so the duplicate rows stop shaping every
+    report. They are provably re-derivable duplicates: the first-claimant
+    account scanned the same physical store this very run.
+
+    Deliberately narrow:
+    * `quota-*.jsonl` stay — quota samples come from each account's OWN auth
+      and are genuinely per-account data even when sessions are shared.
+    * The default account is never touched, structurally: it is the first
+      profile `profiles_for_provider` yields, so it can only ever be the
+      claimant — but a caller-supplied profile order must not be able to turn
+      this cleanup on the one account whose `daily.json` may hold months
+      whose raw transcripts no longer exist anywhere.
+    """
+    if (account or _DEFAULT_ACCOUNT) == _DEFAULT_ACCOUNT:
+        return
+    target = account_dir(provider, account)
+    if not target.is_dir():
+        return
+    dropped = 0
+    try:
+        entries = list(target.iterdir())
+    except OSError:
+        return
+    for entry in entries:
+        name = entry.name
+        is_turn_month = entry.suffix == ".jsonl" and _MONTH_RE.match(entry.stem or "")
+        if (
+            name not in ("daily.json", "_import_cursor.json", "_seen_ids.json")
+            and not is_turn_month
+        ):
+            continue
+        try:
+            entry.unlink()
+            dropped += 1
+        except OSError:
+            continue
+    stats["alias_accounts"] = stats.get("alias_accounts", 0) + 1
+    stats["alias_files_dropped"] = stats.get("alias_files_dropped", 0) + dropped
+    # Nothing left (no quota files) -> remove the dir itself, or the next
+    # rollup's `_all_accounts` walk resurrects an empty `daily.json` in it and
+    # the phantom account lingers in every listing (seen live on dev: a 2-byte
+    # `{}` came back within the same `takkub usage` call that healed the data).
+    try:
+        next(target.iterdir())
+    except StopIteration:
+        try:
+            target.rmdir()
+        except OSError:
+            pass
+    except OSError:
+        pass
+
+
 def import_claude(profiles: list[dict] | None = None) -> dict:
     """Walk every Claude profile's `projects/**/*.jsonl` and record every
     assistant turn's real usage block. Idempotent — see module docstring.
@@ -603,6 +659,9 @@ def import_claude(profiles: list[dict] | None = None) -> dict:
         except OSError:
             resolved = projects_dir
         if resolved in seen_projects_dirs:
+            # Same self-heal as codex (#689): rows this alias account recorded
+            # before the guard existed are duplicates — drop them.
+            _drop_alias_turn_artifacts("claude", account, stats)
             continue
         seen_projects_dirs.add(resolved)
         cursor = _load_cursor("claude", account)
@@ -716,6 +775,19 @@ def _import_codex_file(
 def import_codex(profiles: list[dict] | None = None) -> dict:
     """Walk every Codex profile's `sessions/`+`archived_sessions/` rollout
     JSONLs and record every `token_count` event's real per-turn usage.
+
+    #689: a named codex account provisioned with shared sessions (#505
+    stage 2, `user_profile.CODEX_SHARED_ITEMS`) junctions both session dirs
+    straight back into the default home — the same physical rollouts under
+    two account names, and `record_turn`'s dedup key is account-scoped so
+    it cannot help (every codex total doubled, `turns` identical per row).
+    Same guard `import_claude` has carried for its shared `projects/` dirs:
+    resolve each base and scan a physical store once per run, first profile
+    wins. A profile whose every session dir is such an alias also gets its
+    already-recorded duplicate turn rows dropped (see
+    `_drop_alias_turn_artifacts`) so a ledger poisoned before this guard
+    heals itself on the next import — prod is hands-off, the fix must not
+    need a manual cleanup step there.
     """
     from .codex_helper import codex_home
 
@@ -726,14 +798,32 @@ def import_codex(profiles: list[dict] | None = None) -> dict:
 
     stats = {"scanned_files": 0, "skipped_files": 0, "new_turns": 0, "errors": 0}
     seen_cache: dict[tuple[str, str, str], set[str]] = {}
+    seen_bases: set[Path] = set()
     for profile in profiles:
         account = profile.get("name") or _DEFAULT_ACCOUNT
         raw_dir = profile.get("config_dir") or ""
         home = Path(raw_dir) if raw_dir else codex_home()
-        cursor = _load_cursor("codex", account)
+        bases: list[Path] = []
+        aliased = 0
         for base in (home / "sessions", home / "archived_sessions"):
             if not base.is_dir():
                 continue
+            try:
+                resolved = base.resolve()
+            except OSError:
+                resolved = base
+            if resolved in seen_bases:
+                aliased += 1
+                continue
+            seen_bases.add(resolved)
+            bases.append(base)
+        if aliased and not bases:
+            _drop_alias_turn_artifacts("codex", account, stats)
+            continue
+        if not bases:
+            continue
+        cursor = _load_cursor("codex", account)
+        for base in bases:
             for path in base.rglob("rollout-*.jsonl"):
                 try:
                     _import_codex_file(path, account, cursor, stats, seen_cache)

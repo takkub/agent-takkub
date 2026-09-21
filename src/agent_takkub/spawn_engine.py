@@ -29,6 +29,7 @@ from typing import TYPE_CHECKING
 
 from PyQt6.QtCore import QTimer
 
+from . import memory_prompt
 from ._pty_backend import SpawnTargetCorrupt
 from .agent_pane import AgentPane
 from .browser_chrome import (
@@ -792,6 +793,9 @@ class PaneState:
     # returns, prepending it to the initial task paste as a fallback so the
     # directive still reaches the pane by some route.
     pending_lang_directive: str | None = None
+    # #690: same fallback channel for the project/role memory pointers when a
+    # non-claude pane's AGENTS.md is user-owned (they never landed there).
+    pending_memory_note: str | None = None
     # assign_ts: wall-clock when this pane's current task was dispatched
     # (_assign_dispatch). done() reads this BEFORE popping the PaneState so it
     # can scan the artifacts dir for screenshots newer than the assignment
@@ -1437,6 +1441,49 @@ class SpawnEngineMixin:
             ps = PaneState()
             d[key] = ps
             return ps
+
+    def _resolve_teammate_memory(
+        self,
+        project_ns: str,
+        base_role: str,
+        spawn_cwd: str,
+        role_name: str,
+        provider: str,
+    ) -> tuple[pathlib.Path | None, pathlib.Path | None]:
+        """(project MEMORY.md, this role's learned-notes file) for a
+        non-claude teammate (#690), either may be None.
+
+        Never raises — a memory lookup must not block a spawn — but a failure
+        is logged as a `provider_capability_fallback` rather than swallowed:
+        the whole point of #690 was a gap nobody could see.
+        """
+        mem_path: pathlib.Path | None = None
+        role_mem: pathlib.Path | None = None
+        try:
+            mem_path = _resolve_project_memory(
+                lead_cwd(project_ns) or spawn_cwd, project_ns=project_ns
+            )
+        except Exception:
+            _log.exception("could not resolve project memory for %s (%s)", base_role, provider)
+        try:
+            from .role_memory import ensure_role_memory
+
+            role_mem = ensure_role_memory(project_ns, base_role)
+        except Exception:
+            _log.exception("could not prepare role memory for %s (%s)", base_role, provider)
+        if role_mem is None:
+            # Same live-namespace lookup spawn() itself uses, so one patch of
+            # `agent_takkub.orchestrator._log_event` sees every event here.
+            _from_orch("_log_event")(
+                "provider_capability_fallback",
+                role=role_name,
+                project=project_ns,
+                provider=provider,
+                capability="role_memory",
+                state="missing",
+                fallback="none",
+            )
+        return mem_path, role_mem
 
     # ──────────────────────────────────────────────────────────────
     # registration (main_window builds panes and registers them)
@@ -2597,16 +2644,43 @@ class SpawnEngineMixin:
 ## ภาษาที่ตอบ (#621)
 
 {_lang_line}"""
+                    # #690: project memory (#33/#687) + role learned notes used
+                    # to reach claude teammates only. AGENTS.md is one file per
+                    # cwd, so the role part is a directory + naming rule keyed
+                    # on TAKKUB_BASE_ROLE (see memory_prompt's docstring) —
+                    # never one role's concrete file.
+                    _mem_path, _role_mem = self._resolve_teammate_memory(
+                        project_ns, base_role, spawn_cwd, role_name, spec.name
+                    )
+                    if _mem_path is not None:
+                        _skill_extra += memory_prompt.project_memory_block(_mem_path)
+                    if _role_mem is not None:
+                        _skill_extra += memory_prompt.shared_role_memory_block(_role_mem.parent)
                     _planted, _agents_md_reason = ensure_agents_md(spawn_cwd, extra=_skill_extra)
-                    if not _planted and _agents_md_reason == "user-owned" and _lang_line:
-                        # #621 M3: user-owned AGENTS.md means _skill_extra
-                        # (directive included) never gets written — carry the
-                        # directive through the initial-task paste fallback
-                        # instead (read + cleared by orchestrator.assign()
-                        # right after this spawn() call returns).
-                        self._ps(
-                            _exit_key(project_ns, role_name)
-                        ).pending_lang_directive = _lang_line
+                    if not _planted and _agents_md_reason == "user-owned":
+                        _ps_fallback = self._ps(_exit_key(project_ns, role_name))
+                        if _lang_line:
+                            # #621 M3: user-owned AGENTS.md means _skill_extra
+                            # (directive included) never gets written — carry
+                            # the directive through the initial-task paste
+                            # fallback instead (read + cleared by
+                            # orchestrator.assign() right after spawn()).
+                            _ps_fallback.pending_lang_directive = _lang_line
+                        # #690: same fallback for memory. The paste is
+                        # per-pane, so naming this role's concrete file is
+                        # safe here (unlike the shared AGENTS.md).
+                        _mem_note = memory_prompt.paste_memory_note(_mem_path, _role_mem)
+                        if _mem_note:
+                            _ps_fallback.pending_memory_note = _mem_note
+                            _log_event(
+                                "provider_capability_fallback",
+                                role=role_name,
+                                project=project_ns,
+                                provider=spec.name,
+                                capability="memory",
+                                state="partial",
+                                fallback="initial_task_paste",
+                            )
                 except Exception:
                     _log.exception(
                         "could not render %s role context for %s; spawning without it",
@@ -2622,6 +2696,11 @@ class SpawnEngineMixin:
             env = _build_lead_env(project_ns) if _is_lead else _build_pane_env(project_ns)
             env["TAKKUB_ROLE"] = role_name
             env["TAKKUB_PROJECT"] = project_ns
+            # #690: claude panes already get this (see the claude env block);
+            # non-claude teammates need it to find THEIR role-memory file from
+            # the per-cwd AGENTS.md rule (memory_prompt.shared_role_memory_block)
+            # — TAKKUB_ROLE alone would be "qa#1" for a shard, not the file name.
+            env["TAKKUB_BASE_ROLE"] = base_role
             _stamp_subagent_fanout_env(env, int(_ps_initial.subagent_fanout or 0))
             apply_chrome_bin(env, base_role)
             inject_user_profile_env(env, project_ns)
@@ -2947,24 +3026,8 @@ class SpawnEngineMixin:
                     role_context_available = False
                     role_md_file = None
                 if _mem_path is not None:
-                    _appendix += f"""
-
----
-
-## 📋 Project memory (Lead's constraint registry)
-
-Lead ของ project นี้มี auto-memory ที่บันทึก domain rules ไว้ที่:
-
-`{_mem_path}`
-
-**อ่านก่อนเริ่มงานที่แตะ:** dependency, lockfile, docker, ports, vendor pattern, หรือ tool ที่โปรเจ็คระบุว่าใช้:
-
-```
-Read("{_mem_path}")
-```
-
-MEMORY.md เป็น index — แต่ละ entry ชี้ไปยัง memory file ที่อธิบาย rule นั้นๆ อ่านเฉพาะ file ที่เกี่ยวกับงานของคุณ ไม่ต้องอ่านทั้งหมด
-"""
+                    # #690: one wording shared with the non-claude AGENTS.md path.
+                    _appendix += memory_prompt.project_memory_block(_mem_path)
                 # Per-(role × project) learned memory: this role's OWN accumulated
                 # notes for THIS project (conventions, gotchas, decisions; qa: test
                 # login/flow). Read-on-spawn + append-on-learn so each role grows

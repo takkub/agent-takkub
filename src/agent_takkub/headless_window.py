@@ -24,6 +24,7 @@ from . import cockpit_theme
 from .cli_server import CliServer
 from .config import (
     active_project,
+    clear_active_project,
     get_open_tabs,
     list_project_names,
     project_folder_exists,
@@ -161,6 +162,15 @@ class HeadlessWindow(QObject):
         self.orch.close(LEAD.name, project=project, force=True, reason="tab_close")
         self.orch.unregister_pane(LEAD.name, project=project, force=True)
         del self._tabs[project]
+        # Same invariant as MainWindow._close_project_tab (prod 2026-09-21):
+        # `active` must never name a closed project, or Restart Lead / the
+        # provider switch act on a project with no pane. Headless has no
+        # "visible" tab, so hand it to the most recently opened survivor.
+        if active_project()[0] == project:
+            if self._tabs:
+                set_active_project(next(reversed(self._tabs)))
+            else:
+                clear_active_project()
         self._persist_open_tabs()
         return True, f"closed tab · {project}"
 
