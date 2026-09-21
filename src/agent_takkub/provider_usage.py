@@ -29,6 +29,7 @@ Design contract (never violate):
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import logging
 import os
@@ -110,6 +111,11 @@ class ProviderUsage:
     detail: str | None = None
     spend: dict[str, Any] | None = None
     windows: list[dict[str, Any]] | None = None
+    # A provider can have more than one authenticated local home.  The
+    # provider-level cache deliberately remains account-agnostic for old
+    # callers, while the UsageMeter uses this label when it renders each
+    # account as its own card.
+    account: str | None = None
 
     def __post_init__(self) -> None:
         if self.status not in _VALID_STATUSES:
@@ -138,6 +144,7 @@ def usage_to_dict(data: ProviderUsage) -> dict[str, Any]:
         "spend": data.spend,
         "raw_data": data.raw_data,
         "windows": data.windows,
+        "account": data.account,
     }
 
 
@@ -1220,6 +1227,76 @@ _CONFIG_DIR_AWARE_FETCHERS: dict[str, Callable[..., ProviderUsage]] = {
 }
 
 
+@dataclass(frozen=True)
+class UsageAccountTarget:
+    """One local account home that can be probed independently.
+
+    This intentionally contains only the user-facing label and the path.  It
+    never reads ``auth.json``: its existence is enough to know that Codex owns
+    the home, and the app-server is still the sole authority on whether that
+    credential is valid and what quota it carries.
+    """
+
+    account: str
+    config_dir: Path
+
+
+def codex_usage_targets() -> tuple[UsageAccountTarget, ...]:
+    """Discover every authenticated local Codex home, read-only.
+
+    Accounts created in Cockpit Settings are the preferred names.  Codex's
+    normal ``~/.codex`` home and any sibling ``.codex-*`` home with an
+    ``auth.json`` are included too, so a user who logged in before opening
+    Cockpit does not silently disappear from the quota meter.  Homes are
+    de-duplicated by resolved path; no credentials are parsed or copied.
+    """
+    from . import user_profile
+    from .codex_helper import codex_home
+
+    candidates: dict[str, UsageAccountTarget] = {}
+
+    def add(account: str, home: Path, *, replace: bool = False) -> None:
+        try:
+            resolved = home.expanduser().resolve()
+        except OSError:
+            resolved = home.expanduser()
+        key = str(resolved)
+        if replace or key not in candidates:
+            candidates[key] = UsageAccountTarget(account=account, config_dir=resolved)
+
+    # Registered names are meaningful to the person using Cockpit, so they
+    # win over a generic discovered-directory label for the same home.
+    try:
+        profiles = user_profile.profiles_for_provider("codex")
+    except Exception:
+        profiles = []
+    for profile in profiles:
+        name = str(profile.get("name") or "default")
+        raw_home = str(profile.get("config_dir") or "").strip()
+        add(name, Path(raw_home) if raw_home else codex_home(), replace=name != "default")
+
+    # The app's active home may not have a legacy profile row at all.
+    add("default", codex_home())
+
+    # Codex's documented standard home plus locally named homes.  The auth
+    # guard avoids listing unrelated folders such as a stale backup.
+    try:
+        homes = sorted(Path.home().glob(".codex*"), key=lambda path: path.name.lower())
+    except OSError:
+        homes = []
+    for home in homes:
+        try:
+            authenticated = home.is_dir() and (home / "auth.json").is_file()
+        except OSError:
+            authenticated = False
+        if not authenticated:
+            continue
+        label = "default" if home.name == ".codex" else f"local ({home.name})"
+        add(label, home)
+
+    return tuple(candidates.values())
+
+
 def fetch_provider_usage(provider: str, config_dir: Path | None = None) -> ProviderUsage:
     """Single-provider fetch with a catch-all safety net. Blocking — run off
     the Qt main thread (same contract as the individual `fetch_*` functions
@@ -1297,6 +1374,33 @@ class ProviderUsageStore:
         with self._lock:
             return dict(self._cache)
 
+    def get_all_account_usages(self) -> list[ProviderUsage]:
+        """Return the meter-ready snapshots, one row per known account.
+
+        Only Codex currently has a verified multi-home quota probe.  The
+        other providers retain their existing single provider-wide snapshot;
+        Gemini's OAuth token is machine-wide, not an account-home API.
+        """
+        with self._lock:
+            provider_cache = dict(self._cache)
+            account_cache = dict(self._account_cache)
+
+        rows: list[ProviderUsage] = []
+        for provider in PROVIDER_NAMES:
+            if provider != "codex":
+                usage = provider_cache.get(provider)
+                if usage is not None:
+                    rows.append(usage)
+                continue
+            targets = codex_usage_targets()
+            for target in targets:
+                key = (provider, str(target.config_dir))
+                usage = account_cache.get(key)
+                if usage is None:
+                    usage = ProviderUsage(provider=provider, status=STATUS_LOADING)
+                rows.append(dataclasses.replace(usage, account=target.account))
+        return rows
+
     def refresh_now(self, provider: str, config_dir: Path | str | None = None) -> None:
         """Fire a background fetch for one provider (or, with *config_dir*,
         one ACCOUNT — epic #309 Phase 3b) outside the regular interval (e.g.
@@ -1361,7 +1465,7 @@ class ProviderUsageStore:
         for provider in PROVIDER_NAMES:
             if not self._running:
                 return
-            self._fetch_one(provider)
+            self._fetch_provider_accounts(provider)
         while self._running:
             self._wake.wait(timeout=self._interval_s)
             self._wake.clear()
@@ -1374,7 +1478,38 @@ class ProviderUsageStore:
                     cached = self._cache.get(provider)
                 if cached is not None and cached.status == STATUS_UNSUPPORTED:
                     continue
-                self._fetch_one(provider)
+                self._fetch_provider_accounts(provider)
+
+    def _fetch_provider_accounts(self, provider: str) -> None:
+        """Poll all independently addressable accounts for *provider*.
+
+        Keep the legacy provider-level cache warm as well: remote/API callers
+        and old UI surfaces still ask it for one snapshot.  The account cache
+        is the authoritative multi-account data path used by UsageMeter.
+        """
+        if provider != "codex":
+            self._fetch_one(provider)
+            return
+        targets = codex_usage_targets()
+        if not targets:
+            self._fetch_one(provider)
+            return
+        for target in targets:
+            if not self._running:
+                return
+            self._fetch_one(provider, target.config_dir)
+        # Preserve the original provider-level API using the Cockpit-active
+        # home when it is among the discovered targets.
+        try:
+            from .codex_helper import codex_home
+
+            active_home = str(codex_home().resolve())
+        except OSError:
+            active_home = ""
+        with self._lock:
+            active = self._account_cache.get((provider, active_home))
+            if active is not None:
+                self._cache[provider] = active
 
 
 def _active_config_dir(provider: str) -> Path | None:

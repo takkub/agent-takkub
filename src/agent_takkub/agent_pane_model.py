@@ -245,8 +245,14 @@ class AgentPaneModel:
         `"unsupported"` (confirmed no token data exists for this provider) or
         `"no_data"` (this pane hasn't logged a turn yet). Faint/neutral by
         design — this is informational chrome, not a warning."""
+        is_gemini_context_gap = (
+            self.provider_name == "gemini" and usage.get("status") == "unsupported"
+        )
         return {
-            "text": "tokens n/a",
+            # `n/a` looked like a failed refresh.  Gemini/AGY's live quota is
+            # available elsewhere, but its per-session context fill is not
+            # exposed by the CLI/transcript, so name that exact distinction.
+            "text": "context unavailable" if is_gemini_context_gap else "tokens n/a",
             "color": usage_color(0.0),  # neutral grey — same tier as <50% fill
             "tooltip": usage.get("reason") or "token usage unavailable for this provider",
         }

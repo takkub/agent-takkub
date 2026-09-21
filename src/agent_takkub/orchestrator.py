@@ -12001,6 +12001,17 @@ class Orchestrator(
                 try:
                     key = f"{project_name}::{name}"
                     if name == LEAD.name:
+                        # Lead is exempt from the teammate idle-reminder loop,
+                        # but it is still a provider-backed pane. Let its quota
+                        # banner enter the same generic reroute/park flow before
+                        # continuing; otherwise a quota-hit Lead can never
+                        # switch to an available provider (#691).
+                        if (
+                            pane.session
+                            and pane.session.is_alive
+                            and self._rate_limit_suppressed(project_name, name, pane, now)
+                        ):
+                            self._maybe_auto_resume_park(project_name, name, pane, now)
                         # Issue #59: malformed-tool-call detection covers Lead too even
                         # though Lead is exempt from the idle-done-reminder loop.
                         if (

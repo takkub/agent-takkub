@@ -402,7 +402,8 @@ def _build_provider_card(u: ProviderUsage, now: datetime) -> QWidget:
     lay.setSpacing(3)
 
     label = PROVIDER_LABELS.get(u.provider, u.provider)
-    header_text = label if not u.plan else f"{label} · {u.plan}"
+    account = f" · {u.account}" if u.account else ""
+    header_text = f"{label}{account}" if not u.plan else f"{label}{account} · {u.plan}"
     header = QLabel(header_text, card)
     header.setStyleSheet(f"color:{cockpit_theme.TEXT_PRIMARY}; font-size:12px; font-weight:600;")
     lay.addWidget(header)
@@ -569,6 +570,8 @@ class UsageMeter(QWidget):
             if u.status == "unsupported":
                 continue
             label = PROVIDER_LABELS.get(u.provider, u.provider)
+            if u.account:
+                label += f" · {u.account}"
             if u.utilization is not None:
                 lines.append(f"{label}: เหลือ {max(0, round(100 - u.utilization))}%")
             elif u.status == "loading":

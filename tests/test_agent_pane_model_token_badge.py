@@ -81,6 +81,12 @@ class TestFormatUnsupportedBadge:
         badge = m.format_unsupported_badge({"status": "no_data"})
         assert badge["tooltip"]  # non-empty, never blank chrome
 
+    def test_gemini_names_the_context_telemetry_gap(self) -> None:
+        m = _model()
+        m.configure_provider("gemini", supports_token_meter=True)
+        badge = m.format_unsupported_badge({"status": "unsupported", "reason": "agy has no field"})
+        assert badge["text"] == "context unavailable"
+
 
 class TestRecordTokenMeterResult:
     def test_ok_status_populates_last_usage(self) -> None:

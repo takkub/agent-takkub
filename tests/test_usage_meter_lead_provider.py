@@ -104,3 +104,16 @@ def test_tooltip_shows_short_error_and_raw_detail_separately() -> None:
     tooltip = meter._quick_tooltip(datetime.now(tz=UTC))
     assert "codex: login หมดอายุ" in tooltip
     assert "token_invalidated" in tooltip
+
+
+def test_tooltip_keeps_each_codex_account_distinct() -> None:
+    meter = UsageMeter()
+    meter.set_usages(
+        [
+            ProviderUsage(provider="codex", status="active", utilization=12, account="personal"),
+            ProviderUsage(provider="codex", status="active", utilization=34, account="work"),
+        ]
+    )
+    tooltip = meter._quick_tooltip(datetime.now(tz=UTC))
+    assert "Codex · personal" in tooltip
+    assert "Codex · work" in tooltip

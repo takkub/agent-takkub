@@ -86,10 +86,24 @@ class LimitPanelMixin:
         claude_usage = _claude_provider_usage(data)
         store = provider_usage.get_store()
         cache = store.get_all()
+        # Codex may have several independently logged-in CODEX_HOME
+        # directories.  Keep one card for every account instead of silently
+        # picking whichever home happened to be the provider-level default.
+        account_reader = getattr(store, "get_all_account_usages", None)
+        # Lightweight test/third-party stores that predate the multi-account
+        # method still render their existing provider-level Codex row.
+        codex_accounts = account_reader() if callable(account_reader) else []
+        codex_rows = [usage for usage in codex_accounts if usage.provider == "codex"]
         others = [
-            cache.get(name) or ProviderUsage(provider=name, status="loading")
-            for name in provider_usage.PROVIDER_NAMES
-            if name != "claude"
+            *(
+                codex_rows
+                or [cache.get("codex") or ProviderUsage(provider="codex", status="loading")]
+            ),
+            *[
+                cache.get(name) or ProviderUsage(provider=name, status="loading")
+                for name in provider_usage.PROVIDER_NAMES
+                if name not in ("claude", "codex")
+            ],
         ]
         self._limit_label.set_usages(
             [claude_usage, *others], primary_provider=self._active_lead_provider()

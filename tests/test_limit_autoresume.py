@@ -15,6 +15,8 @@ import time
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from agent_takkub import auto_resume
 from agent_takkub.limit_autoresume import (
     _pane_cwd,
@@ -114,6 +116,33 @@ class TestMaybeAutoResumePark:
         with patch.object(o, "_confirm_limit_via_usage_async") as confirm:
             o._maybe_auto_resume_park("proj", "backend", _pane_alive(), time.time())
         confirm.assert_not_called()
+
+    @pytest.mark.parametrize("provider", ["codex", "gemini", "opencode", "kimi", "cursor"])
+    def test_any_non_claude_lead_reroutes_without_an_assigned_task(
+        self, monkeypatch, provider
+    ) -> None:
+        monkeypatch.setattr(auto_resume, "is_enabled", lambda: True)
+        monkeypatch.setattr(
+            "agent_takkub.limit_autoresume.effective_provider_for", lambda *_args: provider
+        )
+        o = _bare_orch()
+        ps = o._ps("proj::lead")
+        ps.rate_limited_until = time.time() + 3600
+        with patch.object(o, "_reroute_or_park") as reroute:
+            o._maybe_auto_resume_park("proj", "lead", _pane_alive(), time.time())
+        reroute.assert_called_once_with("proj", "lead", ps)
+
+    def test_claude_lead_without_an_assigned_task_confirms_before_rerouting(
+        self, monkeypatch
+    ) -> None:
+        monkeypatch.setattr(auto_resume, "is_enabled", lambda: True)
+        o = _bare_orch()
+        ps = o._ps("proj::lead")
+        ps.rate_limited_until = time.time() + 3600
+        with patch.object(o, "_confirm_limit_via_usage_async") as confirm:
+            o._maybe_auto_resume_park("proj", "lead", _pane_alive(), time.time())
+        confirm.assert_called_once_with("proj", "lead")
+        assert ps.limit_confirm_pending is True
 
     def test_no_signal_a_yet_is_noop(self, monkeypatch) -> None:
         monkeypatch.setattr(auto_resume, "is_enabled", lambda: True)
@@ -268,6 +297,15 @@ class TestOnLimitUsageConfirmed:
         with patch.object(o, "_park_pane_for_limit") as park:
             o._on_limit_usage_confirmed("proj", "backend", True)
         park.assert_not_called()
+
+    def test_confirmed_lead_without_an_assigned_task_reroutes(self) -> None:
+        o = _bare_orch()
+        ps = o._ps("proj::lead")
+        ps.limit_confirm_pending = True
+        ps.rate_limited_until = time.time() + 3600
+        with patch.object(o, "_reroute_or_park") as reroute:
+            o._on_limit_usage_confirmed("proj", "lead", True)
+        reroute.assert_called_once_with("proj", "lead", ps)
 
     def test_limit_cleared_meanwhile_skips_park(self) -> None:
         o = _bare_orch()
@@ -1028,6 +1066,32 @@ class TestReroutePaneToProvider:
         assert "claude" in sent_task and "codex" in sent_task
         o._notify_lead.assert_called_once()
         assert "ย้ายไป codex" in o._notify_lead.call_args.args[1]
+
+    def test_lead_respawn_gets_cross_provider_takeover_context(self) -> None:
+        o = self._orch_with_respawn_hooks()
+        ps = o._ps("proj::lead")
+        lead = _pane_alive()
+        lead._session_cwd = "C:/work/api"
+        lead._transcript_path = "C:/runtime/transcripts/proj/lead.log"
+        lead.session.display_lines.return_value = ["working on migration", "backend still running"]
+        backend = _pane_alive()
+        backend.state = "working"
+        backend.model.provider_name = "gemini"
+        o._panes_by_project["proj"] = {"lead": lead, "backend": backend}
+        with patch(
+            "agent_takkub.limit_autoresume.QTimer.singleShot",
+            side_effect=lambda _ms, callback: callback(),
+        ):
+            o._reroute_pane_to_provider("proj", "lead", ps, "gemini", "codex", time.time() + 3600)
+        o.spawn.assert_called_once()
+        o._notify_lead.assert_not_called()
+        o._send_when_ready.assert_called_once()
+        role, brief = o._send_when_ready.call_args.args[:2]
+        assert role == "lead"
+        assert "codex" in brief and "gemini" in brief
+        assert "lead.log" in brief
+        assert "backend: working (gemini)" in brief
+        assert "queued durably" in brief
 
     def test_preserves_distinct_from_across_the_respawn(self) -> None:
         o = self._orch_with_respawn_hooks()

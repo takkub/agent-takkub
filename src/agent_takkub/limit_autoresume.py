@@ -53,6 +53,7 @@ from .lead_inbox import _delayed_enter
 from .limit_status import UsageData, fetch_usage_shared
 from .orchestrator_text import _human_duration, _log_event
 from .provider_config import CLAUDE, effective_provider_for
+from .roles import LEAD
 from .spawn_engine import PaneState
 
 
@@ -213,6 +214,47 @@ def _read_progress_marker(project: str, role: str) -> dict | None:
     return data if isinstance(data, dict) else None
 
 
+def _lead_provider_takeover_brief(
+    project: str, pane: AgentPane | None, hit_provider: str, new_provider: str, panes: dict
+) -> str:
+    """Build the cross-provider context a replacement Lead can safely use.
+
+    CLI session ids are provider-specific, so a quota reroute cannot use
+    ``--resume``. The managed Lead context covers durable project memory;
+    this brief supplies the missing live layer: the old Lead's transcript
+    location/output tail and every teammate that may report while the new
+    Lead is booting.
+    """
+    lines = [
+        "[system] Lead provider takeover",
+        f"The previous Lead ({hit_provider}) hit its quota. You are the replacement Lead on "
+        f"{new_provider}; continue coordinating the same unfinished work.",
+        "CLI sessions cannot resume across providers. Read the managed project context first, then "
+        "use the sources below before deciding or assigning work.",
+    ]
+    transcript = getattr(pane, "_transcript_path", None) if pane is not None else None
+    if isinstance(transcript, str) and transcript:
+        lines.append(f"Previous Lead transcript: {transcript}")
+    tail = _pane_output_tail(pane)
+    if tail:
+        lines.extend(["Previous Lead's latest visible output:", "```text", tail, "```"])
+    active: list[str] = []
+    for role, teammate in panes.items():
+        if role == LEAD.name:
+            continue
+        state = getattr(teammate, "state", "unknown")
+        provider = getattr(getattr(teammate, "model", None), "provider_name", None)
+        active.append(f"- {role}: {state}" + (f" ({provider})" if provider else ""))
+    if active:
+        lines.extend(["Roles still in flight:", *active])
+    else:
+        lines.append("No other live role is registered right now.")
+    lines.append(
+        "Reports that finish during this handover are queued durably and delivered to this current Lead."
+    )
+    return "\n\n".join(lines)
+
+
 class AutoResumeMixin:
     """Methods assume `self` is an `Orchestrator` (SpawnEngineMixin's
     `_ps`/`_pane_state`/`_panes_by_project`, LeadInboxMixin's `_notify_lead`,
@@ -229,7 +271,8 @@ class AutoResumeMixin:
             return
         key = f"{project}::{role}"
         ps = self._ps(key)
-        if not ps.last_assigned_task:
+        is_lead = role == LEAD.name
+        if not ps.last_assigned_task and not is_lead:
             return  # scope guard: never touch a pane with no pending task
         if ps.limit_park_stopped or ps.limit_parked or ps.limit_confirm_pending:
             return  # already parked, already confirming, or already gave up
@@ -414,6 +457,14 @@ class AutoResumeMixin:
         pane = self._panes_by_project.get(project, {}).get(role)
         cwd = _pane_cwd(pane)
         task = ps.last_assigned_task or ""
+        is_lead = role == LEAD.name
+        lead_takeover = (
+            _lead_provider_takeover_brief(
+                project, pane, hit_provider, new_provider, self._panes_by_project.get(project, {})
+            )
+            if is_lead
+            else ""
+        )
         key = f"{project}::{role}"
         reroute_count = ps.quota_reroute_count + 1
 
@@ -442,13 +493,14 @@ class AutoResumeMixin:
             to_provider=new_provider,
             round=reroute_count,
         )
-        lead_msg = (
-            f"🔀 [auto-resume] {hit_provider} ชนโควตา → {role} ย้ายไป {new_provider} "
-            f"ต่อจาก progress ล่าสุด, {hit_provider} กลับ {human}"
-        )
-        self._notify_lead(
-            project, lead_msg, from_role=role, note="quota_rerouted", kind="quota-rerouted"
-        )
+        if not is_lead:
+            lead_msg = (
+                f"🔀 [auto-resume] {hit_provider} ชนโควตา → {role} ย้ายไป {new_provider} "
+                f"ต่อจาก progress ล่าสุด, {hit_provider} กลับ {human}"
+            )
+            self._notify_lead(
+                project, lead_msg, from_role=role, note="quota_rerouted", kind="quota-rerouted"
+            )
 
         self.close(
             role,
@@ -521,7 +573,9 @@ class AutoResumeMixin:
                         if not pl_run.hop_pending:
                             self._advance_pipeline(project, pl_key, pl_run)
                 return
-            if task:
+            if is_lead:
+                self._send_when_ready(role, lead_takeover, project=project)
+            elif task:
                 note = (
                     f"\n\n[system] งานนี้ย้ายจาก provider {hit_provider} (ชนโควตา) มาที่ "
                     f"{new_provider} — ทำต่อจากจุดที่ค้างไว้ (ถ้าเพิ่งเริ่มงานให้เริ่มใหม่ได้เลย), "
@@ -681,7 +735,7 @@ class AutoResumeMixin:
         ps.limit_confirm_pending = False
         if ps.limit_park_stopped or ps.limit_parked:
             return
-        if not ps.last_assigned_task or not ps.rate_limited_until:
+        if (not ps.last_assigned_task and role != LEAD.name) or not ps.rate_limited_until:
             return  # task finished, or the limit already cleared meanwhile
 
         if not confirmed:
@@ -727,7 +781,7 @@ class AutoResumeMixin:
             ps.limit_parked = False
             _log_event("pane_limit_wake_skipped", role=role, project=project, reason="pane_gone")
             return
-        if not ps.last_assigned_task:
+        if not ps.last_assigned_task and role != LEAD.name:
             ps.limit_parked = False
             _log_event("pane_limit_wake_skipped", role=role, project=project, reason="task_done")
             return
@@ -777,7 +831,11 @@ class AutoResumeMixin:
         # overwritten again by the next park.
         _write_progress_marker(project, role, ps, pane, status="resumed")
 
-        msg = "⏰ quota reset แล้ว — ทำงานต่อจาก task ที่ค้างไว้ ถ้าเสร็จแล้วรายงานด้วย `takkub done`"
+        msg = (
+            "⏰ quota reset แล้ว — กลับมาคุมงานต่อจากบริบทเดิมและตรวจรายงาน role ที่ค้างอยู่"
+            if role == LEAD.name
+            else "⏰ quota reset แล้ว — ทำงานต่อจาก task ที่ค้างไว้ ถ้าเสร็จแล้วรายงานด้วย `takkub done`"
+        )
         _wake_sess = pane.session
         _wake_sess.write(msg)
         _delayed_enter(pane, _wake_sess, 150)

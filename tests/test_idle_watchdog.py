@@ -296,6 +296,22 @@ class TestIdleWatchdog:
         lead.session.write.assert_not_called()
         assert _key("lead") not in orch._idle_state
 
+    def test_lead_quota_gate_runs_without_enabling_teammate_idle_reminders(
+        self, orch: Orchestrator, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        lead = _make_pane(state="working", at_ready_prompt=True)
+        orch.panes["lead"] = lead
+        reroute = MagicMock()
+        monkeypatch.setattr(orch, "_rate_limit_suppressed", lambda *_args: True)
+        monkeypatch.setattr(orch, "_maybe_auto_resume_park", reroute)
+
+        orch._check_idle_teammates()
+
+        reroute.assert_called_once()
+        assert reroute.call_args.args[1] == "lead"
+        lead.session.write.assert_not_called()
+        assert _key("lead") not in orch._idle_state
+
     def test_non_working_state_clears_tracking(
         self, orch: Orchestrator, monkeypatch: pytest.MonkeyPatch
     ) -> None:

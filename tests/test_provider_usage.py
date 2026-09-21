@@ -52,6 +52,59 @@ def test_usage_to_dict_serializes_datetimes_as_isoformat():
     assert out["utilization"] == 7.0
 
 
+def test_usage_to_dict_keeps_the_account_label():
+    out = pu.usage_to_dict(pu.ProviderUsage(provider="codex", status="active", account="personal"))
+    assert out["account"] == "personal"
+
+
+class TestCodexUsageTargets:
+    def test_discovers_authenticated_standard_and_named_homes(self, tmp_path, monkeypatch):
+        standard = tmp_path / ".codex"
+        named = tmp_path / ".codex-work"
+        for home in (standard, named):
+            home.mkdir()
+            (home / "auth.json").write_text("{}", encoding="utf-8")
+
+        monkeypatch.setattr(pu.Path, "home", classmethod(lambda _cls: tmp_path))
+        monkeypatch.setattr(codex_helper, "codex_home", lambda: named)
+        from agent_takkub import user_profile
+
+        monkeypatch.setattr(
+            user_profile,
+            "profiles_for_provider",
+            lambda provider: [
+                {"name": "default", "config_dir": "", "provider": provider},
+                {"name": "work", "config_dir": str(named), "provider": provider},
+            ],
+        )
+
+        targets = pu.codex_usage_targets()
+        assert [(target.account, target.config_dir) for target in targets] == [
+            ("work", named.resolve()),
+            ("default", standard.resolve()),
+        ]
+
+    def test_store_returns_one_cached_row_per_target(self, tmp_path, monkeypatch):
+        first, second = tmp_path / "one", tmp_path / "two"
+        targets = (
+            pu.UsageAccountTarget("personal", first),
+            pu.UsageAccountTarget("work", second),
+        )
+        monkeypatch.setattr(pu, "codex_usage_targets", lambda: targets)
+        store = pu.ProviderUsageStore()
+        store._account_cache[("codex", str(first))] = pu.ProviderUsage(
+            provider="codex", status="active", utilization=12
+        )
+        store._account_cache[("codex", str(second))] = pu.ProviderUsage(
+            provider="codex", status="active", utilization=34
+        )
+        rows = [row for row in store.get_all_account_usages() if row.provider == "codex"]
+        assert [(row.account, row.utilization) for row in rows] == [
+            ("personal", 12),
+            ("work", 34),
+        ]
+
+
 # ── claude adapter ────────────────────────────────────────────────────────
 
 
@@ -1421,6 +1474,13 @@ class TestFetchProviderUsageConfigDir:
 
 
 class TestProviderUsageLoop:
+    @pytest.fixture(autouse=True)
+    def _no_discovered_codex_homes(self, monkeypatch):
+        """Keep the legacy loop-contract tests independent of this machine's
+        authenticated Codex directories.  Dedicated tests cover the new
+        account-target fan-out below."""
+        monkeypatch.setattr(pu, "codex_usage_targets", lambda: ())
+
     def test_initial_pass_fetches_every_provider_once_in_order(self, monkeypatch):
         store = pu.ProviderUsageStore(interval_s=999)
         calls: list[str] = []

@@ -3092,6 +3092,7 @@
         "agent_takkub.provider_config",
         "agent_takkub.provider_state",
         "agent_takkub.provider_usage",
+        "agent_takkub.roles",
         "agent_takkub.spawn_engine",
         "agent_takkub.user_profile"
       ],
@@ -3100,7 +3101,7 @@
         "agent_takkub.orchestrator"
       ],
       "fan_in": 2,
-      "fan_out": 11
+      "fan_out": 12
     },
     {
       "module": "agent_takkub.limit_panel",
@@ -4389,6 +4390,7 @@
         "agent_takkub.headless_window",
         "agent_takkub.lead_inbox",
         "agent_takkub.lead_wait",
+        "agent_takkub.limit_autoresume",
         "agent_takkub.main_window",
         "agent_takkub.orchestrator",
         "agent_takkub.orchestrator_text",
@@ -4404,7 +4406,7 @@
         "agent_takkub.spawn_engine",
         "agent_takkub.team_preset"
       ],
-      "fan_in": 22,
+      "fan_in": 23,
       "fan_out": 0
     },
     {
