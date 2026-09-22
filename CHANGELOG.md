@@ -17,6 +17,14 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
   เป็น backstop กัน blank chat ค้าง) · cold walk ครั้งแรกเป็น single-flight — thread ที่มาซ้อนได้
   "ยังไม่เจอ" กลับไปทันทีแทนที่จะแช่แข็ง GUI รอ lock หรือสแกนซ้ำแย่งดิสก์ + 3 เทส
 
+### Security (CodeQL sweep — เคลียร์ alert เปิดค้างทั้ง 4)
+
+- chmod `0o755` → `0o700` 3 จุด (`cli_shim.py` launcher, `venv_integrity.py` restore,
+  test fixture) — ไฟล์พวกนี้อยู่ใน venv ส่วนตัวของ cockpit ไม่มีใครอื่นต้องอ่าน/รัน (alert #55/#56/#57)
+- alert #54 (clear-text password ใน `_write_json_atomic`) dismiss เป็น false positive —
+  ค่าที่ผ่าน writer คือ `password_hash` (PBKDF2-HMAC-SHA256 + salt, hash ก่อน save เสมอ)
+  CodeQL taint จากชื่อ key เฉยๆ
+
 ### Deps
 
 - dependabot: ruff 0.16.7→0.16.8 (#694) · github/codeql-action 4.38.0→4.38.1 (#693)

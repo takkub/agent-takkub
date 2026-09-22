@@ -38,7 +38,7 @@ def _fake_venv(tmp_path: Path) -> tuple[Path, Path, Path]:
         home.mkdir()
         ver = f"python{sys.version_info.major}.{sys.version_info.minor}"
         (home / ver).write_bytes(_healthy_bytes())
-        os.chmod(home / ver, 0o755)
+        os.chmod(home / ver, 0o700)
         (home / "python3").symlink_to(home / ver)
         py = scripts / "python"
         py.symlink_to(home / ver)

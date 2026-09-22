@@ -267,7 +267,9 @@ def repair(path: Path) -> tuple[bool, str]:
                 os.symlink(src, path)
             except OSError:
                 shutil.copy2(src, path)
-                os.chmod(path, 0o755)
+                os.chmod(
+                    path, 0o700
+                )  # owner-only: per-user cockpit venv, nothing else runs it (CodeQL #57)
     except OSError as exc:
         return False, f"restore {path} from {src} failed ({exc}) — {repair_hint(path)}"
     after = python_executable_problem(path)

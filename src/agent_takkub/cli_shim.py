@@ -146,7 +146,9 @@ def ensure_cli_shims(bin_dir: Path, py: Path) -> Path:
             os.replace(tmp, target)
         if name == "takkub":
             try:
-                os.chmod(target, 0o755)
+                os.chmod(
+                    target, 0o700
+                )  # owner-only: per-user cockpit venv, nothing else runs it (CodeQL #55)
             except OSError:
                 pass
     return bin_dir
