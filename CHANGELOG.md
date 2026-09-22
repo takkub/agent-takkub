@@ -4,14 +4,58 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 
 ## [vNEXT]
 
-### Fixed
+## [v2.1.29] - 2026-09-22
 
+### Fixed (แก้)
+
+- **#341 (เกิดซ้ำ) / #695 / #696: `venv/Scripts/python.exe` ของ cockpit ถูก pane เขียนทับเป็นไฟล์ข้อความ
+  29 byte → `takkub done/send` ทุก pane ตายเงียบ "(no output)" + Windows เด้ง "Unsupported 16-Bit
+  Application" + idle reminder วนไม่หยุด** — ต้นเหตุครั้งนี้: backend pane (codex) รัน
+  `Set-Content -NoNewline 'graphify-out\.graphify_python' $py` แล้ว PowerShell bind `$py` เป็น -Path
+  (วัดจริงด้วย `-WhatIf`: มี `-NoNewline` นำ positional → -Path/-Value สลับกัน) และ `$py` =
+  `(Get-Command python).Source` ชี้ venv ของ cockpit เพราะ `venv/Scripts` ถูก prepend เข้า PATH ของทุก pane
+  → แก้ 3 ชั้นแบบ default-deny (`venv_integrity.py` ใหม่ + threat model ใน docstring):
+  1. **Prevention — PATH (#696):** pane ได้ `<DATA_HOME>/bin` ที่มีแค่ shim `takkub`/`takkub.cmd`
+     (`cli_shim.py`, สร้าง/refresh ตอน spawn) แทน `venv/Scripts` — `python` บน PATH ไม่ใช่ของ cockpit อีก
+     และ shim เช็คขนาด+PE/ELF/Mach-O header ของ interpreter ก่อนรัน ล้มดังๆ `[takkub] cockpit
+     interpreter broken …` exit 1 (npm launcher guard เดิมถูก bypass เพราะ pane เรียก distlib `takkub.exe`
+     ตรง) · dev checkout ใช้ `REPO_ROOT/bin` เดิม · เขียน shim dir ไม่ได้ → fallback เดิม + event
+     `cli_shim_write_failed` · `takkub doctor` เพิ่ม finding `pane-bin`
+  2. **Guard (#695):** `pane_guard` deny **ทุก role รวม Lead** — เขียน/redirect/ลบ/ย้าย/copy/Python
+     inline write/Edit/Write เข้า venv ของ cockpit, base interpreter, `.venv` ของ dev checkout, shim dir
+     (`instance_guard:cockpit_executable` — #633 ยกเว้น own home จึงไม่เคยจับเคสนี้) · `Set-Content/
+     Add-Content/Out-File` ที่ positional เป็น `$var`/`$(…)`/`(…)` และ `> $(…)`/`cp x $(…)`/`tee $(…)` →
+     `instance_guard:dynamic_write_target` พร้อม hint `-LiteralPath … -Value …` · log `pane_guard_denied`
+     ระบุ role/command/target เหมือนเดิม
+  3. **Self-heal (#696):** cockpit ที่รันอยู่ตรวจไฟล์ interpreter ทุก 30 วิ (`_maybe_check_venv_integrity`
+     บน idle tick) → เจอเสีย = ย้ายไฟล์เสียเป็น `.clobbered-<ts>.bak` แล้ว copy คืนจาก base python
+     (`pyvenv.cfg home`, Windows: `Lib/venv/scripts/nt/python.exe`; POSIX: symlink) → event
+     `venv_python_clobbered/repaired/repair_failed` + แจ้ง Lead ทุกโปรเจคครั้งเดียว · ระหว่างซ่อมไม่ได้
+     หยุด idle reminder (`idle_reminder_skipped reason=cli_interpreter_broken`) · `doctor` ใช้ตัวตรวจ
+     เดียวกัน (ย้าย `_python_executable_problem` ไป `venv_integrity`)
+  + 5 ไฟล์เทสใหม่ (`test_venv_integrity.py`, `test_venv_integrity_monitor.py`, `test_cli_shim.py`
+  รัน shim จริงทั้ง cmd/bash, `test_instance_guard_cockpit_exec.py` รวม command ต้นเหตุตัวจริง)
+- **#697: `takkub harvest` ปิด role ด้วย artifact ของ role อื่นเมื่อหลาย pane ใช้ project root เดียวกัน** —
+  scan mtime ทั้ง root ตั้งแต่ pane spawn แยกเจ้าของไม่ได้ (backend ถูก mark done ด้วย screenshot/source
+  ของ frontend 23 ไฟล์) → `harvest_info` รายงาน `other_active` + `attribution: unattributed` เมื่อมี role
+  อื่น working บน root เดียวกัน · `--auto-confirm` บน unattributed ถูกปฏิเสธ (exit 4) เว้นแต่ใส่ `--note`
+  หลักฐานของ role นั้นเอง (option ใหม่) หรือยืนยัน interactive · note ที่สังเคราะห์ใส่ path ของ artifact
+  (ไม่ใช่แค่ตัวเลข) จึงผ่าน gate screenshot #433 ได้เมื่อมีภาพจริง · **gap ที่ยังเปิด:** harvest ยัง resolve
+  git repo จาก project root ไม่ใช่ cwd/ไฟล์ของ assignment (`merge:N/A` เมื่อ root เป็น parent ของหลาย repo)
+  + `test_harvest_attribution.py`
 - **#698: "Lead ใช้ provider → Claude" ไม่มีผล Lead restart แล้วกลับมาเป็น codex** —
   `save_role_overrides` ทิ้งค่า `claude` ทุกครั้งในฐานะ "default โดยนัย" แต่ตั้งแต่ #338
   default จริงของ `provider_for` คือ pin ใน role-models (`aliases-projects.json`) — lead ที่
   ถูก pin เป็น codex ผ่าน model picker จึง fallback กลับไป codex ทุกครั้งที่เลือก Claude จากเมนู
   ตอนนี้ claude ถูกเก็บเป็น override จริงเมื่อ fallback ไม่ตรง (project scope → routing bucket,
   global scope → ถอด pin เก่าทิ้งพร้อม model/effort ของ CLI ที่ย้ายออก) + regression test 2 ชั้น
+
+### Docs
+
+- `docs/lead/role-and-workflow.md` ข้อ 6 Long-run mode: **backlog (#684) คือคิวงานถัดไป** — Lead ต้อง
+  `takkub backlog list --status open` ก่อนถาม user ว่าทำอะไรต่อ (ก่อนหน้านี้ไม่มีเอกสาร Lead ฉบับไหน
+  พูดถึง backlog เลย → ไม่มี Lead คนไหนหยิบใบ backlog มาทำ) · `cli-reference.md` เพิ่ม `takkub backlog …`
+  ทุก verb + `harvest --note` · `anti-patterns.md` บันทึกบทเรียน #341/#695/#696/#697
 
 ## [v2.1.28] - 2026-09-21
 
