@@ -4,6 +4,24 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 
 ## [vNEXT]
 
+## [v2.1.30] - 2026-09-22
+
+### Fixed (แก้ด่วน — prod วนไม่หยุด)
+
+- **#699: Lead ชนโควตาแล้ว reroute วนทุก 5 วินาที paste `[system] Lead provider takeover` ซ้อนกันไม่จบ
+  (regression จาก #691 ใน 2.1.28, prod unirecon 2026-09-22 วน 312+ รอบใน 25 นาที)** —
+  `_reroute_pane_to_provider` เรียก `close()` โดยไม่มี `force` แต่ `close()` protect Lead → pane codex เดิม
+  ยังอยู่ → `spawn` ตอบ "already running" ถูกนับว่าสำเร็จ → takeover brief ถูกส่งลง pane เดิม → tick ถัดไป
+  เห็น banner เดิม → วนใหม่ (ไม่มี latch/เพดาน) และ brief ดึง tail ของจอที่มี brief เก่า → ซ้อนกัน
+  → แก้ 5 จุด: Lead reroute ปิดด้วย `force=True` · latch `quota_reroute_pending` กัน watchdog เข้าซ้ำ
+  ระหว่างรอ respawn · spawn ตอบ "already running" = reroute ไม่เกิด → `quota_reroute_respawn_noop`
+  + give up (`respawn_noop`) ห้ามส่ง brief · เพดาน `MAX_REROUTE_ROUNDS=3` ต่อ task (`reroute_round_cap`)
+  · `_strip_takeover_briefs` ตัด brief เก่าออกจาก tail ก่อนสร้างใบใหม่ + 5 เทส
+- **#700: popup โควตาแสดงการ์ด "Codex · default · plus" ซ้ำ 2 ใบ** — `codex_usage_targets` (#692) ติดป้าย
+  "default" ให้ทั้ง `~/.codex` และ `codex-home` ของ cockpit ซึ่งเป็นคนละโฟลเดอร์ที่ login บัญชีเดียวกัน
+  → `~/.codex` ได้ป้าย `local (~/.codex)` เว้นแต่เป็น active home เอง + แถว codex ที่โควตาเหมือนกันทุกช่อง
+  ถูกรวมเป็นการ์ดเดียว `default + local (~/.codex)` + 2 เทส
+
 ## [v2.1.29] - 2026-09-22
 
 ### Fixed (แก้)
