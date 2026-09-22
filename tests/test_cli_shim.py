@@ -95,7 +95,8 @@ class TestShimRefusesBrokenInterpreter:
         r = subprocess.run(
             ["cmd", "/c", str(bin_dir / "takkub.cmd"), "--help"],
             capture_output=True,
-            text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=60,
         )
         assert r.returncode == 1
@@ -111,7 +112,8 @@ class TestShimRefusesBrokenInterpreter:
         r = subprocess.run(
             [bash, (bin_dir / "takkub").as_posix(), "--help"],
             capture_output=True,
-            text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=60,
         )
         assert r.returncode == 1
@@ -127,11 +129,15 @@ class TestShimRefusesBrokenInterpreter:
         if not py.exists():
             pytest.skip("no console python.exe next to sys.executable")
         bin_dir = cli_shim.ensure_cli_shims(tmp_path / "bin", py)
+        # The CLI help carries Thai text: decode as UTF-8 ourselves — on a
+        # cp1252 CI console `text=True` hits UnicodeDecodeError in the reader
+        # thread and hands back `stdout=None` (windows-latest, 2026-09-22).
         r = subprocess.run(
             ["cmd", "/c", str(bin_dir / "takkub.cmd"), "--help"],
             capture_output=True,
-            text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=120,
         )
         assert r.returncode == 0, r.stderr
-        assert "usage: takkub" in r.stdout
+        assert "usage: takkub" in (r.stdout or "")
