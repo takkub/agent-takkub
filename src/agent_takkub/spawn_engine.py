@@ -208,6 +208,39 @@ def _resolve_teammate_effort(
     return _teammate_tier(base_role)[1]
 
 
+def _pane_cli_bin_dir() -> str:
+    """The directory prepended to every pane's PATH (and exported as
+    ``TAKKUB_CLI_BIN_DIR``) so `takkub` dials back into THIS cockpit.
+
+    #696: for an installed build this is no longer the venv's own
+    ``Scripts/``/``bin/`` (that put the cockpit's ``python`` first on every
+    pane's PATH — the #341 clobber landed there — and launched a broken
+    interpreter through the bare console script with no diagnostic). It is
+    ``<DATA_HOME>/bin``, holding only the `cli_shim` launcher pair that
+    checks the interpreter file before spawning it. A dev checkout keeps
+    ``REPO_ROOT/bin``. Falls back to the venv script dir (the pre-#696
+    behaviour) only when the shim dir cannot be written, with a breadcrumb."""
+    from . import cli_shim
+
+    bin_dir = cli_shim.pane_bin_dir(DATA_HOME, REPO_ROOT)
+    if DATA_HOME == REPO_ROOT:
+        return str(bin_dir)
+    from .venv_integrity import interpreter_dir
+
+    if sys.platform == "win32":
+        py = interpreter_dir() / "python.exe"
+    else:
+        py = pathlib.Path(sys.executable)
+    try:
+        cli_shim.ensure_cli_shims(bin_dir, py)
+    except OSError as exc:
+        from .orchestrator_text import _log_event
+
+        _log_event("cli_shim_write_failed", bin_dir=str(bin_dir), error=str(exc))
+        return str(CLI_BIN_DIR)
+    return str(bin_dir)
+
+
 def _apply_v2_account_env_override(
     env: dict, provider_id: str, project_ns: str, role_name: str
 ) -> None:
@@ -2472,7 +2505,7 @@ class SpawnEngineMixin:
 
             for _isolated_provider in _isolated_providers():
                 inject_provider_home_env(env, _isolated_provider, project_ns)
-            bin_dir = str(CLI_BIN_DIR)
+            bin_dir = _pane_cli_bin_dir()
             env["PATH"] = bin_dir + os.pathsep + env.get("PATH", "")
             env["TAKKUB_CLI_BIN_DIR"] = bin_dir  # #642
             _shell_tok = self._mint_pane_token(env, project_ns, role_name)
@@ -2724,7 +2757,7 @@ class SpawnEngineMixin:
 
             if v2_router_enabled():
                 _apply_v2_account_env_override(env, spec.name, project_ns, role_name)
-            bin_dir = str(CLI_BIN_DIR)
+            bin_dir = _pane_cli_bin_dir()
             if spec.prepend_bin_dir_to_path:
                 provider_dir = os.path.dirname(provider_bin)
                 env["PATH"] = bin_dir + os.pathsep + provider_dir + os.pathsep + env.get("PATH", "")
@@ -3335,7 +3368,7 @@ class SpawnEngineMixin:
             # `from`/`from_project` fields, preventing a compromised or forged pane
             # from impersonating another role or project.
             pane_tok = self._mint_pane_token(env, project_ns, role_name)
-        bin_dir = str(CLI_BIN_DIR)
+        bin_dir = _pane_cli_bin_dir()
         env["PATH"] = bin_dir + os.pathsep + env.get("PATH", "")
         # #642: a pane whose shell is WSL/git-bash resolves `takkub` to the
         # npm shim and then fails with "exec: node: not found" because that

@@ -37,7 +37,13 @@ takkub send --to backend --from-file <path>            # (#491) อ่านข�
 takkub goal "<objective>"                              # ตั้งเป้าหมาย session — prepend เข้าทุก assign task หลังจากนี้
 takkub goal                                            # โชว์ goal ปัจจุบัน
 takkub goal --clear                                    # ล้าง goal
-takkub harvest --role <role>                           # กู้งานของ pane ที่ทำเสร็จแต่ลืม takkub done (scan artifacts)
+takkub harvest --role <role>                           # กู้งานของ pane ที่ทำเสร็จแต่ลืม takkub done (scan artifacts) — note ที่สังเคราะห์ใส่ path ของ artifact ให้แล้ว (ผ่าน gate #433 ได้ถ้ามี screenshot จริง)
+takkub harvest --role <role> --auto-confirm --note "<หลักฐาน>"   # #697: ถ้ามี role อื่น active บน project root เดียวกัน scan แยกเจ้าของไม่ได้ = `unattributed` → --auto-confirm ถูกปฏิเสธ (exit 4) เว้นแต่ใส่ --note หลักฐานของ role นั้นเอง หรือยืนยันแบบ interactive
+takkub backlog add "<title>" [--detail ..] [--source ..] [--file p:line] [--impact ..] [--severity ..]   # (#684) จดงานที่เห็นแต่ยังไม่ทำ — ต่อโปรเจค อยู่ข้ามการ restart
+takkub backlog list [--status open|todo|doing|blocked|deferred|done]   # คิวงานถัดไป — ดูก่อนถาม user ว่าทำอะไรต่อ
+takkub backlog show <id> · done <id> · block <id> "<reason>" · defer <id> · status <id> <status>
+takkub backlog assign <id> --role <role>                # ยิง takkub assign จากใบ backlog แล้วผูก id ให้เอง
+takkub backlog import <file.md>                         # นำเข้าตาราง markdown (| title | detail | ... |) เป็นใบ backlog
 takkub close --role qa                                 # ปิด pane เดียว — 2.1.17: pane ไม่ปิดเองหลัง done แล้ว (นั่งรอ 30 นาที) assign role เดิมซ้ำ = paste เข้า session เดิม ไม่ boot ใหม่ · close เองเฉพาะจะเปลี่ยน provider/model หรือเลิกใช้ (เปลี่ยน worktree ระบบปิด+เปิดใหม่ให้เอง)
 takkub close-all                                       # ปิด teammate ทั้งหมด (Lead รอด)
 takkub end-session --note "<สรุป>"                     # เขียน session summary ลง runtime/sessions + vault mirror

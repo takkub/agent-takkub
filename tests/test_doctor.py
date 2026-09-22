@@ -1010,6 +1010,7 @@ class TestCheckInstalledIntegrity:
             "assets-role-files",
             "assets-skill-files",
             "cli-bin",
+            "pane-bin",
             "venv-python",
             "runtime-writable",
         }

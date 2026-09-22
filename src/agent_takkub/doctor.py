@@ -26,6 +26,8 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
 
+from .venv_integrity import python_executable_problem as _venv_python_executable_problem
+
 
 class Status(StrEnum):
     OK = "ok"
@@ -1567,53 +1569,18 @@ def check_team_preset() -> list[Finding]:
 
 
 # #341/#446: floor + magic-byte check for a venv python that EXISTS but was
-# overwritten/truncated by something outside agent-takkub. Mirrors
-# npm/scripts/lib.js's pythonExecutableProblem() so the cockpit's own
-# `doctor` and the npm launcher agree on what counts as broken. The floor
-# only needs to catch truncation (#341's 29-byte case) — a pyenv/python.org
-# framework build's `bin/pythonX.Y` is a tiny Mach-O re-exec stub that can be
-# well under the old 40KB floor while still being completely runnable
-# (#446); magic-byte sniffing is what actually distinguishes it from
-# garbage.
-_MIN_PYTHON_EXE_BYTES = 1024
-_ELF_MAGIC = b"\x7f\x45\x4c\x46"
-_MACHO_MAGICS = frozenset(
-    {
-        b"\xfe\xed\xfa\xce",  # MH_MAGIC (32-bit)
-        b"\xce\xfa\xed\xfe",  # MH_CIGAM (32-bit, byte-swapped)
-        b"\xfe\xed\xfa\xcf",  # MH_MAGIC_64
-        b"\xcf\xfa\xed\xfe",  # MH_CIGAM_64 (byte-swapped)
-        b"\xca\xfe\xba\xbe",  # FAT_MAGIC (universal/fat binary)
-        b"\xbe\xba\xfe\xca",  # FAT_CIGAM (universal/fat binary, byte-swapped)
-    }
-)
+# overwritten/truncated by something outside agent-takkub — the single
+# implementation lives in `venv_integrity` (#696, imported at the top) so
+# doctor, the guard, the pane shims and the running cockpit's self-repair
+# all agree on "broken".
+_python_executable_problem = _venv_python_executable_problem
 
 
-def _python_executable_problem(py_path: Path) -> str | None:
-    """None when `py_path` looks like a real, runnable interpreter, else a
-    short machine-readable reason ('too-small' or 'bad-magic')."""
-    try:
-        size = py_path.stat().st_size
-    except OSError:
-        return "missing"
-    if size < _MIN_PYTHON_EXE_BYTES:
-        return "too-small"
-    try:
-        with open(py_path, "rb") as f:
-            header = f.read(4)
-    except OSError:
-        return "read-error"
-    if sys.platform == "win32":
-        # Windows PE executables always start with the 'MZ' DOS-header magic.
-        return None if header[:2] == b"MZ" else "bad-magic"
-    # POSIX: accept a real ELF or Mach-O binary, or a shebang script — a
-    # pyenv shim / venv `python` wrapper is a text file starting with '#!',
-    # not a compiled executable, and is just as valid an interpreter path.
-    if header[:2] == b"#!":
-        return None
-    if header == _ELF_MAGIC or header in _MACHO_MAGICS:
-        return None
-    return "bad-magic"
+def py_name_for_shim() -> str:
+    """The console interpreter name inside a venv script dir — ``python.exe``
+    on Windows (never ``pythonw.exe``, which has no console), the running
+    interpreter's own name elsewhere."""
+    return "python.exe" if sys.platform == "win32" else Path(sys.executable).name
 
 
 def check_installed_integrity() -> list[Finding]:
@@ -1707,6 +1674,28 @@ def check_installed_integrity() -> list[Finding]:
             )
         )
 
+    # #696 — the shim pair every pane's PATH actually points at (never the
+    # venv's own script dir any more, see cli_shim.py). Regenerated on every
+    # spawn, so a missing/unwritable dir here means panes fall back to the
+    # unguarded console script.
+    from . import cli_shim as _cli_shim
+
+    pane_bin = _cli_shim.pane_bin_dir(DATA_HOME, REPO_ROOT)
+    try:
+        _cli_shim.ensure_cli_shims(pane_bin, CLI_BIN_DIR / py_name_for_shim())
+        findings.append(Finding("installed", "pane-bin", Status.OK, str(pane_bin)))
+    except OSError as exc:
+        findings.append(
+            Finding(
+                "installed",
+                "pane-bin",
+                Status.FAIL,
+                f"cannot write the pane launcher shims under {pane_bin}: {exc}",
+                "make the DATA_HOME writable — until then panes launch the unguarded "
+                "console script straight from the venv (#696)",
+            )
+        )
+
     # #341 — a stray external tool once overwrote a LIVE venv's python.exe
     # with a 29-byte text file. Every subsequent CLI invocation launched
     # through it then failed to even start (empty stdout/stderr), so nothing
@@ -1717,12 +1706,13 @@ def check_installed_integrity() -> list[Finding]:
     # from under it mid-session, even though a fresh `takkub doctor`
     # invocation launched AFTER the corruption can't run at all (the npm/
     # bin launchers guard that case before ever spawning the interpreter).
-    py_name = "python.exe" if sys.platform == "win32" else Path(sys.executable).name
+    py_name = py_name_for_shim()
     py_path = CLI_BIN_DIR / py_name
+    from .venv_integrity import repair_hint as _repair_hint
+
     fix_hint = (
-        "close every running cockpit/takkub process for this install, then "
-        "`npm install -g agent-takkub --force` to reprovision the venv "
-        f"(or delete {py_path.parent} by hand if that still can't overwrite it)"
+        "a running cockpit repairs this by itself within 30s (#696); otherwise "
+        f"{_repair_hint(py_path)}"
     )
     if not py_path.exists():
         findings.append(

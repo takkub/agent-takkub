@@ -10883,6 +10883,18 @@ class Orchestrator(
 
         artifacts = scan_artifacts(scan_bases, since_ts, limit=limit)
 
+        # #697: an mtime scan over a SHARED project root cannot tell whose
+        # files these are once another role is working on it too (real
+        # case: backend "harvested" 23 of frontend's screenshots/sources and
+        # was marked done on them). Report that, and let the CLI refuse to
+        # auto-confirm on it — human or evidence (`--note`) required.
+        other_active = sorted(
+            r
+            for r, p in self._project_panes(project_ns).items()
+            if r != role and r != LEAD.name and getattr(p, "state", None) in ("working", "active")
+        )
+        attribution = "unattributed" if (other_active and artifacts) else "sole"
+
         return (
             True,
             "ok",
@@ -10891,6 +10903,8 @@ class Orchestrator(
                 "spawn_ts": spawn_ts_raw,
                 "since_ts": since_ts,
                 "artifacts": artifacts,
+                "other_active": other_active,
+                "attribution": attribution,
             },
         )
 
@@ -11926,6 +11940,82 @@ class Orchestrator(
     # ──────────────────────────────────────────────────────────────
     # idle watchdog — surface teammates that forgot to `takkub done`
     # ──────────────────────────────────────────────────────────────
+    _VENV_INTEGRITY_INTERVAL_S = 30.0
+
+    def _maybe_check_venv_integrity(self, now: float) -> None:
+        """#341/#696: detect and repair a clobbered cockpit interpreter file.
+
+        Two real incidents overwrote ``venv/Scripts/python.exe`` with a
+        29-byte text file from inside a pane. Every `takkub done/send`
+        launched through it then died with no output, Windows raised
+        "Unsupported 16-Bit Application" modals, and the idle-reminder loop
+        kept nudging panes to re-run a `done` that could never land. The
+        cockpit process itself keeps running (its image is already mapped),
+        so it is the one place that can (1) notice the on-disk corruption,
+        (2) put the file back from the base interpreter the venv was made
+        from, (3) tell Lead once, and (4) stop the reminder loop meanwhile
+        (`_inject_idle_reminder` checks `_cli_interpreter_broken`).
+
+        Cheap: two stats every 30 s; `find_problems` never raises."""
+        last = getattr(self, "_venv_integrity_last_ts", 0.0)
+        if now - last < self._VENV_INTEGRITY_INTERVAL_S:
+            return
+        self._venv_integrity_last_ts = now
+        try:
+            from . import venv_integrity
+
+            problems = venv_integrity.find_problems()
+        except Exception:
+            return
+        was_broken = getattr(self, "_cli_interpreter_broken", False)
+        if not problems:
+            if was_broken:
+                self._cli_interpreter_broken = False
+                _log_event("venv_python_healthy_again")
+            return
+        notified: set[str] = getattr(self, "_venv_incident_notified", set())
+        self._venv_incident_notified = notified
+        still_broken = False
+        for path, problem in problems:
+            _log_event("venv_python_clobbered", path=str(path), problem=problem)
+            try:
+                ok, msg = venv_integrity.repair(path)
+            except Exception as exc:  # repair() never raises, belt and braces
+                ok, msg = False, f"repair crashed: {exc!r}"
+            _log_event(
+                "venv_python_repaired" if ok else "venv_python_repair_failed",
+                path=str(path),
+                msg=msg,
+            )
+            if not ok:
+                still_broken = True
+            key = f"{path}::{'ok' if ok else 'fail'}"
+            if key in notified:
+                continue
+            notified.add(key)
+            if ok:
+                body = (
+                    f"🩹 [venv-integrity] {path.name} ของ cockpit ถูกเขียนทับ ({problem}) — ซ่อมคืนแล้ว: {msg} · "
+                    "pane ที่ `takkub done` ล้มช่วงนี้ให้สั่งรายงานซ้ำได้เลย (#341/#696)"
+                )
+            else:
+                body = (
+                    f"🚨 [venv-integrity] {path} ถูกเขียนทับ ({problem}) และซ่อมอัตโนมัติไม่ได้: {msg} · "
+                    "ทุก `takkub` ของ pane จะล้มจนกว่าจะซ่อม — หยุด idle reminder ไว้ก่อน (#341/#696)"
+                )
+            for project_ns in list(self._panes_by_project.keys()):
+                try:
+                    self._notify_lead(
+                        project_ns,
+                        body,
+                        from_role="system",
+                        note="venv_integrity",
+                        kind="venv-integrity",
+                    )
+                except Exception:
+                    continue
+        self._cli_interpreter_broken = still_broken
+
     def _check_idle_teammates(self) -> None:
         """Surface a `takkub done` reminder for any teammate pane that's been
         at the ready prompt for IDLE_REMIND_AFTER_S while still flagged
@@ -11949,6 +12039,11 @@ class Orchestrator(
         # sibling file rides the same tick too — see _MACHINE_STATE_FILE's
         # module comment.
         self._maybe_write_machine_state(now)
+        # #696: on-disk interpreter integrity rides the same tick (30 s
+        # throttle) — the running cockpit keeps the healthy image mapped, so
+        # it is the one process that can notice and repair a clobbered
+        # `venv/Scripts/python.exe` while every `takkub` call is failing.
+        self._maybe_check_venv_integrity(now)
         # Stuck-pane detection rides the same 5 s tick so we don't pay
         # for another QTimer. Runs before the idle-reminder logic so a
         # recover (which closes the pane) doesn't fight with reminder
@@ -15059,6 +15154,17 @@ class Orchestrator(
         still be pushed to report and remain harvestable.
         """
         if pane.session is None or not pane.session.is_alive:
+            return
+        if getattr(self, "_cli_interpreter_broken", False):
+            # #696: the CLI the reminder asks the pane to run cannot start —
+            # nudging burns tokens and produces "(no output)" turns until
+            # `_maybe_check_venv_integrity` gets the interpreter back.
+            _log_event(
+                "idle_reminder_skipped",
+                role=role_name,
+                project=project_name,
+                reason="cli_interpreter_broken",
+            )
             return
         self.idleReminderNotice.emit(project_name, role_name, notice_round, escalate)
         _log_event(

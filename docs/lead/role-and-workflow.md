@@ -6,7 +6,7 @@
 1. **สรุปงาน (Summary & Plan):** สรุปเป้าหมายและวางแผนงานชัดเจน
 2. **ห้ามแก้ source code เอง:** ห้าม Write/Edit ใต้ project paths/BLOCKED_DIRS เว้นแต่เข้าเกณฑ์ tiny-fix carve-out (#585)
 3. **มอบหมายงาน (`takkub assign`):** ส่งงานให้ specialist เสมอ ทุก provider ใช้กฎเดียวกัน (Claude, Codex, Gemini/agy, OpenCode, Kimi, Cursor)
-4. **ห้ามสั่ง pane ไปอ่านไฟล์ที่ Lead อ่านแล้ว:** ใส่ข้อสรุปที่ verify แล้วลงใน task spec แทน (pane อ่านซ้ำ = จ่าย token ซ้ำ ตามที่วัดไว้ว่า Read กิน 64% ของ token ทั้ง session)
+4. **ห้ามสั่ง pane ไปอ่านไฟล์ที่ Lead อ่านแล้ว:** ใส่ข้อสรุปที่ verify แล้วลงใน task spec แทน (Read กิน 64% ของ token ทั้ง session)
 
 Teammates: frontend · backend · mobile · devops · qa · reviewer · critic · gemini · codex · opencode · kimi · cursor
 
@@ -79,6 +79,7 @@ Teammates: frontend · backend · mobile · devops · qa · reviewer · critic �
 3. **สรุปถึง user ครั้งเดียวตอนจบ batch**: done ระหว่างทางลง digest/audit log ไม่เด้งหา user ทุกใบ (#464)
 4. **Quota-hit reroute (#514) ทำงานจริง**: pane ตันเพราะโควตา orchestrator ย้าย provider ให้เอง ไม่ต้องรอ user
 5. **Lead ห้ามหยุดรอแบบ block** (กฎ #287/#242): ใช้ `takkub wait` เท่านั้น จบ turn ให้ระบบ delivery ปลุก
+6. **Backlog (#684) = คิวงานถัดไป:** เห็นงานที่ยังไม่ทำ → `takkub backlog add` · **ก่อนถาม user ว่าทำอะไรต่อ → `takkub backlog list --status open` แล้วหยิบมาทำ** (`backlog assign <id> --role <r>`)
 
 ### Done-handoff rules
 หลัง `[<role> done] <note>` (fail = `[<role> FAILED] <reason>`):
@@ -127,8 +128,5 @@ frontend/mobile self-verify ด้วย screenshot จริง:
 ### 3. ❌ ห้าม one-shot `takkub codex` / `takkub gemini`
 - user ต้องเห็นทำงานสดใน pane → ใส่เป็น row ใน propose table → fire `takkub assign --role codex/gemini`
 
-### 4. ห้ามสั่ง pane ไปอ่านไฟล์ที่ Lead อ่านแล้ว
-- ห้ามสั่ง pane ไป Read ไฟล์ซ้ำที่ Lead อ่านและสรุปข้อมูลได้แล้ว — ให้ใส่ข้อสรุปที่ verify แล้วลงใน task spec แทน เพื่อประหยัด token ค่า Read (กิน 64% ของทั้ง session)
-
-### 5. Cockpit self-bug auto-issue (ทุก project tab)
+### 4. Cockpit self-bug auto-issue (ทุก project tab)
 - เจอ error ที่เป็นตัว cockpit เอง (CLI/spawn/crash/provider) → เช็ค `takkub issue list --open` ก่อน ถ้าไม่มี ให้ `takkub issue new "<title>" --cockpit-bug --severity <s> --body "..."` ทันที ไม่ต้อง propose (ถ้าเป็น bug โค้ด user ให้แจ้ง user ตามปกติ ห้ามเปิด issue ของ cockpit)

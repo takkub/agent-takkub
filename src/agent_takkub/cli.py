@@ -2371,6 +2371,33 @@ def _cmd_cleanup_agents_md(args: argparse.Namespace) -> dict:
     return {"ok": True, "msg": f"removed {removed_total} file(s) from {len(found)} path(s)"}
 
 
+_HARVEST_NOTE_MAX_PATHS = 40
+
+
+def _compose_harvest_note(
+    role: str,
+    artifacts: list[dict],
+    since_str: str,
+    extra_note: str,
+    other_active: list[str],
+) -> str:
+    """The done note a harvest synthesizes (#697): the artifact paths
+    themselves (so the #433 screenshot gate sees real files instead of a
+    bare count), the caller's evidence when given, and an explicit
+    unattributed marker when other roles were active on the same root."""
+    lines = [f"harvest: {len(artifacts)} artifact(s) modified since {since_str}"]
+    if other_active:
+        lines.append(f"unattributed: {', '.join(other_active)} also active on this project root")
+    if extra_note:
+        lines.extend(["", extra_note, ""])
+    lines.append("artifacts:")
+    for a in artifacts[:_HARVEST_NOTE_MAX_PATHS]:
+        lines.append(f"- {a.get('path', '?')}")
+    if len(artifacts) > _HARVEST_NOTE_MAX_PATHS:
+        lines.append(f"- … {len(artifacts) - _HARVEST_NOTE_MAX_PATHS} more")
+    return "\n".join(lines)
+
+
 def cmd_harvest(args: argparse.Namespace) -> dict:
     """Scan artifact paths for a role that forgot `takkub done`, then optionally
     synthesize a done event via harvest-done IPC.
@@ -2380,6 +2407,8 @@ def cmd_harvest(args: argparse.Namespace) -> dict:
       1 = user declined or server error
       2 = role not running
       3 = no artifacts found
+      4 = unattributed (another role active on the same root) and
+          --auto-confirm without --note (#697)
     """
     from datetime import datetime
 
@@ -2413,6 +2442,27 @@ def cmd_harvest(args: argparse.Namespace) -> dict:
         print(f"  {rel:>10}  {path}")
     print()
 
+    # #697: with another role active on the same project root the scan is
+    # not evidence of THIS role's work — never auto-confirm on it.
+    extra_note = (getattr(args, "note", None) or "").strip()
+    other_active = resp.get("other_active") or []
+    unattributed = resp.get("attribution") == "unattributed"
+    if unattributed:
+        print(
+            f"⚠ unattributed: {', '.join(other_active)} also active on this project root — "
+            "an mtime scan cannot tell whose files these are"
+        )
+    if unattributed and getattr(args, "auto_confirm", False) and not extra_note:
+        return {
+            "ok": False,
+            "msg": (
+                f"refusing --auto-confirm: artifacts are unattributed ({', '.join(other_active)} "
+                f"also active on this root). Confirm interactively, or pass --note with "
+                f"'{args.role}'s own evidence (files/screenshots it produced)"
+            ),
+            "exit_code": 4,
+        }
+
     if getattr(args, "auto_confirm", False):
         answer = "y"
     else:
@@ -2425,7 +2475,7 @@ def cmd_harvest(args: argparse.Namespace) -> dict:
         print("harvest cancelled")
         return {"ok": False, "msg": "user declined", "exit_code": 1}
 
-    note = f"harvest: {len(artifacts)} artifact(s) modified since {since_str}"
+    note = _compose_harvest_note(args.role, artifacts, since_str, extra_note, other_active)
     done_resp = _request(
         _with_project(
             {"cmd": "harvest-done", "role": args.role, "note": note, "from": _from_role()}
@@ -4790,9 +4840,15 @@ def cmd_guard(_: argparse.Namespace) -> dict:
                     else ""
                 )
                 if file_path:
-                    from .pane_guard import Verdict, is_in_protected_data_home
+                    from .pane_guard import (
+                        Verdict,
+                        _exec_target_verdict,
+                        cockpit_executable_target,
+                        is_in_protected_data_home,
+                    )
 
                     in_prot, prot_home = is_in_protected_data_home(file_path, cwd=cwd)
+                    verdict = None
                     if in_prot:
                         verdict = Verdict(
                             False,
@@ -4802,6 +4858,13 @@ def cmd_guard(_: argparse.Namespace) -> dict:
                                 f"({prot_home}) — ห้ามทุก role แก้ไข ย้าย หรือลบ เพื่อป้องกันข้อมูลเสียหาย (#633)"
                             ),
                         )
+                    else:
+                        # #695: the cockpit's OWN venv/interpreter is off-limits
+                        # to every role through the editing tools as well.
+                        exec_dir = cockpit_executable_target(file_path, cwd=cwd)
+                        if exec_dir is not None:
+                            verdict = _exec_target_verdict(role, file_path, exec_dir, "แก้ไขไฟล์ใน")
+                    if verdict is not None:
                         print(f"[takkub guard: {verdict.rule}] {verdict.reason}", file=sys.stderr)
                         _log_guard_denied(role, f"{tool_name} {file_path}", verdict)
                         _notify_lead_of_guard_block(role, verdict)
@@ -5993,6 +6056,13 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=100,
         help="max artifacts to list (default: 100)",
+    )
+    sh.add_argument(
+        "--note",
+        default=None,
+        help="the role's own evidence to put in the synthesized done note (screenshot "
+        "paths, files it produced) — required with --auto-confirm when another role "
+        "is active on the same project root (#697)",
     )
     sh.set_defaults(func=cmd_harvest)
 

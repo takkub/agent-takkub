@@ -2643,21 +2643,19 @@ def get_foreign_cockpit_pids(*, own_home: pathlib.Path | None = None) -> frozens
     return result
 
 
-def is_in_protected_data_home(
-    target_path: str | pathlib.Path,
-    *,
-    cwd: str | pathlib.Path | None = None,
-    own_home: pathlib.Path | None = None,
-    protected_homes: Iterable[pathlib.Path] | None = None,
-) -> tuple[bool, pathlib.Path | None]:
-    """Check whether `target_path` resolves inside any protected DATA_HOME.
-    Returns (True, matching_protected_home) if inside a protected DATA_HOME,
-    or (False, None) if safe."""
+def _resolve_guard_target(
+    target_path: str | pathlib.Path, cwd: str | pathlib.Path | None
+) -> pathlib.Path | None:
+    """Normalize a path token from a shell command the way the #633/#695
+    checks compare it: quotes stripped, `\\` accepted as a separator on every
+    OS, `$VAR`/`$env:VAR`/`~` expanded from THIS process's environment,
+    relative paths anchored at *cwd*, then resolved. None for an empty
+    token."""
     if not target_path:
-        return False, None
+        return None
     raw = str(target_path).strip().strip("\"'")
     if not raw:
-        return False, None
+        return None
     # #633: a backslash is a separator on Windows but a filename character on
     # POSIX — `{home}\projects.json` must still resolve INTO `{home}` on
     # macOS/Linux. Windows accepts `/` too, so normalizing is safe everywhere.
@@ -2673,9 +2671,73 @@ def is_in_protected_data_home(
         base = pathlib.Path(cwd) if cwd else pathlib.Path.cwd()
         p = base / p
     try:
-        resolved = p.resolve()
+        return p.resolve()
     except (OSError, ValueError):
-        resolved = p.absolute()
+        return p.absolute()
+
+
+def _exec_dirs() -> frozenset[pathlib.Path]:
+    """#695: every directory holding an executable the cockpit itself runs
+    on — its venv tree, the base interpreter, a dev checkout's `.venv`, and
+    the pane shim dir under its own DATA_HOME. Function so tests can patch
+    it; never raises (an unreadable DATA_HOME just drops the shim dir)."""
+    from .venv_integrity import cockpit_executable_dirs
+
+    extra: list[pathlib.Path] = []
+    try:
+        extra.append(get_own_data_home() / "bin")
+    except Exception:
+        pass
+    return cockpit_executable_dirs(extra=extra)
+
+
+def cockpit_executable_target(
+    target_path: str | pathlib.Path, *, cwd: str | pathlib.Path | None = None
+) -> pathlib.Path | None:
+    """#695: the cockpit executable dir *target_path* resolves into, or None.
+
+    Unlike `is_in_protected_data_home` this deliberately covers the cockpit's
+    OWN install — `<DATA_HOME>/venv` is inside own home and therefore exempt
+    from the #633 rule, which is exactly the hole the 2026-09-22 clobber of
+    `venv/Scripts/python.exe` went through. Applies to every role, Lead
+    included: no task ever needs to write into the interpreter that runs the
+    cockpit and the `takkub` CLI every pane reports through."""
+    resolved = _resolve_guard_target(target_path, cwd)
+    if resolved is None:
+        return None
+    from .venv_integrity import is_inside_any
+
+    return is_inside_any(resolved, _exec_dirs())
+
+
+def _exec_target_verdict(
+    role: str | None, target: str, exec_dir: pathlib.Path, verb_th: str
+) -> Verdict:
+    role_desc = f"role `{role}`" if role else "Pane"
+    return Verdict(
+        False,
+        rule="instance_guard:cockpit_executable",
+        reason=(
+            f"{role_desc} ห้าม{verb_th} venv/interpreter ของ cockpit เอง ({exec_dir}): {target} — "
+            "ไฟล์ในนี้คือ python/takkub ที่ทุก pane และ Lead ใช้รายงานงาน เขียนทับแล้ว CLI ตายทั้งระบบ "
+            "(#341/#695) · ถ้าต้องการ interpreter ของโปรเจค ให้ใช้ venv ของโปรเจคเอง ไม่ใช่ `python` บน PATH"
+        ),
+    )
+
+
+def is_in_protected_data_home(
+    target_path: str | pathlib.Path,
+    *,
+    cwd: str | pathlib.Path | None = None,
+    own_home: pathlib.Path | None = None,
+    protected_homes: Iterable[pathlib.Path] | None = None,
+) -> tuple[bool, pathlib.Path | None]:
+    """Check whether `target_path` resolves inside any protected DATA_HOME.
+    Returns (True, matching_protected_home) if inside a protected DATA_HOME,
+    or (False, None) if safe."""
+    resolved = _resolve_guard_target(target_path, cwd)
+    if resolved is None:
+        return False, None
 
     if own_home is None:
         own_home_resolved = get_own_data_home().resolve()
@@ -2767,6 +2829,103 @@ _GIT_MUTATE_CMD = re.compile(
     r"""\bgit\s+(?:-[A-Za-z0-9_-]+\s+)*(?:-C|--git-dir=|--work-tree=)\s*["']?([^\s"';&|\r\n]+)["']?\s+([A-Za-z0-9_-]+)""",
     re.I,
 )
+
+# #695: PowerShell content-writing cmdlets whose POSITIONAL binding is not
+# what it looks like. Measured on pwsh 7 (2026-09-22): `Set-Content -NoNewline
+# 'graphify-out\.graphify_python' $py` binds `$py` as -Path and the literal
+# as -Value — the exact swap that overwrote the cockpit's `python.exe` with a
+# 29-byte string (#341, second occurrence). A static parser cannot know what
+# a variable/subexpression holds, and the binder cannot be trusted to put the
+# literal where the author meant, so a dynamic positional argument to one of
+# these is denied outright — the fix is to name the parameters
+# (`-LiteralPath <file> -Value <text>`), which binds unambiguously.
+_PS_CONTENT_WRITE_CMDS = re.compile(
+    r"""(?:^|[;&|]\s*|\bexec\s+)(?:Set-Content|sc|Add-Content|ac|Out-File)\b(?P<args>[^;&|\r\n]*)""",
+    re.I,
+)
+_PS_SWITCH_PARAMS = frozenset(
+    {
+        "-nonewline",
+        "-force",
+        "-passthru",
+        "-whatif",
+        "-confirm",
+        "-append",
+        "-noclobber",
+        "-asbytestream",
+        "-usetransaction",
+        "-verbose",
+        "-debug",
+        "-nonewline:$true",
+        "-nonewline:$false",
+    }
+)
+# Bash/PowerShell command substitution as a write DESTINATION — `> $(which
+# python)`, `cp x "$(python -c 'import sys;print(sys.executable)')"`,
+# `tee (Get-Command python).Source` — the value is decided at run time, the
+# guard cannot resolve it, and no pane task ever needs it: deny.
+_SUBST_DEST_RE = re.compile(r"""^["']?(?:\$\(|`|\(|@\()""")
+_REDIRECT_SUBST_RE = re.compile(r"""(?:>>|>|1>|2>|\*>)\s*["']?(?:\$\(|`|\()""")
+_PS_ARG_TOKEN_RE = re.compile(r"""[^\s"']+|"[^"]*"|'[^']*'""")
+
+
+def _ps_dynamic_positional(token: str) -> bool:
+    """A PowerShell token whose value the guard cannot know statically: a
+    variable (`$py`, `${x}`), a subexpression (`$(...)`, `(...)`) or a
+    backtick-escaped construct. `$env:NAME...` and `~` are expanded by
+    `_resolve_guard_target` from this process's environment and stay static."""
+    t = token.strip()
+    if not t:
+        return False
+    if t.lower().startswith("$env:"):
+        return False
+    return t.startswith(("$", "(", "@(")) or "`" in t
+
+
+def _ps_dynamic_write_target(seg: str) -> str | None:
+    """The offending token when *seg* runs a `_PS_CONTENT_WRITE_CMDS` cmdlet
+    with a dynamic POSITIONAL argument, else None. Named parameters are
+    skipped together with their value; known switches are skipped alone."""
+    for m in _PS_CONTENT_WRITE_CMDS.finditer(seg):
+        skip_next = False
+        for raw in _PS_ARG_TOKEN_RE.findall(m.group("args")):
+            if skip_next:
+                skip_next = False
+                continue
+            if raw.startswith("-") and not raw.startswith("--"):
+                if raw.lower() in _PS_SWITCH_PARAMS:
+                    continue
+                skip_next = True
+                continue
+            if _ps_dynamic_positional(raw):
+                return raw
+    return None
+
+
+def _subst_write_dest(seg: str) -> str | None:
+    """The command-substitution write destination in *seg* (redirect target,
+    or the last argument of cp/mv/tee/Copy-Item/Move-Item), else None."""
+    m = _REDIRECT_SUBST_RE.search(seg)
+    if m:
+        return m.group(0).strip()
+    for pat in (_FILE_COPY_CMDS, _FILE_MOVE_CMDS):
+        for cm in pat.finditer(seg):
+            tokens = [
+                t for t in _PS_ARG_TOKEN_RE.findall(cm.group("args")) if not t.startswith("-")
+            ]
+            # Everything after the source is destination territory; a
+            # substitution may span several whitespace-split tokens
+            # (`` `which python` `` → "`which", "python`"), so look at every
+            # one of them, not just the last.
+            for t in tokens[1:]:
+                if _SUBST_DEST_RE.match(t) or t.endswith("`"):
+                    return " ".join(tokens[1:])
+    tm = re.search(r"""(?:^|\|)\s*tee\s+(?:-\w+\s+)*(["']?(?:\$\(|`|\()[^|;&]*)""", seg)
+    if tm:
+        return tm.group(1).strip()
+    return None
+
+
 _PYTHON_INLINE_WRITE = re.compile(
     r"""(?:python[0-9.]*(?:\.exe)?|pythonw[0-9.]*(?:\.exe)?|py(?:\.exe)?)\s+[^;&|]*-c\s+["'](?P<code>.+)["']""",
     re.I,
@@ -2882,6 +3041,9 @@ def evaluate_instance_guard(
                     rule="instance_guard:protected_data_home",
                     reason=f"ห้ามรัน Python code เขียนหรือลบไฟล์ใน Protected DATA_HOME ({prot_home}) (#633)",
                 )
+            exec_dir = cockpit_executable_target(lit, cwd=cwd)
+            if exec_dir is not None:
+                return _exec_target_verdict(role, lit, exec_dir, "รัน Python code เขียนหรือลบไฟล์ใน")
 
     cmd = _strip_heredoc_bodies(cmd)
 
@@ -3012,11 +3174,38 @@ def evaluate_instance_guard(
                                     reason=f"ห้าม kill process ด้วย image name '{image}' เพราะมี cockpit instance อื่นกำลังทำงานอยู่บนเครื่อง (นโยบาย cockpit #633)",
                                 )
 
-        # 3. Check Mutations to Protected DATA_HOME
+        # 3. Check Mutations to Protected DATA_HOME (#633) and to the
+        #    cockpit's own executables (#695) — same token walk, two deny-lists.
         if has_mutate:
             prot_homes = _get_prot_homes()
 
-            # Redirections to Protected DATA_HOME
+            # #695: a write whose destination is only known at run time.
+            dyn = _ps_dynamic_write_target(seg)
+            if dyn is not None:
+                role_desc = f"role `{role}`" if role else "Pane"
+                return Verdict(
+                    False,
+                    rule="instance_guard:dynamic_write_target",
+                    reason=(
+                        f"{role_desc} ส่ง `{dyn}` เป็น positional argument ให้ Set-Content/Add-Content/Out-File "
+                        "ไม่ได้ — PowerShell สลับ -Path/-Value ของ positional ได้ (เคยเขียนทับ python.exe ของ "
+                        "cockpit จริง #341/#695) · ระบุชื่อพารามิเตอร์ให้ชัด: `-LiteralPath <ไฟล์> -Value <ข้อความ>`"
+                    ),
+                )
+            subst = _subst_write_dest(seg)
+            if subst is not None:
+                role_desc = f"role `{role}`" if role else "Pane"
+                return Verdict(
+                    False,
+                    rule="instance_guard:dynamic_write_target",
+                    reason=(
+                        f"{role_desc} ใช้ command substitution `{subst}` เป็นปลายทางเขียน/คัดลอกไม่ได้ — "
+                        "guard ตรวจปลายทางไม่ได้และไม่มีงานไหนต้องเขียนลง path ที่คำนวณตอนรัน "
+                        "(เคสจริง: `$(which python)` = interpreter ของ cockpit #341/#695) · resolve path ก่อนแล้วเขียนเป็น literal"
+                    ),
+                )
+
+            # Redirections to Protected DATA_HOME / cockpit executables
             for m in _REDIRECTION_TARGET_RE.finditer(seg):
                 target = m.group(1)
                 in_prot, prot_home = is_in_protected_data_home(
@@ -3028,6 +3217,9 @@ def evaluate_instance_guard(
                         rule="instance_guard:protected_data_home",
                         reason=f"ห้ามเขียนหรือ redirect ข้อมูลลงใน Protected DATA_HOME ({prot_home}): {target} (#633)",
                     )
+                exec_dir = cockpit_executable_target(target, cwd=cwd)
+                if exec_dir is not None:
+                    return _exec_target_verdict(role, target, exec_dir, "redirect ข้อมูลลงใน")
             for m in _POWERSHELL_OUT_FILE_RE.finditer(seg):
                 target = m.group(1)
                 in_prot, prot_home = is_in_protected_data_home(
@@ -3039,6 +3231,9 @@ def evaluate_instance_guard(
                         rule="instance_guard:protected_data_home",
                         reason=f"ห้ามเขียนไฟล์ลงใน Protected DATA_HOME ({prot_home}): {target} (#633)",
                     )
+                exec_dir = cockpit_executable_target(target, cwd=cwd)
+                if exec_dir is not None:
+                    return _exec_target_verdict(role, target, exec_dir, "เขียนไฟล์ลงใน")
 
             # File Deletions
             for m in _FILE_DELETE_CMDS.finditer(seg):
@@ -3056,6 +3251,9 @@ def evaluate_instance_guard(
                             rule="instance_guard:protected_data_home",
                             reason=f"ห้ามลบไฟล์ใน Protected DATA_HOME ({prot_home}): {t} (#633)",
                         )
+                    exec_dir = cockpit_executable_target(t, cwd=cwd)
+                    if exec_dir is not None:
+                        return _exec_target_verdict(role, t, exec_dir, "ลบไฟล์ใน")
 
             # File Moves
             for m in _FILE_MOVE_CMDS.finditer(seg):
@@ -3073,6 +3271,9 @@ def evaluate_instance_guard(
                             rule="instance_guard:protected_data_home",
                             reason=f"ห้ามย้ายไฟล์ในหรือไปยัง Protected DATA_HOME ({prot_home}): {t} (#633)",
                         )
+                    exec_dir = cockpit_executable_target(t, cwd=cwd)
+                    if exec_dir is not None:
+                        return _exec_target_verdict(role, t, exec_dir, "ย้ายไฟล์ในหรือไปยัง")
 
             # File Copies (Destination only)
             for m in _FILE_COPY_CMDS.finditer(seg):
@@ -3089,6 +3290,9 @@ def evaluate_instance_guard(
                             rule="instance_guard:protected_data_home",
                             reason=f"ห้ามคัดลอกไฟล์ไปยังปลายทางใน Protected DATA_HOME ({prot_home}): {dest} (#633)",
                         )
+                    exec_dir = cockpit_executable_target(dest, cwd=cwd)
+                    if exec_dir is not None:
+                        return _exec_target_verdict(role, dest, exec_dir, "คัดลอกไฟล์ไปยัง")
                 else:
                     tokens = [t for t in _split_args_tokens(args) if not _is_cli_switch(t)]
                     if len(tokens) >= 2:
@@ -3102,6 +3306,9 @@ def evaluate_instance_guard(
                                 rule="instance_guard:protected_data_home",
                                 reason=f"ห้ามคัดลอกไฟล์ไปยังปลายทางใน Protected DATA_HOME ({prot_home}): {dest} (#633)",
                             )
+                        exec_dir = cockpit_executable_target(dest, cwd=cwd)
+                        if exec_dir is not None:
+                            return _exec_target_verdict(role, dest, exec_dir, "คัดลอกไฟล์ไปยัง")
 
             # File Writes / Creates
             for m in _FILE_WRITE_CMDS.finditer(seg):
@@ -3119,6 +3326,9 @@ def evaluate_instance_guard(
                             rule="instance_guard:protected_data_home",
                             reason=f"ห้ามเขียนหรือสร้างไฟล์ใน Protected DATA_HOME ({prot_home}): {t} (#633)",
                         )
+                    exec_dir = cockpit_executable_target(t, cwd=cwd)
+                    if exec_dir is not None:
+                        return _exec_target_verdict(role, t, exec_dir, "เขียนหรือสร้างไฟล์ใน")
 
             # Git Mutate
             for m in _GIT_MUTATE_CMD.finditer(seg):
@@ -3148,20 +3358,22 @@ def evaluate_instance_guard(
             for m in _PYTHON_INLINE_WRITE.finditer(seg):
                 code = m.group("code")
                 literals = re.findall(r"""['"]([^'"]+)['"]""", code)
+                writes = bool(_PYTHON_WRITE_CALL_RE.search(code))
                 for lit in literals:
                     in_prot, prot_home = is_in_protected_data_home(
                         lit, cwd=cwd, own_home=own_home, protected_homes=prot_homes
                     )
-                    if in_prot:
-                        if re.search(
-                            r"""open\s*\([^)]*['"](?:w|a|r\+|w\+|x)|(?:\.write_text|\.write_bytes|\.unlink|\.rmdir)\s*\(|os\.(?:remove|unlink|rmdir|rename|replace)\s*\(|shutil\.(?:rmtree|move|copy)\s*\(""",
-                            code,
-                            re.I,
-                        ):
-                            return Verdict(
-                                False,
-                                rule="instance_guard:protected_data_home",
-                                reason=f"ห้ามรัน Python code เขียนหรือลบไฟล์ใน Protected DATA_HOME ({prot_home}) (#633)",
+                    if in_prot and writes:
+                        return Verdict(
+                            False,
+                            rule="instance_guard:protected_data_home",
+                            reason=f"ห้ามรัน Python code เขียนหรือลบไฟล์ใน Protected DATA_HOME ({prot_home}) (#633)",
+                        )
+                    if writes:
+                        exec_dir = cockpit_executable_target(lit, cwd=cwd)
+                        if exec_dir is not None:
+                            return _exec_target_verdict(
+                                role, lit, exec_dir, "รัน Python code เขียนหรือลบไฟล์ใน"
                             )
 
     return None
