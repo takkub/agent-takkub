@@ -35,6 +35,7 @@ import shutil
 import sqlite3
 import subprocess
 import sys
+import threading
 import time
 import urllib.parse
 from pathlib import Path
@@ -289,6 +290,40 @@ def antigravity_transcript_path(session_id: str) -> Path:
     )
 
 
+# ── workspace-probe caches (#701) ────────────────────────────────────────────
+# Probing one conversation db costs a sqlite open + blob read + realpath. On a
+# machine with hundreds of dbs (prod: 500 / 2.2GB) an uncached
+# `find_antigravity_sessions` walk took 2-13s — and the Remote bridge runs it
+# on the Qt main thread, so every PWA history poll froze the GUI. A db's
+# workspace never changes once written, so positive probes are cached for the
+# process lifetime; a probe that yielded None (db locked, or agy hasn't
+# written the metadata blob yet) is re-probed only after the db file itself
+# changes on disk.
+_agy_ws_cache: dict[str, str] = {}  # db path -> normalized workspace
+_agy_ws_miss: dict[str, tuple[int, int]] = {}  # db path -> (mtime_ns, size)
+# Single-flight gate for the first cold walk: a second thread arriving while
+# one is mid-scan gets "nothing yet" instead of piling a duplicate 500-db
+# sqlite walk onto the disk (or freezing the GUI waiting on the lock).
+_agy_scan_lock = threading.Lock()
+_agy_probed_all = False  # True once any thread finished one untruncated walk
+# Empty results are the worst case (a just-spawned pane has no db yet →
+# every poll re-walked the whole store). Remember "cwd resolved to nothing"
+# together with the conversations-dir signature; skip the rescan only while
+# the dir is unchanged AND the entry is fresh — the TTL is the backstop for
+# a db whose metadata blob / transcript appears later without a dir change.
+_agy_empty_scan: dict[str, tuple[float, int]] = {}  # cwd -> (monotonic, dir_mtime_ns)
+_AGY_EMPTY_SCAN_TTL = 5.0
+
+
+def _reset_antigravity_caches() -> None:
+    """Test hook: forget every workspace probe and empty-scan entry."""
+    global _agy_probed_all
+    _agy_ws_cache.clear()
+    _agy_ws_miss.clear()
+    _agy_empty_scan.clear()
+    _agy_probed_all = False
+
+
 def _antigravity_workspace(db_path: Path) -> str | None:
     """The workspace folder recorded in one conversation db, or None.
 
@@ -321,6 +356,41 @@ def _antigravity_workspace(db_path: Path) -> str | None:
     return _folder_uri_to_path(uri)
 
 
+def _antigravity_workspace_normalized(db_path: Path) -> str | None:
+    """Cached `_normalize_chat_store_cwd(_antigravity_workspace(db_path))`."""
+    key = str(db_path)
+    hit = _agy_ws_cache.get(key)
+    if hit is not None:
+        return hit
+    try:
+        st = db_path.stat()
+        sig = (st.st_mtime_ns, st.st_size)
+    except OSError:
+        return None
+    if _agy_ws_miss.get(key) == sig:
+        return None
+    workspace = _antigravity_workspace(db_path)
+    if not workspace:
+        _agy_ws_miss[key] = sig
+        return None
+    try:
+        normalized = _normalize_chat_store_cwd(workspace)
+    except (OSError, ValueError):
+        _agy_ws_miss[key] = sig
+        return None
+    _agy_ws_cache[key] = normalized
+    _agy_ws_miss.pop(key, None)
+    return normalized
+
+
+def _antigravity_conversations_sig() -> int:
+    """mtime_ns of the conversations dir — bumps when a db is added/removed."""
+    try:
+        return (antigravity_root() / "conversations").stat().st_mtime_ns
+    except OSError:
+        return 0
+
+
 def _antigravity_conversation_dbs() -> list[Path]:
     """Conversation dbs, newest first. `-wal`/`-shm` siblings are ignored."""
     conv = antigravity_root() / "conversations"
@@ -341,22 +411,52 @@ def find_antigravity_sessions(cwd: str, limit: int = 0) -> list[tuple[str, Path]
     row with no transcript yet is a session agy has not written to, which
     would resolve to a file the tail could never read.
     """
+    global _agy_probed_all
     wanted = _normalize_chat_store_cwd(cwd) if cwd else ""
     if not wanted:
         return []
-    out: list[tuple[str, Path]] = []
-    for db_path in _antigravity_conversation_dbs():
-        workspace = _antigravity_workspace(db_path)
-        if not workspace or _normalize_chat_store_cwd(workspace) != wanted:
-            continue
-        session_id = db_path.stem
-        transcript = antigravity_transcript_path(session_id)
-        if not transcript.is_file():
-            continue
-        out.append((session_id, transcript))
-        if limit and len(out) >= limit:
-            break
-    return out
+    cached_empty = _agy_empty_scan.get(wanted)
+    if cached_empty is not None:
+        ts, dir_sig = cached_empty
+        if (
+            time.monotonic() - ts < _AGY_EMPTY_SCAN_TTL
+            and dir_sig == _antigravity_conversations_sig()
+        ):
+            return []
+    if not _agy_probed_all:
+        # Cold store: the walk ahead probes every db. Single-flight it — a
+        # concurrent caller resolves to "nothing yet" and its next poll hits
+        # the warm cache instead of blocking (the Remote bridge calls this
+        # on the Qt main thread) or doubling the disk load.
+        if not _agy_scan_lock.acquire(blocking=False):
+            return []
+    else:
+        _agy_scan_lock.acquire()
+    try:
+        dir_sig = _antigravity_conversations_sig()
+        out: list[tuple[str, Path]] = []
+        truncated = False
+        for db_path in _antigravity_conversation_dbs():
+            workspace = _antigravity_workspace_normalized(db_path)
+            if workspace != wanted:
+                continue
+            session_id = db_path.stem
+            transcript = antigravity_transcript_path(session_id)
+            if not transcript.is_file():
+                continue
+            out.append((session_id, transcript))
+            if limit and len(out) >= limit:
+                truncated = True
+                break
+        if not truncated:
+            _agy_probed_all = True
+        if out:
+            _agy_empty_scan.pop(wanted, None)
+        else:
+            _agy_empty_scan[wanted] = (time.monotonic(), dir_sig)
+        return out
+    finally:
+        _agy_scan_lock.release()
 
 
 def resolve_antigravity_transcript(cwd: str, session_uuid: str | None) -> Path | None:
@@ -366,9 +466,9 @@ def resolve_antigravity_transcript(cwd: str, session_uuid: str | None) -> Path |
         if not transcript.is_file():
             return None
         db_path = antigravity_root() / "conversations" / f"{session_uuid}.db"
-        workspace = _antigravity_workspace(db_path) if db_path.is_file() else None
+        workspace = _antigravity_workspace_normalized(db_path) if db_path.is_file() else None
         if workspace and cwd:
-            if _normalize_chat_store_cwd(workspace) != _normalize_chat_store_cwd(cwd):
+            if workspace != _normalize_chat_store_cwd(cwd):
                 return None  # never mirror another project's conversation
         return transcript
     found = find_antigravity_sessions(cwd, limit=1)

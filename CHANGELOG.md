@@ -4,6 +4,23 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 
 ## [vNEXT]
 
+## [v2.1.31] - 2026-09-22
+
+### Fixed (แก้)
+
+- **#701: pane gemini (agy) ทำ UI prod ค้างเป็นช่วงๆ 2-13 วินาที (events.log: `main_thread_stall` 51 ครั้ง
+  รวม ~216s ใน 35 นาที)** — ทุก history poll จากมือถือถูก marshal ขึ้น Qt main thread แล้วไปเรียก
+  `find_antigravity_sessions` ซึ่งเปิด sqlite + อ่าน protobuf blob + realpath ของ conversation db
+  **ทุกใบ ทุกครั้ง** (prod มี 500 db / 2.2GB) และเคสแย่สุดคือ pane เพิ่งเกิดยังไม่มี db → สแกนครบ 500
+  ซ้ำทุกรอบ → แก้ 3 ชั้นใน `gemini_helper.py`: cache db→workspace ถาวร (workspace ของ db ไม่เปลี่ยน)
+  + miss re-probe เฉพาะเมื่อไฟล์ db เปลี่ยน · empty-scan cache ต่อ cwd (dir signature + TTL 5s
+  เป็น backstop กัน blank chat ค้าง) · cold walk ครั้งแรกเป็น single-flight — thread ที่มาซ้อนได้
+  "ยังไม่เจอ" กลับไปทันทีแทนที่จะแช่แข็ง GUI รอ lock หรือสแกนซ้ำแย่งดิสก์ + 3 เทส
+
+### Deps
+
+- dependabot: ruff 0.16.7→0.16.8 (#694) · github/codeql-action 4.38.0→4.38.1 (#693)
+
 ## [v2.1.30] - 2026-09-22
 
 ### Fixed (แก้ด่วน — prod วนไม่หยุด)

@@ -635,3 +635,108 @@ class TestResolveAgyProjectIdConcurrentMint:
         result = gemini_helper.resolve_agy_project_id(cwd)
         assert result == "already-id"
         assert target not in gemini_helper._MINT_INFLIGHT
+
+
+# ── #701: workspace-probe caches keep the resolver off the disk ──────────────
+# Prod 2026-09-22: 500 conversation dbs / 2.2GB → every uncached
+# `find_antigravity_sessions` walk cost 2-13s of sqlite opens, and the Remote
+# bridge runs it on the Qt main thread — 51 main_thread_stall events in 35
+# minutes. These pin the cache contracts that keep a re-walk cheap.
+
+
+def _write_agy_db(root: Path, session_id: str, workspace: str, with_blob: bool = True) -> Path:
+    import sqlite3
+
+    conversations = root / "conversations"
+    conversations.mkdir(parents=True, exist_ok=True)
+    db_path = conversations / f"{session_id}.db"
+    con = sqlite3.connect(db_path)
+    con.execute("CREATE TABLE trajectory_metadata_blob (id TEXT, data BLOB)")
+    if with_blob:
+        blob = b"\n\xaf\x01\n3file:///" + workspace.encode("utf-8") + b"\x12\x33x"
+        con.execute("INSERT INTO trajectory_metadata_blob VALUES ('main', ?)", (blob,))
+    con.commit()
+    con.close()
+    transcript = root / "brain" / session_id / ".system_generated" / "logs" / "transcript.jsonl"
+    transcript.parent.mkdir(parents=True, exist_ok=True)
+    transcript.write_text("{}\n", encoding="utf-8")
+    return db_path
+
+
+class TestAntigravityScanCache:
+    @pytest.fixture(autouse=True)
+    def _fresh_caches(self):
+        gemini_helper._reset_antigravity_caches()
+        yield
+        gemini_helper._reset_antigravity_caches()
+
+    @pytest.fixture
+    def agy_root(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+        root = tmp_path / "antigravity-cli"
+        root.mkdir()
+        monkeypatch.setattr(gemini_helper, "antigravity_root", lambda: root)
+        return root
+
+    @pytest.fixture
+    def workspace(self, tmp_path: Path) -> str:
+        cwd = tmp_path / "project"
+        cwd.mkdir()
+        return cwd.resolve().as_posix()
+
+    def _count_probes(self, monkeypatch: pytest.MonkeyPatch) -> list:
+        calls: list = []
+        real = gemini_helper._antigravity_workspace
+
+        def counting(db_path):
+            calls.append(db_path)
+            return real(db_path)
+
+        monkeypatch.setattr(gemini_helper, "_antigravity_workspace", counting)
+        return calls
+
+    def test_second_walk_probes_no_db_twice(self, agy_root, workspace, monkeypatch, tmp_path):
+        _write_agy_db(agy_root, "aaaa", workspace)
+        _write_agy_db(agy_root, "bbbb", workspace)
+        _write_agy_db(agy_root, "cccc", (tmp_path / "other").as_posix())
+        probes = self._count_probes(monkeypatch)
+
+        first = gemini_helper.find_antigravity_sessions(workspace)
+        assert len(first) == 2
+        assert len(probes) == 3
+        second = gemini_helper.find_antigravity_sessions(workspace)
+        assert second == first
+        assert len(probes) == 3  # every workspace came from the cache
+
+    def test_new_db_after_an_empty_walk_is_found_immediately(self, agy_root, workspace):
+        # Worst case in prod: a just-spawned pane has no db yet, so every
+        # poll re-walked the whole store. The empty result is cached — but a
+        # db appearing (dir signature change) must bust it at once, never
+        # leave the phone on a stale blank chat for the TTL.
+        assert gemini_helper.find_antigravity_sessions(workspace) == []
+        _write_agy_db(agy_root, "dddd", workspace)
+        assert len(gemini_helper.find_antigravity_sessions(workspace)) == 1
+
+    def test_blobless_db_is_reprobed_only_after_it_changes(self, agy_root, workspace, monkeypatch):
+        import os
+        import sqlite3
+
+        db_path = _write_agy_db(agy_root, "eeee", workspace, with_blob=False)
+        monkeypatch.setattr(gemini_helper, "_AGY_EMPTY_SCAN_TTL", 0.0)
+        probes = self._count_probes(monkeypatch)
+
+        assert gemini_helper.find_antigravity_sessions(workspace) == []
+        assert len(probes) == 1
+        # unchanged file → the miss is remembered, no second sqlite open
+        assert gemini_helper.find_antigravity_sessions(workspace) == []
+        assert len(probes) == 1
+
+        con = sqlite3.connect(db_path)
+        blob = b"\n\xaf\x01\n3file:///" + workspace.encode("utf-8") + b"\x12\x33x"
+        con.execute("INSERT INTO trajectory_metadata_blob VALUES ('main', ?)", (blob,))
+        con.commit()
+        con.close()
+        st = db_path.stat()
+        os.utime(db_path, ns=(st.st_atime_ns, st.st_mtime_ns + 1_000_000))
+
+        assert len(gemini_helper.find_antigravity_sessions(workspace)) == 1
+        assert len(probes) == 2
