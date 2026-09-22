@@ -3689,9 +3689,61 @@ def _remote_tail_allowed(tail_tokens: list[str]) -> bool:
 
 
 def _worktree_tail_allowed(tail_tokens: list[str]) -> bool:
-    """Only `list` — `add`/the admin sub-verbs (already unconditionally
-    Lead-only via `_GIT_LEAD_ONLY_PATTERNS`) never reach this check."""
-    return bool(tail_tokens) and tail_tokens[0] == "list"
+    """`list`, plus (#707) one narrow `add` shape: a DETACHED throw-away
+    checkout under the OS temp dir — `git worktree add --detach <tmp-path>
+    [<commit-ish>]`. Real case: devops needed a clean snapshot of HEAD to
+    build a docker image from while another pane was editing the same
+    shared tree; the only alternative was Lead doing it by hand.
+
+    Why this shape and nothing wider: `--detach` moves no ref and creates
+    no branch (nothing another pane's `git status`/`branch` can see change);
+    a temp-dir path can't land inside the shared tree, a sibling worktree
+    or the repo's `.git`; `-b`/`-B`/`--orphan`/`--force`/`--lock`/
+    `--checkout` variants all mutate refs or overwrite an existing path and
+    stay denied. The admin sub-verbs (`remove`/`move`/`prune`/`lock`/
+    `unlock`) never reach this check — `_GIT_LEAD_ONLY_PATTERNS` denies
+    them first — so a pane can create its snapshot but never delete anyone
+    else's."""
+    if not tail_tokens:
+        return False
+    if tail_tokens[0] == "list":
+        return True
+    if tail_tokens[0] != "add":
+        return False
+    positional: list[str] = []
+    detached = False
+    for tok in tail_tokens[1:]:
+        if tok == "--detach":
+            detached = True
+        elif tok.startswith("-"):
+            return False  # -b/-B/--orphan/--force/-f/--lock/--checkout/...
+        else:
+            positional.append(tok)
+    if not detached or not positional or len(positional) > 2:
+        return False
+    return _is_under_temp_dir(positional[0])
+
+
+def _is_under_temp_dir(raw_path: str) -> bool:
+    """True when *raw_path* (quoted or not) resolves under one of the
+    process's temp roots (`TMPDIR`/`TEMP`/`TMP`, `/tmp`, `/private/tmp`).
+    Env-only on purpose — `tempfile.gettempdir()` creates a probe file on
+    first call and this module runs on every Bash hook."""
+    path = raw_path.strip().strip("'\"")
+    if not path:
+        return False
+    norm = os.path.normcase(os.path.normpath(path))
+    if not os.path.isabs(norm):
+        return False
+    roots = [os.environ.get(k, "") for k in ("TMPDIR", "TEMP", "TMP")]
+    roots.extend(["/tmp", "/private/tmp", "/var/tmp"])
+    for root in roots:
+        if not root:
+            continue
+        r = os.path.normcase(os.path.normpath(root))
+        if norm == r or norm.startswith(r.rstrip("\\/") + os.sep):
+            return True
+    return False
 
 
 def _rm_tail_allowed(tail_tokens: list[str]) -> bool:

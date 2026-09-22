@@ -1,6 +1,6 @@
 {
   "generated_by": "grimp 3.14",
-  "module_count": 353,
+  "module_count": 354,
   "modules": [
     {
       "module": "agent_takkub",
@@ -92,6 +92,7 @@
         "agent_takkub.provider_usage",
         "agent_takkub.pty_session",
         "agent_takkub.qa_gate",
+        "agent_takkub.remote.cloudflared_install",
         "agent_takkub.remote.settings_dialog",
         "agent_takkub.services",
         "agent_takkub.settings_management.pages.skills_page",
@@ -108,7 +109,7 @@
         "agent_takkub.verify",
         "agent_takkub.worktree_manager"
       ],
-      "fan_in": 47,
+      "fan_in": 48,
       "fan_out": 0
     },
     {
@@ -745,6 +746,7 @@
         "agent_takkub.qa_gate",
         "agent_takkub.remote",
         "agent_takkub.remote.api",
+        "agent_takkub.remote.cloudflared_install",
         "agent_takkub.remote.config",
         "agent_takkub.remote.http_server",
         "agent_takkub.remote.notify",
@@ -778,7 +780,7 @@
         "agent_takkub.vault_mirror",
         "agent_takkub.worktree_manager"
       ],
-      "fan_in": 112,
+      "fan_in": 113,
       "fan_out": 2
     },
     {
@@ -4177,6 +4179,19 @@
       "fan_out": 2
     },
     {
+      "module": "agent_takkub.remote.cloudflared_install",
+      "imports": [
+        "agent_takkub._win_console",
+        "agent_takkub.config"
+      ],
+      "imported_by": [
+        "agent_takkub.remote.settings_dialog",
+        "agent_takkub.remote.tunnel"
+      ],
+      "fan_in": 2,
+      "fan_out": 2
+    },
+    {
       "module": "agent_takkub.remote.config",
       "imports": [
         "agent_takkub.config"
@@ -4276,17 +4291,19 @@
         "agent_takkub._win_console",
         "agent_takkub.cockpit_theme",
         "agent_takkub.remote.auth",
+        "agent_takkub.remote.cloudflared_install",
         "agent_takkub.remote.config"
       ],
       "imported_by": [],
       "fan_in": 0,
-      "fan_out": 4
+      "fan_out": 5
     },
     {
       "module": "agent_takkub.remote.tunnel",
       "imports": [
         "agent_takkub.config",
         "agent_takkub.pty_session",
+        "agent_takkub.remote.cloudflared_install",
         "agent_takkub.remote.config"
       ],
       "imported_by": [
@@ -4294,7 +4311,7 @@
         "agent_takkub.remote.reports"
       ],
       "fan_in": 2,
-      "fan_out": 3
+      "fan_out": 4
     },
     {
       "module": "agent_takkub.report_builder",

@@ -111,6 +111,7 @@ from .orchestrator_text import (  # re-exported for test/app/main_window imports
     _read_tail_bytes,
     _render_daily_digest,
     _render_hot_md,
+    _render_pty_tail,
     _resolve_pane_pretrust_root,
     _resolve_project_memory,
     _rewrite_task_for_codex,
@@ -1516,6 +1517,12 @@ class Orchestrator(
     # once it has an answer, so the actual park decision runs on the Qt
     # thread instead of the fetch's daemon thread. (project, role, confirmed)
     limitUsageConfirmed = pyqtSignal(str, str, bool)
+    # #704: the same fetch found the provider demonstrably NOT exhausted
+    # (probe succeeded, utilization well under the threshold) — a definitive
+    # "the banner match was a false positive", distinct from `confirmed=
+    # False` which also covers an offline/failed probe. (project, role,
+    # utilization)
+    limitUsageDenied = pyqtSignal(str, str, float)
     # #663: (provider, probed reset_at, verdict, new_reset_at) from the
     # background quota re-probe thread → Qt thread (`_on_quota_reprobed`).
     quotaReprobed = pyqtSignal(str, float, str, float)
@@ -1962,6 +1969,7 @@ class Orchestrator(
         # thread and reports back via this signal so the park decision itself
         # always executes on the Qt thread.
         self.limitUsageConfirmed.connect(self._on_limit_usage_confirmed)
+        self.limitUsageDenied.connect(self._on_limit_usage_denied)
         self.quotaReprobed.connect(self._on_quota_reprobed)
 
         # Periodic snapshot of cockpit state to `<vault>/hot.md`. Skipped
@@ -3273,11 +3281,40 @@ class Orchestrator(
         from . import role_messages
 
         pending, expired = role_messages.queued_no_pane_for_role(RUNTIME_DIR, project_ns, role_name)
-        if not pending and not expired:
+        # #705: a fresh assign is a NEW task — `takkub send` messages that
+        # were written into an earlier session of this role and never
+        # confirmed would otherwise be replayed into the new pane by
+        # `_reap_role_messages` (generation-stale "sent" records), on top of
+        # the queued-no-pane ones counted above. Real case: the warning said
+        # "1 message" while 9 records spanning several days sat in the log,
+        # two of them "sent, unconfirmed" from a task that had already been
+        # closed with `done` — spec text that contradicted the new task.
+        # Retire them now (auditable as `superseded_by_assign`) so only
+        # messages for THIS task can ever reach the pane.
+        superseded = role_messages.abandon_unconfirmed_for_role(
+            RUNTIME_DIR, project_ns, role_name, "superseded_by_assign", states=("sent",)
+        )
+        if superseded:
+            _log_event(
+                "send_superseded_by_assign",
+                project=project_ns,
+                role=role_name,
+                count=superseded,
+            )
+        if not pending and not expired and not superseded:
             return ""
         note = ""
         if pending:
-            note = f"⚠️ มี message ค้าง {len(pending)} ตัวจากรอบก่อนของ '{role_name}' จะถูกส่งให้ pane ใหม่ด้วย (mark stale) — ดูด้วย `takkub messages --role {role_name}`"
+            note = (
+                f"⚠️ มี message ค้าง {len(pending)} ตัวจากรอบก่อนของ '{role_name}' "
+                f"จะถูกส่งให้ pane ใหม่ด้วย (mark stale) — ดูด้วย `takkub messages --role {role_name}`"
+                f" · ถ้าไม่เกี่ยวกับงานนี้: `takkub messages --role {role_name} --drop`"
+            )
+        if superseded:
+            note += ("\n" if note else "") + (
+                f"ℹ️ ยกเลิก {superseded} ข้อความที่ส่งให้ pane เดิมของ '{role_name}' "
+                "แล้วยังไม่ยืนยัน (งานเก่า — ไม่ส่งซ้ำให้ pane ใหม่)"
+            )
         if expired:
             for rec in expired:
                 role_messages.mark_abandoned(
@@ -5508,6 +5545,29 @@ class Orchestrator(
             f"{len(records)} ข้อความถึง {role} ({note})",
             lines,
         )
+
+    def drop_role_messages(self, role: str, project: str | None = None) -> tuple[bool, str, int]:
+        """`takkub messages --role <r> --drop` (#705): retire every message
+        to *role* that is still waiting to reach a pane (`sent` but never
+        confirmed, or `queued_no_pane`) so neither the respawn reaper nor
+        the next assign's flush can deliver it. Records stay readable as
+        `abandoned (dropped_by_lead)`."""
+        role = self.resolve_pane_role(role, project)
+        try:
+            role = validate_name(role, "role")
+        except ValueError as exc:
+            return False, str(exc), 0
+        project_ns = self._resolve_project(project)
+        try:
+            from . import role_messages
+
+            count = role_messages.abandon_unconfirmed_for_role(
+                RUNTIME_DIR, project_ns, role, "dropped_by_lead"
+            )
+        except Exception as exc:
+            return False, f"drop message ไม่ได้: {exc}", 0
+        _log_event("send_dropped_by_lead", project=project_ns, role=role, count=count)
+        return True, f"ยกเลิก {count} ข้อความที่ยังไม่ถึง {role}", count
 
     def _confirm_role_message(
         self, project_ns: str, message_id: str, session, write_baseline: float | None = None
@@ -10835,10 +10895,27 @@ class Orchestrator(
         if t_path is None or not t_path.is_file():
             return False, f"no transcript found for role {role!r} in project {project_ns!r}", {}
 
+        # #708: a live pane already has the rendered screen — return the rows
+        # a human would see instead of re-splitting raw TUI repaint bytes
+        # (which glued fragments of unrelated rows together).
+        pane = self._project_panes(project_ns).get(role)
+        session = getattr(pane, "session", None) if pane is not None else None
+        if session is not None and getattr(session, "is_alive", False):
+            try:
+                screen_rows = [ln.rstrip() for ln in session.display_lines()]
+                screen_rows = [ln for ln in screen_rows if ln.strip()]
+                if screen_rows:
+                    return (
+                        True,
+                        "ok (live screen)",
+                        {"path": str(t_path), "lines": screen_rows[-lines:]},
+                    )
+            except Exception:
+                pass  # torn-down mid-call → fall through to the file
         try:
             read_bytes = max(65536, lines * 4096)
             raw = _read_tail_bytes(t_path, read_bytes)
-            clean_lines = _extract_transcript_lines(raw, max_lines=lines)
+            clean_lines = _render_pty_tail(raw, max_lines=lines)
             return True, "ok", {"path": str(t_path), "lines": clean_lines}
         except OSError as exc:
             return False, f"failed to read transcript for {role!r}: {exc}", {}
@@ -12340,6 +12417,31 @@ class Orchestrator(
                         and _ready_since
                         and (now - _ready_since) >= IDLE_AT_PROMPT_NUDGE_S
                     )
+                    if _idle_at_prompt:
+                        # #706: a pane whose native subagents are still
+                        # driving real child processes (pytest, docker,
+                        # node — anything past the provider's scaffolding)
+                        # is not idle no matter what its composer row looks
+                        # like. Same evidence the stuck watchdog consults
+                        # before a kill (#288); checked only on the rare
+                        # idle-at-prompt path so the psutil walk stays off
+                        # the common tick.
+                        try:
+                            _idle_children = self._live_non_scaffolding_children(
+                                project_name, name, pane.session
+                            )
+                        except Exception:
+                            _idle_children = []
+                        if _idle_children:
+                            _idle_at_prompt = False
+                            if _ps_rd is not None:
+                                _ps_rd.ready_since_ts = 0.0
+                            _log_event(
+                                "idle_at_prompt_deferred_live_children",
+                                role=name,
+                                project=project_name,
+                                children=_idle_children[:5],
+                            )
                     if (
                         _has_bg_work or _tool_marker is not None or _progress_recent
                     ) and not _idle_at_prompt:
@@ -14938,6 +15040,13 @@ class Orchestrator(
             return False
         provider = getattr(pane.model, "provider_name", None) or "claude"
         reset_at = pane.session.rate_limit_reset_at(provider)
+        if _ps_rl is not None and _ps_rl.quota_false_positive_armed:
+            # #704: the usage probe already ruled this screen text a false
+            # positive. Ignore it until it scrolls off; a genuinely new hit
+            # after that re-arms detection normally.
+            if reset_at is None:
+                _ps_rl.quota_false_positive_armed = False
+            return False
         if reset_at is None:
             return False
 
@@ -15014,7 +15123,9 @@ class Orchestrator(
         except Exception:
             model = None
         model_note = f" · model now: {model}" if model else ""
-        marker_note = f' ("{marker}")' if marker else ""
+        # #704: never quote the matched banner phrase verbatim — this notice
+        # lands on the Lead pane's screen, where the same detector runs.
+        marker_note = " (usage-limit banner on screen)" if marker else ""
         msg = f"[system] {role} ({provider}) hit quota{marker_note} — resets in {human}{model_note}"
         self._notify_lead(project, msg, kind="quota-hit")
 

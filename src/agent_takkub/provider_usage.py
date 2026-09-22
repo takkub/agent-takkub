@@ -1313,22 +1313,80 @@ def _usage_fingerprint(usage: ProviderUsage) -> tuple:
     )
 
 
+# #709: how far two "identical" accounts' window reset times may drift.
+# Codex answers `resets_at = now + window` for a window that has not started
+# (0 % used), so four back-to-back probes of the SAME account came back one
+# second apart each (16:39:13/14/15/16) and the byte-equal fingerprint of
+# #700 never matched — the duplicate cards were back the day after the fix.
+_SAME_ACCOUNT_RESET_TOLERANCE_S = 120.0
+
+
+def _reset_epoch(value) -> float | None:
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    if hasattr(value, "timestamp"):
+        try:
+            return float(value.timestamp())
+        except Exception:
+            return None
+    if isinstance(value, str):
+        try:
+            return datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
+        except ValueError:
+            return None
+    return None
+
+
+def _same_account_usage(a: ProviderUsage, b: ProviderUsage) -> bool:
+    """Whether two rows describe one account's quota (#700/#709): every
+    quota-bearing field equal, and each window's reset time within
+    `_SAME_ACCOUNT_RESET_TOLERANCE_S` of its counterpart."""
+    if (a.provider, a.status, a.plan, a.utilization, a.error) != (
+        b.provider,
+        b.status,
+        b.plan,
+        b.utilization,
+        b.error,
+    ):
+        return False
+    wa = list(a.windows or [])
+    wb = list(b.windows or [])
+    if len(wa) != len(wb):
+        return False
+    for x, y in zip(wa, wb, strict=True):
+        if x.get("name") != y.get("name") or x.get("utilization") != y.get("utilization"):
+            return False
+        rx, ry = _reset_epoch(x.get("resets_at")), _reset_epoch(y.get("resets_at"))
+        if (rx is None) != (ry is None):
+            return False
+        if rx is not None and ry is not None and abs(rx - ry) > _SAME_ACCOUNT_RESET_TOLERANCE_S:
+            return False
+    return True
+
+
 def _merge_identical_account_rows(rows: list[ProviderUsage]) -> list[ProviderUsage]:
     """#700: two Codex homes logged into the SAME OpenAI account report the
-    same quota window byte-for-byte — one card labelled with both homes
-    (``default + local (~/.codex)``) says everything two identical cards
-    said, without the meter looking broken. Rows that differ in any
-    quota-bearing field stay separate; non-codex rows pass through."""
+    same quota window — one card labelled with both homes (``default +
+    local (~/.codex)``) says everything two identical cards said, without
+    the meter looking broken. Rows that differ in any quota-bearing field
+    stay separate; non-codex rows pass through. #709: "same" tolerates the
+    per-probe drift in `resets_at` (see `_same_account_usage`)."""
     merged: list[ProviderUsage] = []
-    seen: dict[tuple, int] = {}
     for row in rows:
         if row.provider != "codex" or not row.account:
             merged.append(row)
             continue
-        key = _usage_fingerprint(row)
-        idx = seen.get(key)
+        idx = next(
+            (
+                i
+                for i, prev in enumerate(merged)
+                if prev.provider == "codex" and prev.account and _same_account_usage(prev, row)
+            ),
+            None,
+        )
         if idx is None:
-            seen[key] = len(merged)
             merged.append(row)
             continue
         prev = merged[idx]

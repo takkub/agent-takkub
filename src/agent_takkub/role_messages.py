@@ -266,6 +266,33 @@ def mark_abandoned(runtime_dir: pathlib.Path, project_ns: str, msg_id: str, reas
     return _update(runtime_dir, project_ns, msg_id, state="abandoned", abandoned_reason=reason)
 
 
+def abandon_unconfirmed_for_role(
+    runtime_dir: pathlib.Path,
+    project_ns: str,
+    role: str,
+    reason: str,
+    *,
+    states: tuple[str, ...] = ("sent", "queued_no_pane"),
+) -> int:
+    """Retire every record to *role* that could still be delivered later —
+    `sent` (never confirmed) or `queued_no_pane` (narrow with *states*) —
+    marking each `abandoned` with *reason* (#705). Returns how many were
+    retired. One read + one write regardless of count; 0 leaves the file
+    untouched."""
+    records = read(runtime_dir, project_ns)
+    hit = 0
+    for rec in records:
+        if rec.get("to") != role or rec.get("state") not in states:
+            continue
+        rec["state"] = "abandoned"
+        rec["abandoned_reason"] = reason
+        rec["abandoned_ts"] = time.time()
+        hit += 1
+    if hit:
+        _write_all(runtime_dir, project_ns, records)
+    return hit
+
+
 def undelivered_in(records: list[dict], role: str, current_generation: int) -> list[dict]:
     """Pure filter behind `undelivered_for_generation` — messages written into
     a session older than *current_generation* that were never confirmed
@@ -315,6 +342,10 @@ def format_for_cli(records: list[dict], *, limit: int = 20) -> list[str]:
             # genuine delivery failure — same underlying state, different
             # reason, and Lead needs to tell them apart at a glance.
             badge = "🗑️ หมดอายุ (>12h) ถูกยกเลิก"
+        elif state == "abandoned" and rec.get("abandoned_reason") == "superseded_by_assign":
+            badge = "🗑️ งานเก่า — ยกเลิกตอน assign ใหม่ (#705)"
+        elif state == "abandoned" and rec.get("abandoned_reason") == "dropped_by_lead":
+            badge = "🗑️ Lead ยกเลิก (--drop)"
         else:
             badge = {
                 "delivered": "✅ ถึงแล้ว",

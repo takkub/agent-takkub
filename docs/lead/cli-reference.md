@@ -27,6 +27,7 @@ takkub assign --role backend --shards 4 --fanout pane "<task>"      # (#641) บ
 takkub assign --role reviewer --mode e2e --shards 4 "<task>"        # browser-QA shard = N parallel shard panes เสมอ (qa#1…#N internally · browser profile ต่อ shard) — #590: use this canonical form, not bare --role qa, so provider/model/effort resolve against the row Settings actually shows
 takkub assign --role reviewer --mode e2e --plan --shards 4 "<task>" # plan-first: planner pane แบ่ง N buckets → auto fan-out qa#1…#N ฉลาด (ต้อง --shards ≥ 2)
 takkub assign --role frontend --isolation worktree "<task>" # pane รันใน git worktree+branch แยก (wt/<role>-<ts>) — build ขนานไม่ชนกัน · done → Lead ได้ merge PROPOSAL (ไม่ auto) · ไม่ใช่ git repo → fallback shared+warn (#81)
+# ⚠ (#707) assign บน shared tree จะเตือนทันทีถ้า task สั่ง `git commit/push/merge/rebase/stash/checkout/switch/restore/reset/worktree/tag` (ยกเว้นประโยคห้าม) — pane ทำไม่ได้ (pane_guard บล็อก) อย่าให้ pane ไปชนตอนท้าย: เขียนว่า Lead จะทำส่วนนั้นให้ · lockfile เปลี่ยนจาก npm ci → pane รายงาน Lead revert · snapshot สำหรับ build: pane ใช้ `git worktree add --detach <path ใต้ TEMP> HEAD` ได้ (#707 carve-out — เฉพาะ --detach + path ใต้ temp dir, ไม่มี -b/--force)
 takkub assign --role backend --task-file <path>        # (#491) อ่าน task จากไฟล์ (utf-8) แทน positional — เลี่ยง shell กิน backtick/$()/วงเล็บ; mutually exclusive กับ positional task; `--task-file -` หรือ positional "-" = อ่านจาก stdin
 takkub worktree list [--cwd <path>]                    # ดู wt/* worktrees + commits-ahead + dirty (lead only · ใช้ได้แม้ cockpit ปิด)
 takkub worktree merge --role <r> [--keep]              # merge --no-ff branch ล่าสุดของ role กลับ main + cleanup (conflict → auto-abort, worktree อยู่ครบ) · หรือ --branch wt/... ระบุเอง
@@ -34,6 +35,9 @@ takkub worktree clean [--force]                        # เก็บกวา�
 takkub send --to backend "<message>"                   # peer message (CC Lead อัตโนมัติ)
 takkub send --to backend --from-file <path>            # (#491) อ่านข้อความจากไฟล์ (utf-8) แทน positional — เลี่ยง shell กิน backtick/$()/วงเล็บ; mutually exclusive กับ positional msg; `--from-file -` หรือ positional "-" = อ่านจาก stdin
 # ⚠ (#679) ข้อความ/สเปคที่มี backtick ทุกครั้ง **ต้องใช้ --from-file/--task-file/--body-file เสมอ** — ส่งเป็น argument ตรงๆ = shell รันคำสั่งใน backtick จริง (เคยรัน test suite โดยไม่ตั้งใจ + เนื้อหาหายเงียบ) · takkub issue new ก็มี --body-file <path|-> แล้ว
+takkub messages --role <r> [--limit N]                # (#277) audit log ของ takkub send ถึง role นั้น — ถึงมือจริง/ยังไม่ยืนยัน/รอ pane/ยกเลิก · **#705:** assign ใหม่ = งานใหม่ → ข้อความ "ส่งแล้วยังไม่ยืนยัน" ของ pane เดิมถูกยกเลิกอัตโนมัติ (`งานเก่า — ยกเลิกตอน assign ใหม่`) ไม่ replay ใส่ pane ใหม่ · ที่ยัง "รอ pane เปิด" จะถูกส่งพร้อมป้าย stale (assign เตือนจำนวนจริง)
+takkub messages --role <r> --drop                      # (#705, lead) ยกเลิกทุกข้อความที่ยังไม่ถึง pane (sent-unconfirmed + รอ pane เปิด) ใช้ก่อน assign งานใหม่ที่ไม่เกี่ยวกับข้อความเก่า
+takkub tail --role <r> [--lines N]                     # (#541/#708) จอของ pane: pane ที่ยังเปิด = หน้าจอที่ render แล้วเหมือนที่คนเห็น ("ok (live screen)") · pane ที่ปิดแล้ว = render transcript ผ่าน terminal emulator (ไม่ใช่ raw ANSI ปนบรรทัดอีกแล้ว)
 takkub goal "<objective>"                              # ตั้งเป้าหมาย session — prepend เข้าทุก assign task หลังจากนี้
 takkub goal                                            # โชว์ goal ปัจจุบัน
 takkub goal --clear                                    # ล้าง goal

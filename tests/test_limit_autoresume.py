@@ -118,9 +118,11 @@ class TestMaybeAutoResumePark:
         confirm.assert_not_called()
 
     @pytest.mark.parametrize("provider", ["codex", "gemini", "opencode", "kimi", "cursor"])
-    def test_any_non_claude_lead_reroutes_without_an_assigned_task(
-        self, monkeypatch, provider
-    ) -> None:
+    def test_any_non_claude_lead_confirms_before_rerouting(self, monkeypatch, provider) -> None:
+        """#704: every provider goes through the confirm probe first (a
+        quoted banner on the Lead screen must never reroute on sight); the
+        #595 fallback still reroutes on the banner alone once the probe
+        stays inconclusive past CONFIRM_FALLBACK_TIMEOUT_S."""
         monkeypatch.setattr(auto_resume, "is_enabled", lambda: True)
         monkeypatch.setattr(
             "agent_takkub.limit_autoresume.effective_provider_for", lambda *_args: provider
@@ -128,8 +130,18 @@ class TestMaybeAutoResumePark:
         o = _bare_orch()
         ps = o._ps("proj::lead")
         ps.rate_limited_until = time.time() + 3600
-        with patch.object(o, "_reroute_or_park") as reroute:
+        ps.quota_provider = provider
+        with (
+            patch.object(o, "_reroute_or_park") as reroute,
+            patch.object(o, "_confirm_limit_via_usage_async") as confirm,
+        ):
             o._maybe_auto_resume_park("proj", "lead", _pane_alive(), time.time())
+        reroute.assert_not_called()
+        confirm.assert_called_once_with("proj", "lead")
+        ps.limit_confirm_pending = False
+        later = time.time() + auto_resume.CONFIRM_FALLBACK_TIMEOUT_S + 1
+        with patch.object(o, "_reroute_or_park") as reroute:
+            o._maybe_auto_resume_park("proj", "lead", _pane_alive(), later)
         reroute.assert_called_once_with("proj", "lead", ps)
 
     def test_claude_lead_without_an_assigned_task_confirms_before_rerouting(
@@ -164,24 +176,32 @@ class TestMaybeAutoResumePark:
         confirm.assert_called_once_with("proj", "backend")
         assert ps.limit_confirm_pending is True
 
-    def test_non_claude_shards_park_without_claude_telemetry(self, monkeypatch) -> None:
+    def test_non_claude_shards_probe_their_own_provider(self, monkeypatch) -> None:
+        """#704: a codex/gemini shard is confirmed against ITS provider's
+        usage probe (`confirm_verdict_for_provider`), never claude's
+        five-hour window."""
+        from agent_takkub import limit_autoresume as la
         from agent_takkub import provider_config
 
         monkeypatch.setattr(auto_resume, "is_enabled", lambda: True)
         monkeypatch.setattr(provider_config, "_provider_available", lambda provider: True)
-        for role in ("codex#2", "gemini#3"):
+        for role, provider in (("codex#2", "codex"), ("gemini#3", "gemini")):
             o = _bare_orch()
             ps = o._ps(f"proj::{role}")
             ps.last_assigned_task = "do the thing"
             ps.rate_limited_until = time.time() + 3600
-            with (
-                patch.object(o, "_confirm_limit_via_usage_async") as confirm,
-                patch.object(o, "_park_pane_for_limit") as park,
-            ):
+            ps.quota_provider = provider
+            with patch.object(o, "_confirm_limit_via_usage_async") as confirm:
                 o._maybe_auto_resume_park("proj", role, _pane_alive(), time.time())
-            confirm.assert_not_called()
-            park.assert_called_once_with("proj", role, ps)
-            assert ps.limit_confirm_pending is False
+            confirm.assert_called_once_with("proj", role)
+            assert ps.limit_confirm_pending is True
+            o.limitUsageDenied = MagicMock()
+            with patch.object(
+                la, "confirm_verdict_for_provider", return_value=("denied", 12.0)
+            ) as verdict:
+                o._do_confirm_usage_fetch("proj", role, None)
+            assert verdict.call_args[0][0] == provider
+            o.limitUsageDenied.emit.assert_called_once_with("proj", role, 12.0)
 
     def test_claude_shard_still_uses_claude_telemetry(self, monkeypatch) -> None:
         monkeypatch.setattr(auto_resume, "is_enabled", lambda: True)

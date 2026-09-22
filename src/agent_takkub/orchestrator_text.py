@@ -645,6 +645,86 @@ def _extract_transcript_lines(raw: bytes, max_lines: int = 5) -> list[str]:
     return clean_lines[-max_lines:] if max_lines > 0 else clean_lines
 
 
+def _render_pty_tail(raw: bytes, max_lines: int = 20, cols: int = 160) -> list[str]:
+    """Render raw PTY transcript bytes through a scrollback-keeping terminal
+    emulator and return the last *max_lines* non-blank rows (#708).
+
+    `_extract_transcript_lines` splits the byte stream on "\\n" and resolves
+    "\\r" per line — fine for a plain log, but a TUI (claude/codex/gemini)
+    repaints with cursor-jump sequences, so one "line" of bytes holds
+    fragments from several screen rows and several moments in time. Real
+    output for `takkub tail --role backend#2` (2026-09-22): Korean and Thai
+    from unrelated rows glued together with no spaces, plus raw escape
+    frames — unusable for diagnosing a stuck pane. Feeding the bytes to
+    pyte the way the live pane does yields the rows a human would see.
+
+    A tail slice may start mid-escape-sequence; pyte just drops the partial
+    sequence. Never raises — a pyte failure falls back to the legacy split.
+    """
+    try:
+        import pyte
+
+        rows = max(24, min(200, max_lines * 4))
+        screen = pyte.HistoryScreen(cols, rows, history=max(200, max_lines * 20))
+        # LNM: a bare "\n" (plain-text transcripts, provider stderr) also
+        # returns the carriage, as a terminal in newline mode would —
+        # otherwise each line renders staggered by the previous line's width.
+        screen.set_mode(pyte.modes.LNM)
+        stream = pyte.ByteStream(screen)
+        stream.feed(raw)
+        history_rows: list[str] = []
+        for line in screen.history.top:
+            history_rows.append("".join(ch.data for ch in (line[i] for i in range(cols))))
+        rendered = [*history_rows, *screen.display]
+    except Exception:
+        return _extract_transcript_lines(raw, max_lines=max_lines)
+    clean = [re.sub(r"[ \t]+$", "", ln) for ln in rendered]
+    clean = [ln for ln in clean if ln.strip()]
+    return clean[-max_lines:] if max_lines > 0 else clean
+
+
+def _all_quota_markers() -> tuple[str, ...]:
+    """Every provider's quota/usage-limit REACHED phrase plus the generic
+    baseline, deduped (#704) — the phrases `pty_session` scans for."""
+    from .provider_spec import GENERIC_QUOTA_MARKERS, quota_markers_for
+
+    seen: dict[str, None] = dict.fromkeys(GENERIC_QUOTA_MARKERS)
+    for name in PROVIDER_REGISTRY:
+        for m in quota_markers_for(name):
+            seen.setdefault(m, None)
+    return tuple(seen)
+
+
+_QUOTA_DEFANG_TEXT = "[usage-limit banner]"
+
+
+def defang_quota_markers(text: str) -> str:
+    """Rewrite any quota banner phrase in cockpit-authored text so it can no
+    longer trip the quota detector when it lands on another pane (#704).
+
+    Every piece of text the cockpit writes into the Lead pane is later
+    scanned by that pane's own `rate_limit_reset_at()`; `_notify_quota_hit`
+    used to quote the matched phrase verbatim and the takeover brief /
+    give-up dump echo the quota-hit pane's screen — three ways the cockpit
+    poisoned its own detector. A visible paraphrase (not a zero-width trick)
+    is used on purpose: the Lead is an LLM and will re-type whatever it was
+    shown, so the shown text itself must be harmless."""
+    if not text:
+        return text
+    out = text
+    low = out.lower()
+    for marker in sorted(_all_quota_markers(), key=len, reverse=True):
+        start = 0
+        while True:
+            idx = low.find(marker, start)
+            if idx < 0:
+                break
+            out = out[:idx] + _QUOTA_DEFANG_TEXT + out[idx + len(marker) :]
+            low = out.lower()
+            start = idx + len(_QUOTA_DEFANG_TEXT)
+    return out
+
+
 def _read_tail_bytes(path: pathlib.Path, max_bytes: int) -> bytes:
     """Return at most the last ``max_bytes`` bytes of ``path`` without reading
     the whole file into memory. Pure (no Qt) so it can be unit-tested. Raises

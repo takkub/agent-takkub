@@ -616,13 +616,79 @@ _SELF_COMMIT_TASK_RE = re.compile(
 # (a warning that always fires is one nobody reads). A match is real only
 # when none of these negation/subject tokens sit right before it.
 _SELF_COMMIT_NEGATION_RE = re.compile(
-    r"(?:ห้าม|หาม|อย่า|ไม่ต้อง|ไม่ให้|ไม่|no |not |don'?t |never |lead\s*(?:จะ|เป็นคน)?\s*)\s*$",
+    r"(?:ห้าม|หาม|อย่า|ไม่ต้อง|ไม่ให้|ไม่|no |not |don'?t |never |lead\s*(?:จะ|เป็นคน)?\s*)"
+    r"\s*(?:git\s+)?$",  # (#707) "ห้าม git commit เอง" — the verb may sit between
     re.I,
 )
 
 
+def _negated_at(task: str, start: int) -> bool:
+    """#682: a negation / "Lead does it" subject right before *start* on the
+    same line makes the match policy boilerplate, not an instruction."""
+    prefix = task[max(0, start - 24) : start]
+    prefix = prefix.rsplit("\n", 1)[-1]
+    return bool(_SELF_COMMIT_NEGATION_RE.search(prefix))
+
+
+# (#707) Explicit `git <sub>` instructions a shared-tree pane can never carry
+# out — `pane_guard` denies them (`git_lead_only:*` for commit/push/merge/
+# stash/rebase/config, `git_shared_default_deny:*` for checkout/restore/
+# switch/reset/worktree/branch-mutation). Real incidents, one afternoon:
+# "commit ใน web repo (ห้าม push)" → frontend hit `git_lead_only:commit` at
+# the very end of its work; `git checkout -- package-lock.json` to undo an
+# `npm ci` side effect → denied, Lead had to revert by hand; devops wanted
+# `git worktree add --detach <scratch> HEAD` for a clean docker build →
+# `git_shared_default_deny:worktree`. Each cost a full turn plus a message
+# round-trip. Catching the instruction at assign time is cheaper than the
+# pane discovering the wall after the work is done.
+_GIT_LEAD_ONLY_TASK_RE = re.compile(
+    r"\bgit\s+(?P<sub>commit|push|merge|rebase|stash|checkout|switch|restore|reset|"
+    r"cherry-pick|worktree|tag|branch\s+-[dDmM]|clean\s+-[a-z]*f)\b",
+    re.I,
+)
+_GIT_SUB_BLOCKED_ON_SHARED = {
+    "commit": "Lead commit ให้หลัง done (หรือ assign ใหม่ด้วย `--isolation worktree`)",
+    "push": "Lead push ให้ (pane push ได้เฉพาะ branch wt/<role>-* ใน worktree ของตัวเอง)",
+    "merge": "Lead merge ให้",
+    "rebase": "Lead rebase ให้",
+    "stash": "ห้ามใช้ stash บน shared tree (stack แชร์กันทุก worktree)",
+    "checkout": "ห้าม checkout/revert ไฟล์บน shared tree — ถ้า lockfile เปลี่ยนจาก npm ci ให้รายงาน Lead revert ให้",
+    "switch": "ห้ามสลับ branch บน shared tree",
+    "restore": "ห้าม restore ไฟล์บน shared tree — รายงาน Lead",
+    "reset": "ห้าม reset บน shared tree — รายงาน Lead",
+    "cherry-pick": "Lead ทำให้",
+    "worktree": "ทำได้เฉพาะ `git worktree add --detach <path ใต้ TEMP> [commit]` (#707) — รูปแบบอื่น Lead ทำให้",
+    "tag": "Lead tag ให้",
+}
+
+
+def _git_lead_only_task_warning(task: str, isolation: str) -> str:
+    """#707: name every git instruction in *task* the pane will be denied
+    on a shared tree, before the pane spends a turn finding out."""
+    if isolation == "worktree":
+        return ""
+    found: dict[str, str] = {}
+    for m in _GIT_LEAD_ONLY_TASK_RE.finditer(task or ""):
+        if _negated_at(task, m.start()):
+            continue
+        sub = m.group("sub").lower().split()[0]
+        note = _GIT_SUB_BLOCKED_ON_SHARED.get(sub)
+        if note is None:
+            note = "Lead ทำให้"
+        found.setdefault(sub, note)
+    if not found:
+        return ""
+    bullets = "".join(f"\n   · git {sub}: {note}" for sub, note in found.items())
+    return (
+        "\n⚠️ task นี้สั่งให้ pane ใช้คำสั่ง git ที่ pane_guard บล็อกบน shared tree (#707) — "
+        "pane จะชน guard ตอนท้ายงานแล้วเสียรอบ แก้ข้อความ task หรือบอกไว้ว่า Lead จะทำส่วนนี้ให้:" + bullets
+    )
+
+
 def _self_commit_isolation_warning(task: str, isolation: str) -> str:
-    """Empty string when nothing to warn about — see module comment above."""
+    """Empty string when nothing to warn about — see module comment above.
+    (#707) Also appends `_git_lead_only_task_warning` for every other git
+    verb the shared-tree guard would deny."""
     if isolation == "worktree":
         return ""
     task = task or ""
@@ -631,14 +697,13 @@ def _self_commit_isolation_warning(task: str, isolation: str) -> str:
         # Look back a short window on the same line for a negation / a
         # "Lead does it" subject; either one makes this occurrence policy
         # boilerplate, not an instruction to the pane.
-        prefix = task[max(0, m.start() - 24) : m.start()]
-        prefix = prefix.rsplit("\n", 1)[-1]
-        if _SELF_COMMIT_NEGATION_RE.search(prefix):
+        if _negated_at(task, m.start()):
             continue
         real_match = True
         break
+    git_note = _git_lead_only_task_warning(task, isolation)
     if not real_match:
-        return ""
+        return git_note
     return (
         "\n⚠️ task นี้ดูเหมือนสั่งให้ pane commit เอง แต่ isolation เป็น shared — "
         "`git commit` จะถูก pane_guard บล็อกเสมอสำหรับ claude pane (#314/#399), "
@@ -646,7 +711,7 @@ def _self_commit_isolation_warning(task: str, isolation: str) -> str:
         "ถ้าต้องการให้ pane commit เองจริงๆ ให้สั่งใหม่ด้วย `--isolation worktree` แทน — "
         "ไม่งั้น pane จะจบงานด้วย `takkub done` รอ Lead review + commit ตามปกติ "
         "(นั่นคือหน้าที่ Lead โดยตรง ไม่ใช่ Lead 'ทำงานเอง')"
-    )
+    ) + git_note
 
 
 def _resolve_text_or_file(
@@ -2513,18 +2578,19 @@ def cmd_messages(args: argparse.Namespace) -> dict:
     re-send it after a respawn.
     """
     _warn_deprecated_role(getattr(args, "role", None))
-    resp = _request(
-        _with_project(
-            {
-                "cmd": "messages",
-                "role": args.role,
-                "limit": int(getattr(args, "limit", 20) or 20),
-                "from": _from_role(),
-            }
-        )
-    )
+    payload = {
+        "cmd": "messages",
+        "role": args.role,
+        "limit": int(getattr(args, "limit", 20) or 20),
+        "from": _from_role(),
+    }
+    if getattr(args, "drop", False):
+        payload["drop"] = True
+    resp = _request(_with_project(payload))
     if not resp.get("ok"):
         return {"ok": False, "msg": resp.get("msg", "messages failed"), "exit_code": 1}
+    if getattr(args, "drop", False):
+        return {"ok": True, "msg": resp.get("msg", "dropped")}
     lines = resp.get("lines") or []
     if not lines:
         print(f"[messages] ยังไม่มีข้อความที่ส่งถึง {args.role} ในโปรเจกต์นี้")
@@ -6075,6 +6141,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     smsg.add_argument("--role", required=True, help="recipient role to look up")
     smsg.add_argument("--limit", type=int, default=20, help="how many recent messages (default 20)")
+    smsg.add_argument(
+        "--drop",
+        action="store_true",
+        help="(lead) retire every message to this role that has not reached a pane yet "
+        "(sent-unconfirmed / waiting for a pane) so it is never replayed into a new pane (#705)",
+    )
     smsg.set_defaults(func=cmd_messages)
 
     st = sub.add_parser(

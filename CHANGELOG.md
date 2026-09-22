@@ -4,6 +4,50 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 
 ## [vNEXT]
 
+## [v2.1.32] - 2026-09-22
+
+### Fixed (แก้)
+
+- **#704/#702: cockpit วางยา quota detector ของตัวเอง — Lead ถูก force-close + respawn 3 รอบใน 10 นาที
+  (prod marnop 17:46/17:49/17:52)** — `_notify_quota_hit` quote คำ marker (`"hit your usage limit"`)
+  ลง pane Lead → detector สแกนจอ Lead เจอคำเดียวกัน 6 วิต่อมา → `rate_limit_detected role=lead` ปลอม ·
+  probe ยืนยัน 3% หกครั้งแต่ fallback #595 (3 นาที) reroute ทับ → takeover brief quote จอเก่า (มี marker)
+  เข้า Lead ใหม่ → โดนซ้ำทุกรอบจนครบ cap 3 · แก้ 4 ชั้น: (1) `pty_session._strip_cockpit_notice_lines`
+  ตัดบรรทัดที่เป็นข้อความ cockpit/log (`[system]`, `[auto-resume]`, `"event":`, `takkub …`) ก่อนสแกน
+  marker ทุก provider (2) `defang_quota_markers` แทน marker ด้วย `[usage-limit banner]` ในทุกข้อความที่
+  cockpit เขียนเข้า pane (notice quota-hit, takeover brief, give-up dump) (3) probe เป็น tri-state:
+  `limitUsageDenied` — provider ยืนยันว่า**ไม่**เต็ม → ยกเลิกสถานะทันที (`rate_limit_false_positive`,
+  แจ้ง Lead 1 ครั้ง, latch `quota_false_positive_armed` กัน re-detect จนข้อความเลื่อนพ้นจอ) แทนรอ fallback
+  (4) codex/gemini ผ่าน probe ของ provider ตัวเอง (`fetch_provider_usage`) และใช้ provider ที่ชนจริง
+  (`ps.quota_provider`) ไม่ใช่ `effective_provider_for("lead")` · #702 (loop 549 รอบบน 2.1.28)
+  คือ #699 ที่ปิดใน 2.1.30 แล้ว — ใบนี้ปิดส่วนที่เหลือ
+- **#703: `takkub inbox` โชว์ `missing (#678)` 4 role ทั้งที่ digest ส่งถึง Lead แล้ว** — `_mark_done_notices_delivered`
+  รู้จักแค่ tag ดิบ `[role done]` แต่ digest render เป็น `• [stamp][role] done: …` / `[role] PASS …` →
+  `_done_unread` ไม่เคยถูกล้างสำหรับ done ที่ผ่าน digest (= ทุก clean done) → 120 วิต่อมา inbox ตีเป็น missing ·
+  เพิ่ม `done_roles_in_notice` อ่าน bullet ของ digest ด้วย
+- **#705: assign เตือน "message ค้าง 1" แต่จริง 9 และ replay ข้อความงานเก่าใส่ pane ใหม่** — assign ใหม่ =
+  งานใหม่: record `sent` ที่ยังไม่ยืนยันของ pane เดิมถูก abandon (`superseded_by_assign`) ทันที ไม่ให้
+  `_reap_role_messages` replay · assign บอกจำนวนที่ยกเลิก+จำนวน stale ที่จะส่งจริง · `takkub messages --role <r> --drop`
+  (lead) ยกเลิกทุกข้อความที่ยังไม่ถึง pane
+- **#706: false "idle-at-prompt stalled 5m" ตอน pane รัน native subagent ยาวๆ** — ระหว่างเทิร์น footer ของ claude
+  ยุบเหลือ `← for agents · ↓ to manage` (ไม่มี esc to interrupt) แม้มี `✻ Waiting for 1 background agent`
+  อยู่บนจอ → `has_background_work()` ตอบ False · เพิ่ม evidence แบบชัดเจนไม่ต้องผ่าน footer gate
+  (`· N shell|agent`, `waiting for N background agent`, `/tasks to see subagents`) + ก่อน escalate
+  idle-at-prompt เช็ค child process จริงของ pane (`idle_at_prompt_deferred_live_children`)
+- **#707: assign ไม่เตือนเมื่อ task สั่ง git ที่ guard บล็อค** — `_git_lead_only_task_warning` สแกน
+  `git commit/push/merge/rebase/stash/checkout/switch/restore/reset/cherry-pick/worktree/tag` (เว้นประโยคห้าม
+  รวม "ห้าม git commit เอง") แล้วบอกตอน assign ว่า Lead ทำส่วนไหนให้ · pane_guard carve-out ใหม่:
+  `git worktree add --detach <path ใต้ temp dir> [commit]` บน shared tree (snapshot สำหรับ build) — รูปแบบอื่นยัง deny
+- **#708: `takkub tail` เละ (ANSI ดิบ + เกาหลีปนไทยไม่มีช่องว่าง)** — pane ที่ยังเปิดคืนจอที่ render แล้ว
+  (`display_lines`), pane ที่ปิดแล้ว render transcript ผ่าน `pyte.HistoryScreen` (LNM) แทน split `\n` ดิบ
+- **#709: การ์ด Codex ซ้ำกลับมาบน 2.1.31 (#700 regression)** — fingerprint byte-equal ไม่เคยตรงเพราะ `resets_at`
+  ของ window ที่ยังไม่เริ่ม (0%) เป็น now+5h ต่างกันทีละวินาทีต่อ fetch · เทียบ per-window (name, utilization)
+  + resets_at tolerance 120 วิ แทน
+- **#710: Remote Quick tunnel (trycloudflare.com) ล้มเงียบเมื่อไม่มี cloudflared** — เลือก "Quick tunnel (no domain)"
+  แล้วเครื่องไม่มี binary → cockpit ดาวน์โหลด release ทางการ (GitHub) ลง `DATA_HOME/bin/` (win/mac/linux
+  amd64+arm64, verify `--version`, `.part` แล้วค่อย rename) พร้อม progress dialog · `Tunnel._cloudflared_bin`
+  หาใน config → PATH → DATA_HOME/bin
+
 ## [v2.1.31] - 2026-09-22
 
 ### Fixed (แก้)

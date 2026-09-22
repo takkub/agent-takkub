@@ -1059,6 +1059,12 @@ class PaneState:
     # quota banner meanwhile; without this latch a close that was refused
     # (#699: Lead is close-protected) re-entered the reroute every tick.
     quota_reroute_pending: bool = False
+    # quota_false_positive_armed (#704): the usage probe explicitly denied
+    # the banner the screen scrape matched (the text was a quoted notice or
+    # log, not this pane's own limit). While the same text is still on
+    # screen `_rate_limit_suppressed` must not re-detect it every 5 s tick;
+    # the latch clears itself the first tick the scrape no longer matches.
+    quota_false_positive_armed: bool = False
     # shell_open_dialog_notified: True once the transcript watchdog has
     # warned Lead that this pane's transcript shows the Windows "How do you
     # want to open this file?" ShellExecute marker (issue #104) — a shell

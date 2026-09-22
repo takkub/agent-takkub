@@ -1522,6 +1522,16 @@ class CliServer(QObject):
                     self._reply(sock, ok=False, msg=msg_t)
                 return
             elif cmd == "messages":
+                if req.get("drop"):
+                    # #705: Lead-only — retire every still-deliverable message.
+                    if not self._caller_is_lead(req):
+                        self._reply(sock, ok=False, msg="unauthorized: --drop requires lead token")
+                        return
+                    ok_d, msg_d, count_d = self._orch.drop_role_messages(
+                        req.get("role", ""), project=from_project
+                    )
+                    self._reply(sock, ok=ok_d, msg=msg_d, dropped=count_d, lines=[])
+                    return
                 # #277: read-only audit of `takkub send` traffic for one role.
                 ok_m, msg_m, lines_m = self._orch.role_message_log(
                     req.get("role", ""),

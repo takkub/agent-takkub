@@ -708,6 +708,18 @@ class RemoteSettingsDialog(cockpit_theme.CockpitDialog):
         public_url = self._public_url_edit.text().strip()
         cloudflared_bin = self._cloudflared_bin_edit.text().strip()
 
+        if not is_named:
+            # #710: Quick tunnel's whole point is "no setup" — a machine with
+            # no cloudflared anywhere gets the official binary fetched into
+            # DATA_HOME/bin here, instead of failing at Enable with
+            # "the tunnel couldn't start" and a manual install chase.
+            resolved = self._ensure_cloudflared_for_quick(cloudflared_bin)
+            if resolved is None:
+                return None
+            if resolved != cloudflared_bin:
+                cloudflared_bin = resolved
+                self._cloudflared_bin_edit.setText(resolved)
+
         if is_named and not credentials_json:
             QMessageBox.warning(
                 self, "Missing credentials", "Pick a cloudflared credentials .json file first."
@@ -729,6 +741,73 @@ class RemoteSettingsDialog(cockpit_theme.CockpitDialog):
             "",
             "",
         )
+
+    def _ensure_cloudflared_for_quick(self, explicit: str) -> str | None:
+        """#710: the cloudflared path Quick tunnel will run, downloading the
+        official release into DATA_HOME/bin when nothing is installed.
+        Returns None (after telling the user) when it cannot be provided.
+        The download runs on a plain worker thread and this dialog polls it
+        with a QTimer — never a QThread parented to this dialog (#688)."""
+        import threading
+
+        from PyQt6.QtCore import QTimer
+        from PyQt6.QtWidgets import QProgressDialog
+
+        from . import cloudflared_install
+
+        try:
+            found = cloudflared_install.resolve_cloudflared(explicit)
+        except Exception:
+            found = None
+        if found:
+            return found
+
+        progress = QProgressDialog("Downloading cloudflared…", None, 0, 100, self)
+        progress.setWindowTitle("Quick tunnel setup")
+        progress.setMinimumDuration(0)
+        progress.setValue(0)
+        state: dict = {"done": False, "path": None, "error": None, "pct": 0}
+
+        def _on_progress(done: int, total: int) -> None:
+            state["pct"] = int(done * 100 / total) if total else 0
+
+        def _work() -> None:
+            try:
+                state["path"] = cloudflared_install.resolve_cloudflared(
+                    explicit, download=True, progress=_on_progress
+                )
+            except Exception as exc:  # surfaced below, never raised into Qt
+                state["error"] = str(exc)
+            state["done"] = True
+
+        threading.Thread(target=_work, name="cloudflared-download", daemon=True).start()
+        poll = QTimer(self)
+        poll.setInterval(150)
+
+        def _tick() -> None:
+            progress.setValue(max(progress.value(), state["pct"]))
+            if state["done"]:
+                poll.stop()
+                progress.close()
+
+        poll.timeout.connect(_tick)
+        poll.start()
+        while not state["done"]:
+            QApplication.processEvents()
+            threading.Event().wait(0.05)
+        poll.stop()
+        progress.close()
+        if state["error"] or not state["path"]:
+            QMessageBox.warning(
+                self,
+                "cloudflared not available",
+                "Quick tunnel needs the cloudflared binary and the cockpit could not "
+                f"download it ({state['error'] or 'unknown error'}). Install it "
+                "(winget install Cloudflare.cloudflared / brew install cloudflared) or "
+                "Browse to the executable above, then try again.",
+            )
+            return None
+        return str(state["path"])
 
     def _collect_ngrok_fields(self) -> tuple[str, str, str, str, str, str, str] | None:
         """Validate + gather the ngrok-provider fields for `_on_toggle`,

@@ -251,7 +251,10 @@ class TestRateLimitSuppressedNotifiesImmediately:
         assert "[system]" in msg
         assert "frontend" in msg
         assert "gemini" in msg
-        assert "individual quota reached" in msg
+        # #704: the matched phrase is never quoted — this notice lands on the
+        # Lead screen where the same detector runs.
+        assert "individual quota reached" not in msg
+        assert "usage-limit banner" in msg
         ps = o._pane_state["proj::frontend"]
         assert ps.quota_marker == "individual quota reached"
         assert ps.quota_provider == "gemini"

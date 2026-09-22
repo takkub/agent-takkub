@@ -345,6 +345,33 @@ _DONE_NOTICE_RE = re.compile(r"^\[([^\]\r\n]+?)\s+done\](?:\s+(.*))?$", re.DOTAL
 # (#680) every `[role done]` / `[role FAILED]` tag ANYWHERE in a delivered
 # body (a combined digest carries several) — feeds `_mark_done_notices_delivered`.
 _DONE_NOTICE_TAG_RE = re.compile(r"\[([\w][\w-]*)\s+(?:done|FAILED)\]", re.IGNORECASE)
+# #703: the shape a done report takes once `_flush_lead_digest` has rendered
+# it — `_format_digest_item` prints "• [HH:MM:SS · 3s ago][backend] done:
+# …" and `format_digest_fact_line` prints "• [stamp][qa] PASS [ref #641] ·
+# …" — i.e. "[role]" directly followed by a verdict word, never the raw
+# "[role done]" tag. `_mark_done_notices_delivered` only knew the raw tag,
+# so a digested report (which is EVERY clean done — they all go through the
+# debounce window) never cleared `_done_unread`, and 120 s later `takkub
+# inbox` swore the report was "missing (หลุดจากคิวส่ง — #678)" for a
+# digest that had demonstrably landed (prod unirecon 2026-09-22: four roles
+# flagged, four `lead_inbox_digest count=1` events on record).
+_DIGEST_DONE_LINE_RE = re.compile(
+    r"^\s*•\s*(?:\[[^\]\r\n]*\])?\[([\w][\w-]*)\]\s+(?:done|FAILED|PASS|FAIL|BLOCKED)\b",
+    re.IGNORECASE | re.MULTILINE,
+)
+_DIGEST_HEADER = "[Lead Inbox Digest"
+
+
+def done_roles_in_notice(body: str) -> set[str]:
+    """Every role whose done/FAILED report *body* carries — the raw
+    `[role done]` tag anywhere, plus (#703) each digest bullet when *body*
+    is a rendered Lead Inbox Digest."""
+    roles = {m.group(1) for m in _DONE_NOTICE_TAG_RE.finditer(body)}
+    if _DIGEST_HEADER in body:
+        roles.update(m.group(1) for m in _DIGEST_DONE_LINE_RE.finditer(body))
+    return roles
+
+
 _CC_NOTICE_RE = re.compile(
     r"^\[CC\]\s*\[([^\]\r\n]+?)\s*→\s*([^\]\r\n]+?)\](?:\s+(.*))?$",
     re.DOTALL,
@@ -1015,8 +1042,8 @@ class LeadInboxMixin:
         if not unread:
             return
         try:
-            for m in _DONE_NOTICE_TAG_RE.finditer(body or ""):
-                unread.pop((project_ns, m.group(1)), None)
+            for role in done_roles_in_notice(body or ""):
+                unread.pop((project_ns, role), None)
         except Exception:
             pass
 

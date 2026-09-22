@@ -522,10 +522,37 @@ def _has_background_work_marker(text_lower: str) -> bool:
     `_has_background_segment_evidence` / `_footer_chrome_esc_to_interrupt_line`.
     A spinner line elsewhere on screen ("✻ churning… (esc to interrupt)")
     can never satisfy this on its own — only the footer-chrome line counts,
-    and only once background evidence is confirmed."""
+    and only once background evidence is confirmed.
+
+    #706: an EXPLICIT background count/wait phrase is proof by itself, no
+    footer gate. Field capture (marnop backend#2, 2026-09-22 17:59): the
+    pane was babysitting two native subagents, its footer read
+    "⏵⏵ bypass permissions on · 1 shell · /tasks to see subagents · esc to
+    interrupt · ← for agents" while a turn was open, but between turns the
+    hint row collapsed to "← for agents · ↓ to manage" (no "esc to
+    interrupt", no chrome markers) with "✻ Waiting for 1 background agent
+    to finish" right above it — so the gated check read "no background
+    work", `ready_since_ts` ran for 5 minutes and the Lead got a false
+    idle-at-prompt escalation for a pane mid-work. "← for agents" alone is
+    permanent chrome on current claude builds (it shows on an idle pane
+    with zero agents), so it stays gated as before; only the count/wait
+    shapes below are trusted ungated."""
+    if _BACKGROUND_EXPLICIT_RE.search(text_lower.replace("\n", " ")):
+        return True
     if not _has_background_segment_evidence(text_lower):
         return False
     return any(_footer_chrome_esc_to_interrupt_line(ln) for ln in text_lower.splitlines())
+
+
+# #706: explicit, wording-verified background-work phrases (all from the
+# 2026-09-22 capture above). The count form requires the "·" segment
+# separator claude's footer uses so a prose line like "Ran 1 shell command"
+# in the transcript body can't pass as evidence.
+_BACKGROUND_EXPLICIT_RE = re.compile(
+    r"·\s*\d+\s+(?:shell|agent|task)s?\b"
+    r"|waiting\s+for\s+\d+\s+background\s+(?:agent|shell|task)s?"
+    r"|/tasks\s+to\s+see\s+subagents"
+)
 
 
 # #391 (2026-08-26 live finding): the currently-shipping Claude Code build's
@@ -1311,6 +1338,41 @@ def _parse_rate_limit_reset(
     if epoch <= now:  # clock time already passed today → it means tomorrow
         epoch += 24 * 60 * 60
     return epoch
+
+
+# #704: screen lines that are the cockpit's OWN words (or a log/notice the
+# pane is quoting), never a provider banner. The quota detector scanned the
+# Lead pane, found `[system] qa (codex) hit quota ("hit your usage limit")`
+# — a notice the cockpit itself had just injected — and flagged the LEAD as
+# quota-hit (prod marnop 2026-09-22 17:42:57, six seconds after the notice
+# landed). Its usage probe said 3 % six times in a row, the #595 fallback
+# then rerouted anyway, and the takeover brief quoted the old screen (banner
+# text included) into each replacement Lead: three forced Lead respawns in
+# ten minutes. A real banner line never carries these tokens.
+_COCKPIT_NOTICE_LINE_TOKENS: tuple[str, ...] = (
+    "[system]",
+    "[auto-resume]",
+    "[idle-at-prompt]",
+    "hit quota",
+    "quota-hit",
+    "quota-banner",
+    "usage-limit banner",
+    "rate_limit_detected",
+    '"event":',
+    "takkub ",
+)
+
+
+def _strip_cockpit_notice_lines(lines) -> str:
+    """Lower-cased screen text with cockpit-authored / quoted-log lines
+    removed (#704) — the text every quota-marker scan must run on."""
+    kept = []
+    for ln in lines:
+        low = ln.lower()
+        if any(tok in low for tok in _COCKPIT_NOTICE_LINE_TOKENS):
+            continue
+        kept.append(low)
+    return "\n".join(kept)
 
 
 def _resolve_quota_markers(provider: str) -> tuple[str, ...]:
@@ -2828,7 +2890,7 @@ class PtySession(QObject):
         "individual quota reached" (duration-style reset) and codex's
         provisional reached-state phrasing are checked the same way.
         """
-        text = "\n".join(self.display_lines()).lower()
+        text = _strip_cockpit_notice_lines(self.display_lines())
         return _parse_rate_limit_reset(text, time.time(), _resolve_quota_markers(provider))
 
     def quota_stall_marker(self, provider: str = "claude") -> str | None:
@@ -2836,7 +2898,7 @@ class PtySession(QObject):
         `provider`, or None (#301). Companion to `rate_limit_reset_at()` —
         same detection, exposes WHICH phrase matched so a caller can quote it
         in the Lead-facing notice instead of a bare "quota hit"."""
-        text = "\n".join(self.display_lines()).lower()
+        text = _strip_cockpit_notice_lines(self.display_lines())
         for marker in _resolve_quota_markers(provider):
             if marker in text:
                 return marker

@@ -51,7 +51,7 @@ from .agent_pane import AgentPane
 from .config import RUNTIME_DIR
 from .lead_inbox import _delayed_enter
 from .limit_status import UsageData, fetch_usage_shared
-from .orchestrator_text import _human_duration, _log_event
+from .orchestrator_text import _human_duration, _log_event, defang_quota_markers
 from .provider_config import CLAUDE, effective_provider_for
 from .roles import LEAD
 from .spawn_engine import PaneState
@@ -93,6 +93,60 @@ def quota_reprobe_verdict(usage, recorded_reset_at: float, now: float) -> tuple[
 # provider get skipped; see AutoResumeMixin._pick_reroute_provider. One ring
 # shared with `effective_provider_for`'s pre-spawn skip and the spawn-failure
 # hop so a fresh assign, a post-hit reroute and a failed launch all agree.
+
+
+def _usage_denies_limit(
+    usage: UsageData | None, threshold: float = auto_resume.CONFIRM_UTILIZATION_PCT
+) -> tuple[bool, float]:
+    """#704 counterpart of `_usage_confirms_limit`: `(True, pct)` only when
+    the profile's telemetry POSITIVELY says the five-hour window is far
+    from exhausted — a known utilization figure under *threshold*. None /
+    no five-hour window / unknown figure → `(False, 0.0)`: "can't tell"
+    is never "not limited"."""
+    if usage is None:
+        return False, 0.0
+    for window in usage.windows or ():
+        if window.name == "five_hour" and isinstance(window.utilization, (int, float)):
+            pct = float(window.utilization)
+            return pct < threshold, pct
+    return False, 0.0
+
+
+def confirm_verdict_for_provider(provider: str, config_dir: Path | None) -> tuple[str, float]:
+    """Blocking (network) tri-state probe of *provider* for the auto-resume
+    confirm loop (#704): `("confirmed", pct)` — exhausted per its own
+    telemetry; `("denied", pct)` — demonstrably not exhausted, the banner
+    match was a false positive; `("unknown", 0.0)` — no probe / error /
+    unsupported provider. Every error path is "unknown" on purpose: a
+    network hiccup must neither park a pane nor clear a real stall."""
+    if provider == CLAUDE:
+        try:
+            # Shared-state-aware: reuses a recent poller result and honours a
+            # persisted 429 backoff instead of firing an extra request that
+            # would re-arm the endpoint's penalty (see limit_status module
+            # comment). A pane that just banner-reported a limit makes fresh
+            # telemetry likely cached moments ago anyway.
+            usage = fetch_usage_shared(config_dir, max_age_s=300.0) if config_dir else None
+        except Exception:
+            usage = None
+        if _usage_confirms_limit(usage):
+            return "confirmed", 100.0
+        denied, pct = _usage_denies_limit(usage)
+        return ("denied", pct) if denied else ("unknown", 0.0)
+    try:
+        from .provider_usage import STATUS_ACTIVE, fetch_provider_usage
+
+        p_usage = fetch_provider_usage(provider)
+    except Exception:
+        return "unknown", 0.0
+    if p_usage is None or getattr(p_usage, "status", None) != STATUS_ACTIVE:
+        return "unknown", 0.0
+    util = getattr(p_usage, "utilization", None)
+    if not isinstance(util, (int, float)):
+        return "unknown", 0.0
+    if float(util) >= auto_resume.QUOTA_REPROBE_EXHAUSTED_PERCENT:
+        return "confirmed", float(util)
+    return "denied", float(util)
 
 
 def _usage_confirms_limit(
@@ -143,7 +197,10 @@ def _pane_output_tail(
         lines = [ln.rstrip() for ln in pane.session.display_lines() if ln.strip()]
     except Exception:
         return ""
-    return "\n".join(lines[-max_lines:])
+    # #704: this tail is quoted into the Lead pane (takeover brief, give-up
+    # dump) — a quota-hit pane's own banner must not re-trigger detection
+    # there.
+    return defang_quota_markers("\n".join(lines[-max_lines:]))
 
 
 def _progress_marker_path(project: str, role: str) -> Path:
@@ -318,13 +375,17 @@ class AutoResumeMixin:
         if not ps.rate_limited_until:
             return  # signal (a) not actually recorded yet on this pane state
 
-        if effective_provider_for(role, project) != CLAUDE:
-            # #103: Codex/Gemini do not yet expose usage telemetry here. Their
-            # provider-specific limit banner (signal a) is the safe fallback;
-            # never confirm it against an unrelated Anthropic usage window.
-            self._reroute_or_park(project, role, ps)
-            return
-
+        # #704: every provider goes through the confirm loop now.
+        # `_do_confirm_usage_fetch` picks the probe per the provider that
+        # actually hit (`ps.quota_provider`, stamped by the detector from the
+        # pane's live model — a rerouted Lead running codex is "codex" here
+        # even though `effective_provider_for("lead")` still says claude):
+        # claude → the profile's limit_status window, codex/gemini → the
+        # #663 `fetch_provider_usage` probe. A provider with no usable probe
+        # (opencode/kimi/cursor, or a fetch error) answers "unknown", which
+        # keeps the pre-#704 behaviour: signal (a) alone after the #595
+        # fallback timeout. Only an explicit "not exhausted" answer clears
+        # the episode as a false positive (`_on_limit_usage_denied`).
         if ps.limit_confirm_first_attempt_ts == 0.0:
             ps.limit_confirm_first_attempt_ts = now
         elif (now - ps.limit_confirm_first_attempt_ts) >= auto_resume.CONFIRM_FALLBACK_TIMEOUT_S:
@@ -767,24 +828,57 @@ class AutoResumeMixin:
 
     def _do_confirm_usage_fetch(self, project: str, role: str, config_dir: Path) -> None:
         """Runs in a background thread — network I/O, must never touch a Qt
-        widget directly. Emits `limitUsageConfirmed` so the park decision
-        itself runs back on the Qt thread."""
-        if effective_provider_for(role, project) != CLAUDE:
-            # Defensive re-check in the worker: provider selection may change
-            # after the watchdog schedules this confirmation.
-            self.limitUsageConfirmed.emit(project, role, True)
+        widget directly. Emits `limitUsageConfirmed` (or, #704,
+        `limitUsageDenied`) so the park decision itself runs back on the Qt
+        thread."""
+        key = f"{project}::{role}"
+        ps = getattr(self, "_pane_state", {}).get(key)
+        provider = (ps.quota_provider if ps is not None else "") or effective_provider_for(
+            role, project
+        )
+        verdict, utilization = confirm_verdict_for_provider(provider, config_dir)
+        if verdict == "denied":
+            self.limitUsageDenied.emit(project, role, float(utilization))
             return
-        try:
-            # Shared-state-aware: reuses a recent poller result and honours a
-            # persisted 429 backoff instead of firing an extra request that
-            # would re-arm the endpoint's penalty (see limit_status module
-            # comment). A pane that just banner-reported a limit makes fresh
-            # telemetry likely cached moments ago anyway.
-            usage = fetch_usage_shared(config_dir, max_age_s=300.0)
-        except Exception:
-            usage = None
-        confirmed = _usage_confirms_limit(usage)
-        self.limitUsageConfirmed.emit(project, role, confirmed)
+        self.limitUsageConfirmed.emit(project, role, verdict == "confirmed")
+
+    def _on_limit_usage_denied(self, project: str, role: str, utilization: float) -> None:
+        """Qt-thread slot for `limitUsageDenied` (#704): the provider's own
+        telemetry says it is NOT exhausted, so the banner match was quoted
+        text (a cockpit notice, a log the pane printed, a teammate's banner
+        echoed in a report) rather than this pane's limit. Undo everything
+        the detector recorded, arm the re-detect latch for as long as that
+        text stays on screen, and tell Lead once."""
+        key = f"{project}::{role}"
+        ps = self._pane_state.get(key)
+        if ps is None:
+            return
+        ps.limit_confirm_pending = False
+        if not ps.rate_limited_until or ps.limit_parked or ps.quota_reroute_pending:
+            return  # already cleared, or a park/reroute already committed
+        marker = ps.quota_marker
+        ps.rate_limited_until = 0.0
+        ps.quota_marker = ""
+        ps.limit_confirm_first_attempt_ts = 0.0
+        ps.limit_confirm_last_attempt_ts = 0.0
+        ps.quota_false_positive_armed = True
+        _log_event(
+            "rate_limit_false_positive",
+            role=role,
+            project=project,
+            provider=ps.quota_provider,
+            marker=marker,
+            utilization=utilization,
+        )
+        self._notify_lead(
+            project,
+            f"ℹ️ [system] {role} ({ps.quota_provider or 'claude'}) ไม่ได้ชนโควตา — "
+            f"ข้อความ usage-limit ที่เห็นบนจอเป็นข้อความที่ถูก quote (probe ยืนยันใช้ไป "
+            f"{utilization:.0f}%) ยกเลิกสถานะ stalled:quota แล้ว",
+            from_role=role,
+            note="rate_limit_false_positive",
+            kind="quota-false-positive",
+        )
 
     def _on_limit_usage_confirmed(self, project: str, role: str, confirmed: bool) -> None:
         """Qt-thread slot for `limitUsageConfirmed`. Re-validates against

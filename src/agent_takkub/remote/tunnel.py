@@ -490,7 +490,16 @@ class Tunnel:
         return self._proc.pid if self._proc is not None else None
 
     def _cloudflared_bin(self) -> str:
-        return self._config.cloudflared_bin or shutil.which("cloudflared") or "cloudflared"
+        # #710: explicit config → PATH → the copy `cloudflared_install`
+        # downloaded into DATA_HOME/bin → bare name (so the launch error
+        # names the binary instead of a blank).
+        from .cloudflared_install import resolve_cloudflared
+
+        try:
+            found = resolve_cloudflared(self._config.cloudflared_bin)
+        except Exception:
+            found = None
+        return found or self._config.cloudflared_bin or "cloudflared"
 
     def _ngrok_bin(self) -> str:
         return self._config.ngrok_bin or shutil.which("ngrok") or "ngrok"
