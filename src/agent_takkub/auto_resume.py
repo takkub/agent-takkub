@@ -23,6 +23,14 @@ from pathlib import Path
 # keeps re-hitting the limit for reasons unrelated to a normal usage window.
 MAX_PARK_ROUNDS = 3
 
+# Same budget shape for the #514 quota reroute: how many times ONE task may
+# be moved to another provider before auto-resume stops and hands the
+# decision to Lead. Reset on every fresh assign(). #699: the Lead reroute
+# looped 300+ rounds in 25 minutes on prod (close ignored → spawn "already
+# running" → takeover brief pasted into the same quota-hit pane every 5 s
+# tick) — a cap turns any such regression into a bounded, visible stop.
+MAX_REROUTE_ROUNDS = 3
+
 # If a pane hits the limit again this soon after being woken, the fresh
 # window is already exhausted too (or the task itself is pathological) —
 # stop retrying immediately instead of parking again.

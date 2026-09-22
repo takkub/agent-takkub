@@ -214,6 +214,31 @@ def _read_progress_marker(project: str, role: str) -> dict | None:
     return data if isinstance(data, dict) else None
 
 
+_TAKEOVER_BRIEF_HEAD = "[system] Lead provider takeover"
+_TAKEOVER_BRIEF_TAIL = "queued durably and delivered to this current Lead."
+
+
+def _strip_takeover_briefs(tail: str) -> str:
+    """Drop any earlier takeover brief still visible on the old Lead's
+    screen, so the next brief quotes real output instead of nesting the
+    previous brief (which nests the one before it, ...) — the #699 loop
+    grew one level per 5 s tick."""
+    if _TAKEOVER_BRIEF_HEAD not in tail:
+        return tail
+    kept: list[str] = []
+    skipping = False
+    for line in tail.splitlines():
+        if _TAKEOVER_BRIEF_HEAD in line:
+            skipping = True
+            continue
+        if skipping:
+            if _TAKEOVER_BRIEF_TAIL in line:
+                skipping = False
+            continue
+        kept.append(line)
+    return "\n".join(kept)
+
+
 def _lead_provider_takeover_brief(
     project: str, pane: AgentPane | None, hit_provider: str, new_provider: str, panes: dict
 ) -> str:
@@ -235,7 +260,7 @@ def _lead_provider_takeover_brief(
     transcript = getattr(pane, "_transcript_path", None) if pane is not None else None
     if isinstance(transcript, str) and transcript:
         lines.append(f"Previous Lead transcript: {transcript}")
-    tail = _pane_output_tail(pane)
+    tail = _strip_takeover_briefs(_pane_output_tail(pane))
     if tail:
         lines.extend(["Previous Lead's latest visible output:", "```text", tail, "```"])
     active: list[str] = []
@@ -276,6 +301,8 @@ class AutoResumeMixin:
             return  # scope guard: never touch a pane with no pending task
         if ps.limit_park_stopped or ps.limit_parked or ps.limit_confirm_pending:
             return  # already parked, already confirming, or already gave up
+        if ps.quota_reroute_pending:
+            return  # #699: a reroute is mid-flight (close → 2 s respawn timer)
 
         # Re-limited soon after being woken → the fresh window is exhausted
         # too (or the task is pathological). Stop for good instead of
@@ -327,6 +354,10 @@ class AutoResumeMixin:
             why = "ชน limit ซ้ำเร็วเกินไปหลังปลุก"
         elif reason == "no_fallback_park_disabled":
             why = "ชนโควตา, ไม่มี provider อื่นให้ reroute และ park-fallback ปิดอยู่ใน Settings"
+        elif reason == "reroute_round_cap":
+            why = f"ย้าย provider ครบ {auto_resume.MAX_REROUTE_ROUNDS} รอบแล้วยังชนโควตา"
+        elif reason == "respawn_noop":
+            why = "reroute ปิด pane เดิมไม่สำเร็จ (pane ยังรันอยู่) — หยุดก่อนจะวน"
         else:
             why = f"park/wake ครบ {auto_resume.MAX_PARK_ROUNDS} รอบแล้ว"
         pane = self._panes_by_project.get(project, {}).get(role)
@@ -386,6 +417,12 @@ class AutoResumeMixin:
 
             provider_state.set_quota_reset_at(hit_provider, reset_at)
             self._schedule_provider_quota_reset_notice(project, hit_provider, reset_at)
+
+        if ps.quota_reroute_count >= auto_resume.MAX_REROUTE_ROUNDS:
+            # #699: bounded like park rounds — a task that keeps hitting a
+            # wall on every provider stops here, visibly, instead of cycling.
+            self._give_up_auto_resume(project, role, ps, reason="reroute_round_cap")
+            return
 
         candidate = self._pick_reroute_provider(project, role, ps, hit_provider)
         if candidate is not None:
@@ -502,16 +539,26 @@ class AutoResumeMixin:
                 project, lead_msg, from_role=role, note="quota_rerouted", kind="quota-rerouted"
             )
 
-        self.close(
-            role,
-            project=project,
-            suppress_pipeline=True,
-            suppress_auto_chain=True,
-            keep_queue=True,
-        )
+        ps.quota_reroute_pending = True
+        close_kwargs: dict = {
+            "project": project,
+            "suppress_pipeline": True,
+            "suppress_auto_chain": True,
+            "keep_queue": True,
+        }
+        if is_lead:
+            # #699: Lead is close-protected (`close()` ignores it without
+            # force). The pre-2.1.30 reroute never passed force, so the
+            # quota-hit Lead stayed up, `spawn` answered "already running"
+            # and the takeover brief was pasted into the SAME pane every
+            # 5 s tick — 300+ rounds on prod before anyone noticed.
+            close_kwargs["force"] = True
+            close_kwargs["reason"] = "quota_reroute"
+        self.close(role, **close_kwargs)
 
         def _do_reroute_respawn() -> None:
             _ps_r = self._ps(key)
+            _ps_r.quota_reroute_pending = False
             _ps_r.provider_override = new_provider
             _ps_r.last_assigned_task = task
             _ps_r.quota_reroute_count = reroute_count
@@ -548,6 +595,20 @@ class AutoResumeMixin:
                 msg=msg[:160],
                 to_provider=new_provider,
             )
+            if ok and msg.endswith("already running"):
+                # #699: the close above did not take — the quota-hit pane is
+                # still the one running, so nothing moved provider. Sending
+                # the task/takeover brief into it would just repeat forever;
+                # stop this episode and let Lead decide.
+                _log_event(
+                    "quota_reroute_respawn_noop",
+                    role=role,
+                    project=project,
+                    to_provider=new_provider,
+                )
+                _ps_r.limit_parked = False
+                self._give_up_auto_resume(project, role, _ps_r, reason="respawn_noop")
+                return
             if not ok:
                 self._pane_state.pop(key, None)
                 self._notify_lead(

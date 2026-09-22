@@ -79,9 +79,53 @@ class TestCodexUsageTargets:
         )
 
         targets = pu.codex_usage_targets()
+        # #700: `~/.codex` is a separate home here (the cockpit's active home
+        # is `named`), so it must not share the "default" label.
         assert [(target.account, target.config_dir) for target in targets] == [
             ("work", named.resolve()),
-            ("default", standard.resolve()),
+            ("local (~/.codex)", standard.resolve()),
+        ]
+
+    def test_standard_home_is_default_when_it_is_the_active_home(self, tmp_path, monkeypatch):
+        standard = tmp_path / ".codex"
+        standard.mkdir()
+        (standard / "auth.json").write_text("{}", encoding="utf-8")
+        monkeypatch.setattr(pu.Path, "home", classmethod(lambda _cls: tmp_path))
+        monkeypatch.setattr(codex_helper, "codex_home", lambda: standard)
+        from agent_takkub import user_profile
+
+        monkeypatch.setattr(user_profile, "profiles_for_provider", lambda provider: [])
+
+        targets = pu.codex_usage_targets()
+        assert [(t.account, t.config_dir) for t in targets] == [("default", standard.resolve())]
+
+    def test_identical_quota_rows_merge_into_one_card(self, tmp_path, monkeypatch):
+        """#700 (prod 2026-09-22): cockpit `codex-home` and `~/.codex` logged
+        into the same OpenAI account rendered two identical cards."""
+        first, second, third = tmp_path / "one", tmp_path / "two", tmp_path / "three"
+        targets = (
+            pu.UsageAccountTarget("default", first),
+            pu.UsageAccountTarget("local (~/.codex)", second),
+            pu.UsageAccountTarget("monchai500", third),
+        )
+        monkeypatch.setattr(pu, "codex_usage_targets", lambda: targets)
+        store = pu.ProviderUsageStore()
+        same = dict(
+            provider="codex",
+            status="active",
+            plan="plus",
+            utilization=100,
+            windows=[{"label": "5h", "used_percent": 100}],
+        )
+        store._account_cache[("codex", str(first))] = pu.ProviderUsage(**same)
+        store._account_cache[("codex", str(second))] = pu.ProviderUsage(**same)
+        store._account_cache[("codex", str(third))] = pu.ProviderUsage(
+            provider="codex", status="active", plan="plus", utilization=0
+        )
+        rows = [row for row in store.get_all_account_usages() if row.provider == "codex"]
+        assert [(row.account, row.utilization) for row in rows] == [
+            ("default + local (~/.codex)", 100),
+            ("monchai500", 0),
         ]
 
     def test_store_returns_one_cached_row_per_target(self, tmp_path, monkeypatch):

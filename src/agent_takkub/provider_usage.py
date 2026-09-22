@@ -1291,10 +1291,49 @@ def codex_usage_targets() -> tuple[UsageAccountTarget, ...]:
             authenticated = False
         if not authenticated:
             continue
-        label = "default" if home.name == ".codex" else f"local ({home.name})"
+        # #700: `~/.codex` is only "default" when it IS the cockpit's active
+        # home (then `add` above already registered it and this is a no-op).
+        # Otherwise it is a second, separately logged-in home — labelling it
+        # "default" too rendered two identical "Codex · default · plus" cards
+        # on a machine whose cockpit home lives under ~/.agent-takkub.
+        label = "local (~/.codex)" if home.name == ".codex" else f"local ({home.name})"
         add(label, home)
 
     return tuple(candidates.values())
+
+
+def _usage_fingerprint(usage: ProviderUsage) -> tuple:
+    return (
+        usage.provider,
+        usage.status,
+        usage.plan,
+        usage.utilization,
+        json.dumps(usage.windows, sort_keys=True, default=str),
+        usage.error,
+    )
+
+
+def _merge_identical_account_rows(rows: list[ProviderUsage]) -> list[ProviderUsage]:
+    """#700: two Codex homes logged into the SAME OpenAI account report the
+    same quota window byte-for-byte — one card labelled with both homes
+    (``default + local (~/.codex)``) says everything two identical cards
+    said, without the meter looking broken. Rows that differ in any
+    quota-bearing field stay separate; non-codex rows pass through."""
+    merged: list[ProviderUsage] = []
+    seen: dict[tuple, int] = {}
+    for row in rows:
+        if row.provider != "codex" or not row.account:
+            merged.append(row)
+            continue
+        key = _usage_fingerprint(row)
+        idx = seen.get(key)
+        if idx is None:
+            seen[key] = len(merged)
+            merged.append(row)
+            continue
+        prev = merged[idx]
+        merged[idx] = dataclasses.replace(prev, account=f"{prev.account} + {row.account}")
+    return merged
 
 
 def fetch_provider_usage(provider: str, config_dir: Path | None = None) -> ProviderUsage:
@@ -1399,7 +1438,7 @@ class ProviderUsageStore:
                 if usage is None:
                     usage = ProviderUsage(provider=provider, status=STATUS_LOADING)
                 rows.append(dataclasses.replace(usage, account=target.account))
-        return rows
+        return _merge_identical_account_rows(rows)
 
     def refresh_now(self, provider: str, config_dir: Path | str | None = None) -> None:
         """Fire a background fetch for one provider (or, with *config_dir*,

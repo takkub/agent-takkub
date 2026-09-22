@@ -1053,6 +1053,12 @@ class PaneState:
     # spawn time (provider_override/effective_provider_for) vs. because it
     # fled a quota hit mid-task.
     quota_reroute_from: str = ""
+    # quota_reroute_pending: a #514 reroute has closed (or tried to close)
+    # this pane and its 2 s respawn timer has not run yet. The watchdog
+    # tick keeps calling `_maybe_auto_resume_park` on the still-visible
+    # quota banner meanwhile; without this latch a close that was refused
+    # (#699: Lead is close-protected) re-entered the reroute every tick.
+    quota_reroute_pending: bool = False
     # shell_open_dialog_notified: True once the transcript watchdog has
     # warned Lead that this pane's transcript shows the Windows "How do you
     # want to open this file?" ShellExecute marker (issue #104) — a shell

@@ -1093,6 +1093,87 @@ class TestReroutePaneToProvider:
         assert "backend: working (gemini)" in brief
         assert "queued durably" in brief
 
+    def test_lead_reroute_forces_the_protected_close(self) -> None:
+        """#699 (prod 2026-09-22, 300+ rounds in 25 min): `close()` ignores
+        Lead without force, so the quota-hit Lead never went away."""
+        o = self._orch_with_respawn_hooks()
+        ps = o._ps("proj::lead")
+        o._panes_by_project["proj"] = {"lead": _pane_alive()}
+        with patch(
+            "agent_takkub.limit_autoresume.QTimer.singleShot",
+            side_effect=lambda _ms, cb: cb(),
+        ):
+            o._reroute_pane_to_provider("proj", "lead", ps, "gemini", "codex", time.time() + 3600)
+        assert o.close.call_args.args == ("lead",)
+        assert o.close.call_args.kwargs["force"] is True
+        assert o.close.call_args.kwargs["reason"] == "quota_reroute"
+        assert o.close.call_args.kwargs["keep_queue"] is True
+        assert o._ps("proj::lead").quota_reroute_pending is False
+
+    def test_already_running_respawn_stops_instead_of_looping(self) -> None:
+        """#699: when the close did not take, the task/brief must NOT be
+        pasted into the same pane again — give up loudly."""
+        o = self._orch_with_respawn_hooks()
+        o.spawn = MagicMock(return_value=(True, "lead already running"))
+        o._check_uncommitted_async = MagicMock()
+        ps = o._ps("proj::lead")
+        o._panes_by_project["proj"] = {"lead": _pane_alive()}
+        with patch(
+            "agent_takkub.limit_autoresume.QTimer.singleShot",
+            side_effect=lambda _ms, cb: cb(),
+        ):
+            o._reroute_pane_to_provider("proj", "lead", ps, "gemini", "codex", time.time() + 3600)
+        o._send_when_ready.assert_not_called()
+        assert o._ps("proj::lead").limit_park_stopped is True
+        assert o._notify_lead.call_args.kwargs["note"] == "respawn_noop"
+
+    def test_pending_reroute_blocks_the_watchdog_reentry(self, monkeypatch) -> None:
+        monkeypatch.setattr(auto_resume, "is_enabled", lambda: True)
+        o = _bare_orch()
+        ps = o._ps("proj::lead")
+        ps.rate_limited_until = time.time() + 3600
+        ps.quota_reroute_pending = True
+        with patch.object(o, "_reroute_or_park") as reroute:
+            o._maybe_auto_resume_park("proj", "lead", _pane_alive(), time.time())
+        reroute.assert_not_called()
+
+    def test_reroute_round_cap_gives_up(self, monkeypatch) -> None:
+        monkeypatch.setattr(auto_resume, "park_fallback_enabled", lambda: True)
+        o = _bare_orch()
+        o._check_uncommitted_async = MagicMock()
+        ps = o._ps("proj::backend")
+        ps.last_assigned_task = "t"
+        ps.quota_provider = "codex"
+        ps.quota_reroute_count = auto_resume.MAX_REROUTE_ROUNDS
+        with (
+            patch.object(o, "_pick_reroute_provider", return_value="gemini") as pick,
+            patch.object(o, "_reroute_pane_to_provider") as reroute,
+        ):
+            o._reroute_or_park("proj", "backend", ps)
+        pick.assert_not_called()
+        reroute.assert_not_called()
+        assert ps.limit_park_stopped is True
+        assert o._notify_lead.call_args.kwargs["note"] == "reroute_round_cap"
+
+    def test_takeover_brief_does_not_nest_a_previous_brief(self) -> None:
+        from agent_takkub.limit_autoresume import _lead_provider_takeover_brief
+
+        lead = _pane_alive()
+        lead.session.display_lines.return_value = [
+            "real output before",
+            "[system] Lead provider takeover",
+            "The previous Lead (codex) hit its quota. ...",
+            "Roles still in flight:",
+            "- frontend: working (gemini)",
+            "Reports that finish during this handover are queued durably and delivered to this current Lead.",
+            "› Ask Codex to do anything",
+        ]
+        brief = _lead_provider_takeover_brief("proj", lead, "codex", "gemini", {})
+        assert brief.count("[system] Lead provider takeover") == 1
+        assert "real output before" in brief
+        assert "› Ask Codex to do anything" in brief
+        assert "The previous Lead (codex) hit its quota. ..." not in brief
+
     def test_preserves_distinct_from_across_the_respawn(self) -> None:
         o = self._orch_with_respawn_hooks()
         ps = o._ps("proj::backend")
