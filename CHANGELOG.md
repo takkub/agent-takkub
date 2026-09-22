@@ -4,6 +4,15 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 
 ## [vNEXT]
 
+### Fixed
+
+- **#698: "Lead ใช้ provider → Claude" ไม่มีผล Lead restart แล้วกลับมาเป็น codex** —
+  `save_role_overrides` ทิ้งค่า `claude` ทุกครั้งในฐานะ "default โดยนัย" แต่ตั้งแต่ #338
+  default จริงของ `provider_for` คือ pin ใน role-models (`aliases-projects.json`) — lead ที่
+  ถูก pin เป็น codex ผ่าน model picker จึง fallback กลับไป codex ทุกครั้งที่เลือก Claude จากเมนู
+  ตอนนี้ claude ถูกเก็บเป็น override จริงเมื่อ fallback ไม่ตรง (project scope → routing bucket,
+  global scope → ถอด pin เก่าทิ้งพร้อม model/effort ของ CLI ที่ย้ายออก) + regression test 2 ชั้น
+
 ## [v2.1.28] - 2026-09-21
 
 ### Fixed

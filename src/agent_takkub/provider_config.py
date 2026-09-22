@@ -272,10 +272,16 @@ def save_role_overrides(
     """Persist only real overrides from a page payload (per-project when
     ``project`` given, else global).
 
-    Drops forced roles (lead/codex/gemini — their CLI is fixed) and claude
+    Drops forced roles (codex/gemini — their CLI is fixed) and claude
     defaults (claude is the implicit default, storing it adds noise), then
     writes the result via :func:`save_providers`. Mirrors the old
     RoleProviderDialog save behavior so the file stays minimal.
+
+    "Implicit default" means what `provider_for` resolves to with no
+    override — since #338 that is the role-models pin, not claude. A claude
+    pick for a role the model picker has on another CLI is therefore a real
+    override and is persisted; dropping it made "Lead ใช้ provider → Claude"
+    a silent no-op (Lead respawned on codex twice, 2026-09-22).
 
     ``scope`` — when given, this call only owns overrides for roles in
     ``scope``: any pre-existing override for a role OUTSIDE ``scope`` (e.g. a
@@ -291,8 +297,20 @@ def save_role_overrides(
     for role, provider in (mapping or {}).items():
         r = str(role).lower().strip()
         p = str(provider).lower().strip()
-        if r in FORCED_ROLES or p == CLAUDE or p not in VALID_PROVIDERS:
+        if r in FORCED_ROLES or p not in VALID_PROVIDERS:
             continue
+        if p == CLAUDE:
+            if _provider_from_role_models(r, project) == CLAUDE:
+                continue
+            if not project:
+                # Global scope: the role-models pin IS the global store, so
+                # drop it (model/effort included — they were picked for the
+                # CLI the user just moved off) and let the baseline apply,
+                # instead of storing a claude entry beside a stale pin.
+                from . import role_models
+
+                role_models.clear_model(r)
+                continue
         overrides[r] = p
     save_providers(overrides, project)
 

@@ -98,6 +98,35 @@ class TestProviderFor:
 
         assert provider_config.provider_for("frontend") == "claude"
 
+    def test_explicit_claude_override_beats_a_role_models_pin(self) -> None:
+        """2026-09-22: `save_role_overrides` dropped claude as "the implicit
+        default", but since #338 the default is whatever role-models says —
+        so choosing claude for a role the model picker had pinned on codex
+        was a silent no-op (Lead kept respawning on codex). An explicit claude
+        pick must take effect whenever the fallback would disagree: in global
+        scope the stale pin is dropped (model included — it was picked for
+        the CLI the user just moved off); in project scope an explicit
+        ``claude`` lands in the project's routing bucket."""
+        from agent_takkub import role_models
+
+        _write_role_models({"lead": {"provider": "codex", "model": "gpt-5.6-sol"}})
+        assert provider_config.provider_for("lead") == "codex"
+
+        provider_config.save_role_overrides({"lead": "claude"}, scope=["lead"])
+
+        assert provider_config.provider_for("lead") == "claude"
+        assert "lead" not in role_models.all_models()
+
+        role_models.set_model("lead", "codex", "gpt-5.6-sol", project="proj")
+        assert provider_config.provider_for("lead", "proj") == "codex"
+        provider_config.save_role_overrides({"lead": "claude"}, "proj", scope=["lead"])
+        assert provider_config.provider_for("lead", "proj") == "claude"
+        assert provider_config.load_providers("proj").get("lead") == "claude"
+        # A role the fallback already resolves to claude stays implicit —
+        # the file keeps its minimal shape.
+        provider_config.save_role_overrides({"frontend": "claude"}, scope=["frontend"])
+        assert "frontend" not in provider_config.load_providers()
+
     def test_codex_role_is_always_codex(self, redirect_config_path: Path) -> None:
         # User mapping a "codex" key to "claude" would be nonsensical;
         # the role's whole point is codex.

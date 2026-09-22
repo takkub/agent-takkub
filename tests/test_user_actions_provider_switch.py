@@ -44,6 +44,29 @@ def test_switching_default_gemini_profile_updates_lead_and_restarts(
     window._restart_lead_for_active_project.assert_called_once_with()
 
 
+def test_switching_back_to_claude_wins_over_role_models_pin(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """2026-09-22 (dev cockpit, project agent-takkub): Lead had been pinned
+    on codex through the model picker (`aliases-projects.json`), so picking
+    "Lead ใช้ provider → Claude" wrote nothing — claude was treated as the
+    implicit default and dropped from routing.json — and `provider_for` fell
+    through to the role-models pin. Lead restarted on codex, twice."""
+    from agent_takkub import role_models
+
+    monkeypatch.setattr(QMessageBox, "question", lambda *_a, **_kw: QMessageBox.StandardButton.Ok)
+    role_models.set_model("lead", "codex", "gpt-5.6-sol", project="proj")
+    assert provider_config.provider_for("lead", "proj") == "codex"
+    window = _fake_window()
+
+    UserActionsMixin._on_user_changed(window, "default", "claude")
+
+    assert provider_config.provider_for("lead", "proj") == "claude"
+    assert provider_config.effective_provider_for("lead", "proj") == "claude"
+    assert user_profile.default_provider("proj") == "claude"
+    window._restart_lead_for_active_project.assert_called_once_with()
+
+
 def test_cancel_keeps_existing_provider(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         QMessageBox, "question", lambda *_a, **_kw: QMessageBox.StandardButton.Cancel
