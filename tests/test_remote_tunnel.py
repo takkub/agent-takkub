@@ -11,6 +11,7 @@ import json
 import os
 import sys
 import types
+from pathlib import Path
 
 import psutil
 import pytest
@@ -422,6 +423,14 @@ class TestQuickTunnelMode:
         monkeypatch.setattr(tunnel, "_spawn", _fake_spawn)
         monkeypatch.setattr(tunnel.Tunnel, "_own_job_if_windows", lambda self: None)
         monkeypatch.setattr("shutil.which", lambda name: None)
+        # #710: a copy the cockpit downloaded into DATA_HOME/bin is the third
+        # candidate — point it at nothing so this machine's real install
+        # (CI runners have one) can't change the precedence under test.
+        from agent_takkub.remote import cloudflared_install
+
+        monkeypatch.setattr(
+            cloudflared_install, "installed_path", lambda: Path("/nonexistent/cloudflared")
+        )
         return captured
 
     def test_needs_no_credentials_or_public_url(self, monkeypatch):

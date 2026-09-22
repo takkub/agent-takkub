@@ -80,6 +80,8 @@ def _verify(binary: Path) -> bool:
             [str(binary), "--version"],
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=_VERIFY_TIMEOUT_S,
             creationflags=SUBPROCESS_NO_WINDOW,
         )
@@ -96,8 +98,12 @@ def resolve_cloudflared(
 ) -> str | None:
     """The cloudflared executable to run, or None when none is available
     and *download* is False. With *download* True a missing binary is
-    fetched (see module docstring); `CloudflaredInstallError` on failure."""
-    if explicit and Path(explicit).is_file():
+    fetched (see module docstring); `CloudflaredInstallError` on failure.
+
+    An explicit path wins as given (same precedence `Tunnel._cloudflared_bin`
+    always had) — the user Browsed to it, so a wrong path should fail
+    loudly at launch rather than be silently replaced by another copy."""
+    if explicit:
         return explicit
     on_path = shutil.which("cloudflared")
     if on_path:
