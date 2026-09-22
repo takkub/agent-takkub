@@ -120,6 +120,9 @@ class TestShimRefusesBrokenInterpreter:
 
     @pytest.mark.skipif(not _WIN, reason="cmd.exe shim")
     def test_cmd_shim_runs_a_healthy_interpreter(self, tmp_path: Path) -> None:
+        """Also covers a NON-venv interpreter (CI runs the suite from the
+        hosted-toolcache python): with no pyvenv.cfg the repair hint is a
+        plain sentence, and it must still survive cmd.exe's parser."""
         py = Path(sys.executable).with_name("python.exe")
         if not py.exists():
             pytest.skip("no console python.exe next to sys.executable")

@@ -96,8 +96,11 @@ def python_executable_problem(py_path: Path, *, platform: str | None = None) -> 
 
 def interpreter_dir(executable: str | Path | None = None) -> Path:
     """The script directory of the interpreter this process runs from
-    (``venv/Scripts`` on Windows, ``venv/bin`` on POSIX)."""
-    return Path(executable or sys.executable).resolve().parent
+    (``venv/Scripts`` on Windows, ``venv/bin`` on POSIX). Resolves the
+    DIRECTORY, never the file: a POSIX venv's ``bin/python`` is a symlink to
+    the base interpreter, and following it would report the base install's
+    ``bin/`` instead of the venv's."""
+    return Path(executable or sys.executable).parent.resolve()
 
 
 def venv_root(executable: str | Path | None = None) -> Path | None:
@@ -218,7 +221,11 @@ def repair_sources(path: Path) -> list[Path]:
 
 def repair_hint(path: Path) -> str:
     srcs = repair_sources(path)
-    src = str(srcs[0]) if srcs else "<base python of this venv (see pyvenv.cfg home)>"
+    # Plain words only: `cli_shim` embeds this in a cmd.exe `if (...)` block,
+    # where `<`, `>` or `)` in an echo line break the parse (CI, 2026-09-22).
+    src = (
+        str(srcs[0]) if srcs else "the base python this venv was created from, per pyvenv.cfg home"
+    )
     if sys.platform == "win32":
         return (
             f"Rename-Item '{path}' '{path.name}.clobbered.bak'; Copy-Item '{src}' '{path}' "

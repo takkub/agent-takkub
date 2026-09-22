@@ -21,6 +21,7 @@ user's PATH says, not to the cockpit.
 from __future__ import annotations
 
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -38,7 +39,10 @@ def pane_bin_dir(data_home: Path, repo_root: Path) -> Path:
 
 
 def _cmd_shim(py: Path) -> str:
-    hint = repair_hint(py).replace("%", "%%").replace("—", "-")
+    # The hint sits inside `if ( ... )` blocks: every cmd.exe metacharacter
+    # must be caret-escaped or the block fails to parse ("... was unexpected
+    # at this time") — seen on CI with a hint that carried `<`/`>`/`(`.
+    hint = re.sub(r"([<>()&|^])", r"^\1", repair_hint(py).replace("%", "%%").replace("—", "-"))
     py_win = str(py)
     return "\r\n".join(
         [

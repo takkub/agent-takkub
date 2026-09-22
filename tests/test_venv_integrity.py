@@ -138,7 +138,9 @@ class TestExecutableDirs:
     def test_is_inside_any_matches_descendants_only(self, tmp_path: Path) -> None:
         root, py, _home = _fake_venv(tmp_path)
         dirs = frozenset({root.resolve()})
-        assert vi.is_inside_any(py.resolve(), dirs) == root.resolve()
+        # Resolve the directory, not the file — on POSIX `bin/python` is a
+        # symlink out of the venv (same contract as `interpreter_dir`).
+        assert vi.is_inside_any(py.parent.resolve() / py.name, dirs) == root.resolve()
         assert vi.is_inside_any((root / "Lib" / "site-packages" / "x.pth").resolve(), dirs)
         assert vi.is_inside_any(tmp_path.resolve(), dirs) is None
         # A sibling that merely shares the prefix string is NOT inside.
