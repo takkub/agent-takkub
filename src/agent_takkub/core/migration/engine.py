@@ -146,6 +146,11 @@ def _domain_target_problems(specs: list[tuple[Path, tuple[str, ...]]]) -> list[s
         # true only when the key is absent, not when it holds a
         # legitimately-impossible value.
         missing = [k for k in required_keys if k not in data or data[k] is None]
+        if missing and required_keys == ("data",) and ("fired" in data or "signatures" in data):
+            # A legacy bare `RegistryCopyStep` target (`state/issues/dedup.json` =
+            # `{"fired", "signatures"}`) written before envelope wrap was restored
+            # is a live store, not a broken envelope.
+            missing = []
         if missing:
             problems.append(f"missing required key(s) {missing}: {path}")
     return problems

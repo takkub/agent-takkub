@@ -143,7 +143,11 @@ def _load_state() -> dict:
     from .core.storage.legacy_reader import read_json
 
     data = read_json(path())
-    return data if isinstance(data, dict) else {}
+    if isinstance(data, dict):
+        if "data" in data and isinstance(data["data"], dict):
+            return data["data"]
+        return data
+    return {}
 
 
 def _save_state(state: dict) -> bool:

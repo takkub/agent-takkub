@@ -74,7 +74,14 @@ def write_json_atomic(path: Path, payload: dict) -> None:
 
 def _target_has_data(target: Path) -> bool:
     doc = read_json(target)
-    return bool(isinstance(doc, dict) and doc.get("data"))
+    if not isinstance(doc, dict):
+        return False
+    if bool(doc.get("data")):
+        return True
+    # Bare legacy dedup store written before #504 envelope wrap was restored
+    if "fired" in doc or "signatures" in doc:
+        return bool(doc.get("fired") or doc.get("signatures"))
+    return False
 
 
 @dataclass
@@ -195,7 +202,10 @@ class RegistryCopyStep:
 
     def validate(self) -> StepReport:
         mismatched = [
-            m.name for m in self.mappings if read_json(m.target).get("data") != read_json(m.source)
+            m.name
+            for m in self.mappings
+            if not self._mapping_retired(m)
+            and read_json(m.target).get("data") != read_json(m.source)
         ]
         ok = not mismatched
         return StepReport(
@@ -216,7 +226,9 @@ class RegistryCopyStep:
                         m.target.unlink(missing_ok=True)
                     # else: #605 M1 — a retired ("kept") target that was
                     # never backed up (e.g. backup dir pruned externally)
-                    # must be preserved, not deleted; no-op.
+                    # must be preserved, not deleted; no-op. An empty
+                    # `{"data": {}}` envelope is what apply itself writes for
+                    # a source that never existed — that one IS undone.
                 else:
                     self.backups.restore(backup, m.target)
             except OSError as e:
