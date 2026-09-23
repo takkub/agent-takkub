@@ -13,7 +13,9 @@ own auth override — setting a base URL for the ``openrouter`` profile makes
 its normal Claude CLI login. (Previously a single global file at
 ``~/.takkub/claude-auth.json`` was applied to every pane, so one base URL
 turned every project into API mode — that file is now read only as a
-back-compat fallback for the default profile until it is re-saved.)
+back-compat fallback for the default profile until it is re-saved.) A pane
+spawned on the project's curated copy of the profile (#563) still reads the
+base profile's file — see ``_profile_dir_for_pane``.
 
 Besides the three structured fields (base_url / api_key / auth_token), an
 optional `extra_env` map lets the user inject arbitrary NAME=value env vars
@@ -163,16 +165,41 @@ def save_claude_auth(config: ClaudeAuthConfig, config_dir: Path | str | None = N
         raise
 
 
+def _profile_dir_for_pane(env: dict[str, str]) -> Path | str | None:
+    """The profile dir whose auth file governs the pane described by *env*.
+
+    ``CLAUDE_CONFIG_DIR`` names the pane's profile — except when it is the
+    project's curated dir (#563, ``pane_env.inject_curated_claude_config_dir``),
+    which mirrors credentials/settings from the base profile but not this
+    file: Settings saves it to the profile's base dir, so that is where it
+    must be read from. Any other dir (base profile, a V2 pool account's own
+    home) is taken as-is. Never raises.
+    """
+    config_dir = env.get("CLAUDE_CONFIG_DIR") or None
+    project = (env.get("TAKKUB_PROJECT") or "").strip()
+    if not config_dir or not project:
+        return config_dir
+    try:
+        from .user_profile import config_dir_for, curated_config_dir_for
+
+        if Path(config_dir).resolve() == curated_config_dir_for(project).resolve():
+            return config_dir_for(project)
+    except Exception:
+        pass
+    return config_dir
+
+
 def apply_claude_auth_overrides(env: dict[str, str]) -> None:
     """Mutate *env* with the auth override for *this pane's* profile.
 
     The pane's profile is identified by ``CLAUDE_CONFIG_DIR`` (already injected
     by ``inject_user_profile_env`` for non-default profiles; absent = default
-    profile → ``~/.claude``). Only that profile's auth file is applied, so a
-    base URL set for one profile never leaks into another's panes.
+    profile → ``~/.claude``), mapped back to the profile's base dir when the
+    pane runs on the project's curated copy (see ``_profile_dir_for_pane``).
+    Only that profile's auth file is applied, so a base URL set for one
+    profile never leaks into another's panes.
 
     Blank config values deliberately do nothing, preserving Claude Code's
     default auth/login behavior and any parent env already present.
     """
-    config_dir = env.get("CLAUDE_CONFIG_DIR") or None
-    env.update(load_claude_auth(config_dir).active_env())
+    env.update(load_claude_auth(_profile_dir_for_pane(env)).active_env())

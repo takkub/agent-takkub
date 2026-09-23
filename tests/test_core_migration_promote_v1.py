@@ -843,11 +843,13 @@ def test_restore_v1_preserves_current_file_instead_of_silently_discarding_it(
 
 
 def test_archive_picks_up_v1_files_shared_with_a_v2_top_level_directory(tmp_path, journal_backups):
-    """#504 H7 `shared_legacy`: `agents/<role>.md` and
-    `projects/<slug>/role-providers.json` are real V1 leftovers living one
-    level inside a directory name V2 also owns — the whole-directory skip
-    must not make them invisible to archive/`_pending()`/`validate()`
-    forever."""
+    """#504 H7 `shared_legacy`: `projects/<slug>/role-providers.json` is a
+    real V1 leftover living one level inside a directory name V2 also owns
+    — the whole-directory skip must not make it invisible to archive/
+    `_pending()`/`validate()` forever. `agents/<role>.md` is NOT one of
+    those (2026-09-23 review, idx 6): it is the live custom-role file spawn
+    reads, so it must survive untouched — see
+    `test_archive_never_sweeps_a_live_custom_role_md` below."""
     journal, backups = journal_backups
     data_home = tmp_path / "data_home"
     (data_home / "agents").mkdir(parents=True)
@@ -864,7 +866,7 @@ def test_archive_picks_up_v1_files_shared_with_a_v2_top_level_directory(tmp_path
 
     report = step.apply()
     assert report.ok, report.summary
-    assert not (data_home / "agents" / "custom-role.md").exists()
+    assert (data_home / "agents" / "custom-role.md").read_text(encoding="utf-8") == "role md"
     assert not (data_home / "projects" / "demo" / "role-providers.json").exists()
     assert (data_home / "agents" / "custom" / "registry.json").exists()
     assert (data_home / "projects" / "demo" / "project.json").exists()
@@ -1020,11 +1022,13 @@ def test_archive_delete_phase_failure_leaves_only_the_denied_entry_duplicate(
     journal, backups = journal_backups
     data_home = tmp_path / "data_home"
     data_home.mkdir()
-    (data_home / "a.json").write_text("unique-a", encoding="utf-8")
-    (data_home / "b.json").write_text("unique-b", encoding="utf-8")
+    # Two real V1 names (archive candidates are an allow-list) that sort
+    # in this order, so the second one is the denied removal.
+    (data_home / "autoresume.json").write_text("unique-a", encoding="utf-8")
+    (data_home / "custom-roles.json").write_text("unique-b", encoding="utf-8")
 
     real_unlink = Path.unlink
-    target = data_home / "b.json"
+    target = data_home / "custom-roles.json"
 
     def _fail_second_remove(self, *a, **k):
         if self == target:
@@ -1036,12 +1040,12 @@ def test_archive_delete_phase_failure_leaves_only_the_denied_entry_duplicate(
     report = step.apply()
 
     assert not report.ok
-    # `a.json`'s own removal succeeded — stays pruned, source gone.
-    assert not (data_home / "a.json").exists()
-    # `b.json`'s removal was denied — DUPLICATE: both copies intact.
-    assert (data_home / "b.json").read_text(encoding="utf-8") == "unique-b"
-    assert len(_every_copy(data_home, "a.json")) >= 1
-    assert len(_every_copy(data_home, "b.json")) >= 1
+    # `autoresume.json`'s own removal succeeded — stays pruned, source gone.
+    assert not (data_home / "autoresume.json").exists()
+    # `custom-roles.json`'s removal was denied — DUPLICATE: both copies intact.
+    assert (data_home / "custom-roles.json").read_text(encoding="utf-8") == "unique-b"
+    assert len(_every_copy(data_home, "autoresume.json")) >= 1
+    assert len(_every_copy(data_home, "custom-roles.json")) >= 1
 
 
 def test_promote_rollback_delete_phase_failure_leaves_only_the_denied_entry_duplicate(
@@ -1654,12 +1658,12 @@ def test_restore_v1_cli_multi_generation_undo_reverts_to_command_entry_state(
     archive = ArchiveV1LegacyStep(journal=journal, backups=backups, data_home=data_home)
 
     # Three separate generations that all happen to archive a file at the
-    # SAME top-level name ("same.json") at different points in time.
+    # SAME top-level V1 name ("projects.json") at different points in time.
     for value in ("generation-0", "generation-1", "generation-2"):
-        (data_home / "same.json").write_text(value, encoding="utf-8")
+        (data_home / "projects.json").write_text(value, encoding="utf-8")
         assert archive.apply().ok
 
-    (data_home / "same.json").write_text("CURRENT", encoding="utf-8")
+    (data_home / "projects.json").write_text("CURRENT", encoding="utf-8")
 
     import agent_takkub.core.migration.promote_v1 as promote_mod
 
@@ -1677,7 +1681,7 @@ def test_restore_v1_cli_multi_generation_undo_reverts_to_command_entry_state(
     reports = _cmd_migrate_restore_v1(engine, Namespace(archive_ts=None))
 
     assert not all(r.ok for r in reports)
-    assert (data_home / "same.json").read_text(encoding="utf-8") == "CURRENT"
+    assert (data_home / "projects.json").read_text(encoding="utf-8") == "CURRENT"
 
 
 # ---------------------------------------------------------------------------
@@ -2035,3 +2039,371 @@ def test_os_junk_at_top_level_does_not_block_validate_after_real_data_archived(
 
     validate_report = step.validate()
     assert validate_report.ok, validate_report.summary
+
+
+# ---------------------------------------------------------------------------
+# 2026-09-23 system review — promote_v1 data-safety findings idx 6/7/8
+# (docs/audit/2026-09-22 system review, batch 2 "confirmed" set).
+# ---------------------------------------------------------------------------
+
+# Every live top-level store a running installed cockpit (SETTINGS_HOME ==
+# DATA_HOME) writes beside the V1 leftovers — the exact set the prod
+# 2026-09-11 archive generation was found to have swept.
+_LIVE_TOP_LEVEL_FILES = (
+    "remote.json",
+    "theme-settings.json",
+    "performance-settings.json",
+    "provider-quota.json",
+    "plan.json",
+    "response-language.json",
+    "park-fallback.json",
+    "claude-auth.json",
+)
+_LIVE_TOP_LEVEL_DIRS = (
+    "bin",
+    "context",
+    "resilience",
+    "graft-graphs",
+    "graft-staging",
+    "artifacts",
+)
+
+
+def _seed_live_state(data_home: Path) -> None:
+    data_home.mkdir(parents=True, exist_ok=True)
+    for name in _LIVE_TOP_LEVEL_FILES:
+        (data_home / name).write_text(f'{{"live": "{name}"}}', encoding="utf-8")
+    for name in _LIVE_TOP_LEVEL_DIRS:
+        (data_home / name).mkdir()
+        (data_home / name / "payload.bin").write_bytes(b"live-" + name.encode())
+
+
+def _assert_live_state_untouched(data_home: Path) -> None:
+    for name in _LIVE_TOP_LEVEL_FILES:
+        assert (data_home / name).read_text(encoding="utf-8") == f'{{"live": "{name}"}}', name
+    for name in _LIVE_TOP_LEVEL_DIRS:
+        assert (data_home / name / "payload.bin").read_bytes() == b"live-" + name.encode(), name
+
+
+def _archive_wal(data_home: Path) -> Path:
+    return data_home / "backups" / "archive-v1-legacy-wal.json"
+
+
+def test_archive_candidates_are_an_allow_list_never_live_top_level_state(tmp_path, journal_backups):
+    """2026-09-23 review idx 8 (data-loss): `_archive_candidates()` used to
+    be "every top-level entry not in a static skip set", which on an
+    installed build archived-then-DELETED the app's own live stores
+    (remote pairing secret, theme/perf settings, provider quota, #710's
+    `bin/cloudflared`, `context/`, `resilience/`, the graft store) on every
+    apply pass. Only known V1 domain-step sources may ever be candidates;
+    an unknown name is not this step's business and must never keep
+    `validate()` red either."""
+    journal, backups = journal_backups
+    data_home = tmp_path / "data_home"
+    _seed_live_state(data_home)
+    (data_home / "projects.json").write_text('{"projects": {}}', encoding="utf-8")
+    (data_home / "custom-roles.json").write_text("{}", encoding="utf-8")
+
+    step = ArchiveV1LegacyStep(journal=journal, backups=backups, data_home=data_home)
+    assert {p.name for p in step._archive_candidates()} == {"projects.json", "custom-roles.json"}
+    assert step.inspect().detail["archive_candidates"] == ["custom-roles.json", "projects.json"]
+
+    report = step.apply()
+    assert report.ok, report.summary
+    manifest = json.loads(_find_latest_manifest(data_home).read_text(encoding="utf-8"))
+    assert {e["name"] for e in manifest["archived"]} == {"projects.json", "custom-roles.json"}
+    assert not (data_home / "projects.json").exists()
+    _assert_live_state_untouched(data_home)
+    # Nothing of the live state ever landed in the archive generation.
+    gen = _find_latest_manifest(data_home).parent
+    assert not any((gen / name).exists() for name in _LIVE_TOP_LEVEL_FILES + _LIVE_TOP_LEVEL_DIRS)
+
+    # Live state alone never counts as pending V1 data — validate() is green
+    # and a second apply is a no-op that opens no new generation.
+    assert step._pending_real_data() is False
+    assert step.validate().ok, step.validate().summary
+    again = step.apply()
+    assert again.ok and again.detail.get("nothing_pending") is True
+    assert len(list_v1_archives(data_home)) == 1
+    _assert_live_state_untouched(data_home)
+
+
+def test_archive_ignores_live_state_even_when_nothing_v1_remains(tmp_path, journal_backups):
+    """The prod shape after the first migration: no V1 leftover at all,
+    only live stores at the top level — must be "nothing to archive", not a
+    permanently-red step that re-applies every pass."""
+    journal, backups = journal_backups
+    data_home = tmp_path / "data_home"
+    _seed_live_state(data_home)
+
+    step = ArchiveV1LegacyStep(journal=journal, backups=backups, data_home=data_home)
+    assert step._archive_candidates() == []
+    report = step.apply()
+    assert report.ok and report.detail.get("nothing_pending") is True
+    assert step.validate().ok
+    assert not (data_home / "backups").exists()
+    _assert_live_state_untouched(data_home)
+
+
+def test_archive_never_sweeps_a_live_custom_role_md(tmp_path, journal_backups):
+    """2026-09-23 review idx 6 (data-loss): `agents/<role>.md` is
+    `config.CUSTOM_AGENTS_DIR/<role>.md` — the file `custom_roles
+    .create_role()` writes and every spawn of that role reads. It was
+    listed in `_SHARED_DIR_LEGACY_GLOBS`, so a role created AFTER migration
+    was archived and pruned by the next apply pass, leaving a registry
+    entry that spawned with no instructions. It is never a candidate."""
+    journal, backups = journal_backups
+    data_home = tmp_path / "data_home"
+    (data_home / "agents" / "custom").mkdir(parents=True)
+    (data_home / "agents" / "custom" / "registry.json").write_text(
+        json.dumps({"myrole": {"label": "My Role"}}), encoding="utf-8"
+    )
+    (data_home / "agents" / "myrole.md").write_text("# myrole\ninstructions", encoding="utf-8")
+    # A genuine V1 leftover so the step really applies (not a no-op pass).
+    (data_home / "projects.json").write_text("{}", encoding="utf-8")
+
+    step = ArchiveV1LegacyStep(journal=journal, backups=backups, data_home=data_home)
+    assert step._shared_dir_legacy_candidates() == []
+    assert step.inspect().detail["shared_dir_candidates"] == []
+
+    report = step.apply()
+    assert report.ok, report.summary
+    assert (data_home / "agents" / "myrole.md").read_text(encoding="utf-8") == (
+        "# myrole\ninstructions"
+    )
+    assert not list((data_home / "backups").rglob("myrole.md"))
+    assert step.validate().ok, step.validate().summary
+
+
+def test_archive_clears_its_wal_after_a_late_write_kept_prune(
+    tmp_path, journal_backups, monkeypatch
+):
+    """2026-09-23 review idx 7 (stuck-flow): a prune that conserved a
+    late-written file left the WAL in place forever, and every later
+    `apply_copy_only()` resumed from it instead of scanning — the kept
+    file was never re-enumerated, a NEW V1 leftover was never archived,
+    and `validate()` stayed red on every pass. The COMPLETE manifest is
+    the authoritative record: the WAL is cleared, and the next pass's
+    fresh scan archives the kept file into a new generation."""
+    journal, backups = journal_backups
+    data_home = tmp_path / "data_home"
+    data_home.mkdir()
+    (data_home / "projects.json").write_text("original", encoding="utf-8")
+    (data_home / "custom-roles.json").write_text("{}", encoding="utf-8")
+
+    import agent_takkub.core.migration.promote_v1 as promote_mod
+
+    real_copy_verified = promote_mod.copy_verified
+    late = {"done": False}
+
+    def verify_then_late_write(src, dest):
+        result = real_copy_verified(src, dest)
+        if src.name == "projects.json" and not late["done"]:
+            late["done"] = True
+            (data_home / "projects.json").write_text("LATE-WRITE", encoding="utf-8")
+        return result
+
+    monkeypatch.setattr(promote_mod, "copy_verified", verify_then_late_write)
+    step = ArchiveV1LegacyStep(journal=journal, backups=backups, data_home=data_home)
+    report = step.apply()
+    monkeypatch.undo()
+
+    assert report.ok, report.summary
+    assert report.detail.get("late_write_kept") == {"projects.json": ["projects.json"]}
+    assert (data_home / "projects.json").read_text(encoding="utf-8") == "LATE-WRITE"
+    assert not (data_home / "custom-roles.json").exists()
+    assert not _archive_wal(data_home).exists(), "WAL must not outlive its COMPLETE generation"
+    first_gen = _find_latest_manifest(data_home).parent
+
+    # A new V1 leftover appears AND the kept file is still there: the next
+    # pass must scan fresh (both archived into a NEW generation) and end
+    # green — never resume the old WAL.
+    (data_home / "pane-tools.json").write_text('{"x": 1}', encoding="utf-8")
+    follow_up = step.apply()
+    assert follow_up.ok, follow_up.summary
+    assert not (data_home / "projects.json").exists()
+    assert not (data_home / "pane-tools.json").exists()
+    assert not _archive_wal(data_home).exists()
+    second_gen = _find_latest_manifest(data_home).parent
+    assert second_gen != first_gen
+    assert (second_gen / "projects.json").read_text(encoding="utf-8") == "LATE-WRITE"
+    assert (second_gen / "pane-tools.json").read_text(encoding="utf-8") == '{"x": 1}'
+    assert step.validate().ok, step.validate().summary
+
+
+def test_archive_stale_wal_from_a_complete_generation_is_cleared_not_resumed(
+    tmp_path, journal_backups
+):
+    """The prod state (2026-09-23): `backups/archive-v1-legacy-wal.json`
+    left over from the 11/9 generation, every entry `PRUNED`, that
+    generation's manifest `COMPLETE`, and several sources re-created live
+    since (`remote.json` by the app, a V1 name by hand). Resuming that WAL
+    would re-run the baseline retry: hash match → the live file is deleted
+    again; mismatch → `copy_only` overwrites the archived pre-migration
+    snapshot. It must be treated as a finished generation's leftover:
+    cleared, fresh scan, old snapshot byte-identical afterwards."""
+    journal, backups = journal_backups
+    data_home = tmp_path / "data_home"
+    data_home.mkdir()
+    (data_home / "projects.json").write_text("v1-projects", encoding="utf-8")
+    (data_home / "custom-roles.json").write_text("v1-roles", encoding="utf-8")
+
+    step = ArchiveV1LegacyStep(journal=journal, backups=backups, data_home=data_home)
+    assert step.apply().ok
+    old_gen = _find_latest_manifest(data_home).parent
+    old_manifest = json.loads((old_gen / "manifest.json").read_text(encoding="utf-8"))
+    assert old_manifest["state"] == "COMPLETE"
+    assert not _archive_wal(data_home).exists()
+
+    # Hand-write the pre-fix leftover WAL exactly as prod carries it: every
+    # entry PRUNED, pointing at the COMPLETE generation — plus a live store
+    # the old default-allow sweep had also archived back then.
+    (old_gen / "remote.json").write_text("archived-pairing-secret", encoding="utf-8")
+    ledger = promote_v1_ledger(data_home)
+    ledger.write(
+        {
+            e["name"]: {
+                "name": e["name"],
+                "kind": "file",
+                "src": str(data_home / e["name"]),
+                "dest": str(old_gen / e["name"]),
+                "paths": [],
+                "state": "PRUNED",
+                "sha256": e["sha256"],
+            }
+            for e in old_manifest["archived"]
+        }
+        | {
+            "remote.json": {
+                "name": "remote.json",
+                "kind": "file",
+                "src": str(data_home / "remote.json"),
+                "dest": str(old_gen / "remote.json"),
+                "paths": [],
+                "state": "PRUNED",
+                "sha256": {"remote.json": verify_copy._sha256(old_gen / "remote.json")},
+            }
+        },
+        meta={"archive_root": str(old_gen)},
+    )
+    assert _archive_wal(data_home).exists()
+
+    # Sources re-created since: the app re-paired the phone (new secret),
+    # a V1 name reappeared with identical content (would hash-match the
+    # old entry → deleted under it), another with different content
+    # (would clobber the old snapshot).
+    (data_home / "remote.json").write_text("NEW-pairing-secret", encoding="utf-8")
+    (data_home / "projects.json").write_text("v1-projects", encoding="utf-8")
+    (data_home / "custom-roles.json").write_text("roles-recreated", encoding="utf-8")
+
+    report = step.apply()
+    assert report.ok, report.summary
+
+    # The old generation's snapshot is byte-identical to what it archived.
+    assert (old_gen / "projects.json").read_text(encoding="utf-8") == "v1-projects"
+    assert (old_gen / "custom-roles.json").read_text(encoding="utf-8") == "v1-roles"
+    assert (old_gen / "remote.json").read_text(encoding="utf-8") == "archived-pairing-secret"
+    # The live store is not a candidate at all — never deleted, never copied.
+    assert (data_home / "remote.json").read_text(encoding="utf-8") == "NEW-pairing-secret"
+    # The re-created V1 names were treated as NEW files: a fresh generation
+    # holds them, and the stale WAL is gone.
+    new_gen = _find_latest_manifest(data_home).parent
+    assert new_gen != old_gen
+    assert (new_gen / "projects.json").read_text(encoding="utf-8") == "v1-projects"
+    assert (new_gen / "custom-roles.json").read_text(encoding="utf-8") == "roles-recreated"
+    assert not (data_home / "projects.json").exists()
+    assert not (data_home / "custom-roles.json").exists()
+    assert not _archive_wal(data_home).exists()
+    assert step.validate().ok, step.validate().summary
+
+
+def test_archive_stale_wal_alone_is_cleared_by_prune_as_nothing_pending(tmp_path, journal_backups):
+    """`prune()` called standalone (the engine's deferred pass-B path) on a
+    finished generation's leftover WAL must clear it and report nothing
+    pending — never re-run the baseline retry against live sources."""
+    journal, backups = journal_backups
+    data_home = tmp_path / "data_home"
+    data_home.mkdir()
+    (data_home / "projects.json").write_text("v1", encoding="utf-8")
+    step = ArchiveV1LegacyStep(journal=journal, backups=backups, data_home=data_home)
+    assert step.apply().ok
+    gen = _find_latest_manifest(data_home).parent
+    manifest = json.loads((gen / "manifest.json").read_text(encoding="utf-8"))
+    entry = manifest["archived"][0]
+    promote_v1_ledger(data_home).write(
+        {
+            "projects.json": {
+                "name": "projects.json",
+                "kind": "file",
+                "src": str(data_home / "projects.json"),
+                "dest": str(gen / "projects.json"),
+                "paths": [],
+                "state": "PRUNED",
+                "sha256": entry["sha256"],
+            }
+        },
+        meta={"archive_root": str(gen)},
+    )
+    # Identical content re-created live: the old baseline retry would have
+    # hash-matched and deleted it.
+    (data_home / "projects.json").write_text("v1", encoding="utf-8")
+
+    report = step.prune()
+    assert report.ok and "nothing pending" in report.summary
+    assert not _archive_wal(data_home).exists()
+    assert (data_home / "projects.json").read_text(encoding="utf-8") == "v1"
+    assert (gen / "projects.json").read_text(encoding="utf-8") == "v1"
+
+
+def test_archive_resume_after_crash_never_refreshes_the_committed_snapshot(
+    tmp_path, journal_backups
+):
+    """A GENUINE crash resume (manifest still PENDING, entry already durably
+    `PRUNED` in the WAL, removal never finished): a source that no longer
+    matches the committed digest was re-written since that commit — the
+    T6 retry must keep it AND leave the archived snapshot exactly as
+    committed (never `copy_only` the new content over it), then finish the
+    generation and clear the WAL."""
+    journal, backups = journal_backups
+    data_home = tmp_path / "data_home"
+    data_home.mkdir()
+    (data_home / "projects.json").write_text("committed", encoding="utf-8")
+    (data_home / "custom-roles.json").write_text("roles", encoding="utf-8")
+
+    step = ArchiveV1LegacyStep(journal=journal, backups=backups, data_home=data_home)
+    copy_report = step.apply_copy_only()
+    assert copy_report.ok, copy_report.summary
+    ledger = promote_v1_ledger(data_home)
+    states = ledger.read()
+    gen = Path(ledger.read_meta()["archive_root"])
+    assert json.loads((gen / "manifest.json").read_text(encoding="utf-8"))["state"] == "PENDING"
+    # Simulate the crash: the batch's SOURCE_PRUNED record landed durably,
+    # the process died before `_remove` ran, and a writer since re-wrote
+    # one source.
+    for rec in states.values():
+        rec["state"] = "PRUNED"
+    ledger.write(states)
+    (data_home / "projects.json").write_text("REWRITTEN-after-commit", encoding="utf-8")
+
+    report = step.prune()
+    assert report.ok, report.summary
+    assert (gen / "projects.json").read_text(encoding="utf-8") == "committed"
+    assert (data_home / "projects.json").read_text(encoding="utf-8") == "REWRITTEN-after-commit"
+    # The untouched sibling's interrupted removal was finished normally.
+    assert not (data_home / "custom-roles.json").exists()
+    assert (gen / "custom-roles.json").read_text(encoding="utf-8") == "roles"
+    assert json.loads((gen / "manifest.json").read_text(encoding="utf-8"))["state"] == "COMPLETE"
+    assert not _archive_wal(data_home).exists()
+    assert step.validate().ok is False  # the kept file is a fresh candidate again
+    follow_up = step.apply()
+    assert follow_up.ok, follow_up.summary
+    assert not (data_home / "projects.json").exists()
+    assert (gen / "projects.json").read_text(encoding="utf-8") == "committed"
+    assert step.validate().ok, step.validate().summary
+
+
+def promote_v1_ledger(data_home: Path):
+    from agent_takkub.core.migration.promote_v1 import write_json_atomic
+    from agent_takkub.core.migration.wal import TransferLedger
+
+    return TransferLedger(_archive_wal(data_home), list_key="archived", write_fn=write_json_atomic)

@@ -148,6 +148,22 @@ class _CallableThread(QThread):
         self.deleteLater()
 
 
+def _is_running(thread: _CallableThread | None) -> bool:
+    """`thread.isRunning()` that reads an already-deleted wrapper as "not
+    running". `_cleanup` schedules `deleteLater()` on `finished`, but the
+    owning view keeps its `_kd_*_thread` reference — so the SECOND click on
+    Refresh/Test used to dereference a dead Qt object and raise RuntimeError
+    ("wrapped C/C++ object ... has been deleted") instead of starting a new
+    run (2026-09-23 review; same #526-class guard settings_usage's Refresh
+    already carries)."""
+    if thread is None:
+        return False
+    try:
+        return thread.isRunning()
+    except RuntimeError:
+        return False
+
+
 def _status_dot_color(ok: bool | None) -> str:
     if ok is None:
         return cockpit_theme.TEXT_FAINT
@@ -292,7 +308,7 @@ class KnowledgeDesignSettingsMixin:
         return view
 
     def _on_kd_knowledge_refresh_clicked(self) -> None:
-        if self._kd_knowledge_thread is not None and self._kd_knowledge_thread.isRunning():
+        if _is_running(self._kd_knowledge_thread):
             return
         for dot, detail in self._kd_knowledge_rows.values():
             dot.setStyleSheet(f"background: {cockpit_theme.TEXT_FAINT}; border-radius: 4px;")
@@ -419,7 +435,7 @@ class KnowledgeDesignSettingsMixin:
         return view
 
     def _on_kd_design_refresh_clicked(self) -> None:
-        if self._kd_design_thread is not None and self._kd_design_thread.isRunning():
+        if _is_running(self._kd_design_thread):
             return
         for dot, detail in self._kd_design_rows.values():
             dot.setStyleSheet(f"background: {cockpit_theme.TEXT_FAINT}; border-radius: 4px;")
@@ -470,7 +486,7 @@ class KnowledgeDesignSettingsMixin:
         self._kd_design_cred_status.setText(f"บันทึก credential ของ '{mcp_id}' แล้ว")
 
     def _on_kd_design_test_clicked(self) -> None:
-        if self._kd_design_thread is not None and self._kd_design_thread.isRunning():
+        if _is_running(self._kd_design_thread):
             return
         self._kd_design_test_btn.setEnabled(False)
         self._kd_design_result.setPlainText("กำลังทดสอบ…")

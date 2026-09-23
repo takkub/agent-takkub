@@ -334,3 +334,68 @@ class TestLaunchSessionFlushesQueuedNoPaneMessages:
         )
         _launch(orch, _pane(), label="shell")
         assert calls == []
+
+
+class TestParkedRespawnReplayAtAttach:
+    """Review 2026-09-23: an auto-respawn whose spawn() was only deferred /
+    queued parks its replay on PaneState; `_launch_session` (the attach tail
+    every non-claude provider goes through) settles it once the session
+    that actually came up knows whether it resumed."""
+
+    def _launch_auto(self, orch, *, from_auto_respawn, resume_uuid=None):
+        with (
+            patch("agent_takkub.orchestrator.PtySession", return_value=MagicMock()),
+            patch("agent_takkub.orchestrator._build_transcript_path", return_value="/tmp/t.log"),
+        ):
+            return orch._launch_session(
+                pane=_pane(),
+                role_name="codex",
+                project_ns=TEST_PROJECT,
+                spawn_cwd="/work/dir",
+                argv=["codex"],
+                env={},
+                pane_tok="tok-codex",
+                label="codex",
+                cwd=None,
+                project=TEST_PROJECT,
+                _from_auto_respawn=from_auto_respawn,
+                _shard_total=0,
+                codex_exit=True,
+                auto_trust=True,
+                resume_uuid=resume_uuid,
+            )
+
+    def test_blank_attach_replays_parked_task(self, orch):
+        ps = orch._ps(f"{TEST_PROJECT}::codex")
+        ps.respawn_replay_task = "implement /foo"
+        orch._send_when_ready = MagicMock()
+        ok, _msg = self._launch_auto(orch, from_auto_respawn=True)
+        assert ok is True
+        orch._send_when_ready.assert_called_once_with(
+            "codex", "implement /foo", project=TEST_PROJECT
+        )
+        assert ps.respawn_replay_task is None
+
+    def test_resumed_attach_sends_only_the_nudge(self, orch):
+        ps = orch._ps(f"{TEST_PROJECT}::codex")
+        ps.respawn_replay_task = "implement /foo"
+        ps.respawn_replay_nudge = "continue"
+        orch._send_when_ready = MagicMock()
+        self._launch_auto(orch, from_auto_respawn=True, resume_uuid="sess-1")
+        orch._send_when_ready.assert_called_once_with("codex", "continue", project=TEST_PROJECT)
+        assert ps.respawn_replay_task is None
+        assert ps.respawn_replay_nudge is None
+
+    def test_manual_attach_drops_parked_task(self, orch):
+        ps = orch._ps(f"{TEST_PROJECT}::codex")
+        ps.respawn_replay_task = "implement /foo"
+        orch._send_when_ready = MagicMock()
+        self._launch_auto(orch, from_auto_respawn=False)
+        orch._send_when_ready.assert_not_called()
+        assert ps.respawn_replay_task is None
+
+    def test_nothing_parked_is_a_no_op(self, orch):
+        orch._send_when_ready = MagicMock()
+        ok, _msg = self._launch_auto(orch, from_auto_respawn=True)
+        assert ok is True
+        orch._send_when_ready.assert_not_called()

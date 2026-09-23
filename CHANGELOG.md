@@ -4,6 +4,88 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 
 ## [vNEXT]
 
+## [v2.1.33] - 2026-09-23
+
+รอบนี้มาจาก **system review ทั้งระบบ** (2026-09-22/23): 26 ทีมอ่านโค้ดทุก subsystem (170k LOC) ได้ 335 ข้อ →
+คัด 39 ข้อ severity high → ให้ 2 ทีมอิสระค้านทุกข้อ (tracer ไล่ path จริง + skeptic พยายามหักล้าง หลายข้อ repro
+จริงบน venv) → **ยืนยัน 38 ข้อ แก้ครบทั้ง 38 ข้อในรอบนี้** · รายละเอียด/repro ต่อข้อ:
+`docs/audit/2026-09-23-system-review-batch2-verified.md` · รายการดิบทั้ง 335 ข้อ (med/low ยังไม่ verify):
+`docs/audit/2026-09-22-system-review-batch1-findings.md`
+
+### Fixed (แก้) — ข้อมูลหาย / เขียนทับ
+
+- **Writer ที่ไม่ล้าง read cache ทำข้อมูลหายจริง 6 จุด** (คลาสเดียวกับ #685-#687 ที่เคยเจอใน backlog) — `takkub send`
+  สองข้อความในช่วง 3 วิ ข้อความแรกหายและ `mark_delivered` กลายเป็น no-op ทำให้ replay ซ้ำหลัง respawn
+  (`role_messages.py`) · assign ใบที่สองภายใน 3 วิ ทับใบแรกทั้งแถวและ open pointer (`task_ledger.py`) ·
+  สร้าง custom role ตัวที่ 2 ล้มทุกครั้ง/ลบแล้วไม่หาย (`custom_roles.py`) · `takkub mcp allow/deny` อ่าน policy เก่า
+  แล้วรายงานว่า "นี่คือบั๊ก" (`pane_tools_policy.py`) · migration validate→apply→validate อ่านข้อมูลก่อนเขียน
+  (`core/migration/registry_copy_step.py` — เป็น writer กลางที่ทุก registry ใช้ร่วมกัน) · เลขที่ issue ซ้ำ/ใบหาย
+  เมื่อ CLI คนละ process เขียนพร้อมกัน (`core/storage/v2_target.py` + `issues.py` read-modify-write ใช้ `fresh=True`)
+- **`ArchiveV1LegacyStep` กวาดไฟล์ที่แอปยังใช้เข้า archive ทุกรอบ apply** (`core/migration/promote_v1.py`) — กติกาเดิมเป็น
+  "ทุกอย่างที่ไม่อยู่ใน skip list" บน installed build (`SETTINGS_HOME == DATA_HOME`) จึงกวาด `remote.json` (secret จับคู่มือถือ),
+  `theme-settings.json`, `performance-settings.json`, `provider-quota.json`, `bin/` (#710 cloudflared), `context/`,
+  `graft-graphs/` แล้วลบต้นฉบับ — และ live writer ใหม่ทุกตัวที่เพิ่มทีหลังก็โดนกวาดตามเงียบๆ · เปลี่ยนเป็น **allow-list**
+  ของไฟล์ V1 ที่ ladder step อ่านจริงเท่านั้น (prod มีร่องรอยการกวาดนี้อยู่แล้วใน v1-archive)
+- **`agents/*.md` ถูก archive ทั้งที่เป็นไฟล์ที่ยังใช้** (`core/migration/promote_v1.py`) — `CUSTOM_AGENTS_DIR/<role>.md`
+  คือไฟล์ที่ `custom_roles.create_role()` เขียนและ spawn อ่านทุกครั้ง การ archive ทิ้งทำให้เหลือ registry entry
+  ที่ไม่มีคำสั่งอยู่ข้างหลัง
+- **WAL ที่ manifest COMPLETE แล้วไม่เคยถูกล้าง** (`core/migration/promote_v1.py`) — ทุก apply รอบถัดไป resume จาก WAL เก่า
+  แทนที่จะ scan ใหม่ (V1 leftover ใหม่ไม่เคยถูกนับ validate แดงค้าง) และ retry ทับไฟล์ที่แอปสร้างใหม่ไปแล้ว หรือ copy
+  ทับ snapshot ก่อน migrate ซึ่งเป็นสำเนาเดียวที่ `restore-v1` จะเอากลับมาได้ · prod มี WAL ค้างแบบนี้อยู่ 29 รายการ
+- **อ่าน registry พลาดครั้งเดียว = โปรเจคหายทั้งหมด** (`config.py`) — `load_projects()` fail-open เป็น dict ว่าง แล้ว
+  writer ตัวถัดไป (`set_open_tabs`/`clear_active_project`) เซฟทับทันที · ตอนนี้ความล้มเหลวในการอ่านแยกจาก "ไม่มีโปรเจค" ชัดเจน
+  และ writer ปฏิเสธที่จะเซฟทับ
+- **เปิดไฟล์ที่เปิดอยู่แล้วทิ้งงานที่ยังไม่เซฟ** + **ไฟล์ BOM ได้ BOM เพิ่มทุกครั้งที่ Ctrl+S** (`editor_widget.py`)
+
+### Fixed (แก้) — crash / ค้าง
+
+- **QThread ผูกกับหน้าต่างที่ปิดได้ = ทั้ง cockpit ดับ (คลาส #688) 3 จุด** — boot wizard (`boot_flow_window.py`),
+  autoskills preview และ autoskills install (`settings_window.py`) · ปิดหน้าต่างระหว่างงานยังไม่จบ → Qt fatal abort
+  (0xC0000409) ฆ่าทุก pane พร้อมกัน จับด้วย faulthandler/excepthook ไม่ได้
+- **กด Refresh/Test รอบสองใน Settings → Knowledge/Design พัง** (`settings_knowledge_design.py`) — ใช้ `_CallableThread`
+  ที่ถูกลบไปแล้ว ปุ่มตายจนกว่าจะปิด-เปิด Settings ใหม่ (และ excepthook เปิด issue ผีให้ด้วย)
+- **Lead ไม่ยอม spawn ถ้า cockpit ไม่ใช่หน้าต่างที่โฟกัสอยู่** (`main_window.py`) — gate poll ทุก 50 ms ตลอดไป
+  (เช้านี้ 845 event) boot แบบ unattended/remote จึงได้ Lead ว่างเปล่า
+- **ปิด tab โปรเจคแล้ว role นั้น spawn ไม่ได้อีกจน restart** (`main_window.py`) — pane ถูกล้างจาก dict ก่อน close
+  จึงไม่มีการ unregister เหลือ object ที่ถูกลบค้างใน orchestrator (`wrapped C/C++ object deleted`)
+- **preset role spawn เข้าโปรเจคผิด** เมื่อมี ≥2 tab (`main_window.py` — tab restore สลับ active ก่อน timer 15 วิ) ·
+  **Lead spawn ล้มบน tab เดียวทำ usage corner พัง** status tick throw ทุก 2 วิ (`main_window.py`)
+- **respawn แปะ task ซ้ำ** เมื่อ spawn แค่ถูก queue/defer (`orchestrator.py`, `spawn_engine.py`) — งานถูกทำซ้ำใน
+  session ที่ `--resume` กลับมา
+
+### Fixed (แก้) — guard / quota / remote
+
+- **`pane_guard` ตัดสินข้อความใน payload เป็นคำสั่ง** (`pane_guard.py`) — `strip_takkub_text_payload` แยกบรรทัด
+  ก่อนลบเนื้อหาใน quote (#649 regression) และกฎ full_suite/scope_tiny/browser/git ยังรันบน command ดิบ → done note
+  ที่มีคำว่า `pytest`/`git push` ถูก deny จบงานไม่ได้ · แก้ให้ข้อความใน payload เป็น inert กับทุกกฎ โดยคำสั่งจริงยังถูกกันเหมือนเดิม
+- **ชนโควตารายสัปดาห์ถูกตีเป็น false positive** (`limit_autoresume.py`) — โค้ด #704 ที่เพิ่งเพิ่มใน 2.1.32 ดูแค่ window
+  `five_hour` (claude) / `primary` (codex) ทำให้ weekly 100% อ่านว่า "ยังไม่เต็ม" ยกเลิก episode แล้ว pane ค้างได้ถึง 7 วัน ·
+  ตอนนี้ deny ต้องผ่าน **ทุก** window ที่รู้ค่า ถ้ามี window ไหนไม่รู้ค่า = unknown (ไม่ยกเลิก)
+- **banner โควตาที่ค้างบนจอหลัง reset ถูก detect ซ้ำแล้วเลื่อนไป +24 ชม.** (`orchestrator.py`) — สร้าง episode ผีและ
+  กด watchdog เงียบไปทั้งวัน
+- **remote ที่ start ตอน boot ตอบ 504 ทุก endpoint** (`remote/__init__.py`) — Qt bridge ถูกสร้างบน worker thread ที่จบไปแล้ว
+  signal จึงไม่เคยส่งถึง · และ boot path ไม่เคยอ่าน `captured_url` กลับมา ทำให้ `public_url`/pairing URL/report link ค้างของเก่า
+- **quick tunnel หลัง restart ได้ URL ตาย** (`remote/tunnel.py`) — `captured_url` ถูก seed ด้วย public_url เก่า hostname ใหม่
+  จึงถูกทิ้ง (มือถือเจอ Cloudflare 530) · เพิ่มการเช็ค `proc.poll()` ให้ quick/ngrok ที่ตายทันทีไม่ถูกนับว่าเปิดสำเร็จ
+- **`takkub service-stop` ฆ่า process อื่นได้** (`service_spawner.py`) — เชื่อ PID เปล่าๆ หลัง reboot PID ถูก reuse ·
+  ตอนนี้จำ `create_time`+cmdline แล้วตรวจก่อนฆ่า
+- **MCP ที่ user เพิ่มเองถูกลบทิ้งตอน boot** (`shared_dev_tools.py`) — `ensure_user_mcps()` prune ทุกตัวที่ไม่มีใน
+  `~/.claude.json` เมื่อมี entry ที่ไม่มี credential แม้แต่ตัวเดียว
+- **account override ทับ CLAUDE_CONFIG_DIR ที่ skill gate (#563) เตรียมไว้** (`core/accounts/facade.py`) ทำให้ gate
+  ไม่มีผลเงียบๆ · แก้คู่กับ `claude_auth_config.py` ที่ override ต้องยังมีผลบน dir ที่ curate แล้ว
+
+### Fixed (แก้) — gate / boot อื่นๆ
+
+- **migration ที่ถูก "skip" แสดงผลเป็นย้ายข้อมูลสำเร็จ** (`boot_flow.py`) — หน้า D โชว์ตัวเลขจาก plan ที่ยังไม่ได้ทำ ·
+  ตอนนี้บอกตรงๆ ว่า "ยังไม่ได้ย้ายข้อมูล" พร้อมเหตุผล และซ่อนปุ่มลองใหม่เมื่อ retry เป็น no-op เชิงโครงสร้าง
+- **GUI boot ไม่เคยรัน migration บนเครื่องที่ migrate ครบแล้ว** (`boot_flow_window.py`) — version marker ค้างที่ 2.1.0
+  ตั้งแต่ 11 ก.ย. เพราะ `_on_plan_ready(None)` accept ทันทีโดยไม่เรียก `apply_pending`
+- **`takkub qa-gate` (Node) ล้มเมื่อไฟล์ที่แก้ไม่มี spec** (`qa_gate.py`) — vitest related ขาด `--passWithNoTests`
+  (ฝั่ง jest มีอยู่แล้ว)
+- **release rollback ทิ้ง annotated tag ไว้** (`release.py`) — ปล่อยเวอร์ชันเดิมซ้ำถูกปฏิเสธทุกครั้งพร้อมข้อความชวนเข้าใจผิด
+- **เพดานจำนวน pane จาก RAM วัดครั้งเดียวตอน boot** (`core/scheduling/facade.py`) — RAM ที่ว่างคืนมาไม่เคยยกเพดานจนกว่าจะ restart
+- **feedback prompt auto-skip เขียนคีย์ทุก 150 ms ไม่มี cooldown/cap** (`lead_inbox.py`)
+
 ## [v2.1.32] - 2026-09-22
 
 ### Fixed (แก้)

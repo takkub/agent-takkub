@@ -43,7 +43,7 @@ import pathlib
 import time
 import uuid
 
-from .cached_read import read_cached
+from .cached_read import invalidate, read_cached
 
 # Per (project, role) cap. Generous — a message is a few hundred bytes and the
 # whole point is being able to look back at a long session — but bounded so an
@@ -114,6 +114,12 @@ def _write_all(runtime_dir: pathlib.Path, project_ns: str, records: list[dict]) 
         )
     except OSError:
         pass  # an audit record must never break the send it describes
+    # cached_read's contract (#658): the reaper keeps this file's entry warm
+    # every tick, and its ≤3s stat-free fast path would hand the NEXT
+    # read-modify-write (a second `takkub send`, the first send's own
+    # `mark_delivered` ~1-2s later) the pre-write parse — losing the record
+    # just written, or leaving it "sent" forever and replayed after respawn.
+    invalidate(path)
 
 
 def _append_record(

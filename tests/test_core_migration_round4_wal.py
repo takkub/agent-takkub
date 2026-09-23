@@ -574,8 +574,8 @@ def test_r4b3_manifest_header_written_pending_before_first_copy(
     journal, backups = journal_backups
     data_home = tmp_path / "data_home"
     data_home.mkdir()
-    (data_home / "a.json").write_text("a", encoding="utf-8")
-    (data_home / "b.json").write_text("b", encoding="utf-8")
+    (data_home / "projects.json").write_text("a", encoding="utf-8")
+    (data_home / "custom-roles.json").write_text("b", encoding="utf-8")
 
     import agent_takkub.core.migration.promote_v1 as promote_mod
 
@@ -601,7 +601,7 @@ def test_r4b3_incomplete_generation_listed_and_skipped_by_latest(tmp_path, journ
     journal, backups = journal_backups
     data_home = tmp_path / "data_home"
     data_home.mkdir()
-    (data_home / "a.json").write_text("a", encoding="utf-8")
+    (data_home / "projects.json").write_text("a", encoding="utf-8")
     step = ArchiveV1LegacyStep(journal=journal, backups=backups, data_home=data_home)
     assert step.apply().ok
 

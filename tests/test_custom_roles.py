@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import json
+import os
+import time
 from pathlib import Path
 
 import pytest
 
-from agent_takkub import custom_roles, roles
+from agent_takkub import cached_read, custom_roles, roles
 
 
 @pytest.fixture
@@ -297,3 +299,52 @@ class TestBootLoadSelfHealsOrphanDocs:
     def test_no_agents_dir_is_a_noop(self, registry_files: Path) -> None:
         assert not custom_roles.CUSTOM_AGENTS_DIR.exists()
         assert custom_roles.load_and_register_all() == 0
+
+
+def _age(path: Path, seconds: int = 60) -> None:
+    """Push mtime into the past: the registry's normal state (not written in
+    the last 2 s), which is exactly when `cached_read`'s stat-free TTL
+    (#658) can serve a pre-write parse."""
+    t = time.time() - seconds
+    os.utime(path, (t, t))
+
+
+class TestSaveInvalidatesReadCache:
+    """Review 2026-09-23 (cache-invalidate): every 2nd+ custom role used to
+    be created into a registry whose cached parse still lacked it, so the
+    create handler's own read-back (register_role / known_roles gate) saw
+    nothing and the create failed or was silently unregistered."""
+
+    @pytest.fixture(autouse=True)
+    def _real_ttl(self, monkeypatch: pytest.MonkeyPatch):
+        monkeypatch.setattr(cached_read, "_STAT_TTL_S", 3.0)
+        cached_read.invalidate()
+        yield
+        cached_read.invalidate()
+
+    def test_second_create_is_visible_to_an_immediate_load(self, registry_files: Path) -> None:
+        ok, _err = custom_roles.create_role("aaa", "A", "#112233", 1, 1)
+        assert ok
+        _age(registry_files)
+        assert set(custom_roles.load_custom_roles()) == {"aaa"}  # primes the cache
+
+        ok, err = custom_roles.create_role("bbb", "B", "#445566", 2, 2)
+        assert ok, err
+
+        assert set(custom_roles.load_custom_roles()) == {"aaa", "bbb"}
+        assert "bbb" in custom_roles.list_role_names()
+
+    def test_delete_right_after_a_primed_read_really_removes_the_entry(
+        self, registry_files: Path
+    ) -> None:
+        for name in ("aaa", "bbb"):
+            ok, _err = custom_roles.create_role(name, name.upper(), "#112233", 1, 1)
+            assert ok
+        _age(registry_files)
+        assert set(custom_roles.load_custom_roles()) == {"aaa", "bbb"}
+
+        assert custom_roles.delete_role("bbb") is True
+
+        assert set(custom_roles.load_custom_roles()) == {"aaa"}
+        on_disk = json.loads(registry_files.read_text(encoding="utf-8"))["roles"]
+        assert set(on_disk) == {"aaa"}

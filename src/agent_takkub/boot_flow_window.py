@@ -38,6 +38,8 @@ import html
 import logging
 import os
 import sys
+import time
+import weakref
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -170,6 +172,28 @@ class _MigrationWorker(QThread):
         except Exception as exc:  # pragma: no cover - defensive, must never wedge boot
             outcome = _WorkerError(exc)
         self.resultReady.emit(outcome)
+
+
+# #688 rule (same mechanism as settings_window's `_CATALOG_THREADS`): a
+# worker QThread must never be parented to a dialog that can be dropped
+# while the thread still runs — `run_boot_flow_gate` holds the wizard only
+# as a frame local and returns the moment `flowFinished` fires (Esc/X on a
+# non-migrating page, the #640 deadline, Ctrl+C), which deleted the dialog
+# AND its running child thread → Qt qFatal "QThread: Destroyed while thread
+# is still running" → 0xC0000409 right after the main window appeared.
+# Workers are unparented and kept alive here until they report `finished`;
+# a wizard that still has one running when the gate leaves parks itself in
+# `_LINGERING_WIZARDS` (see `release_workers`) so a late signal never lands
+# on a deleted receiver.
+_BOOT_WORKERS: set[QThread] = set()
+_LINGERING_WIZARDS: set[QObject] = set()
+
+
+def _is_running(worker: QThread) -> bool:
+    try:
+        return worker.isRunning()
+    except RuntimeError:  # C++ side already gone
+        return False
 
 
 def _font(family: str, size: int, weight: int = 400) -> QFont:
@@ -1530,17 +1554,18 @@ class BootFlowWindow(QDialog):
             theme.TEXT_MUTED,
             0,
         )
-        signals = _MigrationSignals(self)
+        # Unparented: the worker thread emits through it, so it must live
+        # exactly as long as the worker (which holds it), never the dialog.
+        signals = _MigrationSignals()
         signals.progress.connect(self._on_progress)
         self._migrate_pending_event = None
         self._migrate_throttle = QTimer(self)
         self._migrate_throttle.setInterval(120)
         self._migrate_throttle.timeout.connect(self._apply_pending_event)
         self._migrate_throttle.start()
-        worker = _MigrationWorker(self._flow, signals, self)
+        worker = _MigrationWorker(self._flow, signals)
         worker.resultReady.connect(self._on_migration_done)
-        self._workers.append(worker)
-        worker.start()
+        self._track_worker(worker)
 
     def _on_progress(self, event: Any) -> None:
         self._migrate_pending_event = event
@@ -2000,6 +2025,21 @@ class BootFlowWindow(QDialog):
         error = getattr(outcome, "error", "") or ""
         rolled_back = bool(getattr(outcome, "rolled_back", True))
         data_intact = bool(getattr(outcome, "data_intact", rolled_back))
+        skipped_reason = getattr(outcome, "skipped_reason", None)
+        if skipped_reason:
+            # The ladder never started (`MigrationOutcome.skipped_reason`):
+            # no phase to name, and the post-rollback guard can't be retried
+            # within this app version — "ลองใหม่" would only skip again.
+            self._show_failed(
+                heading="ยังไม่ได้ย้ายข้อมูล",
+                detail=error[:200] + ("…" if len(error) > 200 else ""),
+                rolled_back=False,
+                data_intact=True,
+                outcome=outcome,
+            )
+            self._failed_retry_btn.setVisible(skipped_reason != "previously-rolled-back")
+            return
+        self._failed_retry_btn.setVisible(True)
         # `failed_step_index`/`failed_step_total` — optional, not in the
         # documented interface yet (see module docstring): when present,
         # names which phase-ordinal and which sub-step within it failed
@@ -2040,11 +2080,12 @@ class BootFlowWindow(QDialog):
         data_intact: bool = False,
         outcome: Any = None,
     ) -> None:
-        subtitle = (
-            "ย้ายข้อมูลไม่สำเร็จ — ย้อนกลับอัตโนมัติแล้ว ไม่มีข้อมูลหาย"
-            if rolled_back
-            else "ย้ายข้อมูลไม่สำเร็จ — ระบบยังไม่ได้ย้อนกลับ กรุณาตรวจสอบ"
-        )
+        if getattr(outcome, "skipped_reason", None):
+            subtitle = "ยังไม่ได้ย้ายข้อมูล — ข้อมูลยังอยู่ที่เดิมทั้งหมด"
+        elif rolled_back:
+            subtitle = "ย้ายข้อมูลไม่สำเร็จ — ย้อนกลับอัตโนมัติแล้ว ไม่มีข้อมูลหาย"
+        else:
+            subtitle = "ย้ายข้อมูลไม่สำเร็จ — ระบบยังไม่ได้ย้อนกลับ กรุณาตรวจสอบ"
         self._set_header(subtitle, theme.STATE_ERROR_BRIGHT, self._last_percent)
         self._failed_heading.setText(heading or "ย้ายข้อมูลไม่สำเร็จ")
         sub_text = detail or error
@@ -2071,11 +2112,12 @@ class BootFlowWindow(QDialog):
     def _populate_failed_info(self, data_intact: bool, outcome: Any) -> None:
         _clear_layout(self._failed_info_lay)
         status_color = theme.STATE_OK if data_intact else theme.STATE_ERROR_BRIGHT
-        status_text = (
-            "เหมือนก่อนเริ่มทุกไบต์ (ตรวจ sha256 แล้ว)"
-            if data_intact
-            else "ตรวจสอบไม่ผ่าน — ดู log ก่อนดำเนินการต่อ"
-        )
+        if getattr(outcome, "skipped_reason", None):
+            status_text = "ยังไม่ได้แตะข้อมูล — การย้ายไม่ได้เริ่ม"
+        elif data_intact:
+            status_text = "เหมือนก่อนเริ่มทุกไบต์ (ตรวจ sha256 แล้ว)"
+        else:
+            status_text = "ตรวจสอบไม่ผ่าน — ดู log ก่อนดำเนินการต่อ"
         self._failed_info_lay.addWidget(
             _kv_row("สถานะข้อมูล", status_text, self._sans, color=status_color)
         )
@@ -2145,10 +2187,79 @@ class BootFlowWindow(QDialog):
             self._apply_remembered_choice(mode, (remembered or {}).get("selected") or [])
             return
         self._set_header("กำลังตรวจสอบอัพเดต provider…", theme.TEXT_MUTED, None)
-        worker = _CallWorker(lambda: flow.check_provider_updates(30.0), self)
+        worker = _CallWorker(lambda: flow.check_provider_updates(30.0))
         worker.resultReady.connect(self._on_provider_check_done)
+        self._track_worker(worker)
+
+    # ── worker lifetime (#688 rule, see `_BOOT_WORKERS`) ─────────
+    def _track_worker(self, worker: QThread) -> None:
+        """Unparented worker, pinned by `_BOOT_WORKERS` until `finished`.
+        The finished-slot closure holds this dialog only weakly — a strong
+        capture would pin every wizard for the worker's whole life (and
+        forever under the tests' synchronous `QThread.start`)."""
         self._workers.append(worker)
+        _BOOT_WORKERS.add(worker)
+        wizard_ref = weakref.ref(self)
+
+        def _finished(w: QThread = worker) -> None:
+            wizard = wizard_ref()
+            if wizard is not None:
+                wizard._release_worker(w)
+            else:
+                _BOOT_WORKERS.discard(w)
+                w.deleteLater()
+
+        worker.finished.connect(_finished)
         worker.start()
+
+    def _release_worker(self, worker: QThread) -> None:
+        _BOOT_WORKERS.discard(worker)
+        try:
+            self._workers.remove(worker)
+        except ValueError:
+            pass
+        worker.deleteLater()
+        if not any(_is_running(w) for w in self._workers):
+            _LINGERING_WIZARDS.discard(self)
+
+    def migration_in_flight(self) -> bool:
+        """True while page C's own `_MigrationWorker` is still copying —
+        the one stage the gate must wait out (see `run_boot_flow_gate`)."""
+        return self._stack.currentIndex() == PAGE_MIGRATING and any(
+            isinstance(w, _MigrationWorker) and _is_running(w) for w in self._workers
+        )
+
+    def release_workers(self) -> None:
+        """Called by the gate the moment it stops listening (`flowFinished`,
+        #640 deadline, Ctrl+C). A worker still running keeps running — its
+        subprocess can't be interrupted anyway — but its result must not
+        drive this wizard any further: a remembered `update_all` would
+        otherwise npm-install providers underneath the cockpit's own pane
+        spawns, and a plan arriving late would start a migration nobody is
+        watching. This dialog (Python-owned — the gate's frame is its only
+        holder) must also outlive the thread so the late `finished`/
+        `progress` signals keep a live receiver: it parks itself in
+        `_LINGERING_WIZARDS` until `_release_worker` sees the last one
+        stop."""
+        live = [w for w in self._workers if _is_running(w)]
+        for w in live:
+            try:
+                w.resultReady.disconnect()
+            except TypeError:
+                pass  # nothing connected (already delivered)
+        if live:
+            _LINGERING_WIZARDS.add(self)
+
+    def wait_workers(self, timeout_s: float) -> bool:
+        """Bounded wait for every running worker (process exit path); False
+        if one is still running afterwards."""
+        deadline = time.monotonic() + timeout_s
+        for w in list(self._workers):
+            if not _is_running(w):
+                continue
+            remaining = max(0.0, deadline - time.monotonic())
+            w.wait(int(remaining * 1000))
+        return not any(_is_running(w) for w in self._workers)
 
     def _resolve_flow(self) -> Any:
         if self._flow is not None:
@@ -2159,7 +2270,7 @@ class BootFlowWindow(QDialog):
 
     def _apply_remembered_choice(self, mode: str, selected_names: list[str]) -> None:
         flow = self._flow
-        worker = _CallWorker(lambda: flow.check_provider_updates(30.0), self)
+        worker = _CallWorker(lambda: flow.check_provider_updates(30.0))
 
         def _on_items(items: Any) -> None:
             if isinstance(items, _WorkerError) or not items:
@@ -2176,8 +2287,7 @@ class BootFlowWindow(QDialog):
             self._run_provider_updates(to_run)
 
         worker.resultReady.connect(_on_items)
-        self._workers.append(worker)
-        worker.start()
+        self._track_worker(worker)
 
     def _on_provider_check_done(self, items: Any) -> None:
         if isinstance(items, _WorkerError) or not items:
@@ -2204,23 +2314,24 @@ class BootFlowWindow(QDialog):
         def _progress_cb(*_args: Any, **_kwargs: Any) -> None:
             pass  # ponytail: no live per-row spinner yet — page A is a quick pre-boot step; add if it proves too quiet in practice
 
-        worker = _CallWorker(lambda: flow.run_provider_updates(items, _progress_cb), self)
+        worker = _CallWorker(lambda: flow.run_provider_updates(items, _progress_cb))
         worker.resultReady.connect(lambda _result: self._proceed_to_migration_check())
-        self._workers.append(worker)
-        worker.start()
+        self._track_worker(worker)
 
     def _proceed_to_migration_check(self) -> None:
         self._set_header("กำลังตรวจสอบโครงสร้างข้อมูล…", theme.TEXT_MUTED, None)
         flow = self._flow
-        worker = _CallWorker(lambda: flow.plan_migration(), self)
+        worker = _CallWorker(lambda: flow.plan_migration())
         worker.resultReady.connect(self._on_plan_ready)
-        self._workers.append(worker)
-        worker.start()
+        self._track_worker(worker)
 
     def _on_plan_ready(self, plan: Any) -> None:
-        if isinstance(plan, _WorkerError) or plan is None:
+        if isinstance(plan, _WorkerError):
             self._proceed = True
             self.accept()
+            return
+        if plan is None:
+            self._run_steady_state_stage()
             return
         self._plan = plan
         self._set_header(
@@ -2230,6 +2341,42 @@ class BootFlowWindow(QDialog):
         )
         self._populate_premigrate(plan)
         self._show_page(PAGE_PREMIGRATE, subtitle_only=False)
+
+    def _run_steady_state_stage(self) -> None:
+        """No first-time migration to show (plan None: already on v2, a dev
+        checkout, or auto-migrate disabled) — but `run_boot_stage()` must
+        still run EVERY boot: on "v2" it is `apply_pending()` that re-pins
+        `version-marker` after each upgrade and picks up any ladder step
+        added since this machine first promoted (its own contract, see
+        `auto_migrate_boot.run_boot_stage`). This path used to `accept()`
+        straight away, so a GUI boot never ran it — only the headless
+        `TAKKUB_BOOT_UPDATE=0` boot and `takkub migrate run` did — and an
+        installed cockpit's marker stayed pinned at whatever version first
+        migrated it (prod: 2.1.0 across every later release). The outcome
+        is logged, never shown: a v2 steady-state drift is doctor's to
+        report, not a reason to block boot (same as the headless path)."""
+        flow = self._flow
+        worker = _CallWorker(lambda: flow.run_migration(None))
+        worker.resultReady.connect(self._on_steady_state_done)
+        self._track_worker(worker)
+
+    def _on_steady_state_done(self, outcome: Any) -> None:
+        try:
+            from .orchestrator_text import _log_event
+
+            if isinstance(outcome, _WorkerError):
+                _log_event("boot_steady_state_migrate", ok=False, error=repr(outcome.exc)[:200])
+            elif outcome is not None:
+                _log_event(
+                    "boot_steady_state_migrate",
+                    ok=bool(getattr(outcome, "ok", False)),
+                    failed_step=getattr(outcome, "failed_step", None),
+                    error=(getattr(outcome, "error", None) or "")[:200] or None,
+                )
+        except Exception:
+            pass
+        self._proceed = True
+        self.accept()
 
     # ── close handling ──────────────────────────────────────────
     def closeEvent(self, event) -> None:
@@ -2318,6 +2465,13 @@ def _boot_gate_timeout_s() -> float:
     return value if value > 0 else float("inf")
 
 
+def _boot_gate_timeout_ms() -> int | None:
+    """`None` when the ceiling is disabled — `int(inf * 1000)` raises
+    OverflowError, so the opt-out never actually got as far as the timer."""
+    timeout_s = _boot_gate_timeout_s()
+    return None if timeout_s == float("inf") else int(timeout_s * 1000)
+
+
 def run_boot_flow_gate(
     main_window_factory: Callable[[], Any],
     quit_requested: Callable[[], bool] | None = None,
@@ -2343,12 +2497,22 @@ def run_boot_flow_gate(
     records `boot_gate_timeout` with whatever the wizard was showing and
     OPENS THE COCKPIT ANYWAY. Fail-open is deliberate — a skipped provider
     update is a nuisance, a cockpit that never appears is not usable at all.
+    The one exception is page C: a ladder still copying is never failed-open
+    on top of (panes would write into RUNTIME_DIR mid-migration, and page
+    C's own footer promises 2–5 min against the 180 s default) — the
+    deadline re-arms until the migration worker itself returns, matching
+    the migrating-page close guards.
+
+    Every stage worker is unparented and outlives this frame if it has to
+    (`_BOOT_WORKERS`, `release_workers`) — the wizard used to take its
+    running child threads down with it here → 0xC0000409.
     """
     from PyQt6.QtCore import QEventLoop
 
     wizard = BootFlowWindow()
     loop = QEventLoop()
     result = {"proceed": True, "timed_out": False}
+    timeout_ms = _boot_gate_timeout_ms()
 
     def _on_finished(proceed: bool) -> None:
         result["proceed"] = proceed
@@ -2361,6 +2525,9 @@ def run_boot_flow_gate(
 
     def _on_deadline() -> None:
         if not loop.isRunning():
+            return
+        if wizard.migration_in_flight() and timeout_ms is not None:
+            deadline_timer.start(timeout_ms)
             return
         result["timed_out"] = True
         result["proceed"] = True
@@ -2389,14 +2556,19 @@ def run_boot_flow_gate(
     deadline_timer = QTimer()
     deadline_timer.setSingleShot(True)
     deadline_timer.timeout.connect(_on_deadline)
-    deadline_timer.start(int(_boot_gate_timeout_s() * 1000))
+    if timeout_ms is not None:
+        deadline_timer.start(timeout_ms)
     wizard.show()
     QTimer.singleShot(0, wizard.start)
     loop.exec()
     deadline_timer.stop()
     if poll_timer is not None:
         poll_timer.stop()
+    wizard.release_workers()
     if not result["proceed"]:
+        # Interpreter teardown would delete a still-running QThread (same
+        # qFatal as above, just at exit) — give it a moment to return first.
+        wizard.wait_workers(3.0)
         sys.exit(0)
     if result["timed_out"]:
         try:

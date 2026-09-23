@@ -485,6 +485,25 @@ class MigrationOutcome:
     # <target> failed" both need it. `None` when unreadable/missing (a
     # from-scratch install with no prior version.json).
     previous_version: str | None = None
+    # `run_boot_stage()` refused to START the first-time migration (its
+    # post-rollback retry guard / disk gate) — the layout is still v1 and
+    # nothing was touched. `None` for every outcome that actually ran the
+    # ladder (or had nothing to run). The window uses it to hide "ลองใหม่"
+    # for the guard that can't be retried within this app version.
+    skipped_reason: str | None = None
+
+
+#: `BootMigrationResult.reason` for a v1-path skip, in the wizard's own
+#: language — the reason codes themselves are `auto_migrate_boot`'s, and a
+#: person on page E must be told the migration never started, not that a
+#: step failed.
+_SKIP_REASON_TEXT: dict[str, str] = {
+    "previously-rolled-back": (
+        "ไม่ได้เริ่มย้าย — เวอร์ชันนี้เคยย้ายไม่สำเร็จและย้อนกลับไปแล้ว "
+        "ระบบจะไม่ลองซ้ำอัตโนมัติในเวอร์ชันเดียวกัน (รัน takkub migrate apply เพื่อย้ายด้วยมือ)"
+    ),
+    "disk-space": "ไม่ได้เริ่มย้าย — พื้นที่ดิสก์ไม่พอสำหรับสำรองข้อมูลก่อนย้าย",
+}
 
 
 def _phase_of_step(step_id: str | None) -> int | None:
@@ -898,9 +917,23 @@ def _outcome_from_result(
     # what makes 3 consecutive boots after such a failure converge on one
     # stable, honest `ok=False` + `failed_step` every time, never a false
     # "pending_applied" success with nothing to point at.
-    ok = result.action in ("applied", "pending_applied", "skipped") and failing is None
+    #
+    # "skipped" is a success only on the plan=None passes (disabled, dev
+    # checkout, v2 steady state — nothing to migrate). With a real plan (the
+    # wizard's v1 path) it means `run_boot_stage` REFUSED TO START — its
+    # post-rollback retry guard ("previously-rolled-back") or the disk gate
+    # ("disk-space") — and the layout is still v1. Counting that as ok made
+    # page D report the PLAN's promote/junk counts for work that never ran
+    # (and the wizard came right back next boot); "ลองใหม่" after a rollback
+    # could therefore never do anything but fake-succeed (review 2026-09-23).
+    skipped_reason = result.reason if (result.action == "skipped" and plan is not None) else None
+    ok = (
+        result.action in ("applied", "pending_applied", "skipped")
+        and failing is None
+        and skipped_reason is None
+    )
     rolled_back = result.action in ("rolled_back", "pending_rolled_back")
-    if ok:
+    if ok or skipped_reason is not None:
         data_intact = True
     elif rolled_back:
         data_intact = "ไม่สำเร็จ" not in " ".join(result.messages)
@@ -943,18 +976,28 @@ def _outcome_from_result(
     if archive_report is not None and archive_report.detail.get("archive_root"):
         archive_dir = Path(archive_report.detail["archive_root"])
 
+    if skipped_reason is not None:
+        error: str | None = _SKIP_REASON_TEXT.get(skipped_reason, skipped_reason)
+    elif ok:
+        error = None
+    else:
+        error = failing.summary if failing else (result.reason or None)
+    # A skip took no backup and moved nothing — the plan's own lists describe
+    # what WOULD have happened, never what did.
+    ran = plan is not None and skipped_reason is None
+
     return MigrationOutcome(
         ok=ok,
         duration_s=duration,
-        promoted=list(plan.promote_items) if plan else [],
-        archived=list(plan.archive_items) if plan else [],
-        junk_deleted=len(plan.junk_items) if (plan is not None and ok) else 0,
+        promoted=list(plan.promote_items) if ran else [],
+        archived=list(plan.archive_items) if ran else [],
+        junk_deleted=len(plan.junk_items) if (ran and ok) else 0,
         projects_count=_projects_count(),
-        backup_dir=plan.backup_dir if plan else None,
+        backup_dir=plan.backup_dir if ran else None,
         archive_dir=archive_dir,
         failed_phase=failed_phase,
         failed_step=failed_step,
-        error=None if ok else (failing.summary if failing else (result.reason or None)),
+        error=error,
         rolled_back=rolled_back,
         data_intact=data_intact,
         log_paths=_log_paths(),
@@ -962,6 +1005,7 @@ def _outcome_from_result(
         failed_step_index=failed_step_index,
         failed_step_total=failed_step_total,
         previous_version=previous_version,
+        skipped_reason=skipped_reason,
     )
 
 

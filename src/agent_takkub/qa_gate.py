@@ -1458,7 +1458,9 @@ def _node_related_test_cmd(pm: str, runner: str, files: list[str]) -> list[str]:
 
     if runner == "jest":
         return pm_exec(pm, "jest", "--ci", "--passWithNoTests", "--findRelatedTests", *files)
-    return pm_exec(pm, "vitest", "related", "--run", *files)
+    # vitest defaults passWithNoTests=false: a changed file no spec imports
+    # makes `related` exit 1 ("No test files found") and fail a healthy diff.
+    return pm_exec(pm, "vitest", "related", "--run", "--passWithNoTests", *files)
 
 
 def _map_python_tests(root: Path, files: list[str]) -> list[str] | None:

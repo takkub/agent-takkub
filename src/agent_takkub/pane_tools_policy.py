@@ -199,6 +199,13 @@ def save_policy(policy: dict[str, dict[str, list[str]]]) -> bool:
         except OSError as e:
             _log.warning("save_policy: could not delete %s: %s", path(), e)
             return False
+        # cached_read's ≤3s stat-free fast path never sees the unlink (it
+        # skips the stat entirely); without this the regen below and the
+        # CLI's verify read the deleted policy. The write branch gets the
+        # same invalidate from `write_json_atomic` itself.
+        from .cached_read import invalidate
+
+        invalidate(path())
         _regen_role_variants_best_effort()
         return True
 

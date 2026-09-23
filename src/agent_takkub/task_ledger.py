@@ -51,7 +51,7 @@ import threading
 import time
 from datetime import datetime
 
-from .cached_read import read_cached
+from .cached_read import invalidate, read_cached
 from .config import RUNTIME_DIR
 from .path_safe import safe_segment
 
@@ -153,7 +153,14 @@ def list_projects_with_ledger() -> list[str]:
 
 
 def _save_state(project: str, state: dict) -> None:
-    _atomic_write(_state_path(project), json.dumps(state, ensure_ascii=False, indent=2))
+    path = _state_path(project)
+    _atomic_write(path, json.dumps(state, ensure_ascii=False, indent=2))
+    # cached_read's contract (#658): its ≤3s stat-free fast path makes this
+    # save invisible to the next `_load_state` unless the writer invalidates
+    # — a second assign in the same burst (chained CLI assigns, fan-out
+    # shards 400ms apart) would otherwise load the pre-write state and save
+    # over the first assign's row + open pointer (same class as backlog #684).
+    invalidate(path)
 
 
 def _find_group(state: dict, date: str, goal: str) -> dict | None:

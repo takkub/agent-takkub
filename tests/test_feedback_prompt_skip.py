@@ -203,6 +203,110 @@ def test_lead_inbox_send_when_ready_auto_skips_feedback(
     sess.write.assert_called_with("0\r")
 
 
+def _delivery_orch_on_feedback_prompt() -> tuple[Orchestrator, MagicMock]:
+    """Bare orchestrator + a gemini pane whose screen keeps matching the
+    survey on EVERY poll (the TUI has not redrawn yet, or the text lingers)."""
+    orch = Orchestrator.__new__(Orchestrator)
+    QObject.__init__(orch)
+    orch._delivery_in_flight = {}
+    orch._pane_state = {}
+    orch._notify_lead = MagicMock()
+
+    pane = MagicMock()
+    pane.provider = "gemini"
+    sess = MagicMock()
+    sess.is_alive = True
+    sess.is_at_ready_prompt.return_value = False
+    sess.is_at_trust_prompt.return_value = False
+    sess.is_blocked_on_tty_prompt.return_value = None
+    sess.is_blocked_on_permission_prompt.return_value = None
+    sess.is_at_feedback_prompt.return_value = True
+    sess.write = MagicMock()
+    pane.session = sess
+
+    orch._panes_by_project = {"demo": {"frontend": pane}}
+    orch._pane = MagicMock(return_value=pane)
+    return orch, sess
+
+
+def test_lead_inbox_send_when_ready_feedback_skip_is_rate_limited(
+    qapp: QCoreApplication, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review 2026-09-23 (lead_inbox.py:1761): `_check` polls every 150 ms
+    and used to write the skip key on EVERY poll while the survey text was
+    still on screen — each write after the prompt closed landed in the
+    composer as a stray "0" message. It now shares the sweep's 3 s cooldown /
+    3-attempt budget on `PaneState.feedback_prompt_dismiss_*`."""
+    orch, sess = _delivery_orch_on_feedback_prompt()
+    polls = [0]
+
+    def fake_single_shot(_ms, fn):
+        if polls[0] < 8:
+            polls[0] += 1
+            fn()
+
+    monkeypatch.setattr("agent_takkub.lead_inbox.QTimer.singleShot", fake_single_shot)
+    orch._send_when_ready("frontend", "test task", 45_000, project="demo")
+    assert polls[0] == 8
+    assert sess.write.call_count == 1
+    ps = orch._ps("demo::frontend")
+    assert ps.feedback_prompt_dismiss_attempts == 1
+    assert ps.feedback_prompt_dismiss_ts > 0
+
+    # Cooldown elapsed (backdate the stamp rather than sleeping) → exactly
+    # one more skip for the next burst of polls.
+    ps.feedback_prompt_dismiss_ts -= 4.0
+    polls[0] = 0
+    sess.write.reset_mock()
+    orch._send_when_ready("frontend", "test task", 45_000, project="demo")
+    assert sess.write.call_count == 1
+    assert ps.feedback_prompt_dismiss_attempts == 2
+
+    # Budget spent (by this loop or the watchdog sweep) → no more writes.
+    ps.feedback_prompt_dismiss_attempts = 3
+    ps.feedback_prompt_dismiss_ts -= 4.0
+    polls[0] = 0
+    sess.write.reset_mock()
+    orch._send_when_ready("frontend", "test task", 45_000, project="demo")
+    sess.write.assert_not_called()
+    assert ps.feedback_prompt_dismiss_attempts == 3
+
+
+def test_lead_inbox_delivery_skip_shares_budget_with_watchdog_sweep(
+    qapp: QCoreApplication, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The sweep's own cap must see the delivery loop's writes: after one
+    delivery-side skip, an immediate sweep tick is inside the cooldown."""
+    orch, sess = _delivery_orch_on_feedback_prompt()
+    polls = [0]
+
+    def fake_single_shot(_ms, fn):
+        if polls[0] < 3:
+            polls[0] += 1
+            fn()
+
+    monkeypatch.setattr("agent_takkub.lead_inbox.QTimer.singleShot", fake_single_shot)
+    orch._send_when_ready("frontend", "test task", 45_000, project="demo")
+    assert sess.write.call_count == 1
+    orch._check_feedback_prompts(time.time())
+    assert sess.write.call_count == 1
+
+
+def test_lead_inbox_blocked_ceiling_names_feedback_prompt(qapp: QCoreApplication) -> None:
+    orch = Orchestrator.__new__(Orchestrator)
+    QObject.__init__(orch)
+    lead_pane = MagicMock()
+    lead_pane.session = MagicMock()
+    lead_pane.session.is_alive = True
+    orch._panes_by_project = {"demo": {LEAD.name: lead_pane}}
+    orch._notify_lead = MagicMock()
+
+    orch._warn_lead_delivery_blocked_ceiling("frontend", "demo", "feedback")
+    msg = orch._notify_lead.call_args[0][1]
+    assert "CLI survey/feedback prompt" in msg
+    assert "interactive shell prompt" not in msg
+
+
 # ---------------------------------------------------------------------------
 # 4. Orchestrator Runtime Auto-Skip & Watchdog Tests
 # ---------------------------------------------------------------------------

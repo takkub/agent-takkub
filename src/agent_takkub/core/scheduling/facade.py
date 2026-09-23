@@ -48,6 +48,27 @@ def invalidate_policy_cache() -> None:
 _BYTES_PER_PANE_ESTIMATE = 650 * 1024 * 1024
 
 
+class _SettingsResolvedCap(int):
+    """The `max_panes_global` `effective_slot_policy()` hands out — the value
+    pinned in Settings → Scheduler, or the RAM-derived default when Settings
+    leaves it unset. A plain `int` to every reader (`policy.evaluate`
+    compares it, `==`/`repr`/`json` see the number) carrying one bit of
+    provenance: a `SlotPolicy` whose cap is one of these is the facade's own
+    settings-backed snapshot, not a policy a caller pinned in code.
+
+    `ResourceGovernor.__init__` takes `effective_slot_policy()` exactly once
+    per cockpit boot — when RAM headroom is at its lowest (WebEngine + boot
+    sweep) — and never re-reads it; `_live_limits` refreshes env caps only
+    and `invalidate_policy_cache()` clears just the parse cache. So the cap
+    sampled at boot stayed the cap until restart: a 16GB laptop booting with
+    ~5GB free was pinned at 2 panes for the session, queueing every third
+    `takkub assign` as 'machine-wide pane cap reached' with RAM long since
+    freed (2026-09-23 system review). `extended_denial_reason` uses the
+    marker to re-resolve such a snapshot at request time instead."""
+
+    __slots__ = ()
+
+
 def _slot_policy_from_config(cfg) -> SlotPolicy:
     return SlotPolicy(
         max_agents_global=cfg.max_agents_global,
@@ -72,12 +93,17 @@ def _ram_derived_max_panes_global() -> int | None:
     acceptable gap, not a correctness bug).
 
     Sampled fresh on every call (a `psutil.virtual_memory()` read is a few
-    microseconds) rather than folded into `_policy_cache` above — that cache
-    exists to skip re-parsing the settings JSON, not to skip a RAM sample
-    this cheap, and this number needs to track current headroom, not the
-    settings file's mtime. Floors at 1 (never a 0-or-negative cap that would
-    block every spawn outright) and fails open to `None` (no cap) on any
-    psutil error, matching every other function in this module."""
+    microseconds; `performance_settings.load()` is one small JSON read)
+    rather than folded into `_policy_cache` above — that cache exists to skip
+    re-parsing the settings JSON, not to skip a RAM sample this cheap, and
+    this number needs to track current headroom, not the settings file's
+    mtime. "Every call" reaches the live governor through
+    `extended_denial_reason` re-resolving a `_SettingsResolvedCap` snapshot
+    per admission check — those are event-driven (`request_slot` per assign,
+    queue retries on the 1/2/5/15 s backoff), never per idle Qt tick. Floors
+    at 1 (never a 0-or-negative cap that would block every spawn outright)
+    and fails open to `None` (no cap) on any psutil error, matching every
+    other function in this module."""
     try:
         import psutil
 
@@ -108,7 +134,11 @@ def effective_slot_policy() -> SlotPolicy:
     (#364 lever 3): when the config leaves it unset (`None` — true both for
     an explicit `null` on disk and for no settings file at all), this
     substitutes `_ram_derived_max_panes_global()`'s live RAM-based figure
-    instead of leaving the dimension uncapped."""
+    instead of leaving the dimension uncapped. Either way the cap goes out
+    as a `_SettingsResolvedCap`, so a governor that keeps this result as its
+    boot-time snapshot still gets it re-resolved per admission check by
+    `extended_denial_reason` (freed RAM and later Settings saves both reach
+    the live governor without a restart)."""
     if not v2_scheduler_enabled():
         return SlotPolicy()
     global _policy_cache
@@ -119,15 +149,20 @@ def effective_slot_policy() -> SlotPolicy:
             mtime = core_v2_settings.path().stat().st_mtime_ns
         except OSError:
             mtime = None
-        if _policy_cache is not None and _policy_cache[0] == mtime:
-            policy = _policy_cache[1]
+        # Local ref: `invalidate_policy_cache()` runs on the Settings UI
+        # thread with no lock shared with the governor calling this — a
+        # `None` landing between the check and the index would fail open.
+        cached = _policy_cache
+        if cached is not None and cached[0] == mtime:
+            policy = cached[1]
         else:
             policy = _slot_policy_from_config(core_v2_settings.load_scheduler_policy())
             _policy_cache = (mtime, policy)
-        if policy.max_panes_global is None:
-            ram_cap = _ram_derived_max_panes_global()
-            if ram_cap is not None:
-                policy = dataclasses.replace(policy, max_panes_global=ram_cap)
+        cap = policy.max_panes_global
+        if cap is None:
+            cap = _ram_derived_max_panes_global()
+        if cap is not None:
+            policy = dataclasses.replace(policy, max_panes_global=_SettingsResolvedCap(cap))
         return policy
     except Exception:
         _log.exception("core.scheduling.facade.effective_slot_policy failed (fail-open)")
@@ -137,9 +172,17 @@ def effective_slot_policy() -> SlotPolicy:
 def extended_denial_reason(
     request: SlotRequest, counts: ActiveCounts, slot_policy: SlotPolicy
 ) -> str:
+    """`slot_policy` is evaluated as given when the caller pinned it in code
+    (an explicit `SlotPolicy` always wins — see `ResourceGovernor.__init__`).
+    When it is the facade's own settings-backed snapshot (its
+    `max_panes_global` is a `_SettingsResolvedCap`) it is re-resolved right
+    here, so the check sees current RAM headroom and the Settings file as it
+    is now, not as they were when the governor was built."""
     if not v2_scheduler_enabled():
         return ""
     try:
+        if isinstance(slot_policy.max_panes_global, _SettingsResolvedCap):
+            slot_policy = effective_slot_policy()
         return policy.evaluate(request, counts, slot_policy)
     except Exception:
         _log.exception("core.scheduling.facade.extended_denial_reason failed (fail-open)")

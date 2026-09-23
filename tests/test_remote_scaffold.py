@@ -9,9 +9,13 @@ import json
 import socket
 import threading
 import time
+import urllib.error
+import urllib.request
+from typing import ClassVar
 from unittest.mock import MagicMock, patch
 
 import pytest
+from PyQt6.QtCore import QCoreApplication, QThread
 
 import agent_takkub.main_window as mw_mod
 from agent_takkub.remote import RemoteControl
@@ -482,6 +486,272 @@ class TestQuickTunnelAutoStart:
         rc = RemoteControl.maybe_start(MagicMock())
         try:
             assert "yes" not in created
+        finally:
+            rc.stop()
+
+
+# ---------------------------------------------------------------------------
+# Review 2026-09-23 — boot-time start on a worker thread (#640) must still
+# leave a bridge the Qt thread can answer through
+# ---------------------------------------------------------------------------
+
+
+def _pump_until(predicate, timeout: float = 10.0) -> bool:
+    app = QCoreApplication.instance()
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        app.processEvents()
+        if predicate():
+            return True
+        time.sleep(0.01)
+    return False
+
+
+def _get_pumped(url: str, headers: dict) -> tuple[int, bytes]:
+    """GET *url* on a background thread while this (Qt) thread pumps the
+    event loop — the only way a bridged route can ever answer."""
+    result: dict = {}
+
+    def _do() -> None:
+        try:
+            with urllib.request.urlopen(
+                urllib.request.Request(url, headers=headers), timeout=15
+            ) as resp:
+                result["value"] = (resp.status, resp.read())
+        except urllib.error.HTTPError as exc:
+            result["value"] = (exc.code, exc.read())
+        except Exception as exc:  # pragma: no cover - surfaced by the assert below
+            result["value"] = (0, repr(exc).encode())
+
+    t = threading.Thread(target=_do)
+    t.start()
+    assert _pump_until(lambda: not t.is_alive())
+    t.join(timeout=1)
+    return result["value"]
+
+
+class TestBridgeBuiltOffTheQtThread:
+    """remote/__init__.py:172 — `prepare()` runs on a plain worker thread at
+    boot, and `http_server.start_server` builds the `_Bridge` QObject there.
+    Once that worker exits, Qt has no event loop to deliver the queued
+    `request` signal to, so `_Bridge._handle` never ran and every bridged
+    `/api/*` route answered 504 "orchestrator did not respond" until the
+    user clicked Disable → Enable (whose synchronous path builds the bridge
+    on the Qt thread). `finish_start()` must leave a bridge this thread owns."""
+
+    def _prepare_on_a_worker(self):
+        box: dict = {}
+
+        def _work() -> None:
+            box["rc"] = RemoteControl.prepare(MagicMock())
+
+        worker = threading.Thread(target=_work, name="review-remote-prepare")
+        worker.start()
+        worker.join(timeout=30)
+        assert not worker.is_alive()
+        return box["rc"]
+
+    def _patch_projects(self, monkeypatch):
+        import agent_takkub.remote.api as api_mod
+
+        monkeypatch.setattr(
+            api_mod,
+            "projects",
+            lambda project, mode: {"projects": [], "mode": mode, "open_tabs": []},
+        )
+
+    def test_bridged_route_answers_after_prepare_ran_on_a_worker(self, _isolated, monkeypatch):
+        self._patch_projects(monkeypatch)
+        RemoteConfig(
+            enabled=True,
+            bind_port=0,
+            auto_start_tunnel=False,
+            mode="control",
+            secret_path="sek",
+            token="tok",
+        ).save()
+        rc = self._prepare_on_a_worker()
+        assert rc is not None
+        try:
+            # The precondition the bug depends on: the server's bridge was
+            # built on (and is still owned by) the now-finished worker.
+            assert rc._server.bridge.thread() != QThread.currentThread()
+
+            assert rc.finish_start() is True
+            assert rc._server.bridge.thread() == QThread.currentThread()
+
+            status, body = _get_pumped(
+                f"http://127.0.0.1:{rc._server.port}/sek/api/projects",
+                {"Authorization": "Bearer tok"},
+            )
+            assert status == 200, body
+            assert json.loads(body)["projects"] == []
+        finally:
+            rc.stop()
+
+    def test_synchronous_start_keeps_the_bridge_it_built(self, _isolated, monkeypatch):
+        """Settings → Enable (and every test) runs both halves on the Qt
+        thread — that bridge is already right and must not be replaced."""
+        self._patch_projects(monkeypatch)
+        RemoteConfig(
+            enabled=True, bind_port=0, auto_start_tunnel=False, secret_path="sek", token="tok"
+        ).save()
+        rc = RemoteControl.prepare(MagicMock())
+        assert rc is not None
+        try:
+            before = rc._server.bridge
+            assert rc.finish_start() is True
+            assert rc._server.bridge is before
+            status, _ = _get_pumped(
+                f"http://127.0.0.1:{rc._server.port}/sek/api/projects",
+                {"Authorization": "Bearer tok"},
+            )
+            assert status == 200
+        finally:
+            rc.stop()
+
+
+# ---------------------------------------------------------------------------
+# Review 2026-09-23 — quick/ngrok-random URL must be harvested by
+# RemoteControl itself (boot path), not only by the Settings dialog's poll
+# ---------------------------------------------------------------------------
+
+
+class _FakeScrapedTunnel:
+    """Stands in for `tunnel.Tunnel` in a scraped mode: `captured_url` lands
+    later, on the reader thread, exactly like the real one."""
+
+    instances: ClassVar[list] = []
+
+    def __init__(self, tunnel_config, public_url, port):
+        self.public_url_given = public_url
+        self.captured_url = None
+        self.is_alive = True
+        self.stopped = False
+        _FakeScrapedTunnel.instances.append(self)
+
+    def start(self):
+        pass
+
+    def stop(self):
+        self.stopped = True
+
+
+class TestScrapedTunnelUrlWatch:
+    """remote/tunnel.py:461 + remote/__init__.py: after a restart the quick
+    tunnel's new `*.trycloudflare.com` hostname was never written anywhere —
+    the only readers of `captured_url` lived in the Enable flow, so
+    `pairing_url()` and `reports.build_url` kept the previous run's dead
+    hostname until the user re-enabled by hand."""
+
+    @pytest.fixture(autouse=True)
+    def _fake_tunnel(self, monkeypatch):
+        import agent_takkub.remote.tunnel as tunnel_mod
+
+        _FakeScrapedTunnel.instances = []
+        monkeypatch.setattr(tunnel_mod, "Tunnel", _FakeScrapedTunnel)
+
+    def _quick_config(self, **overrides) -> RemoteConfig:
+        cfg = RemoteConfig(
+            enabled=True,
+            bind_port=0,
+            auto_start_tunnel=True,
+            tunnel=TunnelConfig(type="quick"),
+            public_url="https://stale-name.trycloudflare.com",
+            secret_path="sek",
+            token="tok",
+        )
+        for key, value in overrides.items():
+            setattr(cfg, key, value)
+        cfg.save()
+        return cfg
+
+    def test_stale_url_is_forgotten_and_the_fresh_one_is_saved_when_it_lands(self, _isolated):
+        self._quick_config()
+        landed: list = []
+        rc = RemoteControl.maybe_start(MagicMock(), on_public_url=landed.append)
+        assert rc is not None
+        try:
+            fake = _FakeScrapedTunnel.instances[-1]
+            # The previous run's hostname never reaches the tunnel, and the
+            # handle stops advertising it while the new one is pending.
+            assert fake.public_url_given == ""
+            assert rc.config.public_url == ""
+            assert rc.config.pairing_url() == ""
+            assert rc._url_timer is not None and rc._url_timer.isActive()
+
+            fake.captured_url = "https://fresh-name.trycloudflare.com"
+            rc._poll_tunnel_url()
+
+            assert rc.config.public_url == "https://fresh-name.trycloudflare.com"
+            assert rc.config.pairing_url().startswith("https://fresh-name.trycloudflare.com/sek/")
+            # Persisted: the Settings dialog and `reports.build_url` read disk.
+            assert RemoteConfig.load().public_url == "https://fresh-name.trycloudflare.com"
+            assert landed == ["https://fresh-name.trycloudflare.com"]
+            assert rc._url_timer is None
+        finally:
+            rc.stop()
+
+    def test_watch_keeps_polling_while_the_url_is_pending(self, _isolated):
+        self._quick_config()
+        rc = RemoteControl.maybe_start(MagicMock())
+        try:
+            rc._poll_tunnel_url()
+            assert rc._url_timer is not None and rc._url_timer.isActive()
+            assert rc.config.public_url == ""
+        finally:
+            rc.stop()
+        assert rc._url_timer is None
+
+    def test_watch_stops_when_the_tunnel_dies_before_printing_a_url(self, _isolated):
+        self._quick_config()
+        landed: list = []
+        rc = RemoteControl.maybe_start(MagicMock(), on_public_url=landed.append)
+        try:
+            _FakeScrapedTunnel.instances[-1].is_alive = False
+            rc._poll_tunnel_url()
+            assert rc._url_timer is None
+            assert rc.config.public_url == ""
+            assert landed == []
+        finally:
+            rc.stop()
+
+    def test_stop_tunnel_only_stops_the_watch(self, _isolated):
+        self._quick_config()
+        rc = RemoteControl.maybe_start(MagicMock())
+        try:
+            assert rc._url_timer is not None
+            rc.stop_tunnel_only()
+            assert rc._url_timer is None
+            assert rc._server is not None
+        finally:
+            rc.stop()
+
+    def test_ngrok_random_is_watched_too(self, _isolated):
+        self._quick_config(
+            tunnel=TunnelConfig(type="ngrok", url_mode="random"),
+            public_url="https://stale1234.ngrok-free.app",
+        )
+        rc = RemoteControl.maybe_start(MagicMock())
+        try:
+            assert _FakeScrapedTunnel.instances[-1].public_url_given == ""
+            assert rc._url_timer is not None
+            _FakeScrapedTunnel.instances[-1].captured_url = "https://fresh1234.ngrok-free.app"
+            rc._poll_tunnel_url()
+            assert RemoteConfig.load().public_url == "https://fresh1234.ngrok-free.app"
+        finally:
+            rc.stop()
+
+    def test_fixed_url_modes_keep_public_url_and_start_no_watch(self, _isolated):
+        self._quick_config(
+            tunnel=TunnelConfig(type="ngrok", url_mode="fixed", ngrok_domain="x.ngrok-free.app"),
+            public_url="https://x.ngrok-free.app",
+        )
+        rc = RemoteControl.maybe_start(MagicMock())
+        try:
+            assert _FakeScrapedTunnel.instances[-1].public_url_given == "https://x.ngrok-free.app"
+            assert rc.config.public_url == "https://x.ngrok-free.app"
+            assert rc._url_timer is None
         finally:
             rc.stop()
 

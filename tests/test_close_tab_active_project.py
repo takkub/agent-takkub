@@ -81,6 +81,7 @@ def _window(nav: ProjectNav):
         unregister_pane=lambda *_a, **_k: None,
         unregister_workspace_diag_sources=lambda *_a, **_k: None,
         preview_command=lambda *_a, **_k: None,
+        _project_panes=lambda *_a, **_k: {},
     )
     return SimpleNamespace(
         tabs=nav,
@@ -88,6 +89,7 @@ def _window(nav: ProjectNav):
         _limit_store=None,
         _limit_label_host=None,
         _persist_open_tabs=lambda: None,
+        _release_usage_corner=lambda _tab: None,
         _status=SimpleNamespace(showMessage=lambda *_a, **_k: None),
     )
 
@@ -129,3 +131,35 @@ def test_closing_a_background_tab_leaves_active_alone(qapp, monkeypatch):
     mw.MainWindow._close_project_tab(_window(nav), "saas_admin_amb")
 
     assert store.active == "unirecon"
+
+
+def test_closing_a_tab_unregisters_every_teammate_from_the_orchestrator(qapp, monkeypatch):
+    """Review 2026-09-23 (main_window.py:1588): `_close_project_tab` clears
+    `tab.teammate_panes` BEFORE `close_all_teammates`, which turns the
+    deferred `_teardown` (the only GUI-side `unregister_pane` for teammates)
+    into a no-op — so the dead panes stayed in `_panes_by_project` after the
+    tab was deleted. Reopening the project and assigning the same role then
+    found the stale pane, skipped `paneRequested`, and failed on the deleted
+    terminal on every attempt until the cockpit restarted."""
+    nav, _store = _setup(monkeypatch, ["saas_admin_amb"], 0, "saas_admin_amb")
+    win = _window(nav)
+    tab = nav.widget(0)
+    tab.teammate_panes = {"qa": object(), "backend#1": object()}
+    registry = {"saas_admin_amb": {"lead": object(), **tab.teammate_panes}}
+    unregistered: list[tuple[str, str | None, bool]] = []
+
+    def _unregister(role, project=None, force=False):
+        unregistered.append((role, project, force))
+        registry.get(project, {}).pop(role, None)
+
+    win.orch._project_panes = lambda project=None: registry.setdefault(project, {})
+    win.orch.unregister_pane = _unregister
+
+    ok, _msg = mw.MainWindow._close_project_tab(win, "saas_admin_amb")
+
+    assert ok
+    assert registry["saas_admin_amb"] == {}, "every pane must leave the registry on tab close"
+    # Teammates are popped without force; Lead keeps its force=True contract.
+    assert ("qa", "saas_admin_amb", False) in unregistered
+    assert ("backend#1", "saas_admin_amb", False) in unregistered
+    assert ("lead", "saas_admin_amb", True) in unregistered

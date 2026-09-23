@@ -611,6 +611,21 @@ def _v2_project_registry_path() -> Path:
     return storage_layout_v2(DATA_HOME).projects_root / "registry.json"
 
 
+class UnreadableProjects(dict):
+    """The document `load_projects()` hands back when the project store on
+    disk EXISTS but could not be read (transient OSError from an AV/backup
+    tool holding the file, a truncated/NUL-filled registry after a power
+    loss, a registry with no usable ``data`` object). Readers keep working
+    on it exactly like a plain dict (fail-open: "no projects" for now), but
+    it is NOT "no projects" — `save_projects_json` refuses to persist it,
+    because every writer (`set_open_tabs`, `clear_active_project`,
+    `project_wizard`) does ``data = load_projects(); data[k] = v;
+    save_projects_json(data)`` and would otherwise overwrite the only copy
+    of the registry with this empty stand-in (post-#566 the V1 file is
+    archived, so there is no in-app recovery). The marker survives the
+    in-place mutation those writers do because it is the object's type."""
+
+
 def load_projects() -> dict:
     """projects.json — reads the promoted V2 project registry when it
     exists (post `core.migration.steps_v1.ProjectMigrationStep` +
@@ -618,9 +633,14 @@ def load_projects() -> dict:
     file itself into ``backups/v1-archive-<ts>/``, #566), falling back to
     the plain V1 file otherwise — pre-migration, and always on a dev
     checkout, where the boot migration ladder never runs
-    (`auto_migrate_boot.is_dev_checkout`)."""
+    (`auto_migrate_boot.is_dev_checkout`).
+
+    A store that exists but cannot be read is returned as
+    :class:`UnreadableProjects` (same shape, refused by writers) — a read
+    failure must never be indistinguishable from an empty project list."""
     empty = {"active": None, "projects": {}}
     registry_path = _v2_project_registry_path()
+    read_failed = False
     if registry_path.exists():
         try:
             registry = json.loads(registry_path.read_text(encoding="utf-8"))
@@ -629,23 +649,27 @@ def load_projects() -> dict:
                 "could not read V2 project registry (%r) — falling back to projects.json", exc
             )
             registry = None
+            read_failed = True
         if isinstance(registry, dict) and isinstance(registry.get("data"), dict):
             return registry["data"]
         if registry is not None:
             _log.warning(
                 "V2 project registry has no usable 'data' object — falling back to projects.json"
             )
+            read_failed = True
     if not PROJECTS_JSON.exists():
-        return empty
+        return UnreadableProjects(empty) if read_failed else empty
     try:
         data = json.loads(PROJECTS_JSON.read_text(encoding="utf-8"))
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         _log.warning("could not read projects.json (%r) — falling back to empty project list", exc)
-        return empty
+        return UnreadableProjects(empty)
     if not isinstance(data, dict):
         _log.warning("projects.json root is not an object — falling back to empty project list")
-        return empty
-    return data
+        return UnreadableProjects(empty)
+    # The registry is the authority once it exists; V1 data read past a
+    # failed registry read is good enough to display but not to write back.
+    return UnreadableProjects(data) if read_failed else data
 
 
 def save_projects_json(data: dict) -> bool:
@@ -654,13 +678,19 @@ def save_projects_json(data: dict) -> bool:
     below, plus ``project_wizard.py``'s add/edit-project flows) goes through
     this one function. Writes into the V2 registry once it exists (post-
     migration) — never both, so the archived V1 file is never resurrected
-    (#566)."""
+    (#566). Returns False without touching disk when *data* came from a
+    failed read (:class:`UnreadableProjects`) or the on-disk registry cannot
+    be read right now — the store on disk may be the only copy."""
+    if isinstance(data, UnreadableProjects):
+        _log.error("refusing to save projects: the project store could not be read (see above)")
+        return False
     registry_path = _v2_project_registry_path()
     if registry_path.exists():
         try:
             registry = json.loads(registry_path.read_text(encoding="utf-8"))
-        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
-            registry = None
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+            _log.error("refusing to save projects: V2 project registry unreadable (%r)", exc)
+            return False
         if not isinstance(registry, dict):
             registry = {"schema": 1}
         registry["data"] = data

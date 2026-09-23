@@ -7,10 +7,12 @@ Mixed into ``Orchestrator``. Builds on the existing rate-limit watchdog
 reset epoch in ``PaneState.rate_limited_until``. This module adds:
 
 * **signal (b)** — for Claude panes, an independent confirmation via the
-  profile's ``limit_status`` telemetry (five-hour window utilization), fetched
-  off the Qt thread so a slow/offline network call never blocks the watchdog
-  tick. Both signals must agree before a Claude pane is parked. Other providers
-  currently fall back to their provider-specific banner (signal (a)) alone.
+  profile's ``limit_status`` telemetry (every limit window it reports —
+  five-hour AND the weekly ones), fetched off the Qt thread so a slow/offline
+  network call never blocks the watchdog tick. Both signals must agree before
+  a Claude pane is parked. Other providers go through their own usage probe
+  the same way (#704) and fall back to the banner (signal (a)) alone when
+  that probe stays inconclusive.
 * **park** — once confirmed, notify the Lead once and stop poking the pane
   (the idle-reminder suppression already in ``_rate_limit_suppressed``
   handles the "stop nagging" half).
@@ -77,10 +79,15 @@ def quota_reprobe_verdict(usage, recorded_reset_at: float, now: float) -> tuple[
             resets_ts = float(resets_at.timestamp())
         except Exception:
             resets_ts = 0.0
-    util = getattr(usage, "utilization", None)
     if resets_ts and resets_ts <= now:
         return "clear", 0.0
-    if isinstance(util, (int, float)) and util < auto_resume.QUOTA_REPROBE_EXHAUSTED_PERCENT:
+    # Every window the probe reports must be under the threshold — codex's
+    # headline `utilization` is its 5h `primary` window only, so a weekly
+    # (`secondary`) exhaustion used to read as "usable again" here.
+    verdict, _ = _classify_utilizations(
+        _window_utilizations(usage), auto_resume.QUOTA_REPROBE_EXHAUSTED_PERCENT
+    )
+    if verdict == "denied":
         return "clear", 0.0
     if resets_ts > recorded_reset_at + 60:
         return "extend", resets_ts
@@ -95,21 +102,57 @@ def quota_reprobe_verdict(usage, recorded_reset_at: float, now: float) -> tuple[
 # hop so a fresh assign, a post-hit reroute and a failed launch all agree.
 
 
+def _window_utilizations(usage) -> list[float | None]:
+    """Every utilization figure *usage* reports, one entry per window, in
+    one shape for claude's `UsageData` (`LimitWindow` objects: five_hour /
+    seven_day / seven_day_sonnet) and a provider probe's `ProviderUsage`
+    (dict rows: codex primary / secondary, gemini's per-tier groups) plus
+    the probe's headline `utilization`. A `None` entry is a window the API
+    listed without a figure — "unknown", never 0%."""
+    if usage is None:
+        return []
+    utils: list[float | None] = []
+    for window in getattr(usage, "windows", None) or ():
+        util = (
+            window.get("utilization")
+            if isinstance(window, dict)
+            else getattr(window, "utilization", None)
+        )
+        utils.append(float(util) if isinstance(util, (int, float)) else None)
+    headline = getattr(usage, "utilization", None)
+    if isinstance(headline, (int, float)):
+        utils.append(float(headline))
+    return utils
+
+
+def _classify_utilizations(utils: list[float | None], threshold: float) -> tuple[str, float]:
+    """Pure tri-state over `_window_utilizations` output: `"confirmed"` when
+    ANY known window is at/over *threshold* (a single exhausted window —
+    the weekly one included — blocks the pane for as long as IT lasts),
+    `"denied"` only when there is at least one figure and EVERY window is
+    known and under it, else `"unknown"`. Second item is the highest known
+    figure (0.0 when none) — the window that matters for the Lead notice."""
+    known = [u for u in utils if u is not None]
+    worst = max(known) if known else 0.0
+    if any(u >= threshold for u in known):
+        return "confirmed", worst
+    if known and len(known) == len(utils):
+        return "denied", worst
+    return "unknown", worst
+
+
 def _usage_denies_limit(
     usage: UsageData | None, threshold: float = auto_resume.CONFIRM_UTILIZATION_PCT
 ) -> tuple[bool, float]:
     """#704 counterpart of `_usage_confirms_limit`: `(True, pct)` only when
-    the profile's telemetry POSITIVELY says the five-hour window is far
-    from exhausted — a known utilization figure under *threshold*. None /
-    no five-hour window / unknown figure → `(False, 0.0)`: "can't tell"
-    is never "not limited"."""
-    if usage is None:
-        return False, 0.0
-    for window in usage.windows or ():
-        if window.name == "five_hour" and isinstance(window.utilization, (int, float)):
-            pct = float(window.utilization)
-            return pct < threshold, pct
-    return False, 0.0
+    the profile's telemetry POSITIVELY says EVERY limit window is far from
+    exhausted — a known utilization figure under *threshold* for each of
+    them. None / no windows / any window without a figure / any window at
+    or over the threshold → `(False, 0.0)`: "can't tell" is never "not
+    limited", and a weekly window at 100% with a fresh five-hour window is
+    a real hit, not a false positive (review 2026-09-23)."""
+    verdict, pct = _classify_utilizations(_window_utilizations(usage), threshold)
+    return (True, pct) if verdict == "denied" else (False, 0.0)
 
 
 def confirm_verdict_for_provider(provider: str, config_dir: Path | None) -> tuple[str, float]:
@@ -141,33 +184,24 @@ def confirm_verdict_for_provider(provider: str, config_dir: Path | None) -> tupl
         return "unknown", 0.0
     if p_usage is None or getattr(p_usage, "status", None) != STATUS_ACTIVE:
         return "unknown", 0.0
-    util = getattr(p_usage, "utilization", None)
-    if not isinstance(util, (int, float)):
-        return "unknown", 0.0
-    if float(util) >= auto_resume.QUOTA_REPROBE_EXHAUSTED_PERCENT:
-        return "confirmed", float(util)
-    return "denied", float(util)
+    # All windows, not the headline alone: codex's `utilization` is its 5h
+    # `primary` window, so a weekly (`secondary`) exhaustion read "denied".
+    verdict, pct = _classify_utilizations(
+        _window_utilizations(p_usage), auto_resume.QUOTA_REPROBE_EXHAUSTED_PERCENT
+    )
+    return (verdict, pct) if verdict != "unknown" else ("unknown", 0.0)
 
 
 def _usage_confirms_limit(
     usage: UsageData | None, threshold: float = auto_resume.CONFIRM_UTILIZATION_PCT
 ) -> bool:
     """Pure signal-(b) check: does the profile's own usage telemetry agree
-    the five-hour window is (near-)exhausted?
+    that a limit window — five-hour OR weekly — is (near-)exhausted?
 
-    None (offline / no credentials / fetch error) or no matching window →
-    False. Conservative on purpose: an unconfirmed signal (a) alone must
-    never park a pane."""
-    if usage is None:
-        return False
-    for window in usage.windows or ():
-        if (
-            window.name == "five_hour"
-            and window.utilization is not None
-            and window.utilization >= threshold
-        ):
-            return True
-    return False
+    None (offline / no credentials / fetch error) or no window with a figure
+    at/over *threshold* → False. Conservative on purpose: an unconfirmed
+    signal (a) alone must never park a pane."""
+    return _classify_utilizations(_window_utilizations(usage), threshold)[0] == "confirmed"
 
 
 # ── status-dump helpers (#158) — pure, no Qt/network, safe on a mock pane ──

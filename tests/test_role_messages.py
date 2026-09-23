@@ -17,9 +17,14 @@ Two guarantees, both tested here:
 
 from __future__ import annotations
 
+import json
+import os
 import pathlib
+import time
 
-from agent_takkub import role_messages
+import pytest
+
+from agent_takkub import cached_read, role_messages
 
 
 def _append(tmp: pathlib.Path, **kw) -> str:
@@ -148,3 +153,56 @@ class TestCliRendering:
         role_messages.mark_replayed(tmp_path, "proj", msg_id, 2)
         lines = "\n".join(role_messages.format_for_cli(role_messages.read(tmp_path, "proj")))
         assert "ส่งซ้ำหลัง respawn 1x" in lines
+
+
+def _ids_on_disk(tmp: pathlib.Path) -> list[str]:
+    path = role_messages._store_path(tmp, "proj")
+    return [
+        json.loads(line)["id"]
+        for line in path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+
+
+class TestWriteInvalidatesReadCache:
+    """Review 2026-09-23 (cache-invalidate): the reaper keeps this store's
+    cache warm every tick; a second `takkub send` (or the first send's own
+    `mark_delivered` ~1-2 s later) inside `cached_read`'s stat-free TTL read
+    the pre-write parse — the first record was overwritten off disk and
+    `mark_delivered` silently returned False (→ replayed after respawn)."""
+
+    @pytest.fixture(autouse=True)
+    def _real_ttl(self, monkeypatch: pytest.MonkeyPatch):
+        monkeypatch.setattr(cached_read, "_STAT_TTL_S", 3.0)
+        cached_read.invalidate()
+        yield
+        cached_read.invalidate()
+
+    def _warm(self, tmp: pathlib.Path) -> str:
+        seed = _append(tmp, body="seed")
+        path = role_messages._store_path(tmp, "proj")
+        t = time.time() - 60  # idle store: the reaper's stat sees a non-recent mtime
+        os.utime(path, (t, t))
+        assert [r["id"] for r in role_messages.read(tmp, "proj")] == [seed]
+        return seed
+
+    def test_two_sends_inside_the_ttl_both_survive(self, tmp_path: pathlib.Path) -> None:
+        seed = self._warm(tmp_path)
+        m1 = _append(tmp_path, to_role="backend", body="note A")
+        m2 = _append(tmp_path, to_role="qa", body="note B")
+
+        assert _ids_on_disk(tmp_path) == [seed, m1, m2]
+        assert [r["id"] for r in role_messages.read(tmp_path, "proj")] == [seed, m1, m2]
+
+    def test_mark_delivered_right_after_send_finds_the_record(self, tmp_path: pathlib.Path) -> None:
+        self._warm(tmp_path)
+        m1 = _append(tmp_path)
+
+        assert role_messages.mark_delivered(tmp_path, "proj", m1) is True
+
+        (rec,) = role_messages.read(tmp_path, "proj", role="backend")[-1:]
+        assert rec["id"] == m1 and rec["state"] == "delivered"
+        # a confirmed message must never be replayed into the next session
+        # (the seed record is still "sent" and legitimately would be)
+        replayable = role_messages.undelivered_for_generation(tmp_path, "proj", "backend", 2)
+        assert m1 not in {r["id"] for r in replayable}

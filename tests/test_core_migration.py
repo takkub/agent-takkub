@@ -1446,12 +1446,13 @@ def test_apply_pending_keeps_project_registry_when_v1_retired_flag_is_false_but_
     assert registry_before["data"]["projects"]["demo"]["paths"] == {"web": "/tmp/web"}
     assert not (data_home / "projects.json").exists()  # archived away by the first apply()
 
-    # A stray top-level leftover unrelated to the "project" step — stands in
-    # for OS junk or another domain step's own not-yet-archived V1 source —
-    # forces `archive-v1-legacy`'s own validate() (and thus `v1_retired`)
-    # false on the next pass, WITHOUT touching `projects.json`'s own
+    # A stray top-level leftover unrelated to the "project" step — another
+    # domain step's own not-yet-archived V1 source (archive candidates are
+    # an allow-list of real V1 names, 2026-09-23 review) — forces
+    # `archive-v1-legacy`'s own validate() (and thus `v1_retired`) false on
+    # the next pass, WITHOUT touching `projects.json`'s own
     # already-archived state.
-    (data_home / "some-other-v1-leftover.txt").write_text("stray", encoding="utf-8")
+    (data_home / "skill-policy.json").write_text("{}", encoding="utf-8")
     archive_step = engine.get_step("archive-v1-legacy")
     assert archive_step.validate().ok is False  # confirms v1_retired would be False
 

@@ -17,7 +17,7 @@ from __future__ import annotations
 import logging
 import secrets
 
-from PyQt6.QtCore import QCoreApplication, QTimer
+from PyQt6.QtCore import QCoreApplication, QThread, QTimer
 
 from .config import RemoteConfig
 
@@ -30,6 +30,11 @@ __all__ = ["RemoteConfig", "RemoteControl"]
 # hours", not fire promptly to the minute.
 _IDLE_CHECK_MS = 60_000
 
+# How often `_poll_tunnel_url` looks for the URL a quick/ngrok-random tunnel
+# printed. Cheap (one attribute read) and only runs until the URL lands or
+# the tunnel process dies, so it can afford to be prompt.
+_TUNNEL_URL_POLL_MS = 500
+
 
 class RemoteControl:
     """Handle returned by `maybe_start` when remote control is enabled.
@@ -39,13 +44,25 @@ class RemoteControl:
     `stop()`, called on idle-expire and on `QCoreApplication.aboutToQuit`.
     """
 
-    def __init__(self, config: RemoteConfig, orch, *, on_auto_suspend=None) -> None:
+    def __init__(
+        self, config: RemoteConfig, orch, *, on_auto_suspend=None, on_public_url=None
+    ) -> None:
         self.config = config
         self._orch = orch
         self._server = None
         self._notifier = None
         self._tunnel = None
         self._idle_timer: QTimer | None = None
+        # Quick/ngrok-random only: polls `Tunnel.captured_url` on the Qt
+        # thread after start and persists it as `config.public_url` — the
+        # one place that happens for a boot-time start (the Settings
+        # dialog's Enable flow runs its own 6s poll, but nothing else ever
+        # read `captured_url`, so every cockpit restart kept advertising
+        # the previous run's dead hostname).
+        self._url_timer: QTimer | None = None
+        # Called (on the Qt thread, once) with the URL when it lands, so a
+        # caller can repaint whatever shows the pairing URL. Optional.
+        self._on_public_url = on_public_url
         # #252: the caller's hook for "idle-expire just tore this instance
         # down" — MainWindow wires this to drop its own `self._remote`
         # reference and repaint the 🌐 chip, so the UI doesn't keep claiming
@@ -71,7 +88,7 @@ class RemoteControl:
         self.local_probe_note: str | None = None
 
     @classmethod
-    def maybe_start(cls, orch, *, on_auto_suspend=None) -> RemoteControl | None:
+    def maybe_start(cls, orch, *, on_auto_suspend=None, on_public_url=None) -> RemoteControl | None:
         """Off by default: `enabled=false` returns None before touching any
         thread/socket/file/signal. `enabled=true` starts the real server —
         any failure partway through is cleaned up before returning None
@@ -87,22 +104,27 @@ class RemoteControl:
         moment the cockpit last closed". An idle-auto-suspended session
         leaves `enabled` untouched (see `_check_idle_expire`), so a fresh
         boot the next morning starts remote control back up on its own."""
-        self = cls.prepare(orch, on_auto_suspend=on_auto_suspend)
+        self = cls.prepare(orch, on_auto_suspend=on_auto_suspend, on_public_url=on_public_url)
         if self is None:
             return None
         return self if self.finish_start() else None
 
     @classmethod
-    def prepare(cls, orch, *, on_auto_suspend=None) -> RemoteControl | None:
+    def prepare(cls, orch, *, on_auto_suspend=None, on_public_url=None) -> RemoteControl | None:
         """The BLOCKING half of `maybe_start` — safe to run off the Qt thread.
 
         #640: `maybe_start` ran entirely inside `MainWindow._boot` on the Qt
         main thread, and this half is slow: an orphan-process sweep, binding
         the HTTP server, a loopback HTTP probe, spawning cloudflared and then
-        sleeping to see whether it survived. The watchdog caught it on every
-        remote-enabled boot (1.6s SOFT stalls, full stack in boot.log). None
-        of it touches a Qt object, so the boot now runs it on a worker and
-        calls `finish_start()` — the Qt half — back on the main thread.
+        sleeping to see whether it survived. The boot now runs it on a worker
+        and calls `finish_start()` — the Qt half — back on the main thread.
+
+        The one Qt object this half creates is `RemoteHttpServer.bridge`
+        (built inside `http_server.start_server`), whose thread affinity is
+        whatever thread ran this — `_start_qt` rebuilds it on the Qt thread,
+        because a QObject left on a finished worker thread never receives
+        the queued `request` signal and every bridged `/api/*` route would
+        time out with 504.
 
         Returns None when remote control is off, or when startup failed (the
         server/tunnel are already torn down in that case)."""
@@ -116,7 +138,7 @@ class RemoteControl:
         config = RemoteConfig.load()
         if not config.enabled:
             return None
-        self = cls(config, orch, on_auto_suspend=on_auto_suspend)
+        self = cls(config, orch, on_auto_suspend=on_auto_suspend, on_public_url=on_public_url)
         try:
             self._start_blocking()
         except Exception:
@@ -183,6 +205,14 @@ class RemoteControl:
             )
             _log.warning("remote-control: %s", self.port_conflict_note)
 
+        # A quick/ngrok-random `public_url` on disk is only ever the hostname
+        # a previous run was assigned — those providers never hand the same
+        # one out twice, so it is dead by now. Forget it (in memory; disk is
+        # rewritten once the fresh URL lands, see `_poll_tunnel_url`) so
+        # `pairing_url()` answers "" (not ready) instead of a link that 530s.
+        if tunnel.scrapes_public_url(self.config.tunnel):
+            self.config.public_url = ""
+
         # #193 item 3: an orphaned cloudflared from a previous public_url
         # would otherwise look identical to a healthy one until the user
         # tries the link and it 530s. `reap_orphan_tunnel` (called just
@@ -204,7 +234,7 @@ class RemoteControl:
         # runs on the Qt main thread — callers that want it (the Settings
         # dialog, once a pairing URL exists) call `diagnostics.probe_public`
         # themselves, off-thread or accepting the same brief block
-        # `_verify_named_started` already does for tunnel startup.
+        # `Tunnel._verify_started` already does for tunnel startup.
         ok, detail = diagnostics.probe_local(self._server.port, self.config.secret_path)
         if not ok:
             self.local_probe_note = f"Local loopback probe failed: {detail}"
@@ -236,6 +266,7 @@ class RemoteControl:
         Qt main thread, after `_start_blocking` has bound the server."""
         from . import notify
 
+        self._bind_bridge_to_this_thread()
         self._notifier = notify.LeadNotifier(self._orch, self._server.broadcaster)
 
         app = QCoreApplication.instance()
@@ -245,6 +276,72 @@ class RemoteControl:
         self._idle_timer = QTimer()
         self._idle_timer.timeout.connect(self._check_idle_expire)
         self._idle_timer.start(_IDLE_CHECK_MS)
+
+        self._start_tunnel_url_watch()
+
+    def _bind_bridge_to_this_thread(self) -> None:
+        """`RemoteHttpServer.__init__` builds its `_Bridge` on whatever
+        thread ran `_start_blocking`. At boot (#640) that is a worker that
+        has already exited by the time this runs, and a QObject owned by a
+        finished thread never gets a queued signal delivered — `moveToThread`
+        does not rescue it either (PyQt's slot proxy stays behind on the
+        dead thread; verified). The handler threads read `server.bridge`
+        per request, so a fresh bridge built here, on the Qt thread, is
+        what every later `/api/*` call goes through. The synchronous path
+        (Settings → Enable, tests) already built it on this thread and
+        keeps it."""
+        from . import http_server
+
+        bridge = getattr(self._server, "bridge", None)
+        if bridge is not None and bridge.thread() == QThread.currentThread():
+            return
+        self._server.bridge = http_server._Bridge(self._orch)
+
+    def _start_tunnel_url_watch(self) -> None:
+        from . import tunnel
+
+        if self._tunnel is None or not tunnel.scrapes_public_url(self.config.tunnel):
+            return
+        self._url_timer = QTimer()
+        self._url_timer.timeout.connect(self._poll_tunnel_url)
+        self._url_timer.start(_TUNNEL_URL_POLL_MS)
+
+    def _stop_tunnel_url_watch(self) -> None:
+        if self._url_timer is not None:
+            self._url_timer.stop()
+            self._url_timer = None
+
+    def _poll_tunnel_url(self) -> None:
+        """QTimer slot: record the scraped URL as `config.public_url` (and
+        save — the Settings dialog and `reports.build_url` read from disk)
+        the moment the tunnel's reader thread captures it. Gives up when the
+        tunnel is gone or its process died before printing one; nothing
+        more is ever coming then."""
+        try:
+            tunnel_obj = self._tunnel
+            if tunnel_obj is None:
+                self._stop_tunnel_url_watch()
+                return
+            url = getattr(tunnel_obj, "captured_url", None)
+            if url:
+                self._stop_tunnel_url_watch()
+                if url != self.config.public_url:
+                    self.config.public_url = url
+                    self.config.save()
+                    _log.info("remote-control: tunnel URL recorded as public_url")
+                if self._on_public_url is not None:
+                    try:
+                        self._on_public_url(url)
+                    except Exception:
+                        _log.exception("remote-control on_public_url callback failed")
+                return
+            if not getattr(tunnel_obj, "is_alive", True):
+                _log.warning("remote-control: tunnel exited before printing a public URL")
+                self._stop_tunnel_url_watch()
+        except Exception:
+            # QTimer slot — nothing here may escape into Qt's event loop.
+            _log.exception("remote-control: tunnel URL watch failed")
+            self._stop_tunnel_url_watch()
 
     def _check_idle_expire(self) -> None:
         """#252 fix: idle-expire used to write `config.enabled = False` to
@@ -292,6 +389,7 @@ class RemoteControl:
         if self._idle_timer is not None:
             self._idle_timer.stop()
             self._idle_timer = None
+        self._stop_tunnel_url_watch()
         if self._tunnel is not None:
             self._tunnel.stop()
             self._tunnel = None
@@ -307,6 +405,7 @@ class RemoteControl:
         the UI (e.g. it's misbehaving, or they want to go loopback-only)
         without disabling remote control entirely — the HTTP server and Lead
         notifier stay up. A no-op if no tunnel is running."""
+        self._stop_tunnel_url_watch()
         if self._tunnel is not None:
             self._tunnel.stop()
             self._tunnel = None
