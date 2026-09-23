@@ -20,7 +20,9 @@ import json
 import logging
 import os
 import queue
+import socket
 import socketserver
+import sys
 import threading
 import time
 import urllib.parse
@@ -1121,6 +1123,19 @@ class _RemoteHandler(http.server.BaseHTTPRequestHandler):
 
 class RemoteHttpServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
     daemon_threads = True
+    # `http.server.HTTPServer` sets SO_REUSEADDR, which on Windows lets a
+    # SECOND process bind a port another process is already listening on —
+    # no OSError, so `start_server`'s scan-forward never ran: dev and prod
+    # both "owned" 9999, cloudflared's localhost:9999 reached whichever the
+    # OS picked, and a dev pairing link 404'd on prod's bad_secret_path
+    # (2026-09-23). Windows gets an exclusive bind instead; POSIX keeps
+    # SO_REUSEADDR (there it only skips TIME_WAIT, never shares a listener).
+    allow_reuse_address = sys.platform != "win32"
+
+    def server_bind(self) -> None:
+        if sys.platform == "win32":
+            self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+        super().server_bind()
 
     def __init__(self, server_address: tuple[str, int], handler_class, config: RemoteConfig, orch):
         super().__init__(server_address, handler_class)

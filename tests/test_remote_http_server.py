@@ -1523,3 +1523,46 @@ class TestTeamPresetRoute:
         )
         assert status == 400
         assert json.loads(body) == {"ok": False, "msg": "invalid team preset"}
+
+
+class TestPortOwnedByAnotherProcess:
+    """2026-09-23 live bug: on Windows `HTTPServer`'s SO_REUSEADDR let a second
+    cockpit (dev beside prod) bind the SAME remote port with no error, so the
+    scan-forward never ran and the tunnel's localhost:<port> reached whichever
+    process the OS picked — dev pairing links 404'd on prod's secret check.
+    Another *process* must hold the port: a same-process second bind is not
+    the case that broke."""
+
+    def test_second_process_on_the_same_port_scans_forward(self) -> None:
+        import subprocess
+        import sys
+
+        probe = socket.socket()
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+        probe.close()
+        holder = subprocess.Popen(
+            [
+                sys.executable,
+                "-c",
+                "import sys, time\n"
+                "from agent_takkub.remote import http_server as H\n"
+                "from agent_takkub.remote.config import RemoteConfig\n"
+                f"s = H.start_server(RemoteConfig(bind_port={port}, secret_path='a', token='t'), None)\n"
+                "print(s.port, flush=True)\n"
+                "time.sleep(30)\n",
+            ],
+            stdout=subprocess.PIPE,
+            text=True,
+        )
+        try:
+            assert int(holder.stdout.readline().strip()) == port
+            config = RemoteConfig(bind_port=port, secret_path="b", token="t", mode="control")
+            server = http_server.start_server(config, None)
+            try:
+                assert server.port != port
+            finally:
+                server.stop()
+        finally:
+            holder.kill()
+            holder.wait(10)
