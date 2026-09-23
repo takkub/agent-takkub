@@ -1095,7 +1095,20 @@ class BootFlowWindow(QDialog):
         selected_items = [
             item for item in self._provider_items if getattr(item, "name", None) in selected_names
         ]
-        self._run_provider_updates(selected_items)
+        if selected_items:
+            # npm installs run for a minute or more with no other sign of life
+            # — without this the click looked like it did nothing, and a
+            # second click / "ข้าม" raced the install still running behind it.
+            self._main_update_btn.setEnabled(False)
+            self._main_skip_btn.setEnabled(False)
+            self._main_update_btn.setText("กำลังอัพเดต…")
+            names = ", ".join(getattr(i, "label", None) or i.name for i in selected_items)
+            self._set_header(
+                f"กำลังอัพเดต {names} — อาจใช้เวลา 1–2 นาที อย่าปิดหน้าต่างนี้",
+                theme.TEXT_MUTED,
+                None,
+            )
+        self._run_provider_updates(selected_items, interactive=True)
 
     def _save_remembered_choice(self, mode: str, selected: list[str]) -> None:
         if not self._remember_check.is_checked() or self._flow is None:
@@ -2305,7 +2318,7 @@ class BootFlowWindow(QDialog):
         self._populate_provider_rows(items)
         self._show_page(PAGE_MAIN, subtitle_only=False)
 
-    def _run_provider_updates(self, items: list[Any]) -> None:
+    def _run_provider_updates(self, items: list[Any], *, interactive: bool = False) -> None:
         if not items:
             self._proceed_to_migration_check()
             return
@@ -2315,8 +2328,41 @@ class BootFlowWindow(QDialog):
             pass  # ponytail: no live per-row spinner yet — page A is a quick pre-boot step; add if it proves too quiet in practice
 
         worker = _CallWorker(lambda: flow.run_provider_updates(items, _progress_cb))
-        worker.resultReady.connect(lambda _result: self._proceed_to_migration_check())
+        worker.resultReady.connect(
+            lambda result: self._on_provider_updates_done(result, interactive=interactive)
+        )
         self._track_worker(worker)
+
+    def _on_provider_updates_done(self, result: Any, *, interactive: bool) -> None:
+        """A failed update used to be dropped on the floor (the result was
+        never read) — the wizard moved on and the same update was offered
+        again next boot, which read as "the button does nothing". When the
+        user clicked Update on page A, stay on the page and say why.
+        Remembered-choice runs (no page shown) still just carry on; the
+        outcome is in events.log (`boot_provider_update`) either way."""
+        if isinstance(result, _WorkerError):
+            failed = [(None, repr(result.exc)[:200])]
+        else:
+            failed = [
+                (i, getattr(i, "detail", "") or "")
+                for i in (result or [])
+                if getattr(i, "status", "") == "failed"
+            ]
+        if not failed or not interactive:
+            self._proceed_to_migration_check()
+            return
+        parts = []
+        for item, detail in failed:
+            name = (getattr(item, "label", None) or getattr(item, "name", "")) if item else ""
+            parts.append(f"{name}: {detail}".strip(": ") if name else detail)
+        self._set_header(
+            "อัพเดตไม่สำเร็จ — " + " · ".join(p for p in parts if p)[:300],
+            theme.STATE_ERROR_BRIGHT,
+            None,
+        )
+        self._main_skip_btn.setText("ไปต่อ — ใช้เวอร์ชันเดิม")
+        self._main_skip_btn.setEnabled(True)
+        self._refresh_update_button()
 
     def _proceed_to_migration_check(self) -> None:
         self._set_header("กำลังตรวจสอบโครงสร้างข้อมูล…", theme.TEXT_MUTED, None)

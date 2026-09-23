@@ -38,12 +38,15 @@ than #574's brief asked for.
 from __future__ import annotations
 
 import json
+import logging
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 from pathlib import Path
 
 from . import config
+
+_log = logging.getLogger(__name__)
 
 # ─────────────────────────────────────────────────────────────────────
 # 1. Provider updates (screen A)
@@ -68,6 +71,9 @@ class ProviderUpdateItem:
     latest: str | None
     selected: bool
     status: str
+    # Why an update did not succeed (`UpdateOutcome.detail`) — "" otherwise.
+    # The wizard shows it; before, a failed npm install just vanished.
+    detail: str = ""
 
 
 def _label(spec) -> str:
@@ -245,8 +251,21 @@ def run_provider_updates(
         outcome = provider_update.update_provider(item.name)
         status = _OUTCOME_STATUS_MAP.get(outcome.status, PROVIDER_STATUS_FAILED)
         current = item.latest if (outcome.status == "updated" and item.latest) else item.current
-        updated = replace(item, status=status, current=current)
+        updated = replace(item, status=status, current=current, detail=outcome.detail or "")
         out.append(updated)
+        try:
+            from .orchestrator_text import _log_event
+
+            _log_event(
+                "boot_provider_update",
+                provider=item.name,
+                status=outcome.status,
+                from_version=item.current,
+                to_version=item.latest,
+                detail=(outcome.detail or "")[:200] or None,
+            )
+        except Exception:
+            _log.debug("boot_provider_update event not logged", exc_info=True)
         if progress_cb is not None:
             try:
                 progress_cb(updated)
