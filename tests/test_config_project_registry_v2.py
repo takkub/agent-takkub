@@ -129,3 +129,138 @@ def test_dev_checkout_still_reads_and_writes_projects_json_unchanged(
     assert config.load_projects() == {"active": "demo", "projects": {"demo": {}}}
     assert config.save_projects_json({"active": None, "projects": {}}) is True
     assert json.loads(pj.read_text(encoding="utf-8")) == {"active": None, "projects": {}}
+
+
+# --- review 2026-09-23: a failed registry read must never be persisted as
+# "no projects" (config.py load_projects fail-open → set_open_tabs /
+# clear_active_project wrote {"projects": {}} over the only copy). ----------
+
+_REAL = {
+    "schema": 1,
+    "migrated_from": "x",
+    "data": {
+        "active": "demo",
+        "projects": {"demo": {"paths": {"web": "/tmp/demo"}}, "other": {"paths": {}}},
+        "open_tabs": ["demo", "other"],
+    },
+}
+
+
+@pytest.fixture
+def seeded_registry(isolated_data_home: Path) -> Path:
+    """A migrated machine: V2 registry with two projects, V1 file archived."""
+    registry_path = config._v2_project_registry_path()
+    registry_path.parent.mkdir(parents=True, exist_ok=True)
+    registry_path.write_text(json.dumps(_REAL), encoding="utf-8")
+    assert not (isolated_data_home / "projects.json").exists()
+    assert type(config.load_projects()) is dict  # a good read is a plain dict
+    return registry_path
+
+
+def _fail_next_read_of(monkeypatch: pytest.MonkeyPatch, target: Path, exc: Exception) -> dict:
+    """Make exactly ONE `Path.read_text` of *target* raise *exc* (an AV/backup
+    tool holding the file for a moment); every later read succeeds."""
+    orig = Path.read_text
+    state = {"fired": 0}
+
+    def flaky(self: Path, *a, **kw):
+        if self == target and not state["fired"]:
+            state["fired"] += 1
+            raise exc
+        return orig(self, *a, **kw)
+
+    monkeypatch.setattr(Path, "read_text", flaky)
+    return state
+
+
+def test_transient_read_error_in_set_open_tabs_does_not_wipe_registry(
+    seeded_registry: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Verifier repro: one PermissionError on the read inside
+    `set_open_tabs()` used to persist `{"active": None, "projects": {},
+    "open_tabs": []}` over the real registry (WIPED True)."""
+    state = _fail_next_read_of(
+        monkeypatch, seeded_registry, PermissionError(13, "sharing violation")
+    )
+    config.set_open_tabs(["demo", "other"])
+    assert state["fired"] == 1
+    assert json.loads(seeded_registry.read_text(encoding="utf-8")) == _REAL
+    # and the next (successful) write still goes through normally
+    config.set_open_tabs(["other"])
+    assert json.loads(seeded_registry.read_text(encoding="utf-8"))["data"]["open_tabs"] == ["other"]
+
+
+def test_transient_read_error_in_clear_active_project_does_not_wipe_registry(
+    seeded_registry: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _fail_next_read_of(monkeypatch, seeded_registry, OSError(5, "I/O error"))
+    config.clear_active_project()
+    assert json.loads(seeded_registry.read_text(encoding="utf-8")) == _REAL
+
+
+def test_corrupt_registry_reads_as_unreadable_and_writers_keep_it(
+    seeded_registry: Path,
+) -> None:
+    """Truncated registry after a power loss: readers fail open to an empty
+    list (marked `UnreadableProjects`), and every writer refuses to replace
+    the corrupt-but-repairable file with a valid empty one."""
+    truncated = json.dumps(_REAL)[:40]
+    seeded_registry.write_text(truncated, encoding="utf-8")
+
+    data = config.load_projects()
+    assert isinstance(data, config.UnreadableProjects)
+    assert data == {"active": None, "projects": {}}
+    assert config.list_project_names() == []
+    assert config.active_project() == (None, {})
+    assert config.get_open_tabs() == []
+
+    config.set_open_tabs(["demo"])
+    config.clear_active_project()
+    assert config.set_active_project("demo") is False
+    # project_wizard shape: mutate the loaded doc in place, then save
+    data["projects"]["new-one"] = {"paths": {}}
+    data["active"] = "new-one"
+    assert config.save_projects_json(data) is False
+    # a fresh doc built by hand is refused too while the on-disk file is unreadable
+    assert config.save_projects_json({"active": None, "projects": {"z": {}}}) is False
+    assert seeded_registry.read_text(encoding="utf-8") == truncated
+
+
+def test_registry_without_data_object_is_not_an_empty_project_list(
+    seeded_registry: Path,
+) -> None:
+    seeded_registry.write_text(json.dumps({"schema": 1, "data": None}), encoding="utf-8")
+    data = config.load_projects()
+    assert isinstance(data, config.UnreadableProjects)
+    assert config.save_projects_json(data) is False
+    assert json.loads(seeded_registry.read_text(encoding="utf-8")) == {"schema": 1, "data": None}
+
+
+def test_unreadable_v1_projects_json_is_refused_by_writers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Dev checkout / pre-migration: same rule for the plain V1 file."""
+    pj = tmp_path / "projects.json"
+    pj.write_text('{"active": "demo", "projects": {"demo": {}', encoding="utf-8")
+    monkeypatch.setattr(config, "DATA_HOME", config.REPO_ROOT)
+    monkeypatch.setattr(config, "PROJECTS_JSON", pj)
+    assert auto_migrate_boot.is_dev_checkout() is True
+
+    data = config.load_projects()
+    assert isinstance(data, config.UnreadableProjects)
+    data["active"] = None
+    assert config.save_projects_json(data) is False
+    assert pj.read_text(encoding="utf-8") == '{"active": "demo", "projects": {"demo": {}'
+
+
+def test_missing_store_is_a_plain_empty_dict_that_writers_accept(
+    isolated_data_home: Path,
+) -> None:
+    """Fresh machine (#504 item 4): no registry, no V1 file → a genuinely
+    empty list, NOT the unreadable marker — the first project must save."""
+    data = config.load_projects()
+    assert type(data) is dict
+    assert data == {"active": None, "projects": {}}
+    data["projects"]["first"] = {"paths": {}}
+    assert config.save_projects_json(data) is True
+    assert config.list_project_names() == ["first"]

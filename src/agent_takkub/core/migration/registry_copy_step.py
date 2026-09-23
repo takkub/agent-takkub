@@ -22,6 +22,8 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from agent_takkub.cached_read import invalidate
+
 from ..storage.legacy_reader import read_json
 from .backup import BackupManager
 from .journal import MigrationJournal
@@ -42,13 +44,21 @@ def write_json_atomic(path: Path, payload: dict) -> None:
     tmp file's content before the rename, and best-effort fsyncs the
     parent directory afterward — every caller of this function (migration
     ledgers/manifests included) needs the write to survive a hard crash,
-    not just an unhandled exception, before this returns."""
+    not just an unhandled exception, before this returns.
+
+    Also drops *path* from `cached_read` (#658 contract: every in-process
+    writer invalidates). Every reader of these targets goes through
+    `legacy_reader.read_json`'s stat-free ≤3 s TTL, so without this the
+    caller's own next read — a step's post-apply `validate()`, a Role
+    Manager create's register/known_roles gate, `takkub mcp deny`'s
+    variant regen + verify — saw the pre-write parse."""
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(path.name + ".tmp")
     tmp.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
     with open(tmp, "r+b") as f:
         os.fsync(f.fileno())
     os.replace(tmp, path)
+    invalidate(path)
     try:
         fd = os.open(str(path.parent), os.O_RDONLY)
         try:

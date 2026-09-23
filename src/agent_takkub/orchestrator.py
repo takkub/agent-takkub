@@ -175,6 +175,7 @@ from .spawn_engine import (  # re-exported for backward compat; mixin provides m
     PaneRegistry,
     PaneState,
     SpawnEngineMixin,
+    _spawn_pending_for,
 )
 from .task_delivery import DeliveryState, NoticeDeduper, make_notice_id
 from .vault_mirror import (  # re-exported for test + script imports
@@ -14627,7 +14628,23 @@ class Orchestrator(
             _ps_after = self._pane_state.get(key)
             spawn_resumed = _ps_after.last_spawn_resumed if _ps_after is not None else False
             if snap_task:
-                if not spawn_resumed:
+                if _spawn_pending_for(self, project, role):
+                    # spawn() only deferred/queued the respawn (gate blocked /
+                    # arbiter busy): nothing is attached yet and spawn_resumed
+                    # is the fresh PaneState default. Park the decision for the
+                    # attach site — deciding here re-pastes the full task into
+                    # the conversation --resume brings back with it inside.
+                    _ps_park = self._ps(key)
+                    _ps_park.respawn_replay_task = snap_task
+                    _ps_park.respawn_replay_nudge = _STUCK_RESUME_NUDGE
+                    _log_event(
+                        "stuck_recover_replay_parked",
+                        role=role,
+                        project=project,
+                        recovery_id=recovery_id,
+                        msg=msg[:160],
+                    )
+                elif not spawn_resumed:
                     self._send_when_ready(role, snap_task, project=project)
                 else:
                     self._send_when_ready(role, _STUCK_RESUME_NUDGE, project=project)
@@ -15040,14 +15057,23 @@ class Orchestrator(
             return False
         provider = getattr(pane.model, "provider_name", None) or "claude"
         reset_at = pane.session.rate_limit_reset_at(provider)
-        if _ps_rl is not None and _ps_rl.quota_false_positive_armed:
-            # #704: the usage probe already ruled this screen text a false
-            # positive. Ignore it until it scrolls off; a genuinely new hit
-            # after that re-arms detection normally.
-            if reset_at is None:
-                _ps_rl.quota_false_positive_armed = False
-            return False
         if reset_at is None:
+            # No banner on screen: release both "this text was already
+            # judged" latches so a genuinely new hit is detected normally.
+            if _ps_rl is not None:
+                _ps_rl.quota_false_positive_armed = False
+                _ps_rl.quota_banner_recorded = False
+            return False
+        if _ps_rl is not None and (
+            _ps_rl.quota_false_positive_armed or _ps_rl.quota_banner_recorded
+        ):
+            # The text on screen was already judged: the usage probe ruled it
+            # a false positive (#704), or it is the banner of an episode this
+            # gate already recorded and that has since ended — the provider
+            # never repaints it away, and re-parsing it now would open a
+            # phantom episode (clock time rolled to tomorrow, countdown
+            # re-added) with a second Lead notice and a day of suppressed
+            # watchdog. Ignore it until it scrolls off.
             return False
 
         marker = ""
@@ -15057,6 +15083,7 @@ class Orchestrator(
             marker = ""
         ps = self._ps(key)
         ps.rate_limited_until = reset_at
+        ps.quota_banner_recorded = True
         ps.quota_marker = marker
         ps.quota_provider = provider
         # #595: fresh episode — the confirm-loop bookkeeping below belongs to

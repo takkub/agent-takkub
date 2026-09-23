@@ -162,6 +162,16 @@ _STALL_DEFER_MAX = 4
 # hard timeout stays wall-clock accurate.
 _READY_POLL_FIRST_MS = 300
 _READY_POLL_INTERVAL_MS = 150
+# #509 feedback/survey auto-skip budget for `_send_when_ready`'s poll loop —
+# the SAME 3 s cooldown / 3-attempt cap the watchdog sweep
+# (`Orchestrator._check_feedback_prompts`) and `_auto_trust` apply, kept on
+# the same `PaneState.feedback_prompt_dismiss_*` counters so the three sites
+# share one budget per episode. A TUI needs longer than one 150 ms poll to
+# dismiss the survey and redraw, so an unconditional write here re-sent the
+# skip key on every poll, each one landing in the composer as a stray "0"
+# message once the survey was gone (review 2026-09-23).
+_FEEDBACK_SKIP_COOLDOWN_S = 3.0
+_FEEDBACK_SKIP_MAX_ATTEMPTS = 3
 # #186: bounded grace _deliver() keeps waiting instead of blind-pasting a
 # task into an active trust/onboarding modal or shell prompt once its normal
 # hard timeout fires. A blind paste into a modal lands as keystrokes on the
@@ -1762,20 +1772,30 @@ class LeadInboxMixin:
                 try:
                     from .provider_spec import feedback_prompt_skip_key_for
 
-                    _prov = (
-                        getattr(getattr(pane, "model", None), "provider_name", None)
-                        or getattr(pane, "provider", None)
-                        or "gemini"
-                    )
-                    _skip_key = feedback_prompt_skip_key_for(_prov) or "0\r"
-                    pane.session.write(_skip_key)
-                    _log_event(
-                        "feedback_prompt_auto_skipped",
-                        project=self._resolve_project(project),
-                        role=role_name,
-                        provider=_prov,
-                        at="delivery",
-                    )
+                    _ps_fb = self._ps(f"{project_ns}::{role_name}")
+                    _now_fb = time.time()
+                    if (
+                        _now_fb - _ps_fb.feedback_prompt_dismiss_ts
+                    ) >= _FEEDBACK_SKIP_COOLDOWN_S and (
+                        _ps_fb.feedback_prompt_dismiss_attempts < _FEEDBACK_SKIP_MAX_ATTEMPTS
+                    ):
+                        _prov = (
+                            getattr(getattr(pane, "model", None), "provider_name", None)
+                            or getattr(pane, "provider", None)
+                            or "gemini"
+                        )
+                        _skip_key = feedback_prompt_skip_key_for(_prov) or "0\r"
+                        pane.session.write(_skip_key)
+                        _ps_fb.feedback_prompt_dismiss_ts = _now_fb
+                        _ps_fb.feedback_prompt_dismiss_attempts += 1
+                        _log_event(
+                            "feedback_prompt_auto_skipped",
+                            project=project_ns,
+                            role=role_name,
+                            provider=_prov,
+                            at="delivery",
+                            attempts=_ps_fb.feedback_prompt_dismiss_attempts,
+                        )
                 except Exception:
                     pass
             if _reason and not prompt_blocked_warned[0]:
@@ -2615,6 +2635,7 @@ class LeadInboxMixin:
             "trust": "trust/onboarding modal",
             "permission": "tool-permission approval dialog",
             "account_pending": "account-pending gate",
+            "feedback": "CLI survey/feedback prompt",
         }.get(reason, "interactive shell prompt")
         msg = (
             f"⚠️ [delivery-blocked-ceiling] {role_name} pane ยังติดอยู่ที่ {kind} "

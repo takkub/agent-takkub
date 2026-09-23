@@ -1,0 +1,507 @@
+{
+ "zero_inbound": [
+  {
+   "module": "agent_takkub.remote.settings_dialog",
+   "loc": 850,
+   "refs_in_src": [
+    "docs_verify.py",
+    "user_actions.py"
+   ]
+  },
+  {
+   "module": "agent_takkub.vault_graph",
+   "loc": 405,
+   "refs_in_src": [
+    "obsidian_backfill.py",
+    "skill_scan.py"
+   ]
+  },
+  {
+   "module": "agent_takkub.remote",
+   "loc": 312,
+   "refs_in_src": [
+    "agent_pane_model.py",
+    "app.py",
+    "browser_chrome.py",
+    "cli.py",
+    "cli_server.py",
+    "codex_agents_md.py"
+   ]
+  },
+  {
+   "module": "agent_takkub.design_review_html",
+   "loc": 288,
+   "refs_in_src": [
+    "routing_planner.py",
+    "skill_scan.py"
+   ]
+  },
+  {
+   "module": "agent_takkub.core.context_sources.resource_source",
+   "loc": 175,
+   "refs_in_src": [
+    "base.py",
+    "__init__.py"
+   ]
+  },
+  {
+   "module": "agent_takkub.core.model_catalog.legacy",
+   "loc": 163,
+   "refs_in_src": [
+    "agent_pane.py",
+    "auto_migrate_boot.py",
+    "boot_flow.py",
+    "boot_flow_window.py",
+    "claude_auth_config.py",
+    "cli.py"
+   ]
+  },
+  {
+   "module": "agent_takkub.core.capabilities.registry",
+   "loc": 137,
+   "refs_in_src": [
+    "accounts_adapter.py",
+    "agent_pane.py",
+    "app.py",
+    "autoskills_installer.py",
+    "boot_context.py",
+    "boot_flow.py"
+   ]
+  },
+  {
+   "module": "agent_takkub.core.model_catalog.registry",
+   "loc": 118,
+   "refs_in_src": [
+    "accounts_adapter.py",
+    "agent_pane.py",
+    "app.py",
+    "autoskills_installer.py",
+    "boot_context.py",
+    "boot_flow.py"
+   ]
+  },
+  {
+   "module": "agent_takkub.core.scheduling.process_registry",
+   "loc": 112,
+   "refs_in_src": []
+  },
+  {
+   "module": "agent_takkub.headless",
+   "loc": 110,
+   "refs_in_src": [
+    "app.py",
+    "auto_migrate_boot.py",
+    "boot_flow.py",
+    "boot_flow_terminal.py",
+    "browser_chrome.py",
+    "claude_update.py"
+   ]
+  },
+  {
+   "module": "agent_takkub.core.secrets.backends.wincred_backend",
+   "loc": 106,
+   "refs_in_src": []
+  },
+  {
+   "module": "agent_takkub.lead_bash_audit",
+   "loc": 103,
+   "refs_in_src": []
+  },
+  {
+   "module": "agent_takkub.core.scheduling.runtime_control",
+   "loc": 100,
+   "refs_in_src": [
+    "backpressure.py"
+   ]
+  },
+  {
+   "module": "agent_takkub.core.conversation.resume",
+   "loc": 97,
+   "refs_in_src": [
+    "agent_pane.py",
+    "agent_pane_model.py",
+    "app.py",
+    "auto_migrate_boot.py",
+    "chatlog_scanner.py",
+    "claude_update.py"
+   ]
+  },
+  {
+   "module": "agent_takkub.obsidian_backfill",
+   "loc": 82,
+   "refs_in_src": [
+    "doctor.py",
+    "vault_mirror.py"
+   ]
+  },
+  {
+   "module": "agent_takkub.core.capabilities.plugin_manager",
+   "loc": 69,
+   "refs_in_src": []
+  },
+  {
+   "module": "agent_takkub.core.brain.sources.decision_note_source",
+   "loc": 64,
+   "refs_in_src": []
+  },
+  {
+   "module": "agent_takkub.core.brain.sources.knowledge_source",
+   "loc": 53,
+   "refs_in_src": []
+  },
+  {
+   "module": "agent_takkub.core.brain.sources.role_memory_source",
+   "loc": 49,
+   "refs_in_src": []
+  },
+  {
+   "module": "agent_takkub.settings_management.__main__",
+   "loc": 49,
+   "refs_in_src": [
+    "app.py",
+    "cli.py",
+    "design_review_html.py",
+    "headless.py",
+    "obsidian_backfill.py",
+    "vault_graph.py"
+   ]
+  },
+  {
+   "module": "agent_takkub.__main__",
+   "loc": 44,
+   "refs_in_src": [
+    "app.py",
+    "cli.py",
+    "design_review_html.py",
+    "headless.py",
+    "obsidian_backfill.py",
+    "vault_graph.py"
+   ]
+  },
+  {
+   "module": "agent_takkub.core.context_sources.brain_source",
+   "loc": 42,
+   "refs_in_src": [
+    "base.py",
+    "conversation_source.py",
+    "__init__.py"
+   ]
+  },
+  {
+   "module": "agent_takkub.core.models.provider",
+   "loc": 42,
+   "refs_in_src": [
+    "accounts_adapter.py",
+    "agent_pane.py",
+    "agent_pane_model.py",
+    "app.py",
+    "auto_resume.py",
+    "boot_flow.py"
+   ]
+  },
+  {
+   "module": "agent_takkub.core.context_sources.conversation_source",
+   "loc": 38,
+   "refs_in_src": [
+    "base.py",
+    "__init__.py"
+   ]
+  },
+  {
+   "module": "agent_takkub.core.models.task",
+   "loc": 34,
+   "refs_in_src": [
+    "agent_pane.py",
+    "auto_issue_signals.py",
+    "auto_resume.py",
+    "backlog.py",
+    "boot_context.py",
+    "boot_flow.py"
+   ]
+  },
+  {
+   "module": "agent_takkub.core.contracts.store",
+   "loc": 30,
+   "refs_in_src": [
+    "accounts_adapter.py",
+    "auto_migrate_boot.py",
+    "auto_resume.py",
+    "backlog.py",
+    "backlog_dialog.py",
+    "boot_flow.py"
+   ]
+  },
+  {
+   "module": "agent_takkub.core.brain",
+   "loc": 25,
+   "refs_in_src": [
+    "boot_context.py",
+    "codex_agents_md.py",
+    "core_v2_settings.py",
+    "doctor.py",
+    "gemini_helper.py",
+    "orchestrator.py"
+   ]
+  },
+  {
+   "module": "agent_takkub.core.contracts.brain_adapter",
+   "loc": 18,
+   "refs_in_src": [
+    "adapter.py"
+   ]
+  },
+  {
+   "module": "agent_takkub.core.contracts.account_selector",
+   "loc": 16,
+   "refs_in_src": [
+    "selector.py",
+    "account.py"
+   ]
+  },
+  {
+   "module": "agent_takkub.core.contracts.secret_manager",
+   "loc": 16,
+   "refs_in_src": [
+    "design_clients.py",
+    "design_integrations.py",
+    "manager.py"
+   ]
+  },
+  {
+   "module": "agent_takkub.settings_management",
+   "loc": 16,
+   "refs_in_src": [
+    "custom_roles.py",
+    "pane_tools_policy.py",
+    "shared_dev_tools.py",
+    "skill_policy.py",
+    "user_actions.py",
+    "skill_store.py"
+   ]
+  },
+  {
+   "module": "agent_takkub.core.resilience",
+   "loc": 15,
+   "refs_in_src": [
+    "doctor.py",
+    "facade.py",
+    "design_clients.py",
+    "circuit_breaker.py",
+    "doctor_section.py",
+    "policy.py"
+   ]
+  },
+  {
+   "module": "agent_takkub.core.context_sources",
+   "loc": 12,
+   "refs_in_src": [
+    "doctor.py",
+    "orchestrator.py",
+    "settings_knowledge_design.py",
+    "token_estimate.py",
+    "facade.py",
+    "doctor_section.py"
+   ]
+  },
+  {
+   "module": "agent_takkub.core.scheduling",
+   "loc": 12,
+   "refs_in_src": [
+    "cli.py",
+    "core_v2_settings.py",
+    "doctor.py",
+    "lead_inbox.py",
+    "pipeline_executor.py",
+    "resource_governor.py"
+   ]
+  },
+  {
+   "module": "agent_takkub.core",
+   "loc": 11,
+   "refs_in_src": [
+    "accounts_adapter.py",
+    "auto_issue_capture.py",
+    "auto_migrate_boot.py",
+    "boot_context.py",
+    "boot_flow.py",
+    "boot_flow_window.py"
+   ]
+  },
+  {
+   "module": "agent_takkub.core.capabilities",
+   "loc": 11,
+   "refs_in_src": [
+    "cli.py",
+    "config.py",
+    "doctor.py",
+    "pane_tools_policy.py",
+    "provider_config.py",
+    "provider_spec.py"
+   ]
+  },
+  {
+   "module": "agent_takkub.core.conversation",
+   "loc": 10,
+   "refs_in_src": [
+    "bm25_search.py",
+    "chatlog_scanner.py",
+    "codex_agents_md.py",
+    "codex_helper.py",
+    "core_v2_settings.py",
+    "cursor_helper.py"
+   ]
+  },
+  {
+   "module": "agent_takkub.core.model_catalog",
+   "loc": 10,
+   "refs_in_src": [
+    "steps_v1.py",
+    "registry.py",
+    "__init__.py",
+    "layout.py"
+   ]
+  },
+  {
+   "module": "agent_takkub.core.models",
+   "loc": 9,
+   "refs_in_src": [
+    "boot_flow.py",
+    "cached_read.py",
+    "cli.py",
+    "core_v2_settings.py",
+    "editor_widget.py",
+    "plan_tier.py"
+   ]
+  },
+  {
+   "module": "agent_takkub.settings_management.repositories",
+   "loc": 9,
+   "refs_in_src": [
+    "custom_roles.py",
+    "pane_tools_policy.py",
+    "skill_policy.py",
+    "skill_store.py",
+    "models.py",
+    "mcp_page.py"
+   ]
+  },
+  {
+   "module": "agent_takkub.settings_management.services",
+   "loc": 8,
+   "refs_in_src": [
+    "app.py",
+    "cli.py",
+    "cli_server.py",
+    "main_window.py",
+    "openviking_cleanup.py",
+    "service_spawner.py"
+   ]
+  },
+  {
+   "module": "agent_takkub.core.brain.sources",
+   "loc": 7,
+   "refs_in_src": [
+    "auto_migrate_boot.py",
+    "boot_context.py",
+    "claude_update.py",
+    "doctor.py",
+    "lead_inbox.py",
+    "limit_autoresume.py"
+   ]
+  },
+  {
+   "module": "agent_takkub.core.contracts",
+   "loc": 6,
+   "refs_in_src": [
+    "disk_usage.py",
+    "doctor.py",
+    "orchestrator_text.py",
+    "provider_spec.py",
+    "release.py",
+    "task_scope.py"
+   ]
+  },
+  {
+   "module": "agent_takkub.core.secrets",
+   "loc": 5,
+   "refs_in_src": [
+    "auto_issue_capture.py",
+    "cli.py",
+    "cli_server.py",
+    "decide.py",
+    "doctor.py",
+    "lead_context.py"
+   ]
+  },
+  {
+   "module": "agent_takkub.core.storage",
+   "loc": 5,
+   "refs_in_src": [
+    "accounts_adapter.py",
+    "app.py",
+    "auto_issue_capture.py",
+    "auto_migrate_boot.py",
+    "boot_flow.py",
+    "boot_flow_window.py"
+   ]
+  },
+  {
+   "module": "agent_takkub.core.migration",
+   "loc": 4,
+   "refs_in_src": [
+    "app.py",
+    "auto_issue_capture.py",
+    "auto_migrate_boot.py",
+    "boot_flow.py",
+    "boot_flow_terminal.py",
+    "boot_flow_window.py"
+   ]
+  },
+  {
+   "module": "agent_takkub.settings_management.pages",
+   "loc": 4,
+   "refs_in_src": [
+    "agent_pane.py",
+    "boot_flow_window.py",
+    "doctor.py",
+    "obsidian_backfill.py",
+    "pane_guard.py",
+    "pipeline_executor.py"
+   ]
+  },
+  {
+   "module": "agent_takkub.core.versioning",
+   "loc": 3,
+   "refs_in_src": [
+    "boot_flow.py",
+    "boot_flow_window.py",
+    "cli.py",
+    "doctor.py",
+    "provider_probe.py",
+    "design_clients.py"
+   ]
+  },
+  {
+   "module": "agent_takkub.settings_management.widgets",
+   "loc": 3,
+   "refs_in_src": [
+    "agent_pane_model.py",
+    "auto_migrate_boot.py",
+    "cockpit_theme.py",
+    "headless.py",
+    "main_window.py",
+    "project_file_index.py"
+   ]
+  },
+  {
+   "module": "agent_takkub._assets",
+   "loc": 1,
+   "refs_in_src": [
+    "config.py",
+    "release.py",
+    "report_builder.py"
+   ]
+  }
+ ],
+ "note": "modules with zero static importers in docs/architecture/depgraph.json as of 2026-09-22"
+}

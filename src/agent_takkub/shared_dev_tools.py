@@ -744,6 +744,65 @@ MANAGED_MCP_NAMES: frozenset[str] = _BROWSER_MCP_NAMES | frozenset(GRAFT_MCP.key
 # `takkub mcp add` / the Tools dialog are the supported install paths.
 _USER_MCP_DEFAULT_ALLOW: frozenset[str] = frozenset()
 
+# Provenance record for `ensure_user_mcps()`: the names it merged from
+# ~/.claude.json on its last run, kept beside the master file. It is the ONLY
+# thing that licenses a prune — every other non-managed entry in the master
+# was installed on purpose (`takkub mcp add`, the Tools dialog, a design
+# integration) and is never mirrored into ~/.claude.json, so "absent from
+# ~/.claude.json" says nothing about it. Without this record a single
+# eligible ~/.claude.json entry wiped every user-installed server on the next
+# boot (2026-09-23 review). Names only — never a cfg value.
+_USER_MCP_MERGED_FILENAME = "user-mcps-merged.json"
+
+
+def _user_mcp_merged_path() -> pathlib.Path:
+    """Derived from SHARED_MCP_FILE (like `_role_variant_path`) so fixtures
+    that redirect the master redirect the record with it."""
+    return SHARED_MCP_FILE.parent / _USER_MCP_MERGED_FILENAME
+
+
+def _read_user_mcp_merged() -> set[str]:
+    """Names `ensure_user_mcps()` recorded as merged from ~/.claude.json.
+    Missing or unreadable record → empty set, i.e. nothing is prunable —
+    the safe direction (a stale entry lingers; a user-installed one is never
+    lost). Never raises."""
+    path = _user_mcp_merged_path()
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return set()
+    except (OSError, json.JSONDecodeError) as e:
+        _log.warning("ensure_user_mcps: could not read %s: %s", path, e)
+        return set()
+    names = data.get("names") if isinstance(data, dict) else None
+    if not isinstance(names, list):
+        return set()
+    return {n for n in names if isinstance(n, str)}
+
+
+def _write_user_mcp_merged(names: Iterable[str]) -> None:
+    """Replace the record with *names*; a no-op when it already matches.
+    Best-effort: a failed write only means nothing is prunable next boot."""
+    wanted = set(names)
+    path = _user_mcp_merged_path()
+    if path.is_file() and wanted == _read_user_mcp_merged():
+        return
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        _write_private_mcp_json(path, {"names": sorted(wanted)})
+    except OSError as e:
+        _log.warning("ensure_user_mcps: could not write %s: %s", path, e)
+
+
+def _forget_user_mcp_merged(name: str) -> None:
+    """Drop *name* from the record: the user just added/removed it by hand
+    through `add_mcp_server`/`remove_mcp_server`, so it is theirs now and
+    `ensure_user_mcps()` must never prune it on their behalf."""
+    recorded = _read_user_mcp_merged()
+    if name in recorded:
+        _write_user_mcp_merged(recorded - {name})
+
+
 # Role-aware MCP policy: which MCPs each role pane sees.
 #
 # Why: claude loads every tool schema from --mcp-config into the session
@@ -919,6 +978,7 @@ def add_mcp_server(name: str, cfg: dict, force: bool = False) -> bool:
         servers[name] = cfg
         SHARED_MCP_FILE.parent.mkdir(parents=True, exist_ok=True)
         _write_private_mcp_json(SHARED_MCP_FILE, config)
+        _forget_user_mcp_merged(name)
         _write_role_variants()
         return True
     except OSError as e:
@@ -947,6 +1007,7 @@ def remove_mcp_server(name: str) -> bool:
             return False
         del servers[name]
         _write_private_mcp_json(SHARED_MCP_FILE, config)
+        _forget_user_mcp_merged(name)
         _write_role_variants()
         return True
     except OSError as e:
@@ -1249,6 +1310,10 @@ def ensure_user_mcps() -> tuple[bool, str]:
       token, API key, etc.) is skipped with a warning.
     - Browser MCP names (playwright, chrome-devtools) are never overwritten;
       user copies are skipped and logged.
+    - Only entries this function itself merged earlier (recorded in
+      `user-mcps-merged.json`) are ever pruned; servers installed through
+      `add_mcp_server` (`takkub mcp add`, the Tools dialog, design
+      integrations) are left alone.
     - Authorization header values are never written to logs.
     - ~/.claude.json read failure → log warning, skip silently (non-fatal).
     - shared-mcp.json corrupt → refuse to touch it.
@@ -1319,16 +1384,21 @@ def ensure_user_mcps() -> tuple[bool, str]:
 
     servers = config.setdefault("mcpServers", {})
 
-    # Prune stale entries: non-managed user MCPs no longer in current policy.
+    # Prune stale entries: names THIS merge recorded as coming from
+    # ~/.claude.json that are no longer eligible there. Anything else that is
+    # not cockpit-managed was installed by the user through
+    # add_mcp_server() and is theirs — see `_USER_MCP_MERGED_FILENAME`.
     # Log name only — never the cfg value (may contain bearer tokens).
+    merged_before = _read_user_mcp_merged()
     pruned: list[str] = []
     for name in list(servers.keys()):
         if name in MANAGED_MCP_NAMES:
             continue  # managed by ensure_browser_mcps/ensure_graft_mcp; never touch
-        if name not in to_merge:
-            del servers[name]
-            pruned.append(name)
-            _log.info("ensure_user_mcps: pruned stale entry %r", name)
+        if name in to_merge or name not in merged_before:
+            continue
+        del servers[name]
+        pruned.append(name)
+        _log.info("ensure_user_mcps: pruned stale entry %r", name)
 
     changed: list[str] = []
     for name, cfg in to_merge.items():
@@ -1340,7 +1410,10 @@ def ensure_user_mcps() -> tuple[bool, str]:
     if not changed and not pruned:
         # Even when master is unchanged, ensure variants exist (first boot
         # after upgrade: master may already be up-to-date but variants
-        # haven't been generated yet).
+        # haven't been generated yet). Same for the provenance record: an
+        # install that merged before the record existed adopts its entries
+        # here, so a later ~/.claude.json removal still prunes them.
+        _write_user_mcp_merged(to_merge)
         _write_role_variants()
         return True, "user MCPs already up-to-date in shared-mcp.json"
 
@@ -1349,6 +1422,7 @@ def ensure_user_mcps() -> tuple[bool, str]:
         _write_private_mcp_json(SHARED_MCP_FILE, config)
     except OSError as e:
         return False, f"could not write {SHARED_MCP_FILE}: {e}"
+    _write_user_mcp_merged(to_merge)
     _write_role_variants()
 
     # log names only — never cfg values (may contain bearer tokens)

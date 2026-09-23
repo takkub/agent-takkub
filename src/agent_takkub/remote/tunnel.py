@@ -86,6 +86,15 @@ class TunnelError(RuntimeError):
     pass
 
 
+def scrapes_public_url(config: TunnelConfig) -> bool:
+    """True for the modes whose public URL is assigned by the provider on
+    every connect (cloudflared quick tunnel, ngrok random) and scraped from
+    stdout — never known up front, never the same twice. Named cloudflared
+    and ngrok-fixed know their hostname from config; `bat` honours whatever
+    `public_url` the user typed for their own script."""
+    return config.type == "quick" or (config.type == "ngrok" and config.url_mode == "random")
+
+
 def _validate_public_url(public_url: str) -> str:
     """H-D: `public_url` ends up as the ingress hostname in a generated YAML
     config. Reject anything that isn't a bare `https://<hostname>` — no
@@ -458,9 +467,16 @@ class Tunnel:
         self._reader: threading.Thread | None = None
         self._job: int | None = None
         # Mode A: URL is known upfront. Mode B: filled in by _scan_for_url.
-        self.captured_url: str | None = public_url or None
+        # A scraped mode always starts at None: `public_url` there is only
+        # ever the hostname a PREVIOUS run was assigned (the Enable flow
+        # persists it), and `_scan_for_url` only records the first match
+        # while this is None — pre-seeding it kept the dead hostname and
+        # ignored the fresh one every cockpit restart.
+        self.captured_url: str | None = (
+            None if scrapes_public_url(tunnel_config) else (public_url or None)
+        )
         # Bounded tail of the child's stdout/stderr (merged) — kept so a
-        # same-process startup failure (see `_verify_named_started`) can be
+        # same-process startup failure (see `_verify_started`) can be
         # reported with cloudflared's own error text instead of nothing.
         self._last_output: list[str] = []
         # Named-tunnel mode only — the rendered config.yml path, kept so
@@ -536,18 +552,21 @@ class Tunnel:
         self._proc = _spawn(argv)
         self._own_job_if_windows()
         self._drain_output()
-        self._verify_named_started()
+        self._verify_started("cloudflared")
 
-    def _verify_named_started(self) -> None:
+    def _verify_started(self, name: str) -> None:
         """`_spawn`'s `Popen(...)` only raises if the executable itself
         can't be launched — it has no idea whether cloudflared then exits
         immediately because `--config`/`--credentials-file` don't parse
         (bad JSON, expired cert, a `credentials_json` path that doesn't
-        exist on this machine). Left unchecked, that dead process looks
-        identical to a healthy one all the way up to the pairing URL shown
-        to the user. Best-effort and short: `proc.poll()` after a brief
-        wait, not a real health check — a process that's still alive after
-        this window is assumed to have started."""
+        exist on this machine), or a quick tunnel / ngrok dies on a bad
+        authtoken, a blocked edge, an unsupported flag. Left unchecked, that
+        dead process looks identical to a healthy one all the way up to the
+        pairing URL shown to the user (and, for a scraped mode, to a
+        `captured_url` that simply never lands). Best-effort and short:
+        `proc.poll()` after a brief wait, not a real health check — a
+        process that's still alive after this window is assumed to have
+        started."""
         proc = self._proc
         if proc is None:
             return
@@ -558,7 +577,7 @@ class Tunnel:
             self._reader.join(timeout=1)
         self._proc = None
         detail = "\n".join(self._last_output) or f"exit code {proc.returncode}"
-        raise TunnelError(f"cloudflared exited immediately: {detail}")
+        raise TunnelError(f"{name} exited immediately: {detail}")
 
     def _start_quick(self) -> None:
         """Mode "quick" (addendum, no-domain path): cockpit spawns
@@ -571,6 +590,7 @@ class Tunnel:
         self._own_job_if_windows()
         self._reader = threading.Thread(target=self._scan_for_url, daemon=True)
         self._reader.start()
+        self._verify_started("cloudflared")
 
     def _start_ngrok(self) -> None:
         """ngrok provider (addendum): "random" scrapes the assigned
@@ -601,6 +621,7 @@ class Tunnel:
         self._own_job_if_windows()
         self._reader = threading.Thread(target=self._scan_for_url, daemon=True)
         self._reader.start()
+        self._verify_started("ngrok")
 
     def _start_bat(self) -> None:
         script = self._config.credentials_json
@@ -616,7 +637,7 @@ class Tunnel:
         """Named-tunnel mode doesn't need the URL scraped, but the child's
         stdout pipe must still be drained or cloudflared blocks once its own
         log output fills the pipe buffer. The last `_MAX_DRAINED_LINES`
-        lines are kept (not discarded) so `_verify_named_started` can report
+        lines are kept (not discarded) so `_verify_started` can report
         *why* cloudflared exited, instead of just that it did."""
 
         def _drain() -> None:
@@ -635,8 +656,11 @@ class Tunnel:
         if proc is None or proc.stdout is None:
             return
         for line in proc.stdout:
+            text = line.decode("utf-8", errors="replace")
+            self._last_output.append(text.rstrip())
+            del self._last_output[:-_MAX_DRAINED_LINES]
             if self.captured_url is None:
-                match = _URL_RE.search(line.decode("utf-8", errors="replace"))
+                match = _URL_RE.search(text)
                 if match:
                     self.captured_url = match.group(0)
                     _log.info("remote tunnel URL captured")
@@ -651,10 +675,10 @@ class Tunnel:
 
     @property
     def last_output(self) -> str:
-        """Tail of the child's recent stdout/stderr, newline-joined. Only
-        populated for named-tunnel mode (`_drain_output`) — the other
-        modes' reader thread (`_scan_for_url`) only scans for a URL match
-        and discards the rest, so this is `""` for them."""
+        """Tail of the child's recent stdout/stderr, newline-joined — kept
+        by both reader threads (`_drain_output` for named mode,
+        `_scan_for_url` for the scraped modes) so `_verify_started` and the
+        sidebar's tunnel dot can show the provider's own error text."""
         return "\n".join(self._last_output)
 
     def stop(self) -> None:

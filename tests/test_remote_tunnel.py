@@ -422,6 +422,7 @@ class TestQuickTunnelMode:
 
         monkeypatch.setattr(tunnel, "_spawn", _fake_spawn)
         monkeypatch.setattr(tunnel.Tunnel, "_own_job_if_windows", lambda self: None)
+        monkeypatch.setattr(tunnel.time, "sleep", lambda s: None)
         monkeypatch.setattr("shutil.which", lambda name: None)
         # #710: a copy the cockpit downloaded into DATA_HOME/bin is the third
         # candidate — point it at nothing so this machine's real install
@@ -473,6 +474,7 @@ class TestNgrokMode:
 
         monkeypatch.setattr(tunnel, "_spawn", _fake_spawn)
         monkeypatch.setattr(tunnel.Tunnel, "_own_job_if_windows", lambda self: None)
+        monkeypatch.setattr(tunnel.time, "sleep", lambda s: None)
         # Deterministic regardless of whether this machine happens to have a
         # real ngrok on PATH — tests that care about a configured/PATH bin
         # override `shutil.which` themselves.
@@ -546,6 +548,117 @@ class TestNgrokMode:
         t = tunnel.Tunnel(cfg, public_url="", port=9999)
         with pytest.raises(tunnel.TunnelError):
             t.start()
+
+
+class TestScrapedModeIgnoresStalePublicUrl:
+    """Review 2026-09-23 (remote/tunnel.py:461): a quick tunnel / ngrok-random
+    URL is assigned fresh on every connect, but the Enable flow persists the
+    one it scraped into `remote.json` `public_url`. On the next boot
+    `RemoteControl` handed that dead hostname back in as `public_url`,
+    `Tunnel.__init__` pre-seeded `captured_url` with it, and `_scan_for_url`
+    (which only records a match while `captured_url is None`) ignored the
+    new `*.trycloudflare.com` line cloudflared just printed — the pairing
+    URL and every report link stayed on the previous run's hostname."""
+
+    def _patched(self, monkeypatch, lines):
+        monkeypatch.setattr(tunnel, "_spawn", lambda argv, extra_env=None: _FakeProc(lines=lines))
+        monkeypatch.setattr(tunnel.Tunnel, "_own_job_if_windows", lambda self: None)
+        monkeypatch.setattr(tunnel.time, "sleep", lambda s: None)
+        monkeypatch.setattr(tunnel.shutil, "which", lambda name: None)
+
+    def test_quick_mode_starts_with_no_url_even_when_public_url_is_set(self):
+        cfg = TunnelConfig(type="quick")
+        t = tunnel.Tunnel(cfg, public_url="https://stale-name.trycloudflare.com", port=9999)
+        assert t.captured_url is None
+
+    def test_quick_mode_captures_the_fresh_url_over_a_stale_public_url(self, monkeypatch):
+        self._patched(monkeypatch, [b"https://fresh-name.trycloudflare.com\n"])
+        cfg = TunnelConfig(type="quick")
+        t = tunnel.Tunnel(cfg, public_url="https://stale-name.trycloudflare.com", port=9999)
+        t.start()
+        t._reader.join(timeout=1)
+        assert t.captured_url == "https://fresh-name.trycloudflare.com"
+
+    def test_ngrok_random_captures_the_fresh_url_over_a_stale_public_url(self, monkeypatch):
+        self._patched(monkeypatch, [b"url=https://fresh1234.ngrok-free.app\n"])
+        cfg = TunnelConfig(type="ngrok", url_mode="random")
+        t = tunnel.Tunnel(cfg, public_url="https://stale1234.ngrok-free.app", port=9999)
+        assert t.captured_url is None
+        t.start()
+        t._reader.join(timeout=1)
+        assert t.captured_url == "https://fresh1234.ngrok-free.app"
+
+    def test_fixed_url_modes_still_keep_the_configured_public_url(self):
+        named = tunnel.Tunnel(
+            TunnelConfig(type="cloudflared", credentials_json="c.json"),
+            public_url="https://agent-takkub.example.com",
+            port=9999,
+        )
+        fixed = tunnel.Tunnel(
+            TunnelConfig(type="ngrok", url_mode="fixed", ngrok_domain="takkub.ngrok-free.app"),
+            public_url="https://takkub.ngrok-free.app",
+            port=9999,
+        )
+        bat = tunnel.Tunnel(
+            TunnelConfig(type="bat", credentials_json="./my-tunnel.sh"),
+            public_url="https://my.fixed.example.com",
+            port=9999,
+        )
+        assert named.captured_url == "https://agent-takkub.example.com"
+        assert fixed.captured_url == "https://takkub.ngrok-free.app"
+        assert bat.captured_url == "https://my.fixed.example.com"
+
+    def test_scrapes_public_url_predicate(self):
+        assert tunnel.scrapes_public_url(TunnelConfig(type="quick")) is True
+        assert tunnel.scrapes_public_url(TunnelConfig(type="ngrok", url_mode="random")) is True
+        assert tunnel.scrapes_public_url(TunnelConfig(type="ngrok", url_mode="fixed")) is False
+        assert tunnel.scrapes_public_url(TunnelConfig(type="cloudflared")) is False
+        assert tunnel.scrapes_public_url(TunnelConfig(type="bat")) is False
+
+
+class TestScrapedModeLivenessCheck:
+    """Review 2026-09-23: `_start_quick`/`_start_ngrok` never looked at
+    `proc.poll()` (only named mode did), so a cloudflared/ngrok that exited
+    at once was indistinguishable from one still waiting to print its URL —
+    `captured_url` just never landed and nothing said why."""
+
+    def _patched(self, monkeypatch, proc):
+        monkeypatch.setattr(tunnel, "_spawn", lambda argv, extra_env=None: proc)
+        monkeypatch.setattr(tunnel.Tunnel, "_own_job_if_windows", lambda self: None)
+        monkeypatch.setattr(tunnel.time, "sleep", lambda s: None)
+        monkeypatch.setattr(tunnel.shutil, "which", lambda name: None)
+
+    def test_quick_mode_dead_process_raises_with_its_output(self, monkeypatch):
+        proc = _FakeProc(returncode=1, lines=[b"failed to connect to the edge\n"])
+        self._patched(monkeypatch, proc)
+        t = tunnel.Tunnel(TunnelConfig(type="quick"), public_url="", port=9999)
+        with pytest.raises(tunnel.TunnelError, match="cloudflared exited immediately"):
+            t.start()
+        assert t._proc is None
+        assert "failed to connect to the edge" in t.last_output
+        assert not tunnel._PID_FILE.exists()
+
+    def test_ngrok_random_dead_process_raises(self, monkeypatch):
+        proc = _FakeProc(returncode=1, lines=[b"ERROR: authentication failed\n"])
+        self._patched(monkeypatch, proc)
+        t = tunnel.Tunnel(TunnelConfig(type="ngrok", url_mode="random"), public_url="", port=9999)
+        with pytest.raises(tunnel.TunnelError, match="ngrok exited immediately"):
+            t.start()
+        assert t._proc is None
+        assert "authentication failed" in t.last_output
+
+    def test_quick_mode_live_process_starts_and_keeps_an_output_tail(self, monkeypatch):
+        proc = _FakeProc(
+            returncode=None,
+            lines=[b"starting...\n", b"https://fresh-name.trycloudflare.com\n"],
+        )
+        self._patched(monkeypatch, proc)
+        t = tunnel.Tunnel(TunnelConfig(type="quick"), public_url="", port=9999)
+        t.start()
+        t._reader.join(timeout=1)
+        assert t._proc is proc
+        assert t.captured_url == "https://fresh-name.trycloudflare.com"
+        assert t.last_output == "starting...\nhttps://fresh-name.trycloudflare.com"
 
 
 def test_real_platform_constant_is_sane():

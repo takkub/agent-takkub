@@ -1575,3 +1575,299 @@ class TestBootGateDeadline:
         assert window == "window"
         assert built == ["main"]
         assert any(event == "boot_gate_timeout" for event, _ in logged)
+
+
+# ---------------------------------------------------------------------------
+# review 2026-09-23 — boot group
+# ---------------------------------------------------------------------------
+
+
+class TestSteadyStateStageOnPlanNone:
+    """`_on_plan_ready(None)` used to `accept()` straight away, so a GUI boot
+    on an already-migrated (v2) install never ran `run_boot_stage()` at all —
+    `apply_pending()` (version-marker re-pin after every upgrade, ladder
+    steps added later, drift-repair) only ever ran on the headless
+    `TAKKUB_BOOT_UPDATE=0` path and `takkub migrate run`. Prod's marker sat
+    at 2.1.0 across every later release."""
+
+    def test_plan_none_runs_the_boot_stage_before_accepting(self) -> None:
+        flow = _FakeFlow(items=[], plan=None)
+        w = bfw.BootFlowWindow(flow=flow)
+        received: list[bool] = []
+        w.flowFinished.connect(received.append)
+        w.start()
+        assert flow.run_migration_calls == 1
+        assert received == [True]
+
+    def test_plan_worker_error_still_skips_the_stage(self) -> None:
+        flow = _FakeFlow(items=[], plan=None)
+        w = bfw.BootFlowWindow(flow=flow)
+        received: list[bool] = []
+        w.flowFinished.connect(received.append)
+        w._on_plan_ready(bfw._WorkerError(RuntimeError("probe failed")))
+        assert flow.run_migration_calls == 0
+        assert received == [True]
+
+    def test_steady_state_failure_is_logged_and_never_blocks_boot(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        logged: list[tuple] = []
+        monkeypatch.setattr(
+            "agent_takkub.orchestrator_text._log_event",
+            lambda event, **kw: logged.append((event, kw)),
+        )
+        flow = _FakeFlow(
+            items=[],
+            plan=None,
+            outcome=_outcome(ok=False, failed_step="role-agent", error="drift"),
+        )
+        w = bfw.BootFlowWindow(flow=flow)
+        received: list[bool] = []
+        w.flowFinished.connect(received.append)
+        w.start()
+        assert received == [True]
+        assert w._stack.currentIndex() != bfw.PAGE_FAILED
+        assert (
+            "boot_steady_state_migrate",
+            {"ok": False, "failed_step": "role-agent", "error": "drift"},
+        ) in logged
+
+
+class TestFailedPageForASkippedMigration:
+    """A `MigrationOutcome` whose ladder never started
+    (`skipped_reason`: post-rollback retry guard / disk gate) used to reach
+    page D as a success with the plan's counts; now it lands on page E, says
+    nothing moved, and hides "ลองใหม่" for the guard that can't be retried
+    within this app version."""
+
+    @staticmethod
+    def _skipped(reason: str) -> SimpleNamespace:
+        return _outcome(
+            ok=False,
+            skipped_reason=reason,
+            error="ไม่ได้เริ่มย้าย — ทดสอบ",
+            failed_phase=None,
+            failed_step=None,
+            rolled_back=False,
+            data_intact=True,
+            promoted=[],
+            archived=[],
+            junk_deleted=0,
+            backup_dir=None,
+        )
+
+    def test_previously_rolled_back_hides_retry_and_says_nothing_moved(self) -> None:
+        flow = _FakeFlow(items=[], plan=_plan(), outcome=self._skipped("previously-rolled-back"))
+        w = bfw.BootFlowWindow(flow=flow)
+        w.start()
+        w._premigrate_start_btn.click()
+        assert w._stack.currentIndex() == bfw.PAGE_FAILED
+        assert w._failed_retry_btn.isHidden()
+        assert w._failed_heading.text() == "ยังไม่ได้ย้ายข้อมูล"
+        assert w._failed_sub.text() == "ไม่ได้เริ่มย้าย — ทดสอบ"
+        assert "ยังไม่ได้ย้ายข้อมูล" in w._subtitle_label.text()
+        assert _label_by_text(w._failed_info_box, "ยังไม่ได้แตะข้อมูล — การย้ายไม่ได้เริ่ม")
+
+    def test_disk_space_skip_keeps_retry(self) -> None:
+        flow = _FakeFlow(items=[], plan=_plan(), outcome=self._skipped("disk-space"))
+        w = bfw.BootFlowWindow(flow=flow)
+        w.start()
+        w._premigrate_start_btn.click()
+        assert w._stack.currentIndex() == bfw.PAGE_FAILED
+        assert not w._failed_retry_btn.isHidden()
+
+    def test_a_real_failure_after_a_skip_shows_retry_again(self) -> None:
+        flow = _FakeFlow(items=[], plan=_plan(), outcome=self._skipped("previously-rolled-back"))
+        w = bfw.BootFlowWindow(flow=flow)
+        w.start()
+        w._premigrate_start_btn.click()
+        assert w._failed_retry_btn.isHidden()
+        w._show_failed_outcome(
+            _outcome(ok=False, failed_phase=3, failed_step="project", error="x", rolled_back=True)
+        )
+        assert not w._failed_retry_btn.isHidden()
+        assert w._failed_heading.text() != "ยังไม่ได้ย้ายข้อมูล"
+
+
+def _pump_until(app, predicate, timeout_s: float = 5.0) -> None:
+    deadline = time.monotonic() + timeout_s
+    while not predicate() and time.monotonic() < deadline:
+        app.processEvents()
+        time.sleep(0.002)
+
+
+class TestWorkerLifetimeOutlivesTheWizard:
+    """#688 rule applied to the boot wizard: every stage worker was a QThread
+    parented to the dialog, and `run_boot_flow_gate` drops the dialog the
+    moment `flowFinished` fires — Esc/X during the provider check, the #640
+    deadline, Ctrl+C — deleting a still-running child thread (Qt qFatal,
+    0xC0000409, right after the main window appeared)."""
+
+    def test_worker_is_unparented_and_survives_dropping_the_wizard(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import gc
+        import threading
+        import weakref
+
+        from PyQt6.QtTest import QTest
+
+        monkeypatch.delattr(QThread, "start", raising=False)  # real threads
+        app = QApplication.instance()
+        assert app is not None
+
+        release = threading.Event()
+        plan_calls: list[int] = []
+        flow = _FakeFlow(items=[], plan=None)
+        flow.check_provider_updates = lambda timeout_s: (release.wait(5), [])[1]
+        flow.plan_migration = lambda: plan_calls.append(1)
+        w = bfw.BootFlowWindow(flow=flow)
+        workers = w._workers  # same list object; survives the `del w` below
+        worker = None
+        try:
+            w.show()
+            w.start()
+            _pump_until(app, lambda: any(t.isRunning() for t in workers))
+            assert workers and workers[0].isRunning(), "worker never started"
+            worker = workers[0]
+            assert worker.parent() is None
+            assert worker in bfw._BOOT_WORKERS
+
+            finished: list[bool] = []
+            w.flowFinished.connect(finished.append)
+            QTest.keyClick(w, Qt.Key.Key_Escape)  # allowed on the provider-check page
+            app.processEvents()
+            assert finished == [True]
+
+            w.release_workers()  # what the gate does on its way out
+            assert w in bfw._LINGERING_WIZARDS
+            ref = weakref.ref(w)
+            del w
+            gc.collect()
+            assert ref() is not None, "wizard must stay parked while its worker runs"
+        finally:
+            release.set()
+            if worker is not None:
+                _pump_until(app, lambda: worker not in bfw._BOOT_WORKERS)
+                app.processEvents()
+
+        assert worker not in bfw._BOOT_WORKERS
+        assert plan_calls == [], "a late provider-check result must not drive the flow on"
+        gc.collect()
+        assert all(wiz is not ref() for wiz in bfw._LINGERING_WIZARDS)
+
+    def test_gate_deadline_waits_out_a_running_migration(
+        self, _qt_session_app, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """#640's fail-open must never open the cockpit on top of a ladder
+        that is still copying (page C's own footer promises 2–5 min against
+        the 180 s default; panes would write into RUNTIME_DIR mid-migration).
+        The deadline re-arms while `_MigrationWorker` runs and fires only
+        once the wizard is past it (here: page D waiting for a click)."""
+        import threading
+
+        from PyQt6.QtCore import QTimer
+
+        monkeypatch.delattr(QThread, "start", raising=False)  # real threads
+        monkeypatch.setenv("TAKKUB_BOOT_GATE_TIMEOUT_S", "0.2")
+
+        release = threading.Event()
+        migrated: list[bool] = []
+
+        def run_migration(_cb):
+            release.wait(10)
+            migrated.append(True)
+            return _outcome()
+
+        flow = _FakeFlow(items=[], plan=_plan())
+        flow.run_migration = run_migration
+
+        def _start(self) -> None:
+            self._flow = flow
+            self._on_plan_ready(_plan())
+            self._on_premigrate_start_clicked()
+
+        monkeypatch.setattr(bfw.BootFlowWindow, "start", _start)
+        logged: list[tuple] = []
+        monkeypatch.setattr(
+            "agent_takkub.orchestrator_text._log_event",
+            lambda event, **kw: logged.append((event, kw)),
+        )
+        QTimer.singleShot(700, release.set)
+        built: list[str] = []
+
+        window = bfw.run_boot_flow_gate(lambda: built.append("main") or "window")
+
+        assert window == "window" and built == ["main"]
+        assert migrated == [True], "gate returned while the migration ladder was still running"
+        assert any(event == "boot_gate_timeout" for event, _ in logged)
+
+    def test_disabled_ceiling_no_longer_overflows_the_timer(
+        self, _qt_session_app, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """`TAKKUB_BOOT_GATE_TIMEOUT_S=0` is documented as the opt-out, but
+        `int(inf * 1000)` raised OverflowError before the wizard ever showed."""
+        monkeypatch.setenv("TAKKUB_BOOT_GATE_TIMEOUT_S", "0")
+        assert bfw._boot_gate_timeout_ms() is None
+        flow = _FakeFlow(items=[], plan=None)
+        monkeypatch.setattr(bfw.BootFlowWindow, "_resolve_flow", lambda self: flow)
+        built: list[str] = []
+        window = bfw.run_boot_flow_gate(lambda: built.append("main") or "window")
+        assert window == "window" and built == ["main"]
+
+    _SCRIPT = """
+import os, sys, time
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+from PyQt6.QtWidgets import QApplication
+app = QApplication([sys.argv[0]])
+import agent_takkub.boot_flow_window as bfw
+
+class Flow:
+    def check_provider_updates(self, timeout_s):
+        time.sleep(2.0)  # the gate's 0.3 s deadline fires while this runs
+        return []
+    def remembered_provider_choice(self):
+        return None
+    def plan_migration(self):
+        print("CHAIN", flush=True)  # a late result must not drive the flow on
+        return None
+    def run_migration(self, cb):
+        return None
+
+bfw.BootFlowWindow._resolve_flow = lambda self: Flow()
+window = bfw.run_boot_flow_gate(lambda: "main")
+assert window == "main", window
+# run_boot_flow_gate's frame is gone: the wizard was its only holder, and
+# the provider-check worker is still sleeping.
+for _ in range(60):
+    app.processEvents()
+    time.sleep(0.05)
+print("SURVIVED", flush=True)
+os._exit(0)
+"""
+
+    def test_gate_exit_with_a_live_worker_does_not_abort_the_process(self, tmp_path) -> None:
+        """The qFatal is uncatchable in-process (see #688) — only a
+        subprocess can prove the process survives the gate's frame exit."""
+        import os
+        import subprocess
+        import sys
+
+        env = dict(os.environ)
+        env["AGENT_TAKKUB_HOME"] = str(tmp_path / "home")
+        env["QT_QPA_PLATFORM"] = "offscreen"
+        env["TAKKUB_BOOT_GATE_TIMEOUT_S"] = "0.3"
+        env.pop("TAKKUB_BOOT_UPDATE", None)
+        proc = subprocess.run(
+            [sys.executable, "-c", self._SCRIPT],
+            capture_output=True,
+            text=True,
+            timeout=120,
+            env=env,
+        )
+        assert "SURVIVED" in proc.stdout, (
+            f"boot gate exit killed the process (exit {proc.returncode})\n"
+            f"stdout: {proc.stdout[-500:]}\nstderr: {proc.stderr[-2000:]}"
+        )
+        assert "CHAIN" not in proc.stdout
+        assert proc.returncode == 0

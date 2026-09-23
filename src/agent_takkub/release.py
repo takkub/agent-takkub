@@ -357,6 +357,7 @@ def release(
 
     original_head = ""
     commit_created = False
+    tag_created = False
     writes_started = False
     try:
         if do_commit:
@@ -389,6 +390,7 @@ def release(
             summary["committed"] = True
         if do_tag:
             _git(repo_root, "tag", "-a", tag, "-m", tag)
+            tag_created = True
             summary["tagged"] = True
 
         # Build the wheel `npm publish` will bundle — only for a real
@@ -399,8 +401,10 @@ def release(
             summary["wheel_built"] = True
             summary["wheel_path"] = str(wheel_path)
     except (subprocess.SubprocessError, OSError, RuntimeError) as exc:
-        # Restore both tracked files and undo a release commit if tag creation
-        # failed after the commit. Preserve any pre-existing file content.
+        # Restore the tracked files, undo a release commit, and drop the tag
+        # when a later step (the wheel build) failed after it was created —
+        # a tag left on the orphaned commit makes every retry of the same
+        # version refuse with "already exists". Preserve pre-existing content.
         try:
             if writes_started:
                 if do_commit:
@@ -420,6 +424,8 @@ def release(
                 changelog.write_text(cl_text, encoding="utf-8")
                 init_py.write_text(init_text, encoding="utf-8")
                 package_json.write_text(npm_text, encoding="utf-8")
+                if tag_created:
+                    _git(repo_root, "tag", "-d", tag)
         except Exception as rollback_exc:
             raise RuntimeError(
                 f"release failed ({exc}); rollback also failed: {rollback_exc}"

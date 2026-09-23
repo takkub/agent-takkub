@@ -51,12 +51,18 @@ class TestUsageConfirmsLimit:
     def test_above_threshold_confirmed(self) -> None:
         assert _usage_confirms_limit(_usage(99.0)) is True
 
-    def test_no_five_hour_window_not_confirmed(self) -> None:
+    def test_weekly_window_alone_confirms(self) -> None:
+        """Review 2026-09-23: an exhausted weekly window blocks the pane
+        exactly like an exhausted five-hour one — it must confirm."""
         usage = UsageData(
             plan="Max",
             windows=[LimitWindow(name="seven_day", utilization=99.0, resets_at=None)],
             extra_usage_enabled=False,
         )
+        assert _usage_confirms_limit(usage) is True
+
+    def test_no_windows_not_confirmed(self) -> None:
+        usage = UsageData(plan="Max", windows=[], extra_usage_enabled=False)
         assert _usage_confirms_limit(usage) is False
 
     def test_custom_threshold(self) -> None:
@@ -72,6 +78,135 @@ class TestUsageConfirmsLimit:
             extra_usage_enabled=False,
         )
         assert _usage_confirms_limit(usage) is False
+
+
+class TestWindowAwareVerdict:
+    """Review 2026-09-23 (limit_autoresume.py:109): the #704 deny verdict
+    looked at claude's five_hour window / codex's primary window only, so a
+    pane whose WEEKLY window was exhausted (five-hour fresh) was classified
+    "denied" — the episode cancelled, the pane un-flagged and left blocked
+    for up to 7 days with no reroute. A deny must require EVERY known
+    window under the threshold; any exhausted window confirms; a window
+    without a figure is "unknown"."""
+
+    @staticmethod
+    def _claude(**pcts: float | None) -> UsageData:
+        return UsageData(
+            plan="Max",
+            windows=[
+                LimitWindow(name=name, utilization=pct, resets_at=None)
+                for name, pct in pcts.items()
+            ],
+            extra_usage_enabled=False,
+        )
+
+    def test_weekly_exhausted_is_not_denied(self) -> None:
+        from agent_takkub.limit_autoresume import _usage_denies_limit
+
+        usage = self._claude(five_hour=30.0, seven_day=100.0)
+        assert _usage_denies_limit(usage) == (False, 0.0)
+        assert _usage_confirms_limit(usage) is True
+
+    def test_sonnet_weekly_exhausted_is_not_denied(self) -> None:
+        from agent_takkub.limit_autoresume import _usage_denies_limit
+
+        usage = self._claude(five_hour=30.0, seven_day=40.0, seven_day_sonnet=100.0)
+        assert _usage_denies_limit(usage) == (False, 0.0)
+        assert _usage_confirms_limit(usage) is True
+
+    def test_every_window_low_is_denied_with_worst_pct(self) -> None:
+        from agent_takkub.limit_autoresume import _usage_denies_limit
+
+        usage = self._claude(five_hour=30.0, seven_day=40.0, seven_day_sonnet=50.0)
+        assert _usage_denies_limit(usage) == (True, 50.0)
+        assert _usage_confirms_limit(usage) is False
+
+    def test_weekly_without_figure_is_unknown(self) -> None:
+        from agent_takkub.limit_autoresume import _usage_denies_limit
+
+        usage = self._claude(five_hour=30.0, seven_day=None)
+        assert _usage_denies_limit(usage) == (False, 0.0)
+        assert _usage_confirms_limit(usage) is False
+
+    def test_claude_verdict_weekly_exhausted_is_confirmed(self, tmp_path) -> None:
+        from agent_takkub import limit_autoresume as la
+
+        with patch.object(
+            la, "fetch_usage_shared", return_value=self._claude(five_hour=30.0, seven_day=100.0)
+        ):
+            assert la.confirm_verdict_for_provider("claude", tmp_path)[0] == "confirmed"
+        with patch.object(
+            la, "fetch_usage_shared", return_value=self._claude(five_hour=30.0, seven_day=None)
+        ):
+            assert la.confirm_verdict_for_provider("claude", tmp_path) == ("unknown", 0.0)
+
+    @staticmethod
+    def _codex(primary: float | None, secondary: float | None):
+        from agent_takkub import provider_usage as pu
+
+        return pu.ProviderUsage(
+            provider="codex",
+            status=pu.STATUS_ACTIVE,
+            utilization=primary,
+            plan="plus",
+            windows=[
+                {"name": "primary", "utilization": primary, "resets_at": None},
+                {"name": "secondary", "utilization": secondary, "resets_at": None},
+            ],
+        )
+
+    def test_codex_weekly_exhausted_is_confirmed(self) -> None:
+        from agent_takkub import limit_autoresume as la
+
+        with patch(
+            "agent_takkub.provider_usage.fetch_provider_usage",
+            return_value=self._codex(30.0, 100.0),
+        ):
+            assert la.confirm_verdict_for_provider("codex", None) == ("confirmed", 100.0)
+
+    def test_codex_both_windows_low_is_denied(self) -> None:
+        from agent_takkub import limit_autoresume as la
+
+        with patch(
+            "agent_takkub.provider_usage.fetch_provider_usage",
+            return_value=self._codex(30.0, 40.0),
+        ):
+            assert la.confirm_verdict_for_provider("codex", None) == ("denied", 40.0)
+
+    def test_codex_weekly_without_figure_is_unknown(self) -> None:
+        from agent_takkub import limit_autoresume as la
+
+        with patch(
+            "agent_takkub.provider_usage.fetch_provider_usage",
+            return_value=self._codex(30.0, None),
+        ):
+            assert la.confirm_verdict_for_provider("codex", None) == ("unknown", 0.0)
+
+    def test_reprobe_keeps_stall_while_codex_weekly_is_exhausted(self) -> None:
+        from agent_takkub.limit_autoresume import quota_reprobe_verdict
+
+        now = time.time()
+        assert quota_reprobe_verdict(self._codex(30.0, 100.0), now + 3600, now) == ("keep", 0.0)
+        assert quota_reprobe_verdict(self._codex(30.0, 40.0), now + 3600, now) == ("clear", 0.0)
+
+    def test_gemini_headline_is_already_its_worst_tier(self) -> None:
+        """Gemini's headline utilization is its most-exhausted tier group, so
+        the all-windows rule changes nothing for it — pinned so a future
+        headline change surfaces here."""
+        from agent_takkub import limit_autoresume as la
+        from agent_takkub import provider_usage as pu
+
+        row = pu.ProviderUsage(
+            provider="gemini",
+            status=pu.STATUS_ACTIVE,
+            utilization=100.0,
+            windows=[
+                {"name": "pro", "utilization": 100.0, "resets_at": None},
+                {"name": "flash", "utilization": 10.0, "resets_at": None},
+            ],
+        )
+        with patch("agent_takkub.provider_usage.fetch_provider_usage", return_value=row):
+            assert la.confirm_verdict_for_provider("gemini", None) == ("confirmed", 100.0)
 
 
 # ── shared fixture: a bare Orchestrator with just what AutoResumeMixin touches ──

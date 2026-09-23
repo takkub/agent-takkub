@@ -341,3 +341,113 @@ class TestEmitRateLimitReset:
             o._emit_rate_limit_reset("proj", "mobile")  # duplicate — must be skipped
 
         assert o._notify_lead.call_count == 1
+
+
+# ── layer 4: the banner outlives the episode it announced ────────────────────
+
+
+class TestStaleBannerAfterReset:
+    """Review 2026-09-23 (orchestrator.py:15042): the provider never repaints
+    its quota banner away, so after the window resets the same text is still
+    on screen and re-parses to a NEW reset epoch (a clock time already passed
+    today rolls to tomorrow; a static "resets in 2h" re-adds 2h). The gate
+    used to record that as a fresh episode: +24h of stalled:quota, a second
+    contradictory Lead notice seconds after the reset notice, and a confirm
+    loop against pre-reset usage telemetry. The banner of an episode already
+    recorded is ignored until it scrolls off, whichever path ended it."""
+
+    def _tick(self, o, pane, now):
+        with (
+            patch("agent_takkub.orchestrator.QTimer.singleShot") as timer,
+            patch("agent_takkub.orchestrator._log_event"),
+        ):
+            return o._rate_limit_suppressed("proj", "qa", pane, now), timer
+
+    def test_expired_episode_banner_is_not_a_new_episode(self) -> None:
+        o = _bare_orch()
+        o._notify_quota_hit = MagicMock()
+        now = time.time()
+        pane = _pane_reporting(now + 3600)
+        assert self._tick(o, pane, now)[0] is True
+        ps = o._ps("proj::qa")
+        assert ps.rate_limited_until == now + 3600
+        assert ps.quota_banner_recorded is True
+
+        # Window reset: the expiry tick clears the episode while the same
+        # banner re-parses as tomorrow's clock time...
+        pane.session.rate_limit_reset_at.return_value = now + 3600 + 86400
+        assert self._tick(o, pane, now + 3605)[0] is False
+        assert ps.rate_limited_until == 0.0
+        # ...and the following ticks must NOT open a phantom +24h episode.
+        for t in (now + 3610, now + 3615):
+            suppressed, timer = self._tick(o, pane, t)
+            assert suppressed is False
+            timer.assert_not_called()
+        assert ps.rate_limited_until == 0.0
+        o._notify_quota_hit.assert_called_once()
+
+    def test_reset_timer_path_then_stale_banner_ignored(self) -> None:
+        o = _bare_emit_orch()
+        o._notify_lead = MagicMock()
+        o._notify_quota_hit = MagicMock()
+        now = time.time()
+        pane = _pane_reporting(now + 1)
+        o._project_panes("proj")["qa"] = pane
+        assert self._tick(o, pane, now)[0] is True
+
+        with (
+            patch("agent_takkub.orchestrator.QTimer.singleShot"),
+            patch("agent_takkub.orchestrator._log_event"),
+        ):
+            o._emit_rate_limit_reset("proj", "qa")  # the one-shot reset notice
+        ps = o._ps("proj::qa")
+        assert ps.rate_limited_until == 0.0
+        assert o._notify_lead.call_count == 1
+
+        pane.session.rate_limit_reset_at.return_value = now + 1 + 86400
+        suppressed, timer = self._tick(o, pane, now + 6)
+        assert suppressed is False
+        timer.assert_not_called()
+        assert ps.rate_limited_until == 0.0
+        o._notify_quota_hit.assert_called_once()
+
+    def test_episode_cleared_elsewhere_still_latches(self) -> None:
+        """Auto-resume's wake (limit_autoresume._wake_parked_pane) zeroes
+        rate_limited_until directly — the latch must not depend on which
+        path ended the episode."""
+        o = _bare_orch()
+        o._notify_quota_hit = MagicMock()
+        now = time.time()
+        pane = _pane_reporting(now + 3600)
+        assert self._tick(o, pane, now)[0] is True
+        ps = o._ps("proj::qa")
+        ps.rate_limited_until = 0.0
+
+        pane.session.rate_limit_reset_at.return_value = now + 3600 + 86400
+        suppressed, timer = self._tick(o, pane, now + 3605)
+        assert suppressed is False
+        timer.assert_not_called()
+        assert ps.rate_limited_until == 0.0
+
+    def test_banner_scrolled_off_rearms_detection(self) -> None:
+        o = _bare_orch()
+        o._notify_quota_hit = MagicMock()
+        now = time.time()
+        pane = _pane_reporting(now + 3600)
+        assert self._tick(o, pane, now)[0] is True
+        ps = o._ps("proj::qa")
+
+        pane.session.rate_limit_reset_at.return_value = now + 3600 + 86400
+        assert self._tick(o, pane, now + 3605)[0] is False  # expiry
+        assert self._tick(o, pane, now + 3610)[0] is False  # stale banner ignored
+
+        pane.session.rate_limit_reset_at.return_value = None  # scrolled off
+        assert self._tick(o, pane, now + 3615)[0] is False
+        assert ps.quota_banner_recorded is False
+
+        pane.session.rate_limit_reset_at.return_value = now + 3620 + 7200  # a genuinely new hit
+        suppressed, timer = self._tick(o, pane, now + 3620)
+        assert suppressed is True
+        assert ps.rate_limited_until == now + 3620 + 7200
+        timer.assert_called_once()
+        assert o._notify_quota_hit.call_count == 2

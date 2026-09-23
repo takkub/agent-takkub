@@ -17,6 +17,7 @@ Covers:
 
 from __future__ import annotations
 
+import collections
 import hashlib
 from unittest.mock import MagicMock, patch
 
@@ -1181,3 +1182,188 @@ class TestDoRespawnSynthesisedRecentExit:
 
         # The original ts must have been seen unchanged (not overwritten)
         assert seen_recent_exit_ts == [original_ts]
+
+
+# ─────────────────────────────────────────────────────────────
+# Review 2026-09-23: replay decided on a deferred/queued spawn
+# ─────────────────────────────────────────────────────────────
+
+
+def _spawn_deferred_by_gate(orch: Orchestrator, key: str):
+    """spawn() stand-in doing what the spawn-gate branch does: parks the role
+    in `_spawn_deferred` and reports ok=True without attaching a session."""
+
+    def _spawn(role, cwd=None, project=None, **_kw):
+        deferred = getattr(orch, "_spawn_deferred", None)
+        if deferred is None:
+            orch._spawn_deferred = deferred = set()
+        deferred.add(key)
+        return (True, f"{role} spawn deferred (gate blocked)")
+
+    return _spawn
+
+
+def _spawn_queued_by_arbiter(orch: Orchestrator):
+    """spawn() stand-in for the FIFO-arbiter branch: enqueues the request
+    (7-tuple shape) and reports ok=True without attaching a session."""
+
+    def _spawn(role, cwd=None, project=None, **kw):
+        queue = getattr(orch, "_spawn_queue", None)
+        if queue is None:
+            orch._spawn_queue = queue = collections.deque()
+        queue.append(
+            (role, cwd, project, kw.get("_from_auto_respawn", False), 0, None, 1_000_000.0)
+        )
+        return (True, f"{role} spawn queued (arbiter busy)")
+
+    return _spawn
+
+
+class TestDeferredAutoRespawnReplay:
+    """spawn() returns ok=True from the spawn gate / FIFO arbiter WITHOUT
+    attaching a session, and last_spawn_resumed is only stamped by the real
+    spawn. _auto_respawn used to read the stale flag right there and arm
+    _send_when_ready with the FULL task; the deferred retry then spawned
+    with --resume (cached uuid + _recent_exits inside RESUME_WINDOW_SEC) and
+    the sticky delivery pasted the task on top of the conversation that
+    already contained it. The decision now waits for the attach site."""
+
+    def _crashed_pane(self, orch: Orchestrator, role: str) -> None:
+        pane = MagicMock()
+        pane.session = None
+        pane.state = "exited"
+        orch._panes_by_project.setdefault(TEST_PROJECT, {})[role] = pane
+
+    def test_gate_deferred_respawn_parks_replay(self, orch: Orchestrator) -> None:
+        key = _exit_key(TEST_PROJECT, "backend")
+        orch._ps(key).last_assigned_task = SAMPLE_TASK
+        self._crashed_pane(orch, "backend")
+
+        with (
+            patch.object(orch, "spawn", side_effect=_spawn_deferred_by_gate(orch, key)),
+            patch.object(orch, "_send_when_ready") as mock_send,
+        ):
+            orch._auto_respawn("backend", "/proj", TEST_PROJECT)
+
+        mock_send.assert_not_called()
+        assert orch._ps(key).respawn_replay_task == SAMPLE_TASK
+        assert orch._ps(key).respawn_replay_nudge is None
+
+    def test_arbiter_queued_respawn_parks_replay(self, orch: Orchestrator) -> None:
+        key = _exit_key(TEST_PROJECT, "backend")
+        orch._ps(key).last_assigned_task = SAMPLE_TASK
+        self._crashed_pane(orch, "backend")
+
+        with (
+            patch.object(orch, "spawn", side_effect=_spawn_queued_by_arbiter(orch)),
+            patch.object(orch, "_send_when_ready") as mock_send,
+        ):
+            orch._auto_respawn("backend", "/proj", TEST_PROJECT)
+
+        mock_send.assert_not_called()
+        assert orch._ps(key).respawn_replay_task == SAMPLE_TASK
+
+    def test_parked_replay_resumed_attach_sends_nothing(self, orch: Orchestrator) -> None:
+        key = _exit_key(TEST_PROJECT, "backend")
+        ps = orch._ps(key)
+        ps.respawn_replay_task = SAMPLE_TASK
+
+        with patch.object(orch, "_send_when_ready") as mock_send:
+            orch._fire_parked_respawn_replay(
+                TEST_PROJECT, "backend", resumed=True, from_auto_respawn=True
+            )
+
+        mock_send.assert_not_called()
+        assert ps.respawn_replay_task is None
+
+    def test_parked_replay_blank_attach_replays_task(self, orch: Orchestrator) -> None:
+        key = _exit_key(TEST_PROJECT, "backend")
+        ps = orch._ps(key)
+        ps.respawn_replay_task = SAMPLE_TASK
+
+        with patch.object(orch, "_send_when_ready") as mock_send:
+            orch._fire_parked_respawn_replay(
+                TEST_PROJECT, "backend", resumed=False, from_auto_respawn=True
+            )
+
+        mock_send.assert_called_once_with("backend", SAMPLE_TASK, project=TEST_PROJECT)
+        assert ps.respawn_replay_task is None
+
+    def test_manual_spawn_drops_parked_replay(self, orch: Orchestrator) -> None:
+        key = _exit_key(TEST_PROJECT, "backend")
+        ps = orch._ps(key)
+        ps.respawn_replay_task = SAMPLE_TASK
+        ps.respawn_replay_nudge = _STUCK_RESUME_NUDGE
+
+        with patch.object(orch, "_send_when_ready") as mock_send:
+            orch._fire_parked_respawn_replay(
+                TEST_PROJECT, "backend", resumed=False, from_auto_respawn=False
+            )
+
+        mock_send.assert_not_called()
+        assert ps.respawn_replay_task is None
+        assert ps.respawn_replay_nudge is None
+
+
+class TestDeferredStuckRecoverReplay:
+    """Same shape in _auto_recover_stuck's _do_respawn: close() popped the
+    PaneState, so on a deferred/queued spawn last_spawn_resumed is the fresh
+    default False and the FULL task went to _send_when_ready — while the
+    restored uuid + synthesised _recent_exits entry guarantee the deferred
+    retry resumes. The task and the continue-nudge are parked together and
+    the attach site picks one."""
+
+    def _setup(self, orch: Orchestrator, key: str) -> MagicMock:
+        pane = _working_pane()
+        project, role = key.split("::", 1)
+        orch._panes_by_project.setdefault(project, {})[role] = pane
+        ps = orch._ps(key)
+        ps.session_uuid = "test-uuid-1234"
+        ps.session_uuid_cwd = "/proj"
+        ps.last_assigned_task = SAMPLE_TASK
+        return pane
+
+    def _recover_deferred(self, orch: Orchestrator, key: str) -> MagicMock:
+        pane = self._setup(orch, key)
+        with (
+            patch("agent_takkub.orchestrator.QTimer") as mock_timer,
+            patch.object(orch, "spawn", side_effect=_spawn_deferred_by_gate(orch, key)),
+            patch.object(orch, "_send_when_ready") as mock_send,
+        ):
+            mock_timer.singleShot.side_effect = lambda ms, fn: fn()
+            orch._auto_recover_stuck("backend", TEST_PROJECT, pane, 1_000_000.0)
+        return mock_send
+
+    def test_gate_deferred_recovery_parks_task_and_nudge(self, orch: Orchestrator) -> None:
+        key = _exit_key(TEST_PROJECT, "backend")
+        mock_send = self._recover_deferred(orch, key)
+
+        mock_send.assert_not_called()
+        ps = orch._ps(key)
+        assert ps.respawn_replay_task == SAMPLE_TASK
+        assert ps.respawn_replay_nudge == _STUCK_RESUME_NUDGE
+        # Restored resume state is intact for the deferred retry.
+        assert ps.session_uuid == "test-uuid-1234"
+        assert key in orch._recent_exits
+
+    def test_deferred_recovery_resumed_attach_sends_nudge(self, orch: Orchestrator) -> None:
+        key = _exit_key(TEST_PROJECT, "backend")
+        self._recover_deferred(orch, key)
+
+        with patch.object(orch, "_send_when_ready") as mock_send:
+            orch._fire_parked_respawn_replay(
+                TEST_PROJECT, "backend", resumed=True, from_auto_respawn=True
+            )
+
+        mock_send.assert_called_once_with("backend", _STUCK_RESUME_NUDGE, project=TEST_PROJECT)
+
+    def test_deferred_recovery_blank_attach_repastes_task(self, orch: Orchestrator) -> None:
+        key = _exit_key(TEST_PROJECT, "backend")
+        self._recover_deferred(orch, key)
+
+        with patch.object(orch, "_send_when_ready") as mock_send:
+            orch._fire_parked_respawn_replay(
+                TEST_PROJECT, "backend", resumed=False, from_auto_respawn=True
+            )
+
+        mock_send.assert_called_once_with("backend", SAMPLE_TASK, project=TEST_PROJECT)

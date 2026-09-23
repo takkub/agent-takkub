@@ -9,6 +9,8 @@ add NEW behavior that only exists once the flag/policy is explicitly set.
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
 
 from agent_takkub.core.scheduling import facade as scheduling_facade
@@ -310,3 +312,72 @@ def test_flag_on_backpressure_throttles_low_priority_new_work(monkeypatch):
         priority=Priority.CRITICAL,
     )
     assert allowed.allowed
+
+
+# ── boot-time slot_policy snapshot must track live RAM / Settings ─────────
+# 2026-09-23 system review: `__init__` reads `effective_slot_policy()` once
+# per cockpit boot — when RAM headroom is lowest (WebEngine + boot sweep) —
+# and `self.slot_policy` is never reassigned, so the RAM-derived
+# `max_panes_global` froze at its boot value until restart.
+
+
+class _FakeVM:
+    def __init__(self, total_bytes: int, available_bytes: int) -> None:
+        self.total = total_bytes
+        self.available = available_bytes
+
+
+def _normal_slot(governor: ResourceGovernor, n: int):
+    return governor.request_slot(
+        project_id="p", pane_id=f"pane{n}", task_id=f"t{n}", resource_class=ResourceClass.NORMAL
+    )
+
+
+def test_ram_derived_pane_cap_tracks_freed_ram_after_boot(monkeypatch):
+    """16GB box, balanced reserve 20% (3.2GB), ~5GB free at boot -> cap 2:
+    the 3rd assign was queued as 'global_panes_limit' even after the user
+    closed the browser and RAM was plentiful. Same governor, RAM freed ->
+    the 3rd slot must now be admitted."""
+    monkeypatch.setenv("TAKKUB_V2_SCHEDULER", "1")
+    import psutil
+
+    from agent_takkub import performance_settings
+
+    gib = 1024**3
+    monkeypatch.setattr(
+        performance_settings,
+        "load",
+        lambda: SimpleNamespace(min_available_ram_percent=20.0),
+    )
+    monkeypatch.setattr(psutil, "virtual_memory", lambda: _FakeVM(16 * gib, 5 * gib))
+    governor = ResourceGovernor(_limits())  # no slot_policy given -> RAM-derived cap
+    assert governor.slot_policy.max_panes_global == 2
+    assert _normal_slot(governor, 0).allowed
+    assert _normal_slot(governor, 1).allowed
+    third = _normal_slot(governor, 2)
+    assert not third.allowed and third.reason == "global_panes_limit"
+
+    monkeypatch.setattr(psutil, "virtual_memory", lambda: _FakeVM(16 * gib, 15 * gib))
+    assert _normal_slot(governor, 2).allowed
+
+
+def test_scheduler_policy_saved_after_boot_reaches_live_governor(monkeypatch):
+    """Settings → Scheduler saved after the governor was built used to be
+    invisible to it (`invalidate_policy_cache` only cleared the parse cache)."""
+    monkeypatch.setenv("TAKKUB_V2_SCHEDULER", "1")
+    from agent_takkub import core_v2_settings
+
+    governor = ResourceGovernor(_limits())  # conftest's abundant fake RAM -> roomy cap
+    assert governor.slot_policy.max_panes_global > 1
+    assert _normal_slot(governor, 0).allowed
+
+    core_v2_settings.save_scheduler_policy(
+        core_v2_settings.SchedulerPolicyConfig(max_panes_global=1)
+    )
+    second = _normal_slot(governor, 1)
+    assert not second.allowed and second.reason == "global_panes_limit"
+
+    core_v2_settings.save_scheduler_policy(
+        core_v2_settings.SchedulerPolicyConfig(max_panes_global=None)
+    )
+    assert _normal_slot(governor, 1).allowed

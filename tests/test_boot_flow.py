@@ -1042,3 +1042,63 @@ class TestRunMigrationOutcome:
         # `files_total` must climb in lockstep with the same banked offset,
         # so `files_done <= files_total` still holds throughout.
         assert all(e.files_done <= e.files_total for e in files_events)
+
+
+# ---------------------------------------------------------------------------
+# review 2026-09-23: a "skipped" run_boot_stage with a REAL plan is not success
+# ---------------------------------------------------------------------------
+
+
+class TestSkippedWithPlanIsNotSuccess:
+    """`run_boot_stage()` returns action="skipped" on the wizard's v1 path
+    only when it refused to START — the post-rollback retry guard
+    ("previously-rolled-back") or the disk gate ("disk-space"). Before this
+    fix `_outcome_from_result` counted that as `ok=True` (reports are always
+    empty for a skip) and page D rendered the PLAN's promote/junk counts for
+    work that never ran; the layout stayed v1 and the wizard came back next
+    boot. "ลองใหม่" after a rollback therefore could only ever fake-succeed."""
+
+    def _skip(self, monkeypatch, reason: str) -> boot_flow.MigrationOutcome:
+        import agent_takkub.core.storage.layout as layout_mod
+        from agent_takkub import auto_migrate_boot
+
+        monkeypatch.setattr(layout_mod, "layout_state", lambda *a, **k: "v1")
+        _seed_v1_leftover(config.DATA_HOME)
+        assert boot_flow.plan_migration() is not None  # the wizard's own precondition
+        monkeypatch.setattr(
+            auto_migrate_boot,
+            "run_boot_stage",
+            lambda *a, **k: auto_migrate_boot.BootMigrationResult("skipped", reason),
+        )
+        return boot_flow.run_migration()
+
+    def test_previously_rolled_back_skip_is_not_ok_and_moved_nothing(self, monkeypatch):
+        outcome = self._skip(monkeypatch, "previously-rolled-back")
+        assert outcome.ok is False
+        assert outcome.skipped_reason == "previously-rolled-back"
+        assert outcome.promoted == [] and outcome.archived == []
+        assert outcome.junk_deleted == 0
+        assert outcome.backup_dir is None
+        assert outcome.failed_step is None and outcome.failed_phase is None
+        assert outcome.rolled_back is False
+        assert outcome.data_intact is True  # nothing was touched
+        assert outcome.error and "takkub migrate apply" in outcome.error
+
+    def test_disk_space_skip_is_not_ok(self, monkeypatch):
+        outcome = self._skip(monkeypatch, "disk-space")
+        assert outcome.ok is False
+        assert outcome.skipped_reason == "disk-space"
+        assert outcome.junk_deleted == 0 and outcome.promoted == []
+        assert outcome.error and "ดิสก์" in outcome.error
+
+    def test_skipped_without_a_plan_stays_a_success(self):
+        """The plan=None passes (disabled / dev checkout / v2 steady state)
+        genuinely have nothing to do — those skips remain ok."""
+        from agent_takkub import auto_migrate_boot
+
+        for reason in ("disabled", "dev-checkout", ""):
+            result = auto_migrate_boot.BootMigrationResult("skipped", reason)
+            outcome = boot_flow._outcome_from_result(result, plan=None, started=0.0)
+            assert outcome.ok is True
+            assert outcome.skipped_reason is None
+            assert outcome.error is None

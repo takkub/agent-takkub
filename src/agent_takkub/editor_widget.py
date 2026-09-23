@@ -28,6 +28,9 @@ Wiring (mirrors `terminal_widget.py`'s Python↔JS split):
     editorConflict(path, diskText)              — phase 3
     editorReloadDisk(path, text)                — phase 3
     editorDiskChanged(path) / editorDiskRemoved(path)  — phase 3 (file_watch_service)
+    activateTab(path)                           — re-open of an already-open path (index.html's
+                                                  own tab switch; never editorOpenFile, which
+                                                  replaces the buffer and clears dirty)
   JS → Python (via `_EditorBridge`, QWebChannel object `bridge`):
     requestDiff(path) / openExternally(path) / revealInExplorer(path) /
     notifyTabClosed(path) / askAgent(path, startLine, endLine, selectedText,
@@ -150,7 +153,11 @@ def read_file_for_editor(
     state = stat_snapshot(resolved, max_bytes)
     text = None
     if not state.binary and not state.too_large and not state.encoding_unsupported:
-        text = resolved.read_text(encoding="utf-8")
+        # utf-8-sig, not utf-8: `state.bom` already records the BOM and
+        # `editor_service._encode_for_write` re-prepends it on save, so the
+        # text handed to Monaco must not carry U+FEFF too — with plain utf-8
+        # every open+save cycle grew the file by one more BOM.
+        text = resolved.read_text(encoding="utf-8-sig")
     return OpenFileResult(
         path=resolved,
         text=text,
@@ -175,7 +182,10 @@ def read_head_blob(repo_root: Path, abs_path: Path) -> str | None:
     """`git show HEAD:<relpath>` — best-effort; None on any failure (new
     file not yet committed, not a git repo, detached HEAD with no commits,
     git not on PATH, ...). Mirrors project_file_index.py's GitStatusService
-    subprocess pattern (timeout, swallow OSError)."""
+    subprocess pattern (timeout, swallow OSError). Decoded with utf-8-sig
+    for the same reason `read_file_for_editor` is: the working-copy side of
+    the diff has its BOM stripped, so the HEAD side must too or every
+    BOM-prefixed file shows a phantom line-1 change."""
     try:
         rel = _safe_resolve(abs_path).relative_to(_safe_resolve(Path(repo_root))).as_posix()
     except ValueError:
@@ -196,7 +206,9 @@ def read_head_blob(repo_root: Path, abs_path: Path) -> str | None:
         return None
     if proc.returncode != 0:
         return None
-    return proc.stdout
+    # BOM stripped here rather than via `encoding="utf-8-sig"`: the #205 guard
+    # requires the literal "utf-8" on every text-mode subprocess call.
+    return proc.stdout.removeprefix("﻿")
 
 
 def build_diff_result(
@@ -635,6 +647,10 @@ class EditorHost(QObject):
         if not roots:
             self.fileOpenFailed.emit(abs_path, "no configured roots for project")
             return
+        open_key = self._buffered_open_key(abs_path, roots)
+        if open_key is not None:
+            self._reactivate(project_name, open_key, show_diff)
+            return
         self._ensure_view()
         worker = _OpenFileWorker(Path(abs_path), roots, MAX_EDITOR_FILE_BYTES)
         worker.signals.finished.connect(
@@ -642,6 +658,47 @@ class EditorHost(QObject):
         )
         worker.signals.failed.connect(self._on_file_failed)
         QThreadPool.globalInstance().start(worker)
+
+    def _buffered_open_key(self, abs_path: str, roots: Sequence[Path]) -> str | None:
+        """The `_open_paths` key for `abs_path` when it is already open with
+        a live editable buffer, else None. A read-only placeholder tab
+        (binary / too-large / encoding_unsupported) has no buffer to
+        protect, so it falls through to a fresh read like a never-opened
+        path. Keys are resolved paths (`_on_file_read` stores
+        `str(result.path)`), so a differently-spelled `abs_path` is resolved
+        the same way before the lookup."""
+        if self._view is None or not self._open_paths:
+            return None
+        key = abs_path
+        if key not in self._open_paths:
+            try:
+                key = str(resolve_and_contain(Path(abs_path), roots))
+            except (PathEscapesRootsError, OSError):
+                return None  # the worker reports the real failure
+            if key not in self._open_paths:
+                return None
+        state = self._file_states.get(key)
+        if state is None or state.binary or state.too_large or state.encoding_unsupported:
+            return None
+        return key
+
+    def _reactivate(self, project_name: str, key: str, show_diff: bool) -> None:
+        """Re-open of an already-open path: switch to its tab, no disk
+        re-read. `editorOpenFile` on an existing tab replaces the Monaco
+        buffer and clears dirty, which silently discarded unsaved edits on
+        an Explorer double-click / CHANGES-row click of the file being
+        edited (review 2026-09-23). An external disk change still reaches
+        the user through the watch banner — never an auto-reload."""
+        if self._view is None:
+            return
+        # `activateTab` is a top-level function of index.html's classic
+        # <script> (script-global, the same one its tab-bar clicks call) —
+        # guarded so a page that hasn't defined it is a no-op, not a JS error.
+        self._view.run_js(f"if (typeof activateTab === 'function') activateTab({_js_str(key)});")
+        self.focus()
+        self.fileOpened.emit(project_name, key)
+        if show_diff:
+            self._on_diff_requested(key)
 
     def _ensure_view(self) -> None:
         if self._view is not None:

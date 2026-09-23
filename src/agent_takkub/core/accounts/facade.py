@@ -8,12 +8,20 @@ all apply for real here). Nothing populates a pool today (Phase 3 report
 §4), so the practical path for every project right now is the legacy
 fallback: whichever profile `user_profile`/`read_selected_account_id`
 already has selected — the SAME account `pane_env.inject_user_profile_env`
-resolves from, so wiring this in changes nothing observable until a pool is
-actually registered.
+/ `inject_provider_home_env` resolves from. That account is returned for
+its identity only (`id`/`label`/`secret_ref` — what
+`core.conversation.facade` binds a session to) with `config_dir` cleared:
+the legacy injectors already applied that dir, and for claude
+`pane_env.inject_curated_claude_config_dir` (#563) then swaps it for the
+per-project curated dir. Re-emitting the base dir through
+`core.providers.plan.account_env_overrides` would revert that curation on
+every spawn (system review 2026-09-23), so only a real V2 pool account
+carries an env-overriding `config_dir` out of this façade.
 """
 
 from __future__ import annotations
 
+import dataclasses
 import logging
 
 from agent_takkub.core.models.account import AccountPool, ProviderAccount, SelectionStrategy
@@ -49,8 +57,11 @@ def resolve_account_for(
 ) -> ProviderAccount | None:
     """Which `ProviderAccount` should back a *provider_id* spawn for
     *project* — a real V2 pool if one is registered, else the legacy
-    profile selection. Never raises: any failure resolves to `None` (the
-    caller then applies no env override, i.e. today's behavior)."""
+    profile selection. A legacy account comes back with ``config_dir=None``
+    (identity only — see module docstring): its dir is the legacy injectors'
+    job, and overriding it here would clobber the #563 curated dir. Never
+    raises: any failure resolves to `None` (the caller then applies no env
+    override, i.e. today's behavior)."""
     try:
         pools = AccountPoolRegistry().all()
         pool = _pool_for(provider_id, project, pools)
@@ -74,7 +85,7 @@ def resolve_account_for(
         account_id = read_selected_account_id(project, provider_id)
         for account in read_legacy_accounts(project):
             if account.id == account_id:
-                return account
+                return dataclasses.replace(account, config_dir=None)
     except Exception:
         _log.exception(
             "core.accounts legacy fallback failed for provider=%r project=%r role=%r",

@@ -375,7 +375,13 @@ def _load_local_issues(cwd: str | Path | None) -> list[dict[str, Any]]:
     if _is_cockpit_bug_path(path):
         from .core.storage.v2_target import read_data
 
-        data = read_data(_cockpit_bug_v2_target())
+        # `fresh=True` (2026-09-23 review): `new_issue` is a read-modify-write
+        # over this list — it picks the next number from `max(existing)` and
+        # appends. The `takkub issue` CLI runs in its own process, so a row
+        # written there seconds ago is invisible to this process's 3 s stat-free
+        # cache: the number gets reused and one of the two issues is dropped by
+        # the next save.
+        data = read_data(_cockpit_bug_v2_target(), fresh=True)
         return data if isinstance(data, list) else []
 
     if not path.exists():

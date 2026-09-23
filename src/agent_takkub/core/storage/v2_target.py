@@ -18,6 +18,7 @@ the migration ladder can never disagree about where a file lives.
 
 from __future__ import annotations
 
+import copy
 import logging
 import os
 import time
@@ -200,14 +201,24 @@ def write_data(target: Path, data: Any) -> None:
     invalidate(target)
 
 
-def read_data(target: Path) -> Any | None:
+def read_data(target: Path, *, fresh: bool = False) -> Any | None:
     """Unwrap a V2 target's ``.data`` field. ``None`` on a missing target or
     a present-but-unreadable/unwrapped one — never raises.
 
     No `exists()` pre-check (#658): that is a second `stat` on the main
     thread per call; `read_json`'s stat-validated cache already reads a
-    missing file as ``{}``."""
+    missing file as ``{}``.
+
+    ``fresh=True`` is for read-modify-write callers (load → mutate →
+    `write_data`): it drops the cache entry first so the read reflects what
+    is on disk NOW — a write from another process (the `takkub` CLI) is
+    otherwise invisible for up to `cached_read._STAT_TTL_S` and the caller
+    would save over it — and returns a deep copy, so the mutation never
+    edits the cached parse in place. The default keeps the stat-free fast
+    path for the main-thread polls."""
+    if fresh:
+        invalidate(target)
     raw = read_json(target)
     if not isinstance(raw, dict) or "data" not in raw:
         return None
-    return raw["data"]
+    return copy.deepcopy(raw["data"]) if fresh else raw["data"]

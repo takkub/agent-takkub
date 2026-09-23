@@ -2316,3 +2316,123 @@ class TestPythonMAgentTakkubDenied:
         ).allowed
         # Allowed for human outside cockpit (role is None)
         assert pane_guard.classify("python -m agent_takkub report build", None).allowed
+
+
+def _busy_machine_state(tmp_path):
+    """Fresh machine-state.json with another project's pane `working`, so the
+    #585 busy-machine gate is live for every role including Lead."""
+    import json
+    import time
+
+    path = tmp_path / "machine-state.json"
+    path.write_text(
+        json.dumps(
+            {
+                "ts": time.time(),
+                "projects": {"other-proj": [{"role": "frontend", "state": "working"}]},
+                "overloaded": False,
+            }
+        ),
+        encoding="utf-8",
+    )
+    return path
+
+
+class TestTakkubTextPayloadInert:
+    """2026-09-23 review (#649 regression): the quoted free text of
+    `takkub assign/done/send/…` must be inert for EVERY rule — a multi-line
+    spec/note with a runner, build, browser or git verb at line start is data
+    handed to the CLI, not a command the pane runs. The strip used to split on
+    `\\n` BEFORE blanking quotes (so only single-line payloads were covered)
+    and only the busy-machine gate ever called it (so full_suite/scope_tiny/
+    browser/git rules still read the raw note)."""
+
+    MULTI_LINE_ASSIGN = (
+        'takkub assign --role backend "step 1: review\nnpm run build\nstep 3: report"'
+    )
+
+    def test_strip_blanks_multi_line_payload(self) -> None:
+        assert (
+            pane_guard.strip_takkub_text_payload(self.MULTI_LINE_ASSIGN)
+            == 'takkub assign --role backend ""'
+        )
+        assert pane_guard._is_heavy_build_or_suite(self.MULTI_LINE_ASSIGN) == (False, "")
+
+    def test_strip_handles_escaped_quote_and_crlf(self) -> None:
+        note = 'takkub done "he said \\"pytest\\"\r\npytest\r\nok"'
+        assert pane_guard.strip_takkub_text_payload(note) == 'takkub done ""'
+
+    def test_strip_keeps_double_quoted_command_substitution_visible(self) -> None:
+        # `$(…)`/backticks inside double quotes are executed by the shell, so
+        # that text is a command, not prose — never blanked (default-deny).
+        assert (
+            pane_guard.strip_takkub_text_payload('takkub done "$(pytest)"')
+            == 'takkub done "$(pytest)"'
+        )
+        assert pane_guard.strip_takkub_text_payload('takkub done "a\n`git push`\nb"') == (
+            'takkub done "a\n`git push`\nb"'
+        )
+        # single quotes are literal in every shell the panes use
+        assert pane_guard.strip_takkub_text_payload("takkub done '$(pytest)'") == 'takkub done ""'
+
+    def test_lead_multi_line_assign_allowed_while_machine_busy(self, tmp_path) -> None:
+        ms = _busy_machine_state(tmp_path)
+        verdict = pane_guard.classify(self.MULTI_LINE_ASSIGN, "lead", machine_state_path=ms)
+        assert verdict.allowed, verdict.rule
+        # the same gate still fires for the real thing
+        assert pane_guard.classify("npm run build", "lead", machine_state_path=ms).rule == (
+            "busy_machine:pm_build"
+        )
+
+    @pytest.mark.parametrize(
+        ("command", "role", "kwargs"),
+        [
+            ('takkub done "ran:\npytest\nall green"', "backend", {}),
+            ('takkub done "ran:\nvitest run\njest\nall green"', "frontend", {}),
+            ('takkub done "did:\ngit push origin feat\nok"', "backend", {}),
+            ("takkub send lead 'note:\ngit commit -m x\ngit merge main\nok'", "backend", {}),
+            ('takkub done "ran:\nplaywright codegen\nnpx playwright install\nok"', "backend", {}),
+            ('takkub done "ran:\npytest\nnpm test\nok"', "backend", {"scope": "tiny"}),
+            ('takkub progress "next:\ntakkub qa-gate --auto\n"', "backend", {"scope": "tiny"}),
+            ('takkub done "ran:\npython -m agent_takkub report build\nok"', "backend", {}),
+            ('takkub issue "repro:\npkill -f node\nfind / -name x\n"', "backend", {}),
+            ("bash -c 'takkub done \"ran:\npytest\nok\"'", "backend", {}),
+            ('rtk takkub done "ran:\npytest\nok"', "backend", {}),
+        ],
+    )
+    def test_multi_line_note_allowed_for_every_rule(self, command: str, role: str, kwargs) -> None:
+        verdict = pane_guard.classify(command, role, **kwargs)
+        assert verdict.allowed, (command, verdict.rule)
+
+    def test_multi_line_done_allowed_while_machine_busy(self, tmp_path) -> None:
+        ms = _busy_machine_state(tmp_path)
+        verdict = pane_guard.classify(
+            'takkub done "ran:\npytest\nall green"', "backend", machine_state_path=ms
+        )
+        assert verdict.allowed, verdict.rule
+
+    @pytest.mark.parametrize(
+        ("command", "role", "kwargs", "rule"),
+        [
+            ('takkub done "x"; pytest', "backend", {}, "full_suite:pytest"),
+            ('pytest\ntakkub done "x"', "backend", {}, "full_suite:pytest"),
+            ('takkub done "x"\ngit push origin main', "backend", {}, "git_lead_only:push"),
+            ('echo "foo\ntakkub done bar" && pytest', "backend", {}, "full_suite:pytest"),
+            ('takkub done "x"; takkub qa-gate', "backend", {"scope": "tiny"}, "scope_tiny:qa_gate"),
+            ('takkub done "x" && playwright codegen', "backend", {}, "browser_driver:bare-invoke"),
+            # unterminated quote: nothing to blank, the runner line is real
+            ('takkub done "ran:\npytest', "backend", {}, "full_suite:pytest"),
+        ],
+    )
+    def test_real_commands_next_to_a_payload_stay_denied(
+        self, command: str, role: str, kwargs, rule: str
+    ) -> None:
+        verdict = pane_guard.classify(command, role, **kwargs)
+        assert not verdict.allowed, command
+        assert verdict.rule == rule
+
+    def test_real_heavy_command_next_to_a_payload_stays_denied_when_busy(self, tmp_path) -> None:
+        ms = _busy_machine_state(tmp_path)
+        for command in ['takkub done "x" && npm run build', 'bash -c "npm run build"']:
+            verdict = pane_guard.classify(command, "lead", machine_state_path=ms)
+            assert verdict.rule == "busy_machine:pm_build", command

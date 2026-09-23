@@ -809,7 +809,21 @@ _TAKKUB_TEXT_CMD = re.compile(
     rf"(?:{'|'.join(_TAKKUB_TEXT_SUBCOMMANDS)})(?![\w-])",
     re.I | re.M,
 )
-_QUOTED_RUN = re.compile(r"""(?s)'[^']*'|"[^"]*\"""")
+# Same quoted-string shape `_CHAIN_SEP_RE` consumes atomically below, so the
+# two agree on where a quoted run ends (a `\"` inside double quotes is not
+# the end of the argument).
+_QUOTED_RUN = re.compile(r"""(?s)'[^']*'|"(?:[^"\\]|\\.)*\"""")
+# `$(…)`/backticks inside DOUBLE quotes are executed by the shell before
+# `takkub` ever sees the text — that part of the payload is a command, not
+# prose, and must stay visible to every rule.
+_DQ_SUBSTITUTION = re.compile(r"\$\(|`")
+
+
+def _blank_quoted_run(m: re.Match[str]) -> str:
+    text = m.group(0)
+    if text[0] == '"' and _DQ_SUBSTITUTION.search(text):
+        return text
+    return '""'
 
 
 def strip_takkub_text_payload(cmd: str) -> str:
@@ -820,16 +834,21 @@ def strip_takkub_text_payload(cmd: str) -> str:
     Only applies to segments that really are such an invocation — anything
     else (including `bash -c "npm run build"`) is returned untouched, so this
     cannot be used to smuggle a heavy command past the gate.
+
+    Segments come from the quote-aware `_split_chain_segments`, never a plain
+    newline split: a multi-line spec/note is ONE quoted argument, and splitting
+    it on `\\n` first left every payload line after the first as its own
+    "command" that `_CMD_START`'s `^` (re.M) then matched — `takkub assign
+    "…\\nnpm run build\\n…"` read as a heavy build, `takkub done
+    "ran:\\npytest\\nok"` as a raw full suite (2026-09-23 review, #649 regression).
     """
     if not cmd or "takkub" not in cmd.lower():
         return cmd
-    out: list[str] = []
-    for segment in re.split(r"(&&|\|\||[;|]|\n)", cmd):
-        if segment and _TAKKUB_TEXT_CMD.search(segment):
-            out.append(_QUOTED_RUN.sub('""', segment))
-        else:
-            out.append(segment)
-    return "".join(out)
+    parts = _split_chain_segments(cmd)
+    for i in range(0, len(parts), 2):
+        if parts[i] and _TAKKUB_TEXT_CMD.search(parts[i]):
+            parts[i] = _QUOTED_RUN.sub(_blank_quoted_run, parts[i])
+    return "".join(parts)
 
 
 # #585 round 2: Heavy build and test suite detection for busy-machine gate
@@ -3978,6 +3997,16 @@ def classify(
     # #609 H2: unwrap `cmd /c ...` / `pwsh -c "..."` / etc so every rule
     # below sees the command that actually runs, not the wrapper spawning it.
     cmd = _unwrap_shell_wrappers(cmd)
+    # #649 (2026-09-23 review): the quoted free text of `takkub assign/done/
+    # send/…` is data this pane hands to the CLI, never a command it runs —
+    # blanked ONCE here, after unwrapping, so every rule below (full_suite,
+    # scope_tiny, browser, git_lead_only, …) is inert to it, not just the
+    # busy-machine gate that used to strip privately. `raw_cmd` keeps the
+    # text only for the GIT_*-env scans, which look at env assignments that
+    # sit outside any quoted payload; the instance guard gets the same
+    # payload-free text (its env-prefix reads survive the blanking too).
+    cmd = strip_takkub_text_payload(cmd)
+    raw_cmd_guard = strip_takkub_text_payload(raw_cmd)
 
     name = normalise_role(role)
 
@@ -4032,7 +4061,7 @@ def classify(
     # Default-deny for EVERY role including Lead and shell.
     # Protects other cockpit instances on the machine (e.g. prod ~/.agent-takkub).
     if name:
-        inst_verdict = evaluate_instance_guard(raw_cmd, name, cwd=cwd)
+        inst_verdict = evaluate_instance_guard(raw_cmd_guard, name, cwd=cwd)
         if inst_verdict and not inst_verdict.allowed:
             return inst_verdict
 

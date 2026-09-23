@@ -1858,6 +1858,40 @@ class TestNodeTargetedNarrowing:
         )
         assert not any(s.name == "smoke" for s in report.steps)
 
+    def test_related_cmd_passes_with_no_tests_for_both_runners(self) -> None:
+        """Review 2026-09-23: vitest defaults passWithNoTests=false, so
+        `vitest related` on a changed file no spec imports exits 1 ("No test
+        files found") — a healthy diff failed the gate that the jest branch
+        (which always carried the flag) passed."""
+        for runner in ("jest", "vitest"):
+            cmd = qa_gate._node_related_test_cmd("npm", runner, ["src/util.ts"])
+            assert "--passWithNoTests" in cmd, runner
+            assert cmd[-1] == "src/util.ts", runner
+
+    def test_vitest_related_with_no_matching_spec_passes_the_gate(
+        self, node_repo, monkeypatch
+    ) -> None:
+        """Same bug at gate level: the fake vitest behaves like the real one
+        — exit 1 unless --passWithNoTests is on the command line."""
+        (node_repo / "app").mkdir()
+        (node_repo / "app" / "util.ts").write_text("export {}", encoding="utf-8")
+        real_run = subprocess.run
+
+        def fake_run(cmd, **kwargs):
+            if cmd[0] == "git":
+                return real_run(cmd, **kwargs)
+            if "related" in cmd and "--passWithNoTests" not in cmd:
+                return _FakeCompleted(1, stdout="No test files found, exiting with code 1\n")
+            return _FakeCompleted(0, stdout="fake tool output\n")
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+
+        report = qa_gate.run_gate(cwd=node_repo, auto=True, write_report=False)
+
+        related = next(s for s in report.steps if s.name == "test:vitest-related")
+        assert related.ok, related.detail
+        assert report.ok
+
     def test_never_acquires_the_full_gate_lock(self, node_repo, monkeypatch) -> None:
         (node_repo / "app").mkdir()
         (node_repo / "app" / "Menu.tsx").write_text("export {}", encoding="utf-8")

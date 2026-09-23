@@ -27,6 +27,7 @@ from PyQt6.QtTest import QTest
 from PyQt6.QtWidgets import QApplication, QWidget
 
 from agent_takkub import editor_widget as ew
+from agent_takkub.editor_service import save_atomic
 from agent_takkub.editor_widget import (
     MAX_EDITOR_FILE_BYTES,
     EditorHost,
@@ -163,6 +164,22 @@ class TestReadFileForEditor:
         assert result.binary is False
         assert result.too_large is False
 
+    def test_utf8_bom_is_stripped_from_text_but_recorded_in_state(self, tmp_path: Path) -> None:
+        """Review 2026-09-23: the BOM lives in `state.bom` (re-prepended by
+        editor_service on save) — the text handed to Monaco must not carry
+        U+FEFF as well, or every open+save cycle adds another BOM."""
+        root = tmp_path / "proj"
+        root.mkdir()
+        f = root / "script.ps1"
+        f.write_bytes(b"\xef\xbb\xbfWrite-Host hi\n")
+
+        result = read_file_for_editor(f, [root])
+
+        assert result.text == "Write-Host hi\n"
+        assert "﻿" not in result.text
+        assert result.state.bom is True
+        assert result.encoding_unsupported is False
+
 
 # ── git-HEAD diff ────────────────────────────────────────────────────────
 
@@ -204,6 +221,25 @@ class TestReadHeadBlob:
         f.write_text("x", encoding="utf-8")
 
         assert read_head_blob(plain, f) is None
+
+    def test_bom_file_at_head_is_returned_without_bom(self, tmp_path: Path, git_available) -> None:
+        """Same BOM strip as read_file_for_editor — the two sides of the
+        HEAD diff must be decoded the same way (see the test in
+        TestBuildDiffResult for the phantom line-1 change otherwise)."""
+        if not git_available:
+            pytest.skip("git not on PATH")
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        _git(repo, "init", "-q")
+        _git(repo, "config", "user.email", "test@example.com")
+        _git(repo, "config", "user.name", "test")
+        (repo / "bom.ps1").write_bytes(b"\xef\xbb\xbfWrite-Host hi\n")
+        _git(repo, "add", "bom.ps1")
+        _git(repo, "commit", "-q", "-m", "bom")
+
+        head_text = read_head_blob(repo, repo / "bom.ps1")
+
+        assert head_text == "Write-Host hi\n"
 
 
 class TestBuildDiffResult:
@@ -304,6 +340,28 @@ class TestBuildDiffResult:
 
         assert result.error == "binary_or_too_large"
         assert result.modified_text is None
+
+    def test_unchanged_bom_file_has_no_phantom_line1_diff(
+        self, tmp_path: Path, git_available
+    ) -> None:
+        """Stripping the BOM on the working-copy read alone would leave
+        HEAD's U+FEFF in `original_text`, so an untouched BOM file would
+        diff on line 1 forever — both sides must agree."""
+        if not git_available:
+            pytest.skip("git not on PATH")
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        _git(repo, "init", "-q")
+        _git(repo, "config", "user.email", "test@example.com")
+        _git(repo, "config", "user.name", "test")
+        (repo / "bom.ps1").write_bytes(b"\xef\xbb\xbfWrite-Host hi\n")
+        _git(repo, "add", "bom.ps1")
+        _git(repo, "commit", "-q", "-m", "bom")
+
+        result = build_diff_result(repo, [repo], repo / "bom.ps1")
+
+        assert result.error is None
+        assert result.original_text == result.modified_text == "Write-Host hi\n"
 
 
 # ── EditorHost: lazy create / single instance / destroy on empty ───────────
@@ -660,6 +718,50 @@ class TestSave:
         assert view.run_js_calls == []
 
 
+class TestBomRoundTrip:
+    """Review 2026-09-23 (editor_widget.py:153): a UTF-8-BOM file used to
+    gain one extra BOM per open+save cycle — `read_file_for_editor` kept
+    U+FEFF in the text (plain utf-8 decode) while `stat_snapshot` also
+    recorded `bom=True`, so `_encode_for_write` prepended a second BOM on
+    top of the one already inside the text."""
+
+    def test_open_save_cycles_never_accumulate_boms(self, tmp_path: Path) -> None:
+        # The verifiers' repro: read -> save the unmodified text, twice.
+        root = tmp_path / "proj"
+        root.mkdir()
+        f = root / "t.ps1"
+        original = b"\xef\xbb\xbfWrite-Host hi\r\n"
+        f.write_bytes(original)
+
+        for _ in range(2):
+            opened = read_file_for_editor(f, [root])
+            saved = save_atomic(f, opened.text, opened.state, [root])
+            assert saved.ok, saved.error
+
+        assert f.read_bytes() == original
+
+    def test_host_save_of_a_bom_file_keeps_exactly_one_bom(
+        self, container, stub_factory, tmp_path
+    ) -> None:
+        f = tmp_path / "t.ps1"
+        f.write_bytes(b"\xef\xbb\xbfhello\n")
+        host = EditorHost(container, view_factory=stub_factory)
+        host.open_file("proj", str(f))
+        _wait_until(lambda: host.open_count() == 1)
+        view = stub_factory.created[0]
+        open_call = next(c for c in view.run_js_calls if "editorOpenFile" in c)
+        # _js_str is ensure_ascii, so a leaked BOM would show up as the
+        # six-char escape — check both spellings.
+        assert "\\ufeff" not in open_call
+        assert "﻿" not in open_call
+        view.run_js_calls.clear()
+
+        view.saveRequested.emit(str(f.resolve()), "hello world\n")
+        _wait_until(lambda: any("editorSaveResult" in c for c in view.run_js_calls))
+
+        assert f.read_bytes() == b"\xef\xbb\xbfhello world\n"
+
+
 class TestSaveConflict:
     def test_disk_changed_since_open_reports_conflict_with_disk_text(
         self, container, stub_factory, tmp_path
@@ -832,6 +934,124 @@ class TestOpenWithDiff:
         _wait_until(lambda: host.open_count() == 1)
         view = stub_factory.created[0]
         _wait_until(lambda: any("editorShowDiff" in c for c in view.run_js_calls))
+
+
+class TestReopenAlreadyOpenFile:
+    """Review 2026-09-23 (editor_widget.py:628): re-opening a path that is
+    already open (Explorer double-click, CHANGES-row click) used to re-read
+    disk and send `editorOpenFile` again — index.html's existing-tab branch
+    then `setValue`s the buffer and clears dirty, silently discarding
+    unsaved edits. Now an open path with a live buffer is only re-activated."""
+
+    def _open(self, host: EditorHost, stub_factory, path: Path) -> _StubEditorView:
+        host.open_file("proj", str(path))
+        _wait_until(lambda: host.open_count() == 1)
+        view = stub_factory.created[0]
+        _wait_until(lambda: any("editorOpenFile" in c for c in view.run_js_calls))
+        view.run_js_calls.clear()
+        return view
+
+    def test_reopen_never_resends_editorOpenFile(self, container, stub_factory, tmp_path) -> None:
+        f = tmp_path / "a.py"
+        f.write_text("x", encoding="utf-8")
+        host = EditorHost(container, view_factory=stub_factory)
+        view = self._open(host, stub_factory, f)
+
+        host.open_file("proj", str(f))
+        QTest.qWait(200)  # long enough for a worker round-trip if one were started
+
+        assert not any("editorOpenFile" in c for c in view.run_js_calls)
+        assert host.open_count() == 1
+        assert len(stub_factory.created) == 1
+
+    def test_reopen_activates_the_existing_tab_and_raises_the_dock(
+        self, container, stub_factory, tmp_path
+    ) -> None:
+        f = tmp_path / "a.py"
+        f.write_text("x", encoding="utf-8")
+        host = EditorHost(container, view_factory=stub_factory)
+        view = self._open(host, stub_factory, f)
+        key = str(f.resolve())
+        opened: list[tuple[str, str]] = []
+        host.fileOpened.connect(lambda proj, path: opened.append((proj, path)))
+        focus_before = view.focus_calls
+
+        host.open_file("proj", str(f))
+
+        activate_calls = [c for c in view.run_js_calls if "activateTab(" in c]
+        assert activate_calls and _js_str(key) in activate_calls[0]
+        assert opened == [("proj", key)]  # MainWindow shows/raises the dock on this
+        assert view.focus_calls == focus_before + 1
+
+    def test_reopen_with_a_different_path_spelling_still_short_circuits(
+        self, container, stub_factory, tmp_path
+    ) -> None:
+        # Keys are resolved paths; a `..` spelling of the same file must hit
+        # the same tab, not start a second read that clobbers the buffer.
+        f = tmp_path / "a.py"
+        f.write_text("x", encoding="utf-8")
+        (tmp_path / "sub").mkdir()
+        host = EditorHost(container, view_factory=stub_factory)
+        view = self._open(host, stub_factory, f)
+
+        host.open_file("proj", str(tmp_path / "sub" / ".." / "a.py"))
+        QTest.qWait(200)
+
+        assert not any("editorOpenFile" in c for c in view.run_js_calls)
+        assert any("activateTab(" in c for c in view.run_js_calls)
+        assert host.open_count() == 1
+
+    def test_reopen_with_show_diff_requests_the_diff_without_rereading(
+        self, container, stub_factory, tmp_path, git_available
+    ) -> None:
+        if not git_available:
+            pytest.skip("git not on PATH")
+        _init_repo_with_commit(tmp_path, "a.py", "old\n")
+        f = tmp_path / "a.py"
+        f.write_text("new\n", encoding="utf-8")
+        host = EditorHost(container, view_factory=stub_factory)
+        view = self._open(host, stub_factory, f)
+
+        host.open_file("proj", str(f), show_diff=True)  # the CHANGES-row click
+        _wait_until(lambda: any("editorShowDiff" in c for c in view.run_js_calls))
+
+        assert not any("editorOpenFile" in c for c in view.run_js_calls)
+
+    def test_reopen_of_a_placeholder_tab_still_rereads(
+        self, container, stub_factory, tmp_path
+    ) -> None:
+        # binary / too-large / encoding_unsupported tabs have no editable
+        # buffer to protect, so a re-open keeps refreshing them from disk.
+        f = tmp_path / "img.bin"
+        f.write_bytes(b"\x00\x01\x02")
+        host = EditorHost(container, view_factory=stub_factory)
+        host.open_file("proj", str(f))
+        _wait_until(lambda: host.open_count() == 1)
+        view = stub_factory.created[0]
+        _wait_until(lambda: any("editorOpenUnavailable" in c for c in view.run_js_calls))
+        view.run_js_calls.clear()
+
+        host.open_file("proj", str(f))
+        _wait_until(lambda: any("editorOpenUnavailable" in c for c in view.run_js_calls))
+
+        assert host.open_count() == 1
+
+    def test_open_after_close_rereads_from_disk(self, container, stub_factory, tmp_path) -> None:
+        # Closing the tab drops the key, so the next open is a real open
+        # again (fresh disk content), not a stale re-activate.
+        f = tmp_path / "a.py"
+        f.write_text("v1", encoding="utf-8")
+        host = EditorHost(container, view_factory=stub_factory)
+        self._open(host, stub_factory, f)
+        stub_factory.created[0].tabClosed.emit(str(f.resolve()))
+        f.write_text("v2", encoding="utf-8")
+
+        host.open_file("proj", str(f))
+        _wait_until(lambda: host.open_count() == 1)
+
+        view = stub_factory.created[-1]
+        open_call = next(c for c in view.run_js_calls if "editorOpenFile" in c)
+        assert "v2" in open_call
 
 
 # ── real QWebEngineView smoke (#364 lever-1 follow-up) ──────────────────────

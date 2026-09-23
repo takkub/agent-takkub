@@ -233,21 +233,63 @@ _DELETE_OUTRIGHT_GLOBS: tuple[str, ...] = (
     "._*",  # macOS AppleDouble sidecar files
 )
 
+# 2026-09-23 review (data-loss, promote_v1 idx 8): the ONLY top-level names
+# `_archive_candidates()` may ever treat as a V1 leftover — every V1 source
+# a `steps_v1.py` domain step reads (`core.storage.layout.LEGACY_MAPPING`,
+# ladder steps 1-5), nothing else. The old rule was the inverse ("everything
+# not in `_ARCHIVE_SKIP_NAMES`"), which on an installed build (where
+# `SETTINGS_HOME == DATA_HOME`) swept every LIVE top-level store the running
+# app writes there — `remote.json` (phone pairing secret), `theme-settings
+# .json`, `performance-settings.json`, `provider-quota.json`, `bin/`
+# (#710 cloudflared), `context/`, `resilience/`, `graft-graphs/`,
+# `graft-staging/` — into `backups/v1-archive-<ts>/` and deleted the
+# source from under the app, on every apply pass, and every new live
+# writer added later (#710's `bin/`) silently joined the sweep. A name not
+# listed here is simply not this step's business: never archived, never
+# counted by `_pending_real_data()`, so it can never keep `validate()` red
+# either (the #605 lesson, generalised).
+_V1_LEGACY_TOP_LEVEL_NAMES: frozenset[str] = frozenset(
+    {
+        # ladder step 1 — `ReadOnlyRegistryMigrationStep`
+        "provider-models.json",
+        "role-models.json",
+        "disabled-providers.json",
+        "exec-mode.json",
+        "rtk-enabled.json",
+        # ladder step 2 — `RoleAgentMigrationStep`
+        "custom-roles.json",
+        "role-providers.json",
+        # ladder step 3 — `CapabilityMigrationStep`
+        "pane-tools.json",
+        "skill-policy.json",
+        # ladder step 4 — `ProjectMigrationStep`
+        "projects.json",
+        # ladder step 5 — `StateMigrationStep`
+        ".takkub_issues.json",
+        "auto_issue_dedup.json",
+        "autoresume.json",
+        "takkub-remote-sessions.json",
+    }
+)
+
 # #504 H7: known V1-only files that live ONE LEVEL INSIDE a shared V2
 # top-level directory (`_V2_TOP_LEVEL_NAMES` skips the whole directory to
 # protect V2's own content there). Each glob is relative to `data_home` and
 # matched non-recursively against real V1 sources named in
-# `core.storage.layout.LEGACY_MAPPING` (`CUSTOM_AGENTS_DIR/<role>.md`,
-# `SETTINGS_HOME/projects/<slug>/role-providers.json`) — `steps_v1.py`'s
-# `RoleAgentMigrationStep`/`ProjectMigrationStep` already folded each file's
-# CONTENT into its V2 target (`agents/custom/registry.json` /
-# `config/routing.json`); these are the original V1 files left behind
-# afterward, so they're archived (never deleted outright) same as every
-# other real V1 leftover.
-_SHARED_DIR_LEGACY_GLOBS: tuple[str, ...] = (
-    "agents/*.md",
-    "projects/*/role-providers.json",
-)
+# `core.storage.layout.LEGACY_MAPPING` (`SETTINGS_HOME/projects/<slug>/
+# role-providers.json`) — `steps_v1.py`'s `ProjectMigrationStep` already
+# folded each file's CONTENT into its V2 target (`config/routing.json`);
+# these are the original V1 files left behind afterward, so they're
+# archived (never deleted outright) same as every other real V1 leftover.
+#
+# 2026-09-23 review (data-loss, promote_v1 idx 6): `agents/*.md` was listed
+# here too, but `CUSTOM_AGENTS_DIR/<role>.md` (= `DATA_HOME/agents/<role>.md`
+# on an installed build) is NOT a retired V1 source — it is the live file
+# `custom_roles.create_role()` writes and `config.agent_role_dir()` reads at
+# every spawn (`custom_roles.py`'s own docstring: "stays V1 (this is what
+# spawn actually reads)"). Archiving it left a registry entry with no
+# instructions behind it. Never list a file the running app still reads.
+_SHARED_DIR_LEGACY_GLOBS: tuple[str, ...] = ("projects/*/role-providers.json",)
 
 
 def _promote_v2_root_wal_path(data_home: Path) -> Path:
@@ -875,7 +917,9 @@ def _prune_failure_summary(action: str, count: int, prune: PruneOutcome) -> str:
     )
 
 
-def _remove_verified_file(src: Path, dest: Path, expected: str | None) -> tuple[bool, str | None]:
+def _remove_verified_file(
+    src: Path, dest: Path, expected: str | None, *, refresh_dest: bool = True
+) -> tuple[bool, str | None]:
     """Remove *src* only if its CURRENT sha256 still matches *expected*
     (what this transaction's own verify step recorded for it) — a file
     that changed on disk since then (a live writer) is NEVER deleted, even
@@ -888,7 +932,13 @@ def _remove_verified_file(src: Path, dest: Path, expected: str | None) -> tuple[
     `dest` is still refreshed with the file's current content on a
     mismatch, so the copy target isn't left stale while the file waits to
     be picked up again — best-effort; a failed refresh still just means
-    the file is kept.
+    the file is kept. *refresh_dest=False* (a resumed, already-`SOURCE_
+    PRUNED` entry — see `_prune_phase`'s baseline loop) skips that
+    refresh: `dest` is then the snapshot an EARLIER call already durably
+    committed, and a `src` that differs from it now was re-created after
+    that commit, never this transaction's own late write — overwriting
+    the snapshot with it would destroy the only pre-migration copy
+    `restore-v1` could ever put back (2026-09-23 review, idx 7).
 
     Returns `(removed, new_digest)` — *new_digest* is non-None only when a
     refresh just updated *dest*, so the caller can fold the corrected
@@ -898,6 +948,8 @@ def _remove_verified_file(src: Path, dest: Path, expected: str | None) -> tuple[
     if expected is not None and _sha256(src) == expected:
         src.unlink()
         return True, None
+    if not refresh_dest:
+        return False, None
     try:
         copy_only(src, dest)
         return False, _sha256(dest)
@@ -919,7 +971,7 @@ def _entry_digest_key(entry: TransferEntry, rel: str) -> str:
 
 
 def _remove_entry_source(
-    entry: TransferEntry, digests: dict[str, str]
+    entry: TransferEntry, digests: dict[str, str], *, refresh_dest: bool = True
 ) -> tuple[list[str], list[str]]:
     """Remove *entry*'s `src` — a single `_remove(entry.src)` call (whole
     file or directory) in the common case, but ONLY after a read-only
@@ -934,7 +986,11 @@ def _remove_entry_source(
 
     Returns `(removed_rel_paths, kept_rel_paths)` — a non-empty `kept`
     means the file(s) named are still at `src`, never lost, never
-    silently deleted unverified."""
+    silently deleted unverified.
+
+    *refresh_dest=False* is the resumed-entry contract described on
+    `_remove_verified_file`: a mismatched file is kept AND `dest` is left
+    exactly as an earlier call committed it."""
     rel_keys = entry.paths if entry.kind == "dir" else (entry.src.name,)
     mismatched: list[str] = []
     for rel in rel_keys:
@@ -972,7 +1028,9 @@ def _remove_entry_source(
 
     if entry.kind == "file":
         key = entry.src.name
-        _, new_digest = _remove_verified_file(entry.src, entry.dest, None)
+        _, new_digest = _remove_verified_file(
+            entry.src, entry.dest, None, refresh_dest=refresh_dest
+        )
         if new_digest is not None:
             digests[key] = new_digest
         return [], [entry.name]
@@ -982,7 +1040,7 @@ def _remove_entry_source(
     for rel in entry.paths:
         p = entry.src / rel
         if rel in mismatched:
-            if p.exists():
+            if p.exists() and refresh_dest:
                 try:
                     copy_only(p, entry.dest / rel)
                     digests[rel] = _sha256(entry.dest / rel)
@@ -1076,7 +1134,11 @@ def _prune_phase(
     for entry in baseline:
         sha256 = ledger_states.get(entry.name, {}).get("sha256", {})
         try:
-            _removed, kept = _remove_entry_source(entry, sha256)
+            # `refresh_dest=False`: `dest` was durably committed by the
+            # earlier call that recorded this entry `SOURCE_PRUNED` — a
+            # `src` that no longer matches it was re-created since, and
+            # must neither be deleted nor copied over that snapshot.
+            _removed, kept = _remove_entry_source(entry, sha256, refresh_dest=False)
         except OSError as e:
             # Already durably committed SOURCE_PRUNED by an earlier call —
             # a resume retry failing again leaves it exactly as-is, still
@@ -2442,6 +2504,11 @@ class ArchiveV1LegacyStep:
         return names
 
     def _archive_candidates(self) -> list[Path]:
+        """Allow-list, never default-allow (2026-09-23 review, idx 8): only
+        a top-level entry whose basename is a known V1 domain-step source
+        (`_V1_LEGACY_TOP_LEVEL_NAMES`) is ever a candidate — a live store
+        the running app writes at `DATA_HOME`'s top level, or any name this
+        module simply doesn't know, is left exactly where it is."""
         if not self.data_home.is_dir():
             return []
         delete_names = {p.name for p in self._delete_candidates()}
@@ -2449,7 +2516,9 @@ class ArchiveV1LegacyStep:
         return [
             p
             for p in sorted(self.data_home.iterdir())
-            if p.name not in protected and p.name not in delete_names
+            if p.name in _V1_LEGACY_TOP_LEVEL_NAMES
+            and p.name not in protected
+            and p.name not in delete_names
         ]
 
     def _shared_dir_legacy_candidates(self) -> list[Path]:
@@ -2534,6 +2603,38 @@ class ArchiveV1LegacyStep:
         if not report.ok or report.detail.get("nothing_pending"):
             return report
         return self.prune()
+
+    def _clear_finished_wal(self, ledger: TransferLedger) -> bool:
+        """2026-09-23 review (idx 7): a WAL whose generation's own manifest
+        is already `COMPLETE` is a leftover, not a resumable attempt —
+        every removal it names was durably committed by the `prune()`
+        that wrote that manifest. Before this fix `_prune_phase` kept the
+        WAL whenever a late-written file was conserved (`late_write_kept`),
+        and every later `apply_copy_only()` then resumed from it forever:
+        never a fresh candidate scan (a new V1 leftover was never
+        enumerated, `validate()` stayed red), and every pass re-ran the
+        baseline retry against a source the app had since re-created —
+        deleting it on a hash match, or `copy_only`-ing it OVER the
+        archived pre-migration snapshot on a mismatch. Returns True (WAL
+        cleared) so the caller falls through to a fresh scan; a WAL whose
+        manifest is still `PENDING` (a genuine crash mid-copy/mid-prune)
+        is left alone for the normal T6 resume. Prod carries exactly such
+        a leftover from its first migration, so this must run BEFORE any
+        resume, not just going forward."""
+        if not ledger.exists():
+            return False
+        try:
+            archive_root = Path(ledger.read_meta()["archive_root"])
+            manifest = json.loads((archive_root / _MANIFEST_NAME).read_text(encoding="utf-8"))
+        except (KeyError, OSError, ValueError):
+            return False  # swallow-ok: unreadable meta/manifest is not
+            # proof of a finished generation — leave the WAL for the
+            # resume path, which validates it independently.
+        if not isinstance(manifest, dict) or not _manifest_is_complete(manifest):
+            return False
+        _log_event("migration_archive_stale_wal_cleared", archive_root=str(archive_root))
+        ledger.clear()
+        return True
 
     def _pending_archive_root(self) -> Path | None:
         """The `archive_root` THIS step's own (not-yet-pruned) WAL is
@@ -2672,6 +2773,9 @@ class ArchiveV1LegacyStep:
         # writing into) rather than picking a fresh timestamp and
         # rescanning — a rescan after a partial removal would see a
         # SMALLER candidate list than what that attempt already promised.
+        # A WAL left behind by an already-COMPLETE generation is not that
+        # case (`_clear_finished_wal`) — cleared, then scanned fresh.
+        self._clear_finished_wal(ledger)
         if ledger.exists():
             meta = ledger.read_meta()
             archive_root = Path(meta["archive_root"])
@@ -2772,7 +2876,7 @@ class ArchiveV1LegacyStep:
         (from `apply()`, same call) or later, once a caller has
         independently validated the whole ladder (#504 round4 B1)."""
         ledger = TransferLedger(self._wal_path(), list_key="archived", write_fn=write_json_atomic)
-        if not ledger.exists():
+        if self._clear_finished_wal(ledger) or not ledger.exists():
             return StepReport(self.step_id, "apply", True, "nothing pending prune")
 
         meta = ledger.read_meta()
@@ -2877,6 +2981,13 @@ class ArchiveV1LegacyStep:
                 "deleted": [],
             },
         )
+        # The COMPLETE manifest above is now this generation's authoritative
+        # record — the WAL has nothing left to resume. `_prune_phase` only
+        # clears it itself when no late write was conserved; a conserved
+        # file stays at `src` and is picked up by the NEXT pass's fresh
+        # candidate scan into a NEW generation (`_clear_finished_wal`'s
+        # docstring has the failure this replaces).
+        ledger.clear()
 
         # #504 item 5: delete outright, only AFTER the archive above has
         # fully succeeded and verified — a failure here just leaves a bit of
@@ -2923,13 +3034,10 @@ class ArchiveV1LegacyStep:
             summary += (
                 f" ({len(delete_failures)} junk item(s) could not be deleted — harmless clutter)"
             )
-        return StepReport(
-            self.step_id,
-            "apply",
-            True,
-            summary,
-            detail={"archive_root": str(archive_root), "delete_failures": delete_failures},
-        )
+        detail = {"archive_root": str(archive_root), "delete_failures": delete_failures}
+        if prune.late_write_kept:
+            detail["late_write_kept"] = prune.late_write_kept
+        return StepReport(self.step_id, "apply", True, summary, detail=detail)
 
     def validate(self) -> StepReport:
         # #579: only fail validation if there is REAL V1 data pending, not just

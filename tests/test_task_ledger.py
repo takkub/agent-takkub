@@ -9,11 +9,14 @@ to a placeholder string instead of an empty/blank group header.
 
 from __future__ import annotations
 
+import json
+import os
 import pathlib
+import time
 
 import pytest
 
-from agent_takkub import task_ledger
+from agent_takkub import cached_read, task_ledger
 
 PROJECT = "ledgertest"
 
@@ -598,3 +601,60 @@ class TestBatchMaxScope:
             PROJECT, "backend", "/api", "task", "goal", "feat", "claude", scope="huge"
         )
         assert task_ledger.batch_max_scope(PROJECT) == "normal"
+
+
+class TestSaveInvalidatesReadCache:
+    """Review 2026-09-23 (cache-invalidate): two assigns in one burst (chained
+    CLI assigns, `--shards` fan-out 400 ms apart) — the second `_load_state`
+    hit `cached_read`'s stat-free TTL and got the pre-write state, so it
+    saved over the first assign's row + open pointer; that role's later
+    `takkub done` then silently no-op'd."""
+
+    @pytest.fixture(autouse=True)
+    def _real_ttl(self, monkeypatch: pytest.MonkeyPatch):
+        monkeypatch.setattr(cached_read, "_STAT_TTL_S", 3.0)
+        cached_read.invalidate()
+        yield
+        cached_read.invalidate()
+
+    def _seed_idle_ledger(self) -> pathlib.Path:
+        """A ledger last written >2 s ago — the normal state between batches."""
+        state_path = task_ledger._state_path(PROJECT)
+        state_path.parent.mkdir(parents=True, exist_ok=True)
+        state_path.write_text(json.dumps({"groups": [], "open": {}}), encoding="utf-8")
+        t = time.time() - 60
+        os.utime(state_path, (t, t))
+        return state_path
+
+    def test_burst_of_two_assigns_keeps_both_rows(self) -> None:
+        state_path = self._seed_idle_ledger()
+        w1, _ = task_ledger.create_assignment(
+            PROJECT, "frontend", "/web", "task A", "goal", "feat", "claude"
+        )
+        w2, _ = task_ledger.create_assignment(
+            PROJECT, "backend", "/api", "task B", "goal", "feat", "claude"
+        )
+        assert w1 == "" and w2 == ""
+
+        on_disk = json.loads(state_path.read_text(encoding="utf-8"))
+        assert set(on_disk["open"]) == {"frontend", "backend"}
+        rows = [r for g in on_disk["groups"] for f in g["features"] for r in f["rows"]]
+        assert [r["role"] for r in rows] == ["frontend", "backend"]
+        assert task_ledger.get_open_scope(PROJECT, "frontend") == "normal"
+
+    def test_done_right_after_assign_flips_the_row(self) -> None:
+        self._seed_idle_ledger()
+        task_ledger.create_assignment(
+            PROJECT, "frontend", "/web", "task A", "goal", "feat", "claude"
+        )
+        task_ledger.create_assignment(
+            PROJECT, "backend", "/api", "task B", "goal", "feat", "claude"
+        )
+
+        assert task_ledger.mark_done(PROJECT, "frontend", "ok") == ""
+
+        state = task_ledger.load_state(PROJECT)
+        assert "frontend" not in state["open"]
+        assert "backend" in state["open"]
+        rows = [r for g in state["groups"] for f in g["features"] for r in f["rows"]]
+        assert {r["role"]: r["status"] for r in rows} == {"frontend": "ok", "backend": "working"}

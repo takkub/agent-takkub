@@ -1,11 +1,13 @@
 """Tests for the `takkub release` ceremony (release.py).
 
 String transforms are pure and fully covered here. release() is exercised
-with do_commit/do_tag off (and dry_run) so no git is invoked.
+with do_commit/do_tag off (and dry_run) so no git is invoked — except the
+rollback tests at the bottom, which run real git in a throwaway tmp repo.
 """
 
 from __future__ import annotations
 
+import subprocess
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -452,6 +454,93 @@ class TestReleaseWheelStep:
                 release(repo, part="minor", today="2026-05-31")
         # reverted — pyproject still at the pre-release version
         assert 'version = "0.3.9"' in (repo / "pyproject.toml").read_text(encoding="utf-8")
+
+    def test_build_wheel_failure_deletes_the_tag_it_created(self, tmp_path):
+        """Review 2026-09-23: the rollback reset the commit and restored the
+        files but left the annotated tag on the now-orphaned commit, so every
+        retry of the same version was refused with "tag already exists"."""
+        repo = self._repo(tmp_path)
+        with (
+            patch("agent_takkub.release._git") as git,
+            patch("agent_takkub.release.build_wheel", side_effect=RuntimeError("build broke")),
+        ):
+            with pytest.raises(RuntimeError, match="build broke"):
+                release(repo, part="minor", today="2026-05-31")
+        ops = [c.args[1:] for c in git.call_args_list if len(c.args) > 1]
+        assert ("tag", "-a", "v0.4.0", "-m", "v0.4.0") in ops
+        assert ("tag", "-d", "v0.4.0") in ops
+        assert ops.index(("tag", "-d", "v0.4.0")) > ops.index(
+            ("tag", "-a", "v0.4.0", "-m", "v0.4.0")
+        )
+
+    def test_commit_failure_before_the_tag_never_deletes_one(self, tmp_path):
+        """Only a tag this run created is dropped — a commit that dies in
+        pre-commit tagged nothing, so the rollback must not touch tags."""
+        repo = self._repo(tmp_path)
+
+        def git(_root, *args, **_kw):
+            if args and args[0] == "commit":
+                raise subprocess.CalledProcessError(1, "git commit")
+            return MagicMock(stdout="abc123\n")
+
+        with (
+            patch("agent_takkub.release._git", side_effect=git) as m,
+            patch("agent_takkub.release.build_wheel"),
+        ):
+            with pytest.raises(RuntimeError, match="working tree reverted"):
+                release(repo, part="minor", today="2026-05-31")
+        ops = [c.args[1:] for c in m.call_args_list if len(c.args) > 1]
+        assert not any(op[:2] == ("tag", "-d") for op in ops)
+
+    def test_retry_after_wheel_failure_succeeds_with_the_same_version(self, tmp_path):
+        """The verifiers' repro on real git: wheel build fails → rollback
+        leaves no tag and HEAD where it was → a retry of the very same
+        version goes through instead of "git tag v0.4.0 already exists"."""
+        repo = self._repo(tmp_path)
+        git = _git_init_commit(repo)
+        head = git("rev-parse", "HEAD")
+
+        with patch("agent_takkub.release.build_wheel", side_effect=RuntimeError("build broke")):
+            with pytest.raises(RuntimeError, match="build broke"):
+                release(repo, part="minor", today="2026-05-31")
+
+        assert git("tag", "-l") == ""
+        assert git("rev-parse", "HEAD") == head
+        assert 'version = "0.3.9"' in (repo / "pyproject.toml").read_text(encoding="utf-8")
+
+        with (
+            patch("agent_takkub.release.build_wheel", return_value=repo / "dist" / "x.whl"),
+            patch("agent_takkub.release.create_github_release", return_value=(True, "u")),
+        ):
+            res = release(repo, part="minor", today="2026-05-31")
+
+        assert res["tagged"] is True and res["wheel_built"] is True
+        assert git("tag", "-l") == "v0.4.0"
+        assert git("rev-parse", "HEAD") != head
+
+
+def _git_init_commit(root):
+    """Turn a `_make_repo` tree into a one-commit git repo with a local
+    identity and signing off, so `release()`'s own `_git` can commit + tag
+    in it on any CI runner. Returns a `git(*args) -> stdout` runner."""
+
+    def git(*args: str) -> str:
+        return subprocess.run(
+            ["git", "-C", str(root), *args],
+            check=True,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+        ).stdout.strip()
+
+    git("init", "-q")
+    git("config", "user.email", "t@t.test")
+    git("config", "user.name", "t")
+    git("config", "commit.gpgsign", "false")
+    git("config", "tag.gpgsign", "false")
+    git("add", "-A")
+    git("commit", "-q", "-m", "init")
+    return git
 
 
 def test_release_commit_outlasts_the_pre_commit_chain(tmp_path):

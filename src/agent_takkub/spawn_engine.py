@@ -124,6 +124,30 @@ SPAWN_NATIVE_SLOW_MS = int(os.environ.get("TAKKUB_SPAWN_NATIVE_SLOW_MS", "5000")
 SPAWN_QUEUE_STUCK_SEC = int(os.environ.get("TAKKUB_SPAWN_QUEUE_STUCK_SEC", "120"))
 
 
+def _spawn_pending_for(orch, project_ns: str, role_name: str) -> bool:
+    """True while spawn() has accepted a request for (project, role) without
+    attaching a session yet — parked in the spawn gate's deferred set or the
+    FIFO arbiter's queue. Every such early return reports ok=True, so a
+    caller that must act only once the session exists asks this instead of
+    trusting ok. Module-level (not a mixin method) so the stuck-recover path
+    can ask it of the minimal orchestrator stubs its tests drive it with."""
+    key = f"{project_ns}::{role_name}"
+    deferred = getattr(orch, "_spawn_deferred", None)
+    if deferred and key in deferred:
+        return True
+    queue = getattr(orch, "_spawn_queue", None)
+    if not queue:
+        return False
+    resolve = getattr(orch, "_resolve_project", None)
+    for item in queue:
+        if item[0] != role_name:
+            continue
+        item_ns = resolve(item[2]) if resolve is not None else item[2]
+        if item_ns == project_ns:
+            return True
+    return False
+
+
 def _log_spawn_native_ms(_log_event, *, role: str, project: str, ms: int) -> None:
     """Emit the routine ``spawn_native_ms`` timing plus a separate, louder
     event when it ran unusually slow (#139) — the routine event is high-volume
@@ -926,6 +950,16 @@ class PaneState:
     idle_defer_log_ts: float = 0.0
     # _last_spawn_resumed: True when the last spawn used --resume (not --session-id)
     last_spawn_resumed: bool = False
+    # respawn_replay_task / respawn_replay_nudge: an auto-respawn (crash or
+    # stuck-recover) whose spawn() was only deferred/queued (spawn gate, FIFO
+    # arbiter) parks its replay decision here instead of reading
+    # last_spawn_resumed — which at that point still describes the dead
+    # session — and pasting the full task on top of the conversation the
+    # eventual --resume brings back with the task already in it. The attach
+    # site settles it (`_fire_parked_respawn_replay`): task when the session
+    # came up blank, nudge (if any) when it resumed.
+    respawn_replay_task: str | None = None
+    respawn_replay_nudge: str | None = None
     # throughput watchdog (issue #35) — snapshot of pane._tp_total_bytes taken
     # each watchdog tick, plus the wall-clock of that snapshot.
     tp_last_total: int = 0
@@ -1065,6 +1099,14 @@ class PaneState:
     # screen `_rate_limit_suppressed` must not re-detect it every 5 s tick;
     # the latch clears itself the first tick the scrape no longer matches.
     quota_false_positive_armed: bool = False
+    # quota_banner_recorded: True from the tick the banner on this pane's
+    # screen was recorded as an episode until the tick the scrape no longer
+    # matches. The provider never repaints the banner away, so once the
+    # episode ends (reset time passed, reset timer, auto-resume wake) the
+    # same text is still there and re-parses to a NEW reset — the clock form
+    # rolls to tomorrow, the duration form re-adds its countdown — which
+    # `_rate_limit_suppressed` would record as a phantom second episode.
+    quota_banner_recorded: bool = False
     # shell_open_dialog_notified: True once the transcript watchdog has
     # warned Lead that this pane's transcript shows the Windows "How do you
     # want to open this file?" ShellExecute marker (issue #104) — a shell
@@ -1609,6 +1651,51 @@ class SpawnEngineMixin:
         ):
             ps.spawn_initial_task_state = "pending"
 
+    def _fire_parked_respawn_replay(
+        self, project_ns: str, role_name: str, *, resumed: bool, from_auto_respawn: bool
+    ) -> None:
+        """Settle the replay an auto-respawn parked because its spawn() was
+        deferred/queued (PaneState.respawn_replay_task). Runs at the attach
+        site — the first point `resumed` is known for the session that
+        actually came up. A spawn that is not the auto-respawn's own retry
+        (manual spawn, fresh assign) supersedes the dead session's task, so
+        the parked replay is dropped rather than pasted into it."""
+        ps = getattr(self, "_pane_state", {}).get(_exit_key(project_ns, role_name))
+        if ps is None or ps.respawn_replay_task is None:
+            return
+        task, nudge = ps.respawn_replay_task, ps.respawn_replay_nudge
+        ps.respawn_replay_task = None
+        ps.respawn_replay_nudge = None
+        if not from_auto_respawn:
+            _log_event(
+                "auto_respawn_replay_dropped",
+                role=role_name,
+                project=project_ns,
+                reason="superseded_by_manual_spawn",
+            )
+            return
+        payload = nudge if resumed else task
+        _log_event(
+            "auto_respawn_replay",
+            role=role_name,
+            project=project_ns,
+            resumed=resumed,
+            task_preview=(payload or "")[:120],
+        )
+        if not payload:
+            return
+        # Called from inside the spawn try-block: a delivery error must not
+        # be misread as a failed native spawn (which tears the session down).
+        try:
+            self._send_when_ready(role_name, payload, project=project_ns)
+        except Exception as e:
+            _log_event(
+                "auto_respawn_replay_failed",
+                role=role_name,
+                project=project_ns,
+                err=f"{type(e).__name__}: {e}",
+            )
+
     def _retry_deferred_spawn(
         self,
         role_name: str,
@@ -2039,6 +2126,12 @@ class SpawnEngineMixin:
             if resume_uuid:
                 self._ps(_ekey).session_uuid = resume_uuid
                 self._ps(_ekey).session_uuid_cwd = spawn_cwd
+            self._fire_parked_respawn_replay(
+                project_ns,
+                role_name,
+                resumed=bool(resume_uuid),
+                from_auto_respawn=_from_auto_respawn,
+            )
             _sess = session
             # #540: staleness is decided by the pane's OWN session generation
             # (bumped only by attach_session), captured right now — NOT by
@@ -3986,6 +4079,9 @@ class SpawnEngineMixin:
             # _do_respawn can read it directly without parsing the message string.
             # (Fix 1: eliminates the "(resumed)" in msg string-coupling fragility.)
             self._ps(_ekey_spawn).last_spawn_resumed = resumed
+            self._fire_parked_respawn_replay(
+                project_ns, role_name, resumed=resumed, from_auto_respawn=_from_auto_respawn
+            )
             suffix = " (resumed)" if resumed else ""
             # If a forced non-claude role (codex/gemini/...) reached the claude
             # spawn path, its provider was unavailable (toggled off or not
@@ -4400,13 +4496,28 @@ class SpawnEngineMixin:
         ok, msg = self.spawn(role_name, cwd=cwd, project=project, _from_auto_respawn=True)
         _log_event("auto_respawn_done", role=role_name, project=project, ok=ok, msg=msg[:160])
         if ok:
+            _ps_ar = self._pane_state.get(_exit_key(project, role_name))
+            cached_task = _ps_ar.last_assigned_task if _ps_ar is not None else None
+            if cached_task and _spawn_pending_for(self, project, role_name):
+                # spawn() only deferred/queued this respawn (gate blocked /
+                # arbiter busy): no session exists yet and last_spawn_resumed
+                # still describes the crashed one. Park the replay for the
+                # attach site — deciding here would paste the full task on top
+                # of the conversation the eventual --resume brings back with it.
+                _ps_ar.respawn_replay_task = cached_task
+                _ps_ar.respawn_replay_nudge = None
+                _log_event(
+                    "auto_respawn_replay_parked",
+                    role=role_name,
+                    project=project,
+                    msg=msg[:160],
+                )
+                return
             # Bug-5 fix: a resumed session already holds the task in claude's
             # conversation history — re-pasting it risks duplicate work on
             # non-idempotent steps (file creates, migrations, etc.).
             # Fix 1: read structured flag set by spawn() instead of parsing msg.
-            _ps_ar = self._pane_state.get(_exit_key(project, role_name))
             spawn_resumed = _ps_ar.last_spawn_resumed if _ps_ar is not None else False
-            cached_task = _ps_ar.last_assigned_task if _ps_ar is not None else None
             if cached_task and not spawn_resumed:
                 _log_event(
                     "auto_respawn_replay",

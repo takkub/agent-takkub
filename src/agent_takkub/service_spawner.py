@@ -21,12 +21,20 @@ strongest detach flags so it also survives a cockpit restart:
   controlling terminal).
 
 Every service is recorded in ``RUNTIME_DIR/services/<project>/registry.json``
-(pid, name, cmd, log path) so `app.py`'s single-instance old-process kill
-and the pane teardown paths can skip these PIDs, and so a human can find
-the log. stdout/stderr go to ``RUNTIME_DIR/services/<project>/<name>.log``.
+(pid + create_time, name, cmd, log path) so `app.py`'s single-instance
+old-process kill and the pane teardown paths can skip these PIDs, and so a
+human can find the log. stdout/stderr go to
+``RUNTIME_DIR/services/<project>/<name>.log``.
 
-Pure leaf (stdlib only) — imported by `cli_server` (spawn) and `app`
-(pid exclusion).
+A row names its process by ``(pid, create_time)``, never by the bare PID:
+the registry outlives cockpit restarts and reboots by design, and the OS
+recycles a dead service's PID (every reboot for sure, within minutes on
+Windows under pane churn). `stop()` kills a whole tree, so it must never act
+on a stranger wearing that PID — same guard as `remote/tunnel.py`'s
+``owner_create_time``.
+
+Pure leaf (stdlib + lazily imported psutil) — imported by `cli_server`
+(spawn) and `app` (pid exclusion).
 """
 
 from __future__ import annotations
@@ -56,6 +64,9 @@ class ServiceRecord:
     cwd: str
     log_path: str
     started_ts: float
+    # psutil create_time of the spawned process — the half of its identity a
+    # bare PID lacks; 0.0 when it exited before spawn() could read it.
+    create_time: float
     by_role: str
     project: str
 
@@ -93,35 +104,55 @@ def _save_registry(path: Path, records: list[dict]) -> None:
     os.replace(tmp, path)
 
 
-def _pid_alive(pid: int) -> bool:
-    if pid <= 0:
-        return False
-    try:
-        import psutil
+# Same process ⇒ identical create_time from the same kernel source on every
+# call; the slack only absorbs float/JSON rounding, never a real successor.
+_CREATE_TIME_TOLERANCE = 1.0
 
-        return psutil.pid_exists(pid)
-    except Exception:
-        try:
-            os.kill(pid, 0)
-            return True
-        except OSError:
-            return False
+
+def _live_process(rec: dict):
+    """The `psutil.Process` a registry row still names, or None when the PID
+    is gone or now belongs to an unrelated process (reuse after the service
+    died / a reboot)."""
+    try:
+        pid = int(rec.get("pid") or 0)
+    except (TypeError, ValueError):
+        return None
+    if pid <= 0:
+        return None
+    import psutil
+
+    try:
+        proc = psutil.Process(pid)
+        born = float(proc.create_time())
+    except psutil.Error:
+        # NoSuchProcess/ZombieProcess = gone. AccessDenied = not something the
+        # cockpit spawned (its own children are always inspectable) — never a
+        # kill candidate either way.
+        return None
+    recorded = rec.get("create_time")
+    if isinstance(recorded, (int, float)) and recorded > 0:
+        return proc if abs(born - float(recorded)) < _CREATE_TIME_TOLERANCE else None
+    # Row written before `create_time` was recorded (≤ 2.1.32), or the service
+    # exited before spawn() could read it: it was alive at `started_ts`, so a
+    # process born after that instant can only be wearing a recycled PID.
+    started = rec.get("started_ts")
+    if isinstance(started, (int, float)) and started > 0:
+        return proc if born <= float(started) + _CREATE_TIME_TOLERANCE else None
+    return None
 
 
 def registered_pids(runtime_dir: Path) -> set[int]:
-    """Every service PID across all projects — for teardown paths to skip.
-    Best-effort: unreadable registries contribute nothing."""
+    """Every live service PID across all projects — for teardown paths to
+    skip. Best-effort: unreadable registries contribute nothing, and a row
+    whose PID was recycled is not a shield for the stranger holding it."""
     root = runtime_dir / "services"
     out: set[int] = set()
     if not root.is_dir():
         return out
     for reg in root.glob("*/registry.json"):
         for rec in _load_registry(reg):
-            try:
-                out.add(int(rec.get("pid") or 0))
-            except (TypeError, ValueError):
-                continue
-    out.discard(0)
+            if _live_process(rec) is not None:
+                out.add(int(rec["pid"]))
     return out
 
 
@@ -132,8 +163,7 @@ def list_services(runtime_dir: Path, project: str | None) -> list[dict]:
     live: list[dict] = []
     changed = False
     for rec in records:
-        alive = _pid_alive(int(rec.get("pid") or 0))
-        if alive:
+        if _live_process(rec) is not None:
             live.append({**rec, "alive": True})
         else:
             changed = True
@@ -212,6 +242,12 @@ def spawn(
                 continue
     if proc is None:
         raise ServiceSpawnError(f"could not start {cmd[0]!r}: {last_exc}")
+    try:
+        import psutil
+
+        create_time = float(psutil.Process(proc.pid).create_time())
+    except Exception:
+        create_time = 0.0  # e.g. `cmd /c exit` already gone — `started_ts` still rules out reuse
     record = ServiceRecord(
         name=name,
         pid=int(proc.pid),
@@ -219,11 +255,12 @@ def spawn(
         cwd=str(workdir),
         log_path=str(log_path),
         started_ts=time.time(),
+        create_time=create_time,
         by_role=by_role,
         project=(project or "default"),
     )
     path = registry_path(runtime_dir, project)
-    records = [r for r in _load_registry(path) if _pid_alive(int(r.get("pid") or 0))]
+    records = [r for r in _load_registry(path) if _live_process(r) is not None]
     records.append(asdict(record))
     _save_registry(path, records)
     return record
@@ -239,18 +276,22 @@ def stop(runtime_dir: Path, project: str | None, name: str) -> tuple[bool, str]:
         return False, f"no registered service named {name!r}"
     pid = int(target.get("pid") or 0)
     killed = False
-    if _pid_alive(pid):
-        try:
-            import psutil
+    p = _live_process(target)
+    if p is not None:
+        import psutil
 
-            p = psutil.Process(pid)
+        try:
             for child in p.children(recursive=True):
                 try:
                     child.kill()
                 except Exception:
                     pass
+            # psutil re-checks (pid, create_time) inside kill(): a reuse that
+            # lands between our check and here raises NoSuchProcess, never kills.
             p.kill()
             killed = True
+        except psutil.NoSuchProcess:
+            pass
         except Exception as exc:
             return False, f"could not kill pid {pid}: {exc}"
     _save_registry(path, [r for r in records if r.get("name") != name])

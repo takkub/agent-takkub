@@ -89,6 +89,11 @@ from .user_actions import UserActionsMixin
 _BOOT_LEAD_INITIAL_MS = 150  # wait after first-paint before starting debounce
 _BOOT_LEAD_POLL_MS = 50  # ms between debounce turns
 _BOOT_LEAD_QUIET_N = 3  # consecutive clear turns required (~150-250 ms total)
+# Foreground focus is only a "did the activation storm happen yet" heuristic.
+# A cockpit launched behind another window, on a locked screen or from the
+# phone (`takkub restart`) may never get it, so after this long an inactive
+# app stops holding Lead back (InSendMessageEx + modal stay hard gates).
+_BOOT_LEAD_INACTIVE_GRACE_MS = 2_000
 
 
 def _relative_project_path(project_name: str, path: str) -> str:
@@ -956,7 +961,10 @@ class MainWindow(
         # until InSendMessageEx + modal/popup gate stays clear for
         # _BOOT_LEAD_QUIET_N consecutive event-loop turns.
         self._boot_quiet_count = 0
+        self._boot_lead_wait_active = True
+        self._boot_lead_last_block: tuple[bool, ...] | None = None
         QTimer.singleShot(_BOOT_LEAD_INITIAL_MS, self._spawn_lead_when_quiet)
+        QTimer.singleShot(_BOOT_LEAD_INACTIVE_GRACE_MS, self._end_boot_lead_active_wait)
         _boot_phase("mw_boot_lead_scheduled")
 
         # (The /remote-control auto-bridge was removed 2026-07-10 — it raced
@@ -971,13 +979,20 @@ class MainWindow(
                 f"auto-spawning {len(presets)} preset role(s): {', '.join(presets)}",
                 6_000,
             )
+            # Pin the project the presets were read from: `spawn(role)` resolves
+            # `active` at fire time, and the tab restore below runs first.
             for i, role in enumerate(presets):
-                QTimer.singleShot(15_000 + i * 3_000, lambda r=role: self.orch.spawn(r))
+                QTimer.singleShot(
+                    15_000 + i * 3_000, lambda r=role, p=active: self.orch.spawn(r, project=p)
+                )
 
         # Restore any extra tabs the user had open last session. The very
         # first tab is already in place (the active project), so we skip
         # it and reopen the rest with a small stagger so each Lead's
-        # claude bootstrap doesn't collide.
+        # claude bootstrap doesn't collide. They open in the background so
+        # the boot tab stays current and `active` stays on the project the
+        # user left the cockpit on — only a bare "default" placeholder tab
+        # (no active project at all) hands focus to the restored tab.
         saved = get_open_tabs()
         already = set(self._open_projects())
         to_open = [n for n in saved if n not in already]
@@ -985,10 +1000,14 @@ class MainWindow(
             self._status.showMessage(
                 f"restoring {len(to_open)} extra tab(s): {', '.join(to_open)}", 6_000
             )
+            focus_restored = not active
             for i, name in enumerate(to_open):
                 # 4s stagger so Leads don't all try to bind a renderer / read
                 # claude binaries in parallel
-                QTimer.singleShot(2_500 + i * 4_000, lambda n=name: self._open_project_tab(n))
+                QTimer.singleShot(
+                    2_500 + i * 4_000,
+                    lambda n=name: self._open_project_tab(n, make_current=focus_restored),
+                )
         # Persist the current state (covers the case where saved tabs
         # referenced a now-deleted project and got dropped).
         self._persist_open_tabs()
@@ -1062,18 +1081,27 @@ class MainWindow(
         app_active = QApplication.applicationState() == Qt.ApplicationState.ApplicationActive
         window_ready = self.isVisible()
         insend_clear = not is_in_send_blocked()
+        # See _BOOT_LEAD_INACTIVE_GRACE_MS: an app that never comes to the
+        # foreground must not leave the Lead pane empty until someone clicks it.
+        active_clear = app_active or not self._boot_lead_wait_active
 
-        all_clear = insend_clear and modal_clear and app_active and window_ready
+        all_clear = insend_clear and modal_clear and active_clear and window_ready
 
         if not all_clear:
             self._boot_quiet_count = 0
-            _log_event(
-                "boot_lead_gate_blocked",
-                insend_clear=insend_clear,
-                modal_clear=modal_clear,
-                app_active=app_active,
-                window_ready=window_ready,
-            )
+            # One line per distinct reason, not one per 50 ms poll — a boot
+            # that sat behind another window wrote ~20 lines/s and rotated
+            # events.log (2 MiB) in minutes, wiping what other readers need.
+            block = (insend_clear, modal_clear, active_clear, window_ready)
+            if block != self._boot_lead_last_block:
+                self._boot_lead_last_block = block
+                _log_event(
+                    "boot_lead_gate_blocked",
+                    insend_clear=insend_clear,
+                    modal_clear=modal_clear,
+                    app_active=app_active,
+                    window_ready=window_ready,
+                )
             QTimer.singleShot(_BOOT_LEAD_POLL_MS, self._spawn_lead_when_quiet)
             return
 
@@ -1087,6 +1115,11 @@ class MainWindow(
         ok, msg = self.orch.spawn(LEAD.name)
         if not ok:
             self._status.showMessage(f"⚠ Lead spawn failed: {msg}", 30_000)
+
+    def _end_boot_lead_active_wait(self) -> None:
+        """Grace timer from `_boot`: from here on `_spawn_lead_when_quiet` no
+        longer waits for the application to become active."""
+        self._boot_lead_wait_active = False
 
     def _restore_teammates_from_snapshot(self) -> None:
         """Read last-session.json and re-spawn the teammate panes that
@@ -1471,11 +1504,13 @@ class MainWindow(
         except Exception as e:  # never let link repair break tab open
             self._status.showMessage(f"⚠ skill link repair failed: {e}", 6_000)
 
-    def _open_project_tab(self, project_name: str) -> None:
+    def _open_project_tab(self, project_name: str, make_current: bool = True) -> None:
         """Create a ProjectTab for `project_name`, register a fresh Lead
         pane in the orchestrator's per-project namespace, spawn the
         claude session, and auto-bridge to /remote-control. Becomes the
-        focused tab on return.
+        focused + `active` tab on return, unless `make_current=False` (the
+        boot tab-restore path): then it opens in the background, suspended
+        like any other hidden project, and neither focus nor `active` move.
 
         Uses the deferred-attach pattern (addTab BEFORE creating the
         Lead AgentPane) so QWebEngineView never gets re-parented after
@@ -1493,10 +1528,12 @@ class MainWindow(
                 15_000,
             )
             return
-        # Set as active so spawn picks up lead_cwd() for the new project.
         previous_active = active_project()[0]
-        set_active_project(project_name)
-        self._refresh_project_list()
+        if make_current:
+            # Set as active so the project combo / rtk button follow the tab
+            # the user just opened (spawn itself gets `project=` explicitly).
+            set_active_project(project_name)
+            self._refresh_project_list()
         # Repair the central-skills junctions/symlinks for this project so a
         # skill created in an earlier session (or a link broken between
         # sessions) is discoverable from cwd before Lead/teammates spawn.
@@ -1505,7 +1542,10 @@ class MainWindow(
         tab = ProjectTab(project_name, lead_pane=None)
         idx = self.tabs.addTab(tab, project_name)
         self._wire_project_tab(tab)
-        self.tabs.setCurrentIndex(idx)
+        if make_current:
+            self.tabs.setCurrentIndex(idx)
+        else:
+            tab.set_keepalive(False)
         lead = AgentPane(LEAD, parent=tab)
         self.orch.register_pane(lead, project=project_name)
         tab.attach_lead(lead)
@@ -1517,6 +1557,12 @@ class MainWindow(
                 lead._terminal.destroy_terminal()
             except Exception:
                 pass
+            # Same teardown order as _close_project_tab: the shared usage
+            # corner was mounted here by _on_tab_switched, and this tab's
+            # explorer index was registered by _wire_project_tab — both must
+            # let go before the tab is removed/deleted.
+            self._release_usage_corner(tab)
+            self.orch.unregister_workspace_diag_sources(project_name)
             failed_index = next(
                 (i for i in range(self.tabs.count()) if self.tabs.widget(i) is tab), -1
             )
@@ -1587,26 +1633,24 @@ class MainWindow(
         teammate_panes = list(tab.teammate_panes.values())
         tab.teammate_panes.clear()
         self.orch.close_all_teammates(project=tab.project_name)
+        # That clear() also silences the deferred `_teardown` that is the only
+        # place a teammate ever leaves the orchestrator registry — so pop the
+        # dead panes here. Otherwise reopening this project and assigning the
+        # same role finds the stale entry, never asks for a new pane, and
+        # fails on the deleted terminal until the cockpit restarts.
+        for role_name in list(self.orch._project_panes(tab.project_name)):
+            if role_name != LEAD.name:
+                self.orch.unregister_pane(role_name, project=tab.project_name)
         self.orch.close(LEAD.name, project=tab.project_name, force=True, reason="tab_close")
         self.orch.unregister_pane(LEAD.name, project=tab.project_name, force=True)
         if self._limit_store is not None:
             from . import user_profile as _up_tc
 
             self._limit_store.unregister(_up_tc.config_dir_for(tab.project_name))
-        # The usage meter + performance chip live together in one
-        # `_usage_corner` container parked as this tab's corner widget. If
-        # we're closing the tab that currently hosts it, detach it BEFORE
-        # deleteLater — otherwise Qt destroys the C++ widget along with the
-        # tab while Python keeps `_usage_corner` (and `_limit_label`)
-        # pointing at the dead wrapper, and every subsequent usage poll
-        # throws "has been deleted", so the meter vanishes until the cockpit
-        # restarts. removeTab below re-mounts
-        # it on the new active tab via _on_tab_switched (host is None now, so it
-        # skips the stale-clear and just mounts).
-        if self._limit_label_host is tab:
-            tab.pane_tabs.setCornerWidget(None, Qt.Corner.TopRightCorner)
-            self._usage_corner.setParent(None)
-            self._limit_label_host = None
+        # removeTab below re-mounts the usage corner on the new active tab via
+        # _on_tab_switched (host is None now, so it skips the stale-clear and
+        # just mounts).
+        self._release_usage_corner(tab)
         self.tabs.removeTab(index)
         # Invariant, independent of whether the nav's currentChanged fired
         # (it silently didn't on prod 2026-09-21 — see ProjectNav.removeTab):
@@ -1641,13 +1685,32 @@ class MainWindow(
         self._status.showMessage(f"closed tab · {tab.project_name}", 4_000)
         return True, f"closed tab · {tab.project_name}"
 
+    def _release_usage_corner(self, tab: ProjectTab) -> None:
+        """Detach the shared usage corner (token meter + performance chip)
+        from `tab` if it is the current host. Must run before a host tab is
+        removed/deleteLater'd: Qt would destroy the C++ widget along with
+        the tab while Python keeps `_usage_corner` (and `_limit_label`)
+        pointing at the dead wrapper — every later usage poll / performance
+        tick throws "has been deleted", the meter vanishes until restart, and
+        `_on_tab_switched` raises on the dead host before it reaches
+        `set_active_project`, so `active` desyncs from the visible tab."""
+        if self._limit_label_host is not tab:
+            return
+        if not sip.isdeleted(tab):
+            tab.pane_tabs.setCornerWidget(None, Qt.Corner.TopRightCorner)
+            self._usage_corner.setParent(None)
+        self._limit_label_host = None
+
     def _on_tab_switched(self, index: int) -> None:
         """User picked a different project in the sidebar. Sync `active` in
         projects.json so the orchestrator's project-default resolution and the
         rtk button match the visible project."""
         if index < 0:
             # No tabs left (e.g. the last one just closed) — `active` must
-            # not keep pointing at a project with no open tab (#102).
+            # not keep pointing at a project with no open tab (#102), and the
+            # usage corner must not stay parked in a tab that is going away.
+            if self._limit_label_host is not None:
+                self._release_usage_corner(self._limit_label_host)
             clear_active_project()
             self._tasks_dock_widget.set_project(None)
             self._sync_preview_to_active_tab(None)

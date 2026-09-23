@@ -785,12 +785,17 @@ class _AutoskillsPreviewThread(QThread):
     """Runs `autoskills_installer.preview()` off the Qt main thread — it
     shells out and can block up to 60s (see that module's docstring), and
     the Skill Catalog's "ดึง skill ตาม stack" button must never freeze the
-    whole window while that subprocess runs."""
+    whole window while that subprocess runs.
+
+    Never Qt-parented (no `parent` argument on purpose): the SettingsWindow
+    that starts it is WA_DeleteOnClose, and a QThread destroyed with its
+    parent while still running is a Qt6 qFatal (#688 class — see
+    `_AUTOSKILLS_THREADS`)."""
 
     resultReady: pyqtSignal = pyqtSignal(object)  # PreviewResult
 
-    def __init__(self, project_root: Path, parent: QWidget | None = None) -> None:
-        super().__init__(parent)
+    def __init__(self, project_root: Path) -> None:
+        super().__init__(None)
         self._project_root = project_root
 
     def run(self) -> None:
@@ -799,15 +804,14 @@ class _AutoskillsPreviewThread(QThread):
 
 class _AutoskillsInstallThread(QThread):
     """Runs `autoskills_installer.install()` off the Qt main thread — same
-    blocking-subprocess reasoning as `_AutoskillsPreviewThread`, only called
-    after the user has explicitly confirmed a skill selection."""
+    blocking-subprocess reasoning (and the same never-parented rule) as
+    `_AutoskillsPreviewThread`, only called after the user has explicitly
+    confirmed a skill selection."""
 
     resultReady: pyqtSignal = pyqtSignal(object)  # InstallResult
 
-    def __init__(
-        self, project_root: Path, selected_names: list[str], parent: QWidget | None = None
-    ) -> None:
-        super().__init__(parent)
+    def __init__(self, project_root: Path, selected_names: list[str]) -> None:
+        super().__init__(None)
         self._project_root = project_root
         self._selected_names = selected_names
 
@@ -839,6 +843,23 @@ class _ModelCatalogRefreshThread(QThread):
 # Qt6 qFatal ("QThread: Destroyed while thread is still running") →
 # fail-fast 0xc0000409 that kills the whole cockpit with no Python trace.
 _CATALOG_THREADS: set[_ModelCatalogRefreshThread] = set()
+
+# Same keep-alive for the autoskills scan/install workers (2026-09-23
+# review): they were still parented to the SettingsWindow after #688, so
+# closing Settings during the up-to-60s `npx autoskills` scan (or the
+# install that follows) aborted the whole cockpit the same way.
+_AUTOSKILLS_THREADS: set[QThread] = set()
+
+
+def _start_detached(thread: QThread, registry: set) -> None:
+    """Start an unparented worker QThread whose owner is a WA_DeleteOnClose
+    window: *registry* keeps it alive until `finished`, at which point it
+    drops out and deletes itself. A late `resultReady` has nowhere unsafe to
+    land — PyQt drops a slot connection when its receiver QObject dies."""
+    registry.add(thread)
+    thread.finished.connect(lambda t=thread: registry.discard(t))
+    thread.finished.connect(thread.deleteLater)
+    thread.start()
 
 
 class _AutoskillsConfirmDialog(QDialog):
@@ -1068,11 +1089,8 @@ class SettingsWindow(
         # destroyed, so the late signal has nowhere unsafe to land.
         thread = _ModelCatalogRefreshThread()
         thread.resultReady.connect(self._on_model_catalog_refreshed)
-        _CATALOG_THREADS.add(thread)
-        thread.finished.connect(lambda t=thread: _CATALOG_THREADS.discard(t))
-        thread.finished.connect(thread.deleteLater)
         self._model_catalog_thread = thread
-        thread.start()
+        _start_detached(thread, _CATALOG_THREADS)
 
     def _on_model_catalog_refreshed(self, results: dict[str, list[str]]) -> None:
         """Repopulate every model combo whose provider just got a fresh
@@ -1560,6 +1578,7 @@ class SettingsWindow(
         role_provider_combos = getattr(self, "_role_provider_combos", {})
         role_effort_combos = getattr(self, "_role_effort_combos", {})
         role_toggles = getattr(self, "_role_toggles", {})
+        role_toggle_baseline = getattr(self, "_role_toggle_baseline", {})
         mcp_toggles = getattr(self, "_mcp_toggles", {})
         plugin_toggles = getattr(self, "_plugin_toggles", {})
         skill_toggles = getattr(self, "_skill_toggles", {})
@@ -1638,8 +1657,19 @@ class SettingsWindow(
 
             payload = pipeline_config.load(self._project)
             roles_enabled = dict(payload.get("rolesEnabled", {}))
+            # Persist ONLY the switches the user flipped this session
+            # (2026-09-23 review). Every switch renders `_row_enabled_now`
+            # = can_spawn AND is_role_enabled, so under solo-lead/pair (and
+            # for the extras under full/auto) it reads OFF purely because the
+            # PRESET excludes the role — writing that back as an explicit
+            # rolesEnabled=False poisoned pipelines.json on any Save (even a
+            # provider-only edit): Lead got "role X DISABLED" ×4, and the
+            # next switch to ทีมเต็ม/อัตโนมัติ found every position still
+            # OFF (assign rejected, or a silent flip to an all-off custom).
             for role, toggle in role_toggles.items():
-                roles_enabled[role] = toggle.isChecked()
+                checked = toggle.isChecked()
+                if checked != role_toggle_baseline.get(role, not checked):
+                    roles_enabled[role] = checked
             payload["rolesEnabled"] = roles_enabled
 
             pb_template_id = getattr(self, "_pb_template_id", None)
@@ -1667,10 +1697,18 @@ class SettingsWindow(
             # only diffs the roles this page actually lets the user touch;
             # its own defaults (False for a fixed preset, the existing custom
             # value otherwise) already do the right thing for the rest.
+            # The drift check still sees the FULL rendered roster (not just
+            # the flipped switches written to disk above): an untouched
+            # switch reads exactly what the standing preset says, so a
+            # fixed preset with no hand edits diffs clean — passing only the
+            # deltas would default every untouched position to False and
+            # flip a plain "full" save to custom.
+            rendered_roles = {**roles_enabled}
+            rendered_roles.update((role, t.isChecked()) for role, t in role_toggles.items())
             _team_preset.note_manual_roles_change(
                 {
                     k: v
-                    for k, v in roles_enabled.items()
+                    for k, v in rendered_roles.items()
                     if k not in _team_preset.EXTRA_POSITION_ROLES
                 },
                 self._project,
@@ -2484,6 +2522,10 @@ class SettingsWindow(
         rp_lay.addWidget(no_autorun_note)
 
         self._role_toggles = {}
+        # role -> the ON/OFF each switch RENDERED with (`_row_enabled_now`
+        # for this cfg), so Save & Apply can tell a switch the user flipped
+        # from one that merely reads OFF because the preset excludes it.
+        self._role_toggle_baseline: dict[str, bool] = {}
         self._role_provider_combos = {}
         self._role_model_combos: dict[str, QComboBox] = {}
         self._role_effort_combos: dict[str, QComboBox] = {}
@@ -2898,6 +2940,7 @@ class SettingsWindow(
             toggle.toggled.connect(self._mark_dirty)
             row_lay.addWidget(toggle)
             self._role_toggles[role] = toggle
+            self._role_toggle_baseline[role] = enabled
 
         # Critic visual-review round-2 #1 — a custom role could be created
         # but never removed from this view (Nielsen #3, user control &
@@ -2954,6 +2997,7 @@ class SettingsWindow(
         toggle.toggled.connect(self._mark_dirty)
         row_lay.addWidget(toggle)
         self._role_toggles[role] = toggle
+        self._role_toggle_baseline[role] = enabled
         return row
 
     def _refresh_deferred_role_labels(self, *_args: object) -> None:
@@ -3008,6 +3052,7 @@ class SettingsWindow(
             return
         roles_mod.unregister_role(role)
         self._role_toggles.pop(role, None)
+        self._role_toggle_baseline.pop(role, None)
         self._role_provider_combos.pop(role, None)
         self._role_model_combos.pop(role, None)
         self._role_effort_combos.pop(role, None)
@@ -4371,11 +4416,12 @@ class SettingsWindow(
             return
         self._as_scan_btn.setEnabled(False)
         self._as_status.setText("กำลังสแกน stack…")
-        # Kept on self so the QThread object isn't garbage-collected mid-run
-        # (a local variable going out of scope here would stop the thread).
-        self._as_preview_thread = _AutoskillsPreviewThread(roots[0], self)
+        # Unparented + `_AUTOSKILLS_THREADS` keep-alive (#688 pattern): a
+        # Cancel/Esc mid-scan lets the subprocess finish in the background
+        # instead of destroying a running QThread with this dialog.
+        self._as_preview_thread = _AutoskillsPreviewThread(roots[0])
         self._as_preview_thread.resultReady.connect(self._on_autoskills_preview_ready)
-        self._as_preview_thread.start()
+        _start_detached(self._as_preview_thread, _AUTOSKILLS_THREADS)
 
     def _on_autoskills_preview_ready(self, result: autoskills_installer.PreviewResult) -> None:
         self._as_scan_btn.setEnabled(True)
@@ -4417,9 +4463,9 @@ class SettingsWindow(
             return
         self._as_scan_btn.setEnabled(False)
         self._as_status.setText("กำลังติดตั้ง…")
-        self._as_install_thread = _AutoskillsInstallThread(roots[0], selected, self)
+        self._as_install_thread = _AutoskillsInstallThread(roots[0], selected)
         self._as_install_thread.resultReady.connect(self._on_autoskills_install_ready)
-        self._as_install_thread.start()
+        _start_detached(self._as_install_thread, _AUTOSKILLS_THREADS)
 
     def _on_autoskills_install_ready(self, result: autoskills_installer.InstallResult) -> None:
         self._as_scan_btn.setEnabled(True)

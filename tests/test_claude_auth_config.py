@@ -120,6 +120,75 @@ def test_apply_resolves_profile_from_claude_config_dir(tmp_path: Path) -> None:
     assert "ANTHROPIC_BASE_URL" not in env_b
 
 
+def test_apply_reads_base_profile_when_pane_runs_on_curated_dir(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """System review 2026-09-23 (claude_auth_config.py:177): a pane spawned on
+    the #563 curated CLAUDE_CONFIG_DIR must still pick up the auth override
+    Settings saved to the profile's BASE dir — the curated dir never mirrors
+    takkub-claude-auth.json."""
+    from agent_takkub import user_profile as up
+
+    monkeypatch.setattr("agent_takkub.config.DATA_HOME", tmp_path / "data_home")
+    monkeypatch.setattr(cfg, "_LEGACY_GLOBAL_PATH", tmp_path / "legacy-absent.json")
+    base = tmp_path / "claude-work"
+    up.add_profile("work", str(base))
+    up.set_profile("proj", "work")
+    # What Settings → Claude Auth does: save to the profile's config_dir.
+    cfg.save_claude_auth(cfg.ClaudeAuthConfig(base_url="https://proxy.example", api_key="k"), base)
+
+    curated = up.curated_config_dir_for("proj")
+    curated.mkdir(parents=True)
+    assert not (curated / cfg._AUTH_FILENAME).exists()
+
+    env = {"CLAUDE_CONFIG_DIR": str(curated), "TAKKUB_PROJECT": "proj"}
+    cfg.apply_claude_auth_overrides(env)
+    assert env["ANTHROPIC_BASE_URL"] == "https://proxy.example"
+    assert env["ANTHROPIC_API_KEY"] == "k"
+    # The remap is read-only: the pane keeps running on the curated dir.
+    assert env["CLAUDE_CONFIG_DIR"] == str(curated)
+
+
+def test_apply_curated_dir_maps_to_default_profile_dir(tmp_path: Path, monkeypatch) -> None:
+    """Default profile on the curated dir → the default profile's own file."""
+    from agent_takkub import user_profile as up
+
+    monkeypatch.setattr("agent_takkub.config.DATA_HOME", tmp_path / "data_home")
+    default_dir = tmp_path / "dot-claude"
+    monkeypatch.setattr(up, "_DEFAULT_CONFIG_DIR", default_dir)
+    monkeypatch.setattr(cfg, "_DEFAULT_CONFIG_DIR", default_dir)
+    monkeypatch.setattr(cfg, "_LEGACY_GLOBAL_PATH", tmp_path / "legacy-absent.json")
+    cfg.save_claude_auth(cfg.ClaudeAuthConfig(base_url="https://default.example"))
+
+    curated = up.curated_config_dir_for("proj")
+    env = {"CLAUDE_CONFIG_DIR": str(curated), "TAKKUB_PROJECT": "proj"}
+    cfg.apply_claude_auth_overrides(env)
+    assert env["ANTHROPIC_BASE_URL"] == "https://default.example"
+
+
+def test_apply_non_curated_dir_is_read_as_is_even_with_project(tmp_path: Path, monkeypatch) -> None:
+    """Narrow remap: any other CLAUDE_CONFIG_DIR (e.g. a V2 pool account's own
+    home) keeps reading ITS file, never the project's base profile."""
+    from agent_takkub import user_profile as up
+
+    monkeypatch.setattr("agent_takkub.config.DATA_HOME", tmp_path / "data_home")
+    base = tmp_path / "claude-work"
+    up.add_profile("work", str(base))
+    up.set_profile("proj", "work")
+    cfg.save_claude_auth(cfg.ClaudeAuthConfig(base_url="https://base.example"), base)
+    pool_home = tmp_path / "pool-home"
+    cfg.save_claude_auth(cfg.ClaudeAuthConfig(base_url="https://pool.example"), pool_home)
+
+    env = {"CLAUDE_CONFIG_DIR": str(pool_home), "TAKKUB_PROJECT": "proj"}
+    cfg.apply_claude_auth_overrides(env)
+    assert env["ANTHROPIC_BASE_URL"] == "https://pool.example"
+
+    # No project tag at all (non-spawn callers) → unchanged historical lookup.
+    env2 = {"CLAUDE_CONFIG_DIR": str(base)}
+    cfg.apply_claude_auth_overrides(env2)
+    assert env2["ANTHROPIC_BASE_URL"] == "https://base.example"
+
+
 def test_default_profile_falls_back_to_legacy_global(tmp_path: Path, monkeypatch) -> None:
     """Existing ~/.takkub/claude-auth.json keeps working for the default profile."""
     default_dir = tmp_path / "dot-claude"

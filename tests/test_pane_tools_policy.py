@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import json
+import os
+import time
 from pathlib import Path
 
 import pytest
 
-from agent_takkub import pane_tools_policy, shared_dev_tools
+from agent_takkub import cached_read, pane_tools_policy, shared_dev_tools
 
 
 @pytest.fixture
@@ -597,3 +599,51 @@ class TestVariantIntegration:
 
         sdt._write_role_variants()
         assert sdt.shared_mcp_config_path_for_role("totally-unregistered-role-xyz") == str(mcp_env)
+
+
+def _age(path: Path, seconds: int = 60) -> None:
+    """Push mtime into the past: the policy file's normal state (last written
+    >2 s ago), which is exactly when `cached_read`'s stat-free TTL (#658)
+    can serve a pre-write parse."""
+    t = time.time() - seconds
+    os.utime(path, (t, t))
+
+
+class TestSaveInvalidatesReadCache:
+    """Review 2026-09-23 (cache-invalidate): `takkub mcp deny` wrote the
+    policy, then the in-process variant regen + CLI verify read the OLD
+    policy from cache — the denied MCP stayed effective and the CLI reported
+    'this is a bug'. Same for `reset_role`'s unlink branch."""
+
+    @pytest.fixture(autouse=True)
+    def _real_ttl(self, monkeypatch: pytest.MonkeyPatch):
+        monkeypatch.setattr(cached_read, "_STAT_TTL_S", 3.0)
+        cached_read.invalidate()
+        yield
+        cached_read.invalidate()
+
+    def _seed(self, policy_file: Path) -> None:
+        payload = {
+            "version": 1,
+            "roles": {"qa": {"mcps": ["playwright", "context7"], "plugins": []}},
+        }
+        policy_file.write_text(json.dumps(payload), encoding="utf-8")
+        _age(policy_file)
+        assert pane_tools_policy.effective_mcps("qa") == {"playwright", "context7"}  # primes
+
+    def test_deny_is_effective_on_the_very_next_read(self, policy_file: Path) -> None:
+        self._seed(policy_file)
+
+        assert pane_tools_policy.deny_item("qa", "mcps", "playwright") is True
+
+        assert pane_tools_policy.effective_mcps("qa") == {"context7"}
+        assert pane_tools_policy.load_policy()["qa"]["mcps"] == ["context7"]
+
+    def test_reset_role_that_empties_the_policy_is_visible_at_once(self, policy_file: Path) -> None:
+        self._seed(policy_file)
+
+        assert pane_tools_policy.reset_role("qa") is True
+
+        assert not policy_file.exists()
+        assert pane_tools_policy.load_policy() == {}
+        assert pane_tools_policy.effective_mcps("qa", frozenset({"x"})) == {"x"}

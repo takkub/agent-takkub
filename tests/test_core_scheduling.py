@@ -558,6 +558,121 @@ def test_effective_slot_policy_fails_open_on_load_exception(monkeypatch):
     assert scheduling_facade.effective_slot_policy() == SlotPolicy()
 
 
+# ── facade.extended_denial_reason re-resolves a settings-backed snapshot ────
+# 2026-09-23 system review: `ResourceGovernor.__init__` reads
+# `effective_slot_policy()` once at cockpit boot (when RAM headroom is lowest)
+# and keeps that snapshot for its whole life — the RAM-derived
+# `max_panes_global` and any later Settings → Scheduler save never reached
+# the live governor until a restart.
+
+_GIB = 1024**3
+_REQUEST = SlotRequest(project_id="p", pane_id="pane", task_id="t")
+
+
+def _pin_reserve_20pct(monkeypatch) -> None:
+    from agent_takkub import performance_settings
+
+    monkeypatch.setattr(
+        performance_settings,
+        "load",
+        lambda: SimpleNamespace(min_available_ram_percent=20.0),
+    )
+
+
+def test_extended_denial_reason_resamples_ram_cap_after_boot_snapshot(monkeypatch):
+    """16GB laptop, balanced reserve 20% (3.2GB), ~5GB free at boot -> cap 2.
+    Once RAM is freed the SAME snapshot must admit a 3rd pane; once it
+    shrinks again the same snapshot must tighten."""
+    monkeypatch.setenv("TAKKUB_V2_SCHEDULER", "1")
+    import psutil
+
+    _pin_reserve_20pct(monkeypatch)
+    monkeypatch.setattr(psutil, "virtual_memory", lambda: _FakeVM(16 * _GIB, 5 * _GIB))
+    snapshot = scheduling_facade.effective_slot_policy()
+    assert snapshot.max_panes_global == 2
+    two_held = ActiveCounts(agents_global=2, panes_global=2)
+    assert (
+        scheduling_facade.extended_denial_reason(_REQUEST, two_held, snapshot)
+        == "global_panes_limit"
+    )
+
+    monkeypatch.setattr(psutil, "virtual_memory", lambda: _FakeVM(16 * _GIB, 15 * _GIB))
+    assert scheduling_facade.extended_denial_reason(_REQUEST, two_held, snapshot) == ""
+
+    monkeypatch.setattr(psutil, "virtual_memory", lambda: _FakeVM(16 * _GIB, 4 * _GIB))
+    one_held = ActiveCounts(agents_global=1, panes_global=1)
+    assert (
+        scheduling_facade.extended_denial_reason(_REQUEST, one_held, snapshot)
+        == "global_panes_limit"
+    )
+
+
+def test_extended_denial_reason_sees_settings_saved_after_boot_snapshot(monkeypatch):
+    """`core_v2_settings.save()` only invalidates the parse cache — the
+    governor's snapshot itself is never re-read. A cap pinned in Settings →
+    Scheduler after boot must bite on that snapshot, and a snapshot taken
+    while Settings pinned the cap must follow a later change too."""
+    monkeypatch.setenv("TAKKUB_V2_SCHEDULER", "1")
+    import psutil
+
+    from agent_takkub import core_v2_settings
+
+    _pin_reserve_20pct(monkeypatch)
+    monkeypatch.setattr(psutil, "virtual_memory", lambda: _FakeVM(16 * _GIB, 15 * _GIB))
+    snapshot = scheduling_facade.effective_slot_policy()
+    assert snapshot.max_panes_global > 1
+    one_held = ActiveCounts(agents_global=1, panes_global=1)
+    assert scheduling_facade.extended_denial_reason(_REQUEST, one_held, snapshot) == ""
+
+    core_v2_settings.save_scheduler_policy(
+        core_v2_settings.SchedulerPolicyConfig(max_panes_global=1)
+    )
+    assert (
+        scheduling_facade.extended_denial_reason(_REQUEST, one_held, snapshot)
+        == "global_panes_limit"
+    )
+
+    pinned = scheduling_facade.effective_slot_policy()
+    assert pinned.max_panes_global == 1
+    core_v2_settings.save_scheduler_policy(
+        core_v2_settings.SchedulerPolicyConfig(max_panes_global=5)
+    )
+    assert scheduling_facade.extended_denial_reason(_REQUEST, one_held, pinned) == ""
+
+
+def test_extended_denial_reason_evaluates_caller_pinned_policy_as_given(monkeypatch):
+    """A `SlotPolicy` a caller built in code is never swapped for the
+    Settings-backed one (`ResourceGovernor(slot_policy=...)` wins) — and an
+    all-defaults `SlotPolicy()` still denies nothing."""
+    monkeypatch.setenv("TAKKUB_V2_SCHEDULER", "1")
+    from agent_takkub import core_v2_settings
+
+    core_v2_settings.save_scheduler_policy(
+        core_v2_settings.SchedulerPolicyConfig(max_panes_global=1)
+    )
+    one_held = ActiveCounts(agents_global=1, panes_global=1)
+    pinned_in_code = SlotPolicy(max_panes_global=100)
+    assert scheduling_facade.extended_denial_reason(_REQUEST, one_held, pinned_in_code) == ""
+    assert scheduling_facade.extended_denial_reason(_REQUEST, one_held, SlotPolicy()) == ""
+
+
+def test_settings_resolved_cap_is_a_plain_int_to_every_reader(monkeypatch):
+    """The provenance marker must be invisible outside the facade: equality,
+    JSON, repr and `isinstance(int)` all see the number."""
+    monkeypatch.setenv("TAKKUB_V2_SCHEDULER", "1")
+    import json
+
+    from agent_takkub import core_v2_settings
+
+    core_v2_settings.save_scheduler_policy(
+        core_v2_settings.SchedulerPolicyConfig(max_panes_global=3)
+    )
+    cap = scheduling_facade.effective_slot_policy().max_panes_global
+    assert cap == 3 and isinstance(cap, int)
+    assert json.dumps(cap) == "3" and repr(cap) == "3"
+    assert dataclasses.replace(SlotPolicy(), max_panes_global=cap) == SlotPolicy(max_panes_global=3)
+
+
 def test_facade_backpressure_level_fails_open(monkeypatch):
     monkeypatch.setenv("TAKKUB_V2_SCHEDULER", "1")
 
