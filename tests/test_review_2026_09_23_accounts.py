@@ -54,7 +54,12 @@ def _claude_spawn_env_sequence(env: dict[str, str], project: str) -> None:
     cfg.apply_claude_auth_overrides(env)
 
 
-def test_claude_spawn_keeps_curated_dir_and_applies_base_profile_auth(spawn_env_sandbox):
+def test_claude_spawn_runs_on_base_profile_dir_and_applies_its_auth(spawn_env_sandbox):
+    """2026-09-23 hotfix: the pane must end on the profile's BASE dir (where
+    the OAuth login lives and where Claude Code writes its rotated refresh
+    token back), never the #563 curated copy — the curated copy's mirrored
+    `.credentials.json` got clobbered on every spawn and forced /login on
+    each restart."""
     tmp_path = spawn_env_sandbox
     base = tmp_path / "claude-work"
     base.mkdir()
@@ -66,13 +71,7 @@ def test_claude_spawn_keeps_curated_dir_and_applies_base_profile_auth(spawn_env_
     env: dict[str, str] = {}
     _claude_spawn_env_sequence(env, PROJECT)
 
-    curated = user_profile.curated_config_dir_for(PROJECT)
-    # Finding 5: the curated dir must survive the V2 account override.
-    assert Path(env["CLAUDE_CONFIG_DIR"]) == curated
-    assert curated.parent.name == "claude" and curated.parent.parent.name == "providers"
-    assert (curated / ".credentials.json").is_file()
-    assert not (curated / cfg._AUTH_FILENAME).exists()
-    # Finding 3: the base profile's auth override still reaches the pane.
+    assert Path(env["CLAUDE_CONFIG_DIR"]) == base
     assert env["ANTHROPIC_BASE_URL"] == "https://proxy.example"
     assert env["ANTHROPIC_API_KEY"] == "k"
 
@@ -88,9 +87,8 @@ def test_claude_spawn_default_project_is_not_curated(spawn_env_sandbox):
 
 
 def test_codex_named_account_home_still_set_by_legacy_injector(spawn_env_sandbox, monkeypatch):
-    """Parity: the override's legacy fallback was redundant for codex
-    (`inject_provider_home_env` already applies the named account's home),
-    so stripping config_dir from it changes nothing for codex panes."""
+    """Parity: the override's legacy fallback resolves the same home
+    `inject_provider_home_env` already applied, so codex env is unchanged."""
     from agent_takkub.spawn_engine import _apply_v2_account_env_override
 
     tmp_path = spawn_env_sandbox

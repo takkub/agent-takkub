@@ -350,12 +350,14 @@ def test_resolve_account_for_falls_back_to_legacy_when_no_pool(tmp_path):
     assert account.id == "legacy-claude-default"
 
 
-def test_resolve_account_for_legacy_fallback_carries_no_env_override(tmp_path):
-    """System review 2026-09-23 (core/accounts/facade.py:74): the legacy
-    fallback used to hand back the profile's BASE config_dir, which
-    `account_env_overrides` wrote over the #563 curated CLAUDE_CONFIG_DIR on
-    every claude spawn. Identity must survive (conversation binding), the
-    env override must not."""
+def test_resolve_account_for_legacy_fallback_keeps_base_config_dir(tmp_path):
+    """2026-09-23 hotfix: the legacy fallback MUST hand back the profile's
+    BASE config_dir so the claude pane runs on the dir that owns the real
+    OAuth login. The review fix that stripped it moved every claude pane
+    onto the #563 curated copy, whose `.credentials.json` is re-mirrored
+    from the base on each spawn — Claude Code's rotated refresh token was
+    overwritten (or deleted when the base had none) and every restart
+    demanded /login again."""
     from agent_takkub import user_profile as up
     from agent_takkub.core.accounts.facade import resolve_account_for
     from agent_takkub.core.accounts.registry import AccountPoolRegistry
@@ -364,9 +366,6 @@ def test_resolve_account_for_legacy_fallback_carries_no_env_override(tmp_path):
 
     up.add_profile("work", str(tmp_path / "claude-work"))
     up.set_profile("some-project", "work")
-    # The reader itself still knows the dir — the façade is what strips it.
-    raw = next(a for a in read_legacy_accounts("some-project") if a.id == "legacy-claude-work")
-    assert raw.config_dir == str(tmp_path / "claude-work")
 
     empty_pools = AccountPoolRegistry(_JsonlStore(tmp_path / "pools.jsonl"))
     with pytest.MonkeyPatch.context() as mp:
@@ -374,9 +373,10 @@ def test_resolve_account_for_legacy_fallback_carries_no_env_override(tmp_path):
         account = resolve_account_for("claude", "some-project")
     assert account is not None
     assert account.id == "legacy-claude-work"
-    assert account.secret_ref == "secret://claude/work"
-    assert account.config_dir is None
-    assert account_env_overrides("claude", account) == {}
+    assert account.config_dir == str(tmp_path / "claude-work")
+    assert account_env_overrides("claude", account) == {
+        "CLAUDE_CONFIG_DIR": str(tmp_path / "claude-work")
+    }
 
 
 def test_resolve_account_for_pool_account_keeps_config_dir(tmp_path):
