@@ -863,8 +863,10 @@ class TestPromoteBootFailureHandling:
         exactly zero bytes too — `ArchiveV1LegacyStep`'s own candidates
         weren't counted at all."""
         data_home = config.DATA_HOME
-        (data_home / "unmapped-legacy").mkdir(parents=True)
-        (data_home / "unmapped-legacy" / "large.bin").write_bytes(b"x" * 8192)
+        # A real V1 name — the archive step only touches
+        # `promote_v1._V1_LEGACY_TOP_LEVEL_NAMES` since the 2026-09-23 review.
+        data_home.mkdir(parents=True, exist_ok=True)
+        (data_home / "exec-mode.json").write_bytes(b"x" * 8192)
         # #574: doubled — `pre-migrate-backup` copies this content too.
         assert auto_migrate_boot._estimate_copy_bytes(data_home) == 8192 * 2
         with pytest.MonkeyPatch().context() as mp:

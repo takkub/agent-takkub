@@ -56,7 +56,9 @@ def _seeded_data_home(tmp_path: Path) -> Path:
 
     # A genuine V1 top-level leftover archive-v1-legacy will MOVE (copy-
     # verify then prune) — never backed up here (its own WAL protects it).
-    (data_home / "some-old-v1-file.txt").write_text("legacy", encoding="utf-8")
+    # Must be a real V1 name: since the 2026-09-23 review the archive step
+    # only touches `promote_v1._V1_LEGACY_TOP_LEVEL_NAMES`.
+    (data_home / "exec-mode.json").write_text("legacy", encoding="utf-8")
 
     return data_home
 
@@ -90,9 +92,9 @@ def test_backs_up_every_input_category_at_least_once(tmp_path, journal_backups, 
 
     # #574 round11 item 1: the pure-move V1 leftover is deliberately never
     # backed up here — surfaced instead via `skipped_move_only_items()`.
-    assert not (backup_dir / "some-old-v1-file.txt").exists()
+    assert not (backup_dir / "exec-mode.json").exists()
     skipped_names = [n for n, _reason in step.skipped_move_only_items()]
-    assert "some-old-v1-file.txt" in skipped_names
+    assert "exec-mode.json" in skipped_names
 
     assert step.validate().ok
 
