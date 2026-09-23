@@ -1670,6 +1670,14 @@ class SettingsWindow(
                 checked = toggle.isChecked()
                 if checked != role_toggle_baseline.get(role, not checked):
                     roles_enabled[role] = checked
+                elif (
+                    checked
+                    and getattr(self, "_preset_card_picked", False)
+                    and roles_enabled.get(role) is False
+                ):
+                    # The picked preset turns this role ON; drop the stale
+                    # explicit OFF so assign agrees with the switch.
+                    roles_enabled[role] = True
             payload["rolesEnabled"] = roles_enabled
 
             pb_template_id = getattr(self, "_pb_template_id", None)
@@ -2356,6 +2364,13 @@ class SettingsWindow(
     def _on_team_preset_card_clicked(self, preset_id: str) -> None:
         self._selected_team_preset_id = preset_id
         self.pending_team_preset = preset_id
+        # Picking a card is an explicit "use this team" — from here on the
+        # preset alone decides each switch (`_row_enabled_now`), and Save
+        # clears any stale rolesEnabled=False under a role it turns ON. A
+        # project poisoned before the 2026-09-23 fix (every position saved
+        # False under solo-lead/pair) otherwise rendered all-OFF under
+        # ทีมเต็ม too and saved into an all-off custom preset.
+        self._preset_card_picked = True
         self._mark_dirty()
         self._refresh_team_size_panel()
         self._rebuild_roster_panel()
@@ -2418,6 +2433,8 @@ class SettingsWindow(
         from . import team_preset as _team_preset
 
         can_spawn_ok, _ = _team_preset._can_spawn_from_cfg(role, cfg, self._project)
+        if getattr(self, "_preset_card_picked", False):
+            return can_spawn_ok
         return can_spawn_ok and pipeline_config.is_role_enabled(role, self._project)
 
     def _build_collapsible_group(

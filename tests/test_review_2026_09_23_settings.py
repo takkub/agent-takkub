@@ -201,6 +201,34 @@ class TestSaveApplyPersistsOnlyFlippedRoleToggles:
         assert pipeline_config.is_role_enabled("reviewer", project) is False
         dlg.deleteLater()
 
+    def test_picking_full_heals_a_project_poisoned_before_the_fix(self) -> None:
+        """2026-09-23 live test: the fix above only stops NEW poison. A real
+        project saved under solo-lead before it already had every position +
+        checker stored False — clicking ทีมเต็ม rendered all of them OFF and
+        Save flipped the project to an all-off custom. Picking a card must let
+        the preset decide and clear the stale OFFs it turns ON."""
+        project = "proj-h"
+        team_preset.set_current("solo-lead", project)
+        poisoned = {
+            r: False for r in (*team_preset.CORE_POSITION_ROLES, "reviewer", "qa", "critic")
+        }
+        payload = pipeline_config.load(project)
+        payload["rolesEnabled"] = {**payload.get("rolesEnabled", {}), **poisoned}
+        pipeline_config.save(payload, project)
+        assert pipeline_config.is_role_enabled("backend", project) is False
+
+        dlg = self._open_roles_page(project)
+        dlg._on_team_preset_card_clicked("full")
+        for role in team_preset.CORE_POSITION_ROLES:
+            assert dlg._role_toggles[role].isChecked() is True, role
+        dlg._on_save_apply_clicked()
+
+        assert team_preset.current_preset_id(project) == "full"
+        for role in team_preset.CORE_POSITION_ROLES:
+            assert pipeline_config.is_role_enabled(role, project) is True, role
+            assert team_preset.can_spawn(role, project)[0] is True, role
+        dlg.deleteLater()
+
     def test_flip_and_flip_back_writes_nothing(self) -> None:
         project = "proj-g"
         team_preset.set_current("full", project)
