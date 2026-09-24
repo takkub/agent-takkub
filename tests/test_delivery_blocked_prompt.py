@@ -107,16 +107,16 @@ def _written_strings(session: MagicMock) -> list[str]:
 
 
 class TestPromptBlockedEarlyNotice:
-    def test_trust_prompt_warns_lead_on_first_poll_not_after_timeout(
+    def test_trust_prompt_cleared_quickly_does_not_warn(
         self, orch: Orchestrator, monkeypatch
     ) -> None:
         """The warning must fire immediately on detection, well before the
         pane's own delivery hard timeout, unlike busy-wait/unconfirmed."""
         lead = _pane(_live_session())
         gemini = _pane(_live_session())
-        # Stays blocked for several polls, then clears and delivers — large
-        # max_wait_ms so the busy/stall hard-timeout branch never runs; the
-        # early notice must fire anyway, well before that. (#376 round 2:
+        # Stays blocked briefly, then clears and delivers — large max_wait_ms
+        # so the busy/stall hard-timeout branch never runs; the 20-second
+        # warning grace means auto-trust recovery stays quiet. (#376 round 2:
         # the ready-streak gate now also holds at 0 for as long as this
         # stays True — a modal that never cleared at all would mean
         # delivery legitimately never happens via the ready path, which is
@@ -132,9 +132,7 @@ class TestPromptBlockedEarlyNotice:
 
         warnings = _written_strings(lead.session)
         blocked = [m for m in warnings if "[delivery-blocked-prompt]" in m]
-        assert len(blocked) == 1
-        assert "gemini" in blocked[0]
-        assert "#186" in blocked[0]
+        assert not blocked
         # No busy-wait/unconfirmed noise for a pane that recovers normally.
         assert not any("[delivery-busy-wait]" in m for m in warnings)
 
@@ -154,7 +152,7 @@ class TestPromptBlockedEarlyNotice:
             orch._send_when_ready("backend", "run smoke", max_wait_ms=100_000, project="P")
 
         blocked = [m for m in _written_strings(lead.session) if "[delivery-blocked-prompt]" in m]
-        assert len(blocked) == 1
+        assert not blocked
 
     def test_warns_only_once_across_many_polls(self, orch: Orchestrator, monkeypatch) -> None:
         """Detection is checked every poll (the check is cheap and the pane
@@ -163,11 +161,9 @@ class TestPromptBlockedEarlyNotice:
         still only produce a single warning, not one per poll."""
         lead = _pane(_live_session())
         gemini = _pane(_live_session())
-        # Blocked for many polls (well past the one-shot warning firing on
-        # the first) before it finally clears — bounded so delivery still
-        # completes and this test doesn't recurse anywhere near the real
-        # (100_000ms / 150ms) poll budget.
-        gemini.session.is_at_trust_prompt.side_effect = _blocked_then_clear(20)
+        # Blocked beyond the 20-second grace before clearing. Delivery still
+        # completes and the one-shot notice is sent only once.
+        gemini.session.is_at_trust_prompt.side_effect = _blocked_then_clear(140)
         gemini.session.is_at_ready_prompt.side_effect = _ready_after(4)
         gemini.session.seconds_since_output.return_value = 1.0
         orch._panes_by_project["P"] = {"lead": lead, "gemini": gemini}

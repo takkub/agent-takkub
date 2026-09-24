@@ -125,12 +125,13 @@ class TestUngatedPromptBlockHoldsTheReadyStreak:
         # early as poll 7.
         assert gemini.session.is_at_trust_prompt.call_count >= 17
 
-    def test_no_modal_case_is_unaffected(self, orch: Orchestrator, monkeypatch) -> None:
-        """A pane that never shows any prompt behaves exactly as before the
-        round-2 fix — delivers as soon as it reads ready."""
+    def test_short_lived_trust_prompt_does_not_warn(self, orch: Orchestrator, monkeypatch) -> None:
+        """Auto-trust can clear the modal while the ready streak stays held,
+        without notifying the Lead about a prompt that did not persist."""
         lead = _pane(_live_session())
         backend = _pane(_live_session())
         backend.session.is_at_ready_prompt.return_value = True
+        backend.session.is_at_trust_prompt.side_effect = _true_then_false(10)
         orch._panes_by_project["P"] = {"lead": lead, "backend": backend}
         monkeypatch.setattr(orch_mod.QTimer, "singleShot", staticmethod(lambda _ms, fn: fn()))
 
