@@ -276,6 +276,10 @@ class MainWindow(
         self.orch.sessionCapNotice.connect(self._on_session_cap_notice)
         self.orch.idleReminderNotice.connect(self._on_idle_reminder_notice)
         self.orch.backlogPendingNotice.connect(self._on_backlog_pending_notice)
+        # #715: question cards for the Lead composer (polls the active Lead).
+        from .lead_composer_host import LeadQuestionHost
+
+        self._lead_questions = LeadQuestionHost(self.orch, self._active_project_name, self)
         # `takkub restart` — same persist+relaunch path as the status-bar 🔄
         # button, minus the confirm dialog (typing the command IS the confirm).
         self.orch.restartRequested.connect(self._restart_cockpit)
@@ -391,6 +395,7 @@ class MainWindow(
         self._wire_project_tab(initial_tab)
         initial_lead = AgentPane(LEAD, parent=initial_tab)
         self.orch.register_pane(initial_lead, project=initial_project)
+        self._wire_lead_composer(initial_lead, initial_project)
         initial_tab.attach_lead(initial_lead)
         self.tabs.setCurrentIndex(0)
 
@@ -1206,6 +1211,11 @@ class MainWindow(
                 10_000,
             )
 
+    def _wire_lead_composer(self, pane, project: str) -> None:
+        host = getattr(self, "_lead_questions", None)
+        if host is not None:
+            host.wire(pane, project)
+
     def _on_backlog_pending_notice(self, project_ns: str, text: str, count: int) -> None:
         """#714: new work just started while other backlog cards are still
         pending — show the owner the list directly (status bar + tray + a
@@ -1589,6 +1599,7 @@ class MainWindow(
             tab.set_keepalive(False)
         lead = AgentPane(LEAD, parent=tab)
         self.orch.register_pane(lead, project=project_name)
+        self._wire_lead_composer(lead, project_name)
         tab.attach_lead(lead)
 
         ok, msg = self.orch.spawn(LEAD.name, project=project_name)

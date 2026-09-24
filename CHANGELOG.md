@@ -4,6 +4,27 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 
 ## [vNEXT]
 
+### Added (เพิ่ม)
+
+- **แถบพิมพ์ของ cockpit ใต้ pane Lead แทนช่องแชทของ provider (#715)** — terminal ของ Lead ถูก lock แบบ pane อื่น
+  แถบนี้เป็นทางเดียวที่พิมพ์เข้า (`lead_composer.py`):
+  - ช่องพิมพ์หลายบรรทัด (Enter ส่ง · Shift+Enter ขึ้นบรรทัด) · แนบไฟล์/รูปด้วย 📎, ลากวาง หรือ Ctrl+V รูป → chip ลบได้
+    · ส่งเป็น path ธรรมดาให้ทุก provider (แบบเดียวกับรูปจาก Remote) · รูปที่วางเก็บใน `runtime/attachments/<วันที่>/` (ลบเองหลัง 14 วัน)
+  - เขียนเข้า PTY ทางเดียวกับการพิมพ์จริง (paste+Enter แยกจังหวะเหมือน task) — ปลุก `takkub wait` ได้ และข้อความระบบ
+    ไม่ชนกับสิ่งที่กำลังพิมพ์อีกต่อไป (ร่างอยู่ในแถบ ไม่ได้อยู่ใน TUI) · Lead ยังไม่รัน → เตือนและเก็บร่างไว้
+  - Lead ถามแบบเลือกข้อ → แถบกลายเป็นการ์ด (radio/checkbox หลายคำถาม ตรวจว่าตอบครบ) ส่งเป็นปุ่มกดแบบเว้นจังหวะ (#660)
+    · ใช้ตัวอ่านคำถามของ Remote ผ่าน importlib (ลบ `remote/` แล้วการ์ดหาย แต่ส่วนอื่นยังทำงาน)
+  - แป้นสำรอง ⌨ (1-9 ลูกศร Enter Esc Tab Shift+Tab Ctrl+C) สำหรับเมนูที่การ์ดอ่านไม่ออก + "พิมพ์ใน terminal" ปลดล็อกชั่วคราว
+    (lock กลับเองเมื่อส่งจากแถบ) · ปิดทั้งฟีเจอร์ได้ด้วย `TAKKUB_LEAD_COMPOSER=0`
+  - gap: การ์ดคำถามรองรับ claude ก่อน — kimi (`QuestionRequest` ใน wire.jsonl) / opencode (`question.asked`) / codex
+    (`request_user_input`, Plan mode) / agy (protobuf) ยังใช้แป้นสำรอง · สำรวจครบใน #715
+
+### Fixed (แก้)
+
+- **`takkub done` จาก pane codex บน Windows ไม่ถึง Lead (#716)** — เครื่องที่ไม่มี Git Bash `bash` คือ WSL: shim `sh` เจอ
+  `C:/.../python.exe` ที่ไม่ใช่ path ใน WSL ("cockpit interpreter missing") และตัวแปร TAKKUB_* ของ pane ไม่ข้ามเข้า WSL เลย ·
+  shim แปลง path ด้วย `wslpath`/`cygpath` ก่อนตรวจ และ env ของ pane บน Windows ใส่ตัวแปร cockpit ทั้งหมดลง `WSLENV`
+
 ### Changed (เปลี่ยน)
 
 - **backlog เป็นกฎบังคับก่อนเริ่มงาน + รายงานงานค้างก่อนเริ่มงานใหม่ (#714)** — #684 ออกไปเป็นแค่บรรทัดแนะนำในคู่มือ Lead

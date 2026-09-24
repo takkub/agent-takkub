@@ -1,6 +1,6 @@
 {
   "generated_by": "grimp 3.14",
-  "module_count": 354,
+  "module_count": 356,
   "modules": [
     {
       "module": "agent_takkub",
@@ -138,6 +138,8 @@
         "agent_takkub.bg_pool",
         "agent_takkub.cockpit_theme",
         "agent_takkub.config",
+        "agent_takkub.lead_composer",
+        "agent_takkub.orchestrator_text",
         "agent_takkub.performance_settings",
         "agent_takkub.provider_spec",
         "agent_takkub.pty_session",
@@ -155,7 +157,7 @@
         "agent_takkub.spawn_engine"
       ],
       "fan_in": 6,
-      "fan_out": 11
+      "fan_out": 13
     },
     {
       "module": "agent_takkub.agent_pane_model",
@@ -592,6 +594,7 @@
         "agent_takkub.backlog_dialog",
         "agent_takkub.boot_flow_window",
         "agent_takkub.headless_window",
+        "agent_takkub.lead_composer",
         "agent_takkub.logs_panel",
         "agent_takkub.main_window",
         "agent_takkub.orchestrator",
@@ -624,7 +627,7 @@
         "agent_takkub.usage_meter",
         "agent_takkub.user_actions"
       ],
-      "fan_in": 36,
+      "fan_in": 37,
       "fan_out": 0
     },
     {
@@ -3018,6 +3021,28 @@
       "fan_out": 1
     },
     {
+      "module": "agent_takkub.lead_composer",
+      "imports": [
+        "agent_takkub.cockpit_theme"
+      ],
+      "imported_by": [
+        "agent_takkub.agent_pane"
+      ],
+      "fan_in": 1,
+      "fan_out": 1
+    },
+    {
+      "module": "agent_takkub.lead_composer_host",
+      "imports": [
+        "agent_takkub.orchestrator_text"
+      ],
+      "imported_by": [
+        "agent_takkub.main_window"
+      ],
+      "fan_in": 1,
+      "fan_out": 1
+    },
+    {
       "module": "agent_takkub.lead_context",
       "imports": [
         "agent_takkub.codex_agents_md",
@@ -3180,6 +3205,7 @@
         "agent_takkub.config",
         "agent_takkub.editor_widget",
         "agent_takkub.graft_autobuild",
+        "agent_takkub.lead_composer_host",
         "agent_takkub.lead_context",
         "agent_takkub.limit_panel",
         "agent_takkub.logs_panel",
@@ -3206,7 +3232,7 @@
         "agent_takkub.app"
       ],
       "fan_in": 1,
-      "fan_out": 28
+      "fan_out": 29
     },
     {
       "module": "agent_takkub.maintenance",
@@ -3435,6 +3461,7 @@
         "agent_takkub.worktree_manager"
       ],
       "imported_by": [
+        "agent_takkub.agent_pane",
         "agent_takkub.app",
         "agent_takkub.auto_migrate_boot",
         "agent_takkub.boot_context",
@@ -3447,6 +3474,7 @@
         "agent_takkub.core.migration.promote_v1",
         "agent_takkub.core.migration.wal",
         "agent_takkub.disk_usage",
+        "agent_takkub.lead_composer_host",
         "agent_takkub.lead_inbox",
         "agent_takkub.lead_wait",
         "agent_takkub.limit_autoresume",
@@ -3457,7 +3485,7 @@
         "agent_takkub.settings_window",
         "agent_takkub.spawn_engine"
       ],
-      "fan_in": 21,
+      "fan_in": 23,
       "fan_out": 11
     },
     {

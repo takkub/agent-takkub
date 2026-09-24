@@ -82,6 +82,12 @@ def _env_pane_discard_override(persisted: bool) -> bool:
     return bool(persisted)
 
 
+def lead_composer_enabled() -> bool:
+    """#715: on by default; `TAKKUB_LEAD_COMPOSER=0` restores typing straight
+    into the Lead terminal."""
+    return os.environ.get("TAKKUB_LEAD_COMPOSER", "1").strip() != "0"
+
+
 class AgentPane(QFrame):
     """One agent slot. Owns its PtySession when active."""
 
@@ -98,6 +104,9 @@ class AgentPane(QFrame):
     # Takkub"). Forwarded from TerminalWidget; orchestrator.register_pane
     # binds the project name and routes it to the editor host.
     openInEditorRequested = pyqtSignal(str)  # absolute path
+    # #715: the Lead composer's question card was answered — per-question
+    # lists of 0-based option indices. MainWindow turns them into picker keys.
+    leadQuestionAnswered = pyqtSignal(list)
 
     def __init__(self, role: Role, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -352,6 +361,46 @@ class AgentPane(QFrame):
 
         root.addWidget(header)
         root.addWidget(self._stack, 1)
+
+        # #715: Lead gets the cockpit's own input bar; its terminal is locked
+        # like every teammate pane and the bar is the one way in.
+        self.composer = None
+        if role.name == LEAD.name and lead_composer_enabled():
+            from .lead_composer import LeadComposer, prune_attachments
+
+            self.composer = LeadComposer(RUNTIME_DIR, self)
+            self.composer.textSubmitted.connect(self._send_composer_text)
+            self.composer.rawKeys.connect(lambda data: self.inputBytes.emit(self.role.name, data))
+            self.composer.terminalUnlockChanged.connect(
+                lambda on: self._terminal.set_input_locked(not on)
+            )
+            self.composer.questionAnswered.connect(self.leadQuestionAnswered)
+            self.composer.set_send_guard(self._composer_send_blocker)
+            self._terminal.set_input_locked(True)
+            root.addWidget(self.composer)
+            bg_pool.submit(lambda: prune_attachments(RUNTIME_DIR))
+
+    def _composer_send_blocker(self) -> str | None:
+        if self.session is None or not getattr(self.session, "is_alive", False):
+            return "Lead ยังไม่ได้รัน — กด spawn ก่อน แล้วส่งใหม่ (ข้อความยังอยู่)"
+        return None
+
+    def _send_composer_text(self, text: str) -> None:
+        """#715: write the composer's message into the Lead PTY exactly the
+        way the orchestrator writes a task — sanitized, bracketed-paste when
+        multi-line/long, then a separate Enter after the paste has rendered.
+        Both writes go through `inputBytes`, the same path as real typing, so
+        the draft tracker and `takkub wait`'s owner-input wake still see it."""
+        from .orchestrator_text import _enter_delay_ms, _paste_payload, _sanitize_pane_text
+
+        if self._composer_send_blocker():
+            return
+        payload = _paste_payload(_sanitize_pane_text(text))
+        if not payload:
+            return
+        role = self.role.name
+        self.inputBytes.emit(role, payload.encode("utf-8"))
+        QTimer.singleShot(_enter_delay_ms(payload), lambda: self.inputBytes.emit(role, b"\r"))
 
     # ──────────────────────────────────────────────────────────────
     # model proxies — session/state bookkeeping lives on self.model
