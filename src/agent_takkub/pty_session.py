@@ -46,6 +46,18 @@ from .provider_spec import READY_RULES as _READY_RULES
 # CREATE_NO_WINDOW so the helper taskkill doesn't flash a console window.
 _CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
+# Long-lived machine services and their helpers can be launched from an agent
+# pane (for example, Docker Desktop on Windows). They must outlive the pane.
+_PROTECTED_TREE_NAMES = frozenset(
+    {
+        "docker desktop.exe",
+        "com.docker.backend.exe",
+        "com.docker.service",
+        "com.docker.proxy.exe",
+        "docker.exe",
+    }
+)
+
 # Bound on the native pty-constructor call itself (issue #139): a wedged
 # pywinpty/ptyprocess spawn once blocked the Qt main thread — and the
 # spawn-in-progress FIFO arbiter behind it (spawn_engine.py) — for 47+
@@ -220,15 +232,57 @@ def _tree_kill(pid: int | None) -> None:
         # blocks, so terminate() runs it on a background thread (see terminate),
         # NOT on the Qt main thread — keeping the ordering correct AND the UI
         # responsive. (An earlier fire-and-forget Popen here broke the ordering.)
+        def _taskkill_tree() -> None:
+            try:
+                subprocess.run(
+                    ["taskkill", "/PID", str(pid), "/T", "/F"],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    creationflags=_CREATE_NO_WINDOW,
+                    timeout=10,
+                    check=False,
+                )
+            except Exception:
+                pass
+
         try:
-            subprocess.run(
-                ["taskkill", "/PID", str(pid), "/T", "/F"],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                creationflags=_CREATE_NO_WINDOW,
-                timeout=10,
-                check=False,
-            )
+            import psutil
+
+            root = psutil.Process(pid)
+            # Build the complete snapshot before killing anything. Children of
+            # a protected process are protected too, even if their own names
+            # are generic (WSL and service helpers commonly are).
+            killable: list[object] = []
+            found_protected = False
+            stack = [(child, False) for child in root.children()]
+            while stack:
+                child, protected_parent = stack.pop()
+                name = child.name().casefold()
+                protected = protected_parent or name in _PROTECTED_TREE_NAMES
+                found_protected = found_protected or name in _PROTECTED_TREE_NAMES
+                if not protected:
+                    killable.append(child)
+                stack.extend((grandchild, protected) for grandchild in child.children())
+        except Exception:
+            # An incomplete tree scan cannot establish that /T is safe; retain
+            # the legacy behavior when psutil cannot inspect the full tree.
+            _taskkill_tree()
+            return
+
+        if not found_protected:
+            _taskkill_tree()
+            return
+
+        # Children are added before their descendants; reverse order therefore
+        # reaps leaves first. Kill by PID only so taskkill cannot cross into a
+        # protected service branch. The root is also terminated by PID alone.
+        for child in reversed(killable):
+            try:
+                child.kill()
+            except Exception:
+                pass
+        try:
+            root.kill()
         except Exception:
             pass
         return

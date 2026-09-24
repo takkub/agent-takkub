@@ -9,6 +9,7 @@ concurrent feed+read can't crash. See docs/cockpit-freeze-rca-2026-05-29.md.
 from __future__ import annotations
 
 import threading
+from unittest.mock import MagicMock
 
 import agent_takkub.pty_session as pty_mod
 from agent_takkub.pty_session import PtySession
@@ -100,8 +101,42 @@ def test_concurrent_feed_and_read_no_crash() -> None:
         t.start()
     for t in threads:
         t.join()
-
     assert not errors, f"concurrent feed/read raised: {errors!r}"
+
+
+def test_tree_kill_preserves_protected_process_and_its_descendants(monkeypatch) -> None:
+    """Windows cleanup must not use taskkill /T across a Docker branch."""
+    import sys
+    import types
+
+    root = MagicMock()
+    ordinary = MagicMock()
+    docker = MagicMock()
+    docker_child = MagicMock()
+    sibling = MagicMock()
+    root.children.return_value = [ordinary, sibling]
+    ordinary.children.return_value = [docker]
+    docker.children.return_value = [docker_child]
+    sibling.children.return_value = []
+    docker_child.children.return_value = []
+    ordinary.name.return_value = "worker.exe"
+    docker.name.return_value = "Docker Desktop.exe"
+    docker_child.name.return_value = "com.docker.backend.exe"
+    sibling.name.return_value = "other.exe"
+    fake_psutil = types.SimpleNamespace(Process=lambda pid: root)
+    monkeypatch.setitem(sys.modules, "psutil", fake_psutil)
+    monkeypatch.setattr(pty_mod.sys, "platform", "win32")
+    run = MagicMock()
+    monkeypatch.setattr(pty_mod.subprocess, "run", run)
+
+    pty_mod._tree_kill(1234)
+
+    run.assert_not_called()
+    ordinary.kill.assert_called_once_with()
+    sibling.kill.assert_called_once_with()
+    docker.kill.assert_not_called()
+    docker_child.kill.assert_not_called()
+    root.kill.assert_called_once_with()
 
 
 def test_feed_and_log_caches_ready_state() -> None:
