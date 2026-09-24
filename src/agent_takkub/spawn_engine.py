@@ -75,6 +75,7 @@ from .pane_env import (
     inject_provider_home_env,
     inject_provider_no_autoupdate_env,
     inject_user_profile_env,
+    share_takkub_env_with_wsl,
 )
 from .pipeline_executor import _split_shard
 from .pty_session import PtySession
@@ -2111,6 +2112,7 @@ class SpawnEngineMixin:
                 )
                 return True, f"{role_name} spawn deferred (final re-sample blocked)"
             _t0 = time.time()
+            share_takkub_env_with_wsl(env)  # #716: codex→bash→WSL keeps pane identity
             session.spawn(argv=argv, cwd=spawn_cwd, env=env, transcript_path=_t_path)
             _log_spawn_native_ms(
                 _log_event,
@@ -3985,6 +3987,7 @@ class SpawnEngineMixin:
                 )
                 return True, f"{role_name} spawn deferred (final re-sample blocked)"
             _t0 = time.time()
+            share_takkub_env_with_wsl(env)  # #716: codex→bash→WSL keeps pane identity
             session.spawn(argv=argv, cwd=spawn_cwd, env=env, transcript_path=_t_path)
             _log_spawn_native_ms(
                 _log_event,

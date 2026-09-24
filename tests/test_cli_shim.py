@@ -141,3 +141,63 @@ class TestShimRefusesBrokenInterpreter:
         )
         assert r.returncode == 0, r.stderr
         assert "usage: takkub" in (r.stdout or "")
+
+
+class TestWslBash716:
+    """#716: a Windows pane whose CLI runs `bash` gets WSL when there is no
+    Git Bash — `C:/...` is not a path there and no pane variable crosses in."""
+
+    def test_sh_shim_maps_the_interpreter_through_wslpath(self, tmp_path: Path) -> None:
+        bash = _posix_shell()
+        if bash is None:
+            pytest.skip("needs a POSIX shell (Git Bash on Windows)")
+        real = _fake_python(tmp_path / "real", healthy=False)
+        # The generated shim names an interpreter that does not exist as
+        # written; a `wslpath` on PATH maps it to the real (clobbered) file.
+        shim_dir = cli_shim.ensure_cli_shims(tmp_path / "shims", tmp_path / "gone" / "python.exe")
+        conv_dir = tmp_path / "conv"
+        conv_dir.mkdir()
+        conv = conv_dir / "wslpath"
+        conv.write_text(f"#!/bin/sh\necho '{real.as_posix()}'\n", encoding="utf-8", newline="\n")
+        conv.chmod(0o755)
+        shim = (shim_dir / "takkub").as_posix()
+        r = subprocess.run(
+            # `cd && pwd` turns C:/... into /c/... on Git Bash so PATH's
+            # `:` separator doesn't split the drive letter off.
+            [bash, "-c", f'PATH="$(cd "{conv_dir.as_posix()}" && pwd):$PATH" sh "{shim}"'],
+            capture_output=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=60,
+        )
+        # the mapped interpreter was found and checked — not reported missing
+        assert "cockpit interpreter missing" not in r.stderr
+        assert "cockpit interpreter broken" in r.stderr
+
+    def test_shim_text_carries_the_mapping(self, tmp_path: Path) -> None:
+        py = _fake_python(tmp_path, healthy=True)
+        shim = cli_shim.ensure_cli_shims(tmp_path / "shims", py) / "takkub"
+        assert "wslpath cygpath" in shim.read_text(encoding="utf-8")
+
+    def test_pane_env_lists_cockpit_vars_in_wslenv(self) -> None:
+        from agent_takkub.pane_env import share_takkub_env_with_wsl
+
+        env = {
+            "TAKKUB_ROLE": "backend",
+            "TAKKUB_PANE_TOKEN": "t",
+            "AGENT_TAKKUB_HOME": "C:/x",
+            "PATH": "p",
+            "WSLENV": "USERPROFILE/p:TAKKUB_ROLE",
+        }
+        share_takkub_env_with_wsl(env, platform="win32")
+        parts = env["WSLENV"].split(":")
+        assert parts[:2] == ["USERPROFILE/p", "TAKKUB_ROLE"]  # existing kept, no dup
+        assert {"TAKKUB_PANE_TOKEN", "AGENT_TAKKUB_HOME"} <= set(parts)
+        assert "PATH" not in parts
+
+    def test_pane_env_wslenv_is_windows_only(self) -> None:
+        from agent_takkub.pane_env import share_takkub_env_with_wsl
+
+        env = {"TAKKUB_ROLE": "backend"}
+        share_takkub_env_with_wsl(env, platform="darwin")
+        assert "WSLENV" not in env

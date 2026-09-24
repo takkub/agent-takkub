@@ -48,6 +48,7 @@ from __future__ import annotations
 import os
 import re
 import subprocess
+import sys
 from datetime import datetime
 
 from ._win_console import SUBPROCESS_NO_WINDOW
@@ -809,3 +810,26 @@ def _apply_win32_path_sanitization(env: dict[str, str]) -> None:
             env["PATH"] = os.pathsep.join(path_parts)
         elif npm_idx == -1:
             env["PATH"] = npm_dir + os.pathsep + env.get("PATH", "")
+
+
+_WSL_SHARED_PREFIXES = ("TAKKUB_", "AGENT_TAKKUB_")
+
+
+def share_takkub_env_with_wsl(env: dict[str, str], *, platform: str | None = None) -> None:
+    """#716: list every cockpit variable in ``WSLENV`` (Windows only).
+
+    A pane's CLI that runs shell commands through ``bash`` on a machine with
+    no Git Bash gets ``C:/Windows/System32/bash.exe`` — WSL — and WSL
+    passes a Windows variable in only when ``WSLENV`` names it. Without this
+    ``takkub done`` from a codex pane ran with no ``TAKKUB_ROLE``/pane token
+    at all. Names ride as-is both ways (no ``/p`` path translation): the
+    shim hands them straight back to the cockpit's Windows interpreter.
+    Existing ``WSLENV`` entries are kept."""
+    if (platform or sys.platform) != "win32":
+        return
+    names = sorted(k for k in env if k.startswith(_WSL_SHARED_PREFIXES))
+    if not names:
+        return
+    existing = [part for part in (env.get("WSLENV") or "").split(":") if part]
+    have = {part.split("/", 1)[0] for part in existing}
+    env["WSLENV"] = ":".join(existing + [n for n in names if n not in have])
