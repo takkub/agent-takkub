@@ -182,6 +182,9 @@ class _Window:
     def _wire_project_tab(self, tab) -> None:
         pass
 
+    def _wire_lead_composer(self, pane, project: str) -> None:
+        pass
+
     def _refresh_project_list(self) -> None:
         pass
 
