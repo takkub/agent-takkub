@@ -5215,7 +5215,16 @@ class Orchestrator(
                 except Exception:
                     pass
 
-        header = f"[{from_role} → {to_role}] " if from_role and from_role != to_role else ""
+        # shell panes are a raw PowerShell/bash terminal, not an LLM: a
+        # `[{from} → {to}] ` header would be parsed as PowerShell type
+        # literals (`[lead → shell]`) and raise ParserError on every paste.
+        # Only the shell pane gets the raw text; every LLM pane keeps the header.
+        _is_shell_target = _split_shard(to_role)[0] == "shell"
+        header = (
+            f"[{from_role} → {to_role}] "
+            if from_role and from_role != to_role and not _is_shell_target
+            else ""
+        )
         body = header + _sanitize_pane_text(msg)
         _send_sess = pane.session
         body_payload = _paste_payload(body)
