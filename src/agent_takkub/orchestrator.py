@@ -12229,6 +12229,9 @@ class Orchestrator(
             for name, pane in list(project_panes.items()):
                 try:
                     key = f"{project_name}::{name}"
+                    _picker_waiting = getattr(self, "_question_menu_waiting", None)
+                    if callable(_picker_waiting) and _picker_waiting(name, project_name, pane):
+                        continue
                     if name == LEAD.name:
                         # Lead is exempt from the teammate idle-reminder loop,
                         # but it is still a provider-backed pane. Let its quota
@@ -13855,6 +13858,10 @@ class Orchestrator(
         for project_name, project_panes in list(self._panes_by_project.items()):
             for role, pane in list(project_panes.items()):
                 try:
+                    if pane.session is not None and pane.session.is_alive:
+                        _picker_waiting = getattr(self, "_question_menu_waiting", None)
+                        if callable(_picker_waiting) and _picker_waiting(role, project_name, pane):
+                            continue
                     if role == LEAD.name:
                         continue
                     if pane.state != "working":
@@ -14355,6 +14362,10 @@ class Orchestrator(
         for project_name, project_panes in list(self._panes_by_project.items()):
             for role, pane in list(project_panes.items()):
                 try:
+                    if pane.session is not None and pane.session.is_alive:
+                        _picker_waiting = getattr(self, "_question_menu_waiting", None)
+                        if callable(_picker_waiting) and _picker_waiting(role, project_name, pane):
+                            continue
                     if role == LEAD.name:
                         continue
                     if pane.state != "working":
@@ -14462,6 +14473,37 @@ class Orchestrator(
                 except Exception:
                     _log_event("tool_stuck_watchdog_error", role=role, project=project_name)
 
+    def _question_menu_waiting(self, role: str, project: str, pane) -> bool:
+        """Defer quiet/stuck watchdogs while a known picker awaits a person."""
+        from .provider_spec import picker_question_on_screen
+
+        key = f"{project}::{role}"
+        ps = getattr(self, "_pane_state", {}).get(key)
+        provider = getattr(getattr(pane, "model", None), "provider_name", None)
+        if not isinstance(provider, str) or not provider:
+            provider = getattr(ps, "provider_override", None)
+        if not provider:
+            try:
+                from .provider_config import effective_provider_for
+
+                provider = effective_provider_for(role, project=project)
+            except Exception:
+                provider = None
+        waiting = picker_question_on_screen(getattr(pane, "session", None), provider)
+        if ps is None and waiting:
+            ps = self._ps(key)
+        if waiting and not ps.picker_wait_notice_active:
+            self._notify_lead(
+                project,
+                f"⏳ {role} รอผู้ใช้ตอบคำถาม",
+                from_role=role,
+                note="question-picker-waiting-user",
+                kind="question-picker-waiting-user",
+            )
+        if ps is not None:
+            ps.picker_wait_notice_active = waiting
+        return waiting
+
     def _session_uuid_for(self, key: str) -> str | None:
         """Best-known transcript uuid for a `project::role` slot (#422 item 3):
         the live PaneState first, else the last `session_report` this slot
@@ -14524,6 +14566,9 @@ class Orchestrator(
         # #41: carry the stuck-recover attempt count across the close→respawn so
         # the watchdog can enforce STUCK_RECOVER_MAX (close() pops the PaneState).
         snap_recover_attempts = _ps_snap.stuck_recover_attempts if _ps_snap is not None else 0
+        snap_provider_override = _ps_snap.provider_override if _ps_snap is not None else None
+        snap_model_override = _ps_snap.model_override if _ps_snap is not None else None
+        snap_effort_override = _ps_snap.effort_override if _ps_snap is not None else None
 
         self._ps(key).last_stuck_recover = now
         # silent_for_s = raw-byte silence. It is frequently 0 even on a genuine
@@ -14606,6 +14651,11 @@ class Orchestrator(
             # wedged-but-alive pane never crashes, so auto_respawn_attempts —
             # which only counts crashes — never caps it).
             self._ps(key).stuck_recover_attempts = snap_recover_attempts + 1
+            # Automatic recovery continues the existing assignment, including
+            # its explicit routing/model/reasoning choices.
+            self._ps(key).provider_override = snap_provider_override
+            self._ps(key).model_override = snap_model_override
+            self._ps(key).effort_override = snap_effort_override
             if snap_uuid is not None:
                 _ps_r = self._ps(key)
                 _ps_r.session_uuid = snap_uuid

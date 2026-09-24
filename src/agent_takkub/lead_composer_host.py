@@ -28,6 +28,7 @@ from collections.abc import Callable
 from PyQt6.QtCore import QObject, QTimer, pyqtSignal
 
 from .orchestrator_text import _log_event
+from .provider_spec import PICKER_SCREEN_MARKERS, picker_question_on_screen
 
 # Providers whose `remote.notify` scanner implements `live_ask` today.
 _ASK_PROVIDERS = frozenset({"claude", "gemini", "opencode"})
@@ -37,36 +38,13 @@ _POLL_MS = 1500
 _ANSWERED_HIDE_S = 8.0
 
 
-# #717: provider-specific text captured from each real picker. Picker keys
-# typed at a plain prompt become a chat message, so nothing is sent unless a
-# complete marker group is on the Lead's screen.
-_PICKER_SCREEN_MARKERS = {
-    "claude": (("Esc to cancel",), ("to navigate", "Enter to select")),
-    "opencode": (("enter submit", "esc dismiss"),),
-    "gemini": (
-        ("Question 1/", "enter Select", "esc Skip"),
-        ("Question 1/", "space Toggle", "enter Submit", "esc Skip"),
-    ),
-    "agy": (
-        ("Question 1/", "enter Select", "esc Skip"),
-        ("Question 1/", "space Toggle", "enter Submit", "esc Skip"),
-    ),
-}
-_PICKER_SCREEN_TAIL_LINES = 40
+# Backwards-compatible alias for the composer regression tests; source of
+# truth lives in provider_spec so watchdogs can use the identical markers.
+_PICKER_SCREEN_MARKERS = PICKER_SCREEN_MARKERS
 
 
 def _picker_on_screen(pane, provider: str) -> bool:
-    session = getattr(pane, "session", None)
-    try:
-        lines = [ln for ln in session.display_lines() if ln.strip()]
-    except Exception:
-        return False
-    tail = "\n".join(lines[-_PICKER_SCREEN_TAIL_LINES:])
-    folded = tail.casefold()
-    groups = _PICKER_SCREEN_MARKERS.get(provider, ())
-    if any(all(marker.casefold() in folded for marker in group) for group in groups):
-        return True
-    return False
+    return picker_question_on_screen(getattr(pane, "session", None), provider)
 
 
 def _remote(name: str):

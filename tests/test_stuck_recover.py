@@ -13,6 +13,7 @@ What the tests pin down (the contract the auto-recover relies on):
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
@@ -49,6 +50,7 @@ class _FakePane:
         self.state = state
         self._last_output_ts = last_out
         self._session_cwd = cwd
+        self.model = SimpleNamespace(provider_name="claude")
         if session_alive:
             sess = MagicMock()
             sess.is_alive = True
@@ -128,6 +130,11 @@ class _FakeOrch:
         # the fake (the watchdog calls `self._auto_recover_stuck`).
         Orchestrator._auto_recover_stuck(  # type: ignore[arg-type]
             self, role, project, pane, now, idle_no_progress=idle_no_progress
+        )
+
+    def _question_menu_waiting(self, role, project, pane) -> bool:
+        return Orchestrator._question_menu_waiting(  # type: ignore[arg-type]
+            self, role, project, pane
         )
 
     def _maybe_surface_tty_block(self, key, role, project, prompt_line, now, *, kind="tty") -> None:
@@ -304,6 +311,60 @@ class TestCheckStuckPanes:
         assert (
             fake._pane_state.get("agent-takkub::backend") or PaneState()
         ).last_stuck_recover == now
+
+    def test_question_picker_waiting_for_user_is_not_recovered_and_noticed_once(self) -> None:
+        fake = _FakeOrch()
+        pane = _FakePane(last_out=1.0)
+        pane.model.provider_name = "agy"
+        pane.session.display_lines.return_value = [
+            "Question 1/1",
+            "↑/↓ Navigate · enter Select · esc Skip | esc to cancel",
+        ]
+        fake._panes_by_project["p"] = {"backend": pane}
+        now = 1.0 + STUCK_THRESHOLD_S + STUCK_RECOVER_COOLDOWN_S + 1
+
+        _check(fake, now)
+        _check(fake, now + 5)
+        lead_pane = _FakePane(last_out=1.0)
+        lead_pane.model.provider_name = "gemini"
+        lead_pane.session.display_lines.return_value = ["Question 1/2", "enter Select · esc Skip"]
+        fake._question_menu_waiting("lead", "p", lead_pane)
+        fake._question_menu_waiting("lead", "p", lead_pane)
+
+        assert fake.close_calls == []
+        assert fake.spawn_calls == []
+        assert [notice for _, notice, _ in fake.notify_calls if "รอผู้ใช้ตอบคำถาม" in notice] == [
+            "⏳ backend รอผู้ใช้ตอบคำถาม",
+            "⏳ lead รอผู้ใช้ตอบคำถาม",
+        ]
+
+    def test_stuck_recovery_restores_assign_provider_model_and_effort(self, monkeypatch) -> None:
+        import agent_takkub.orchestrator as orchestrator_module
+
+        pane = _FakePane(last_out=10.0)
+        observed: list[tuple[str | None, str | None, str | None]] = []
+
+        class _PopOnClose(_FakeOrch):
+            def close(self, role, project=None, **_kw):
+                self._pane_state.pop(f"{project or ''}::{role}", None)
+                return True, "ok"
+
+            def spawn(self, role, cwd=None, project=None, **_kw):
+                ps = self._pane_state[f"{project or ''}::{role}"]
+                observed.append((ps.provider_override, ps.model_override, ps.effort_override))
+                return True, "ok"
+
+        fake = _PopOnClose()
+        fake._pane_state["p::backend"] = PaneState(
+            provider_override="gemini",
+            model_override="gemini-2.5-pro",
+            effort_override="high",
+        )
+        monkeypatch.setattr(orchestrator_module.QTimer, "singleShot", lambda _ms, fn: fn())
+
+        _recover(fake, "backend", "p", pane, 20_000.0)
+
+        assert observed == [("gemini", "gemini-2.5-pro", "high")]
 
     def test_cooldown_suppresses_back_to_back_recover(self) -> None:
         # Same pane stuck twice within the cooldown window — second

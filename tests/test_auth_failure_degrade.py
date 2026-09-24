@@ -154,10 +154,17 @@ class TestRecoverAuthFailedPaneDegradesImmediately:
         qa = _pane(_auth_failed_session(), provider="gemini-agy")
         orch._panes_by_project["P"] = {"lead": lead, "qa": qa}
         key = _exit_key("P", "qa")
+        orch._ps(key).provider_override = "gemini-agy"
+        orch._ps(key).model_override = "gemini-2.5-pro"
+        orch._ps(key).effort_override = "high"
         assert orch._ps(key).no_content_recover_attempts == 0
 
         with (
-            patch.object(orch, "close") as mock_close,
+            patch.object(
+                orch,
+                "close",
+                side_effect=lambda *_a, **_kw: orch._pane_state.pop(key, None),
+            ) as mock_close,
             patch.object(orch, "spawn", return_value=(True, "ok")) as mock_spawn,
             patch.object(orch, "_send_when_ready") as mock_resend,
             patch("agent_takkub.lead_inbox._log_event"),
@@ -170,6 +177,8 @@ class TestRecoverAuthFailedPaneDegradesImmediately:
         mock_spawn.assert_called_once()
         ps_after = orch._pane_state[key]
         assert ps_after.provider_override == "claude"
+        assert ps_after.model_override == "gemini-2.5-pro"
+        assert ps_after.effort_override == "high"
         assert ps_after.no_content_recover_attempts == 1
         mock_resend.assert_called_once()
 

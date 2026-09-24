@@ -1190,6 +1190,8 @@ class TestReroutePaneToProvider:
         o = self._orch_with_respawn_hooks()
         ps = o._ps("proj::backend")
         ps.last_assigned_task = "implement the thing"
+        ps.model_override = "claude-sonnet-4"
+        ps.effort_override = "high"
         pane = MagicMock()
         pane._session_cwd = "C:/work/api"
         o._panes_by_project["proj"] = {"backend": pane}
@@ -1212,6 +1214,8 @@ class TestReroutePaneToProvider:
         assert o.spawn.call_args.kwargs["_from_auto_respawn"] is True
         new_ps = o._ps("proj::backend")
         assert new_ps.provider_override == "codex"
+        assert new_ps.model_override == "claude-sonnet-4"
+        assert new_ps.effort_override == "high"
         assert new_ps.quota_reroute_from == "claude"
         assert new_ps.quota_reroute_count == 1
         o._send_when_ready.assert_called_once()
