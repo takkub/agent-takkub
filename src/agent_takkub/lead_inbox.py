@@ -1755,6 +1755,12 @@ class LeadInboxMixin:
                     role=role_name,
                 )
                 return
+            _picker_waiting = getattr(self, "_question_menu_waiting", None)
+            if callable(_picker_waiting) and _picker_waiting(role_name, project_ns, pane):
+                # A picker is an explicit human gate; never treat it as a
+                # quiet boot or paste task bytes into its answer menu.
+                QTimer.singleShot(_READY_POLL_INTERVAL_MS, _check)
+                return
             if elapsed_at_session_alive[0] is None:
                 elapsed_at_session_alive[0] = elapsed[0]
             # #186: recognise "blocked on a prompt that needs a keypress" as
@@ -3435,6 +3441,9 @@ class LeadInboxMixin:
         snap_task_file = getattr(_ps_snap, "last_assigned_task_file", None) if _ps_snap else None
         snap_scope = getattr(_ps_snap, "last_assigned_scope", None) if _ps_snap else None
         snap_fanout = int(getattr(_ps_snap, "subagent_fanout", 0) or 0) if _ps_snap else 0
+        snap_provider_override = getattr(_ps_snap, "provider_override", None) if _ps_snap else None
+        snap_model_override = getattr(_ps_snap, "model_override", None) if _ps_snap else None
+        snap_effort_override = getattr(_ps_snap, "effort_override", None) if _ps_snap else None
         # #422: closed-enum reason + bounded snapshot + recovery_id shared
         # with the `{kind}_pane_respawned` event below (see
         # orchestrator_text.RECOVERY_REASONS).
@@ -3484,8 +3493,9 @@ class LeadInboxMixin:
         def _do_respawn() -> None:
             ps = self._ps(key)
             ps.no_content_recover_attempts = snap_attempts + 1
-            if degrade:
-                ps.provider_override = "claude"
+            ps.provider_override = "claude" if degrade else snap_provider_override
+            ps.model_override = snap_model_override
+            ps.effort_override = snap_effort_override
             ps.pending_auth_recovery = snap_auth_recovery
             # #648: restore the task record so `takkub task show` still
             # answers for this pane even if the re-send below never lands.

@@ -612,6 +612,8 @@ class AutoResumeMixin:
         snap_assign_dirty_snapshot = ps.assign_dirty_snapshot
         snap_assign_non_git = bool(ps.assign_non_git)
         snap_distinct_from = ps.distinct_from
+        snap_model_override = ps.model_override
+        snap_effort_override = ps.effort_override
 
         _write_progress_marker(
             project, role, ps, pane, status="rerouted", reason=f"{hit_provider}->{new_provider}"
@@ -655,6 +657,8 @@ class AutoResumeMixin:
             _ps_r = self._ps(key)
             _ps_r.quota_reroute_pending = False
             _ps_r.provider_override = new_provider
+            _ps_r.model_override = snap_model_override
+            _ps_r.effort_override = snap_effort_override
             _ps_r.last_assigned_task = task
             _ps_r.quota_reroute_count = reroute_count
             _ps_r.quota_reroute_from = hit_provider

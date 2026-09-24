@@ -785,6 +785,9 @@ class PaneState:
     # instead of staying degraded forever. Mirrors model_override's
     # shape/precedent immediately above.
     provider_override: str | None = None
+    # #719: one notice per visible question-picker episode; reset when the
+    # screen returns to ordinary provider output.
+    picker_wait_notice_active: bool = False
     # Provider ring: how many times an assign already re-ran on the next
     # ring provider after a spawn failure (0 = never; capped at 1 by
     # `Orchestrator._spawn_failure_provider_hop`). Reset on a successful

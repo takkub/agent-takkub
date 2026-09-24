@@ -30,6 +30,36 @@ import sys
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
+# #717: provider-specific, field-captured question-picker screens. Keep these
+# in this dependency-light module so both the UI question host and watchdogs
+# can share the same trust boundary without an import cycle.
+PICKER_SCREEN_MARKERS: dict[str, tuple[tuple[str, ...], ...]] = {
+    "claude": (("Esc to cancel",), ("to navigate", "Enter to select")),
+    "opencode": (("enter submit", "esc dismiss"),),
+    "gemini": (
+        ("Question 1/", "enter Select", "esc Skip"),
+        ("Question 1/", "space Toggle", "enter Submit", "esc Skip"),
+    ),
+    "agy": (
+        ("Question 1/", "enter Select", "esc Skip"),
+        ("Question 1/", "space Toggle", "enter Submit", "esc Skip"),
+    ),
+}
+PICKER_SCREEN_TAIL_LINES = 40
+
+
+def picker_question_on_screen(session, provider: str | None) -> bool:
+    """Whether a known provider's interactive question picker is visible."""
+    groups = PICKER_SCREEN_MARKERS.get((provider or "").casefold(), ())
+    if not groups:
+        return False
+    try:
+        lines = [line for line in session.display_lines() if line.strip()]
+    except Exception:
+        return False
+    folded = "\n".join(lines[-PICKER_SCREEN_TAIL_LINES:]).casefold()
+    return any(all(marker.casefold() in folded for marker in group) for group in groups)
+
 
 @dataclass(frozen=True)
 class ReadyRule:

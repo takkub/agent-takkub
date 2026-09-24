@@ -3034,13 +3034,14 @@
     {
       "module": "agent_takkub.lead_composer_host",
       "imports": [
-        "agent_takkub.orchestrator_text"
+        "agent_takkub.orchestrator_text",
+        "agent_takkub.provider_spec"
       ],
       "imported_by": [
         "agent_takkub.main_window"
       ],
       "fan_in": 1,
-      "fan_out": 1
+      "fan_out": 2
     },
     {
       "module": "agent_takkub.lead_context",
@@ -4016,6 +4017,7 @@
         "agent_takkub.core.versioning.probe",
         "agent_takkub.doctor",
         "agent_takkub.headless_pane",
+        "agent_takkub.lead_composer_host",
         "agent_takkub.lead_inbox",
         "agent_takkub.mcp_bridge",
         "agent_takkub.orchestrator",
@@ -4037,7 +4039,7 @@
         "agent_takkub.status_header",
         "agent_takkub.user_actions"
       ],
-      "fan_in": 31,
+      "fan_in": 32,
       "fan_out": 4
     },
     {
