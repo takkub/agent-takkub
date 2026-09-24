@@ -2,6 +2,17 @@
 
 All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses [SemVer](https://semver.org/).
 
+## [v2.1.37] - 2026-09-24
+
+### Fixed (แก้)
+
+- **Lead composer (#715):** อ่านและตอบการ์ดคำถามของ OpenCode และ agy เพิ่ม พร้อมตรวจจาก CLI จริง; ช่องพิมพ์ยังรับไฟล์แนบและสลับไปพิมพ์ใน CLI ได้
+- **watchdog (#719):** รักษา pane ที่ค้างรอคำตอบ และคง provider ที่ระบุเมื่อ recover
+- **Codex ระหว่างทำงาน (#721):** ส่งข้อความเข้าคิวด้วย Tab และรายงานเมื่อส่งไม่ถึงจริง; callback รับผลการส่งเพียงครั้งเดียว
+- **Claude resume (#722):** เก็บ session ขณะเลื่อนปิด pane เพราะมีงานลูก และตรวจ provider ก่อนใช้ session เดิม
+- **Backlog และ shell:** แก้ลำดับการ์ดใน popup, prefix คำสั่ง shell และงาน harvest ที่บล็อก UI
+- **assign:** แจ้ง Lead เมื่อเปิด pane ไม่สำเร็จโดยไม่ retry ข้าม provider
+
 ## [v2.1.36] - 2026-09-24
 
 ### Changed (เปลี่ยน)
