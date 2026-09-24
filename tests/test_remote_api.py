@@ -1089,12 +1089,19 @@ class TestBuildPickerKeySequence:
             api._build_picker_key_sequence(state["questions"], [[0, 1]])
         assert excinfo.value.status == 400
 
-    def test_opencode_uses_digit_and_review_semantics(self):
-        state = _two_question_state()
-        seq = api._build_picker_key_sequence_for_provider(
-            "opencode", state["questions"], [[0], [1]]
-        )
-        assert seq == ["1", "2", "\r"]
+    def test_opencode_single_select_uses_arrow_then_enter(self):
+        state = _one_question_state()
+        seq = api._build_picker_key_sequence_for_provider("opencode", state["questions"], [[1]])
+        assert seq == ["\x1b[B", "\r"]
+
+    def test_opencode_unverified_picker_shapes_are_refused(self):
+        for state, answers in (
+            (_two_question_state(), [[0], [1]]),
+            (_one_question_state(multi_select=True), [[0, 1]]),
+        ):
+            with pytest.raises(api.RemoteApiError) as excinfo:
+                api._build_picker_key_sequence_for_provider("opencode", state["questions"], answers)
+            assert excinfo.value.status == 409
 
     def test_agy_navigates_from_first_row_then_selects(self):
         state = _one_question_state()

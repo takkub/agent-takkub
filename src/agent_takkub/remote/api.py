@@ -444,9 +444,16 @@ def _build_picker_key_sequence_for_provider(
     provider: str, questions: list[dict], answers: list
 ) -> list[str]:
     """Build only key sequences verified against that provider's real TUI."""
-    if provider in {"claude", "opencode"}:
+    if provider == "claude":
         return _build_picker_key_sequence(questions, answers)
     if provider in {"gemini", "agy"}:
+        return _build_agy_picker_key_sequence(questions, answers)
+    if provider == "opencode":
+        # opencode 1.18.32 was only verified on one single-select question with
+        # ↓ + Enter; its footer advertises no digit keys, and multi-select or
+        # multi-question pickers were never exercised.
+        if len(questions) != 1 or questions[0].get("multiSelect"):
+            raise RemoteApiError(409, "only a single single-select opencode picker is verified")
         return _build_agy_picker_key_sequence(questions, answers)
     raise RemoteApiError(409, f"provider {provider} has no verified question picker")
 

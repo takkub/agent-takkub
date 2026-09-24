@@ -323,7 +323,7 @@ class TestQuestionHost:
                 "opencode",
                 ["1. Red", "2. Blue", "3. Type your own answer", "enter submit  esc dismiss"],
                 [[1]],
-                ["2"],
+                ["\x1b[B", "\r"],
             ),
             (
                 "gemini",
