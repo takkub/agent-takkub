@@ -7,6 +7,8 @@ venv/
 # Spawn-safe launcher copied from .venv by agent-takkub.bat (issue #94) —
 # machine-specific (embeds the venv python path); regenerated every launch.
 bin/takkub.exe
+bin/cloudflared
+bin/cloudflared.exe
 *.egg-info/
 build/
 dist/
