@@ -5280,12 +5280,23 @@ class Orchestrator(
             on_repaste=lambda rem, r=to_role: _log_event(
                 "send_repaste", project=project_ns, role=r, remaining=rem
             ),
+            on_queued=lambda r=to_role: _log_event(
+                "send_queued_into_busy_queue", project=project_ns, role=r, message_id=message_id
+            ),
             # #277: the same accept signal task delivery already trusts — the
             # pane left its ready prompt, so it took the paste. Until this
             # fires the record stays "sent", which is the honest state: bytes
-            # written, receipt unproven.
-            on_settled=lambda p=project_ns, m=message_id, s=_send_sess, b=write_baseline: (
-                self._confirm_role_message(p, m, s, write_baseline=b)
+            # written, receipt unproven. #721: a busy-queue submit that sticks
+            # in the composer must NOT be marked delivered.
+            on_settled=lambda _o=None, p=project_ns, m=message_id, s=_send_sess, b=write_baseline, r=to_role: (
+                self._confirm_role_message(
+                    p,
+                    m,
+                    s,
+                    write_baseline=b,
+                    queue_stuck=bool(_o is not None and getattr(_o, "stuck_in_composer", False)),
+                    role=r,
+                )
             ),
             expires_at=message_expires_at,
         )
@@ -5592,7 +5603,14 @@ class Orchestrator(
         return True, f"ยกเลิก {count} ข้อความที่ยังไม่ถึง {role}", count
 
     def _confirm_role_message(
-        self, project_ns: str, message_id: str, session, write_baseline: float | None = None
+        self,
+        project_ns: str,
+        message_id: str,
+        session,
+        write_baseline: float | None = None,
+        *,
+        queue_stuck: bool = False,
+        role: str = "",
     ) -> None:
         """Mark a recorded message delivered once its submit chain settles and
         the pane is demonstrably no longer at its ready prompt.
@@ -5606,8 +5624,36 @@ class Orchestrator(
         Same fallback `_on_settled` already uses for task delivery (#359):
         any PTY output produced after `write_baseline` proves the bytes were
         received regardless of the pane's current state.
+
+        #721: when `queue_stuck` is True the submit chain settled because the
+        busy-queue resends ran out without the queue-confirm markers appearing
+        — the message is still an unsubmitted draft in a busy codex composer.
+        That is NOT "delivered": the record stays undelivered and Lead is
+        notified (`send_queued_stuck_in_composer`) so the keystroke can be
+        applied by a human instead of being silently counted as delivered.
         """
         if not message_id:
+            return
+        if queue_stuck:
+            _log_event(
+                "send_queued_stuck_in_composer",
+                project=project_ns,
+                role=role or "",
+                message_id=message_id,
+            )
+            self._notify_lead(
+                project_ns,
+                (
+                    f"⚠️ [send-stuck] ข้อความไปยัง {role or 'pane'} ไม่ถูก submit เนื่องจาก pane "
+                    f"ยัง busy และ codex ต้องการ Tab เพื่อ queue (Enter ไม่ส่งตอน busy) แต่ยัง "
+                    f"ไม่ยืนยันเข้าคิว — ข้อความค้างเป็น draft ในช่องพิมพ์ · เปิด pane นั้นแล้วกด "
+                    f"Tab เพื่อ queue เอง (issue #721) · ตรวจด้วย `takkub messages --role "
+                    f"{role or ''}`"
+                ),
+                from_role="system",
+                note="send_queued_stuck_in_composer",
+                kind="send-delivery-stuck",
+            )
             return
         try:
             accepted = not session.is_at_ready_prompt()

@@ -174,6 +174,22 @@ class ProviderSpec:
     enter_delay_per_kb_ms: int = 150
     enter_delay_max_ms: int = 3000
     input_swallow_recovery: bool = True
+    # #721: a provider whose TUI does NOT submit the composer with Enter while
+    # a turn is in flight — instead it shows a footer hint telling the user to
+    # press a different key to QUEUE the typed message until the current turn
+    # ends. Seen live on codex 0.156 (footer "tab to queue message"): a task
+    # pasted into a busy pane stayed as an unsubmitted draft and the pane went
+    # back to its ready footer, so the old logic marked it "delivered". When
+    # this marker string shows on the screen, lead_inbox._send_then_verify
+    # presses `busy_queue_key` (a literal `\t` for codex) instead of Enter,
+    # then treats one of `busy_queue_confirm_markers` ("Queued follow-up
+    # inputs", "Messages to be submitted" on codex) as proof it arrived in the
+    # queue. Providers WITHOUT a queue key (claude/agy/opencode: Enter submits
+    # or interrupts while busy, never silently drops to a draft) leave all
+    # three empty — verify-from-screen, never guess from docs alone.
+    busy_queue_marker: str | None = None
+    busy_queue_key: str | None = None
+    busy_queue_confirm_markers: tuple[str, ...] = field(default_factory=tuple)
     # #424: split one big PTY paste into chunks of this many characters with
     # `paste_chunk_delay_ms` between them (0 = write the payload in one go).
     # Only needed for a provider WITHOUT `supports_agent_file_read` (so a long
@@ -901,6 +917,22 @@ codex_spec = ProviderSpec(
     enter_delay_per_kb_ms=150,  # do NOT tune codex lower than claude in Phase 0, it would
     enter_delay_max_ms=3000,  # regress the #99 enter-swallow fix. Tuning is a separate change.)
     input_swallow_recovery=True,  # review action item 2-D: keep True (self-heal stays active)
+    # #721: while a codex turn is running, Enter does NOT submit the composer —
+    # it just leaves the typed draft sitting there and the ready-footer takes
+    # over when the turn ends, so send() would mis-report "delivered". Codex
+    # instead shows the footer hint "tab to queue message" while busy; pressing
+    # Tab queues the draft and it submits when the turn ends, then "Queued
+    # follow-up inputs" / "Messages to be submitted" appears above the input
+    # line. All confirmed live on codex-cli 0.156 (2026-09-24, the #721
+    # incident). The strings below are lowercase because
+    # PtySession._ready_region() normalizes the screen to lowercase before
+    # matching.
+    busy_queue_marker="tab to queue message",
+    busy_queue_key="\t",
+    busy_queue_confirm_markers=(
+        "queued follow-up inputs",
+        "messages to be submitted",
+    ),
     # multiline_newline_seq left at default None: codex's ratatui UI treats a
     # bare ESC as interrupt/clear-composer, not a no-op, so ESC+CR would clear
     # the composer and submit an empty line instead of inserting a newline
@@ -1984,6 +2016,33 @@ def auto_skip_feedback_for(provider: str) -> bool:
     (#509)."""
     spec = PROVIDER_REGISTRY.get(provider)
     return bool(spec.auto_skip_feedback) if spec is not None else False
+
+
+def busy_queue_marker_for(provider: str) -> str | None:
+    """Footer hint `provider` shows while a turn is running telling the user to
+    press a dedicated key to queue a typed message (#721). None when the
+    provider has no busy-queue pattern confirmed — its Enter always submits.
+    Unknown provider name → None."""
+    spec = PROVIDER_REGISTRY.get(provider)
+    return spec.busy_queue_marker if spec is not None else None
+
+
+def busy_queue_key_for(provider: str) -> str:
+    """Keystroke to queue a typed message on `provider` while its current turn
+    is running (#721). Only meaningful when ``busy_queue_marker_for`` is set;
+    defaults to plain Enter when the provider has no busy-queue pattern
+    confirmed (or an unknown provider name)."""
+    spec = PROVIDER_REGISTRY.get(provider)
+    return spec.busy_queue_key if spec is not None and spec.busy_queue_key else "\r"
+
+
+def busy_queue_confirm_markers_for(provider: str) -> tuple[str, ...]:
+    """On-screen proof a busy-queued message actually joined `provider`'s
+    submit queue (#721). Empty for a provider with none confirmed, or an
+    unknown provider name — a busy-submit must never be deemed delivered from a
+    generic phrase."""
+    spec = PROVIDER_REGISTRY.get(provider)
+    return spec.busy_queue_confirm_markers if spec is not None else ()
 
 
 # ── ready-marker calibration status (#257) ──────────────────────────────────

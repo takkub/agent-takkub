@@ -39,6 +39,7 @@ import sys as _sys
 import time
 import uuid
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import datetime
 
 from PyQt6.QtCore import QProcess, QTimer
@@ -135,6 +136,34 @@ def _timing_or_none(value: object) -> float | int | None:
     against one of these two accessors goes through this first so a
     non-numeric result degrades to "no timing signal" instead of crashing."""
     return value if isinstance(value, (int, float)) else None
+
+
+@dataclass
+class SubmitSettleOutcome:
+    """Outcome of a `_delayed_enter_verified` submit chain, passed to its
+    ``on_settled`` callback (#721).
+
+    Why a value instead of a bare no-arg call: the plain true/false submit
+    model broke on codex-0.156, whose TUI never submits with Enter while a
+    turn is running — Enter leaves the pasted text as an unsubmitted draft and
+    the no-arg ``on_settled`` (which only knew "left the ready prompt, so it
+    must have submitted") then misreported "delivered". The chain now
+    distinguishes the additional states only a busy-popped provider can get
+    into:
+
+    * ``queue_submit_used`` — the actual write to the pane was the provider's
+      busy-queue key (Tab for codex), NOT Enter, because `shows_busy_queue_`
+      ``marker`` was on screen at submit time.
+    * ``stuck_in_composer`` — the busy resend budget ran out while the marker
+      stayed up and the queue-confirm signal never appeared, i.e. the pasted
+      message is STILL sitting as an unsubmitted draft in the composer. The
+      caller must NOT mark this delivered and must surface it to Lead.
+
+    Defaults are the historical state (plain Enter used, no stuck report), so
+    an old caller that ignores the outcome keeps today's semantics."""
+
+    queue_submit_used: bool = False
+    stuck_in_composer: bool = False
 
 
 # Stall-aware deferral (#133). A fan-out of concurrent pane spawns backlogs
@@ -717,6 +746,7 @@ def _delayed_enter_verified(
     payload: str | None = None,
     content_fragment: str = "",
     on_repaste=None,
+    on_queued=None,
     on_settled=None,
     delivery_id: str | None = None,
     session_generation: int | None = None,
@@ -759,9 +789,12 @@ def _delayed_enter_verified(
     ``on_resend`` / ``on_repaste`` (optional) are invoked with the
     remaining-attempt count each time the respective recovery fires, so the
     caller can log/observe it. ``on_settled`` (optional) fires exactly once,
-    with no args, when the chain stops trying — submitted, gave up, or the
-    pane was torn down — so a caller can serialise further writes to the same
-    session until this one is no longer in flight (#133).
+    with a `SubmitSettleOutcome`, when the chain stops trying — submitted,
+    gave up, or the pane was torn down — so a caller can serialise further
+    writes to the same session until this one is no longer in flight (#133).
+    ``on_queued`` (optional) fires once when the submit was verified to have
+    joined the provider's busy-queue (#721) — the busy-path analogue of a
+    clean ready-prompt submit.
 
     ``validator`` (#258): forwarded to every `_safe_session_write` call this
     function makes — the CR resend below AND the payload repaste — same as
@@ -786,11 +819,66 @@ def _delayed_enter_verified(
     second paste on top of one the CLI is refusing to process. ``None``
     (the default) skips the check entirely — unchanged behaviour for any
     caller that hasn't been taught its pane's provider.
+
+    ``provider`` also drives #721 busy-queue delivery: when the provider's
+    ``busy_queue_marker`` footer is on screen at submit time, this helper
+    presses the provider's ``busy_queue_key`` (Tab for codex) instead of
+    Enter, and verifies the message landed by watching for the provider's
+    ``busy_queue_confirm_markers`` on screen — NOT by the ready prompt (a busy
+    pane never leaves it). Requesters that don't pass ``provider`` (e.g.
+    `Orchestrator.send`) get it derived from ``pane.model.provider_name``.
     """
 
-    def _settled() -> None:
+    # #721: normalize the provider before any marker query. Task delivery
+    # passes it explicitly (_provider_deliver); the peer-send path never
+    # learned it, so derive it from the pane when absent. A test double
+    # without `.model` just stays None (legacy Enter-only behaviour).
+    if provider is None:
+        try:
+            provider = getattr(getattr(pane, "model", None), "provider_name", None) or None
+        except Exception:
+            provider = None
+    provider = provider or None
+
+    def _settled(outcome: SubmitSettleOutcome | None = None) -> None:
         if on_settled is not None:
-            on_settled()
+            # A settle that never entered busy-queue mode carries the all-
+            # default outcome (plain Enter, no stuck report) so every caller
+            # can rely on a SubmitSettleOutcome, never None.
+            _outcome = outcome if outcome is not None else SubmitSettleOutcome()
+            try:
+                on_settled(_outcome)
+            except TypeError:
+                # Pre-#721 on_settled (no-arg lambda / test double) — fall back
+                # to the historical call shape rather than drop the settle.
+                on_settled()
+
+    def _busy_queue_mode_now() -> bool:
+        """True while the pane is busy AND its provider's busy-queue footer
+        hint is on screen right now (#721). While True the submit writes the
+        provider's queue key (not Enter) and arrival is verified with the
+        queue-confirm signal instead of the ready prompt."""
+        if not provider:
+            return False
+        try:
+            shows = session.shows_busy_queue_marker(provider)
+        except Exception:
+            shows = False
+        return isinstance(shows, bool) and shows
+
+    def _busy_queue_key_bytes() -> bytes:
+        from .provider_spec import busy_queue_key_for
+
+        return busy_queue_key_for(provider).encode("ascii")
+
+    def _shows_queue_confirm() -> bool:
+        if not provider:
+            return False
+        try:
+            shows = session.shows_busy_queue_confirm(provider)
+        except Exception:
+            shows = False
+        return isinstance(shows, bool) and shows
 
     # Output-timestamp baseline captured the instant we begin verifying (the
     # caller has just written the paste). Output that arrives AFTER this proves
@@ -808,9 +896,13 @@ def _delayed_enter_verified(
         if pane.session is not session:
             _settled()
             return
+        # #721: a busy codex-style pane won't submit with Enter — it needs the
+        # provider's busy-queue key (Tab). Pick the key per-write so a pane
+        # that transitions busy/marker mid-chain switches key with it.
+        _submit_key = _busy_queue_key_bytes() if _busy_queue_mode_now() else b"\r"
         _safe_session_write(
             pane.session,
-            b"\r",
+            _submit_key,
             priority=WritePriority.CONTROL,
             kind="control",
             delivery_id=delivery_id,
@@ -876,6 +968,54 @@ def _delayed_enter_verified(
             # budget stranded later panes' tasks under concurrent multi-spawn
             # (3+ codex panes booting at once outlasted the 3-resend budget).
             if not session.is_at_ready_prompt():
+                # #721: the provider's busy-queue footer is up — Enter can
+                # never submit this (it only leaves an unsubmitted draft), so
+                # the ready-prompt-based recovery below is meaningless here.
+                # The queue key we sent should have moved the paste into the
+                # provider's submit queue, which shows its confirm line; verify
+                # THAT arrived, retry the queue key on the generous busy budget,
+                # and report-stuck once that budget is exhausted.
+                if _busy_queue_mode_now():
+                    if _shows_queue_confirm():
+                        _log_verify_decision(
+                            "queued_confirm",
+                            session=session,
+                            payload=payload,
+                            is_ready=False,
+                            shows_pending=True,
+                        )
+                        if on_queued is not None:
+                            on_queued()
+                        _settled(
+                            SubmitSettleOutcome(queue_submit_used=True, stuck_in_composer=False)
+                        )
+                        return
+                    if busy_remaining > 0:
+                        _log_verify_decision(
+                            "resend_busy_queue",
+                            session=session,
+                            payload=payload,
+                            is_ready=False,
+                            shows_pending=True,
+                        )
+                        if on_resend is not None:
+                            on_resend(busy_remaining)
+                        _send_then_verify(remaining, busy_remaining - 1)
+                        return
+                    # Queue resend budget exhausted and the confirm never
+                    # appeared — the pasted message is still an unsubmitted
+                    # draft. Settle with the stuck flag so the caller reports
+                    # it to Lead instead of marking it delivered.
+                    _log_verify_decision(
+                        "stuck_in_composer",
+                        session=session,
+                        payload=payload,
+                        is_ready=False,
+                        shows_pending=payload is not None
+                        and session.shows_pending_input(content_fragment),
+                    )
+                    _settled(SubmitSettleOutcome(queue_submit_used=True, stuck_in_composer=True))
+                    return
                 if (
                     payload is not None
                     and busy_remaining > 0
@@ -1539,7 +1679,7 @@ class LeadInboxMixin:
                     delivery_id=delivery.delivery_id,
                 )
 
-            def _on_settled() -> None:
+            def _on_settled(_outcome: SubmitSettleOutcome | None = None) -> None:
                 if pane.session is not _task_sess:
                     manager.mark_failed(delivery.delivery_id, "session_replaced")
                     return
@@ -1547,7 +1687,17 @@ class LeadInboxMixin:
                     accepted = not _task_sess.is_at_ready_prompt()
                 except Exception:
                     accepted = False
-                if not accepted and write_baseline is not None:
+                # #721: a busy codex pane never leaves its ready prompt even
+                # when the submit DID happen — that state uses the queue
+                # confirm markers instead. The queue path reports separately
+                # through the outcome: `stuck_in_composer` means the paste is
+                # still sitting as an unsubmitted draft, which must NOT be
+                # counted as accepted.
+                _stuck_in_composer = False
+                if _outcome is not None and getattr(_outcome, "stuck_in_composer", False):
+                    accepted = False
+                    _stuck_in_composer = True
+                if not accepted and not _stuck_in_composer and write_baseline is not None:
                     # (#359) A long paste can legitimately return to the
                     # ready prompt before the CLI visibly starts processing
                     # it — "still ready" alone can't tell "never submitted"
@@ -1654,6 +1804,22 @@ class LeadInboxMixin:
                             attempts=_ps_redeliver.post_boot_redeliver_attempts,
                         )
                         self._warn_lead_delivery_uncertain(role_name, project)
+                elif _stuck_in_composer:
+                    # #721: the busy-queue resend budget ran out before the
+                    # provider's queue-confirm markers ever appeared — the
+                    # pasted task is still sitting as an unsubmitted draft in
+                    # the composer (codex's busy Enter swallows rather than
+                    # submits, and the Tab resends never confirmed). Surface
+                    # to Lead with the queue-specific cause so they don't read
+                    # it as a ready-prompt Enter failure.
+                    manager.mark_uncertain(delivery.delivery_id)
+                    _log_event(
+                        "task_deliver_stuck_in_composer",
+                        project=project_ns,
+                        role=role_name,
+                        delivery_id=delivery.delivery_id,
+                    )
+                    self._warn_lead_delivery_composer_stuck(role_name, project)
                 else:
                     manager.mark_uncertain(delivery.delivery_id)
                     self._warn_lead_delivery_uncertain(role_name, project)
@@ -1679,6 +1845,12 @@ class LeadInboxMixin:
                     project=self._resolve_project(p),
                     role=r,
                     remaining=rem,
+                ),
+                on_queued=lambda r=role_name, p=project: _log_event(
+                    "task_deliver_queued",
+                    project=self._resolve_project(p),
+                    role=r,
+                    delivery_id=delivery.delivery_id,
                 ),
                 on_settled=_on_settled,
                 delivery_id=delivery.delivery_id,
@@ -2704,6 +2876,35 @@ class LeadInboxMixin:
         )
         self._notify_lead(project_ns, msg, kind="delivery-uncertain")
         _log_event("delivery_uncertain_warned", role=role_name, project=project_ns)
+
+    def _warn_lead_delivery_composer_stuck(self, role_name: str, project: str | None) -> None:
+        """Tell the Lead a delivery is stuck as an unsubmitted draft because the
+        target provider needs its busy-queue key, not Enter (#721).
+
+        Distinct from `_warn_lead_delivery_uncertain`: that fires when a pane
+        returns to its ready prompt after Enter resends; this fires when the
+        pane is STILL busy and the paste never confirmed into the provider's
+        queue (codex's "tab to queue message" footer stayed up, no
+        "Queued follow-up inputs" ever appeared). The right manual fix is to
+        open the pane and press the provider's queue key (Tab) once — an
+        automatic Tab here could land on a pane that has since moved on, so
+        the cockpit reports and leaves the keystroke to a human.
+        Fires once per delivery, from `_on_settled`'s single terminal branch.
+        No-op when warning the Lead about itself."""
+        if role_name == LEAD.name:
+            return
+        project_ns = self._resolve_project(project)
+        lead = self._project_panes(project_ns).get(LEAD.name)
+        if not (lead and lead.session and lead.session.is_alive):
+            return
+        msg = (
+            f"⚠️ [delivery-stuck] {role_name} pane ยัง busy อยู่ (codex ต้องกด Tab เพื่อ "
+            f"queue ข้อความ — Enter ไม่ส่งตอนมี turn ค้าง) แต่ข้อความยังไม่ยืนยันเข้าคิว "
+            f"จึงค้างเป็น draft ในช่องพิมพ์ — เปิด pane {role_name} แล้วกด Tab "
+            f"เพื่อ queue เองถ้ายังไม่ถูกส่ง (issue #721)"
+        )
+        self._notify_lead(project_ns, msg, kind="delivery-stuck")
+        _log_event("delivery_stuck_warned", role=role_name, project=project_ns)
 
     def _warn_lead_delivery_blocked(self, role_name: str, project: str | None) -> None:
         """Tell the Lead that an assign was dropped by the single-flight gate
@@ -4692,8 +4893,14 @@ class LeadInboxMixin:
             self._lead_notify_verify_active = set()
         self._lead_notify_verify_active.add(project_ns)
 
-        def _on_verify_settled(p=project_ns) -> None:
+        def _on_verify_settled(_outcome=None, *, p=project_ns) -> None:
             getattr(self, "_lead_notify_verify_active", set()).discard(p)
+            # #721: Lead is normally claude (Enter always submits, so a stuck
+            # outcome can't fire) — but if a future busy-queue provider ever
+            # becomes Lead, surface the stuck report instead of silently
+            # clearing the in-flight marker.
+            if _outcome is not None and getattr(_outcome, "stuck_in_composer", False):
+                _log_event("lead_notify_stuck_in_composer", project=project_ns)
 
         # Self-healing submit: a done-report whose Enter is swallowed mid-paste-
         # render leaves Lead idle with the report unsubmitted — it "won't run on"
@@ -4939,8 +5146,14 @@ class LeadInboxMixin:
             self._lead_notify_verify_active = set()
         self._lead_notify_verify_active.add(project_ns)
 
-        def _on_verify_settled(p=project_ns) -> None:
+        def _on_verify_settled(_outcome=None, *, p=project_ns) -> None:
             getattr(self, "_lead_notify_verify_active", set()).discard(p)
+            # #721: Lead is normally claude (Enter always submits, so a stuck
+            # outcome can't fire) — but if a future busy-queue provider ever
+            # becomes Lead, surface the stuck report instead of silently
+            # clearing the in-flight marker.
+            if _outcome is not None and getattr(_outcome, "stuck_in_composer", False):
+                _log_event("lead_notify_stuck_in_composer", project=project_ns)
 
         _orch_attr("_delayed_enter_verified", _delayed_enter_verified)(
             lead,

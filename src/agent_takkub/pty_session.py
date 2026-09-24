@@ -2758,6 +2758,40 @@ class PtySession(QObject):
         """
         return _input_has_content(_ready_region(self.display_lines()), fragment)
 
+    def shows_busy_queue_marker(self, provider: str) -> bool:
+        """True when `provider`'s TUI is currently prompting the user to press
+        its busy-submit key instead of Enter (#721).
+
+        Codex renders the footer hint "tab to queue message" while a turn is
+        running and Enter alone would just leave the typing as an unsubmitted
+        draft. Scoped to the same bottom footer/input region as
+        is_at_ready_prompt() (via ``_ready_region``) — the strings are
+        lowercase here because that region is normalized to lowercase. A
+        provider with no `busy_queue_marker` configured (claude/agy/opencode:
+        Enter always submits while busy) always returns False."""
+        text = _ready_region(self.display_lines())
+        from .provider_spec import busy_queue_marker_for
+
+        marker = busy_queue_marker_for(provider)
+        return bool(marker) and marker in text
+
+    def shows_busy_queue_confirm(self, provider: str) -> bool:
+        """True when `provider`'s TUI shows ON-SCREEN proof that a message
+        pressed with the busy-submit key joined the submit queue (#721).
+
+        Codex renders "Queued follow-up inputs" / "Messages to be submitted"
+        above the input line after a busy Tab. Used by the deliver-by-queue
+        self-heal to tell an arrived queue entry from a resend that still
+        didn't take (that case is reported to Lead as not-arrived instead of
+        being marked delivered). Same `_ready_region` + lowercase scoping as
+        shows_busy_queue_marker; a provider with no confirm markers configured
+        always returns False."""
+        text = _ready_region(self.display_lines())
+        from .provider_spec import busy_queue_confirm_markers_for
+
+        markers = busy_queue_confirm_markers_for(provider)
+        return bool(markers) and any(m in text for m in markers)
+
     def is_at_update_splash(self) -> bool:
         """True when a codex 'update available!' startup splash is blocking the prompt.
 
