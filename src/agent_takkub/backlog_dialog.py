@@ -369,7 +369,13 @@ class BacklogDialog(cockpit_theme.CockpitDialog):
         super().__init__(parent)
         self.setWindowTitle(f"Backlog — {self._project}")
         self.setModal(True)
-        self.resize(900, 600)
+        width, height = 1200, 800
+        screen = self.screen()
+        if screen is not None:
+            avail = screen.availableGeometry()
+            width = min(width, int(avail.width() * 0.9))
+            height = min(height, int(avail.height() * 0.9))
+        self.resize(width, height)
         self.setMinimumSize(880, 560)
         self._build()
         self._reload()
@@ -856,7 +862,9 @@ class BacklogDialog(cockpit_theme.CockpitDialog):
                 else None
             )
             row = QListWidgetItem()
-            row.setText(self._card_text(it))
+            # Not setText(): the list paints item text under the card widget on
+            # hover/selection. The summary stays available to screen readers.
+            row.setData(Qt.ItemDataRole.AccessibleTextRole, self._card_text(it))
             row.setData(Qt.ItemDataRole.UserRole, item_id)
             card = BacklogCardWidget(
                 it,
