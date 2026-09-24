@@ -6383,20 +6383,75 @@ class Orchestrator(
             # close, provider-switch, or quota reroute all want a fresh
             # session, so they leave preserve_resume False and the uuid dies
             # with the pop as before.
+            from .provider_config import CLAUDE as _CLAUDE_PRESERVE
+
+            _uuid_from_ps = getattr(_popped_ps_close, "session_uuid", None)
+            _uuid_from_model = getattr(getattr(pane, "model", None), "session_uuid", None)
+            _close_uuid = (
+                (_uuid_from_ps if isinstance(_uuid_from_ps, str) and _uuid_from_ps else None)
+                or (
+                    self._session_uuid_for(key)
+                    if isinstance(self._session_uuid_for(key), str)
+                    else None
+                )
+                or (
+                    _uuid_from_model
+                    if isinstance(_uuid_from_model, str) and _uuid_from_model
+                    else None
+                )
+            )
+
+            _cwd_from_ps = getattr(_popped_ps_close, "session_uuid_cwd", None)
+            _cwd_from_last = getattr(self, "_last_session_cwd", {}).get(key)
+            _cwd_from_pane = getattr(pane, "_session_cwd", None)
+            _close_cwd = (
+                (_cwd_from_ps if isinstance(_cwd_from_ps, str) and _cwd_from_ps else "")
+                or (_cwd_from_last if isinstance(_cwd_from_last, str) and _cwd_from_last else "")
+                or (_cwd_from_pane if isinstance(_cwd_from_pane, str) and _cwd_from_pane else "")
+                or ""
+            )
+
+            _prov_from_ps = getattr(_popped_ps_close, "session_provider", None)
+            _prov_from_last = getattr(self, "_last_session_provider", {}).get(key)
+            _prov_from_model = getattr(getattr(pane, "model", None), "provider_name", None)
+            _prov_from_override = getattr(_popped_ps_close, "provider_override", None)
+            _close_prov = (
+                (_prov_from_ps if isinstance(_prov_from_ps, str) and _prov_from_ps else "")
+                or (_prov_from_last if isinstance(_prov_from_last, str) and _prov_from_last else "")
+                or (
+                    _prov_from_model
+                    if isinstance(_prov_from_model, str) and _prov_from_model
+                    else ""
+                )
+                or (
+                    _prov_from_override
+                    if isinstance(_prov_from_override, str) and _prov_from_override
+                    else ""
+                )
+                or "claude"
+            )
+
             if (
                 preserve_resume
                 and role_name != LEAD.name
-                and _popped_ps_close is not None
-                and _popped_ps_close.session_uuid
-                and _popped_ps_close.session_uuid_cwd
+                and _close_uuid
+                and _close_cwd
+                and _close_prov == _CLAUDE_PRESERVE
             ):
                 _seed_ps = self._ps(key)
-                _seed_ps.session_uuid = _popped_ps_close.session_uuid
-                _seed_ps.session_uuid_cwd = _popped_ps_close.session_uuid_cwd
+                _seed_ps.session_uuid = _close_uuid
+                _seed_ps.session_uuid_cwd = _close_cwd
+                _seed_ps.session_provider = _close_prov
                 self._recent_exits[key] = {
-                    "cwd": _popped_ps_close.session_uuid_cwd,
+                    "cwd": _close_cwd,
                     "ts": time.time(),
+                    "provider": _close_prov,
                 }
+            else:
+                getattr(self, "_recent_exits", {}).pop(key, None)
+                getattr(self, "_last_session_uuid", {}).pop(key, None)
+                getattr(self, "_last_session_cwd", {}).pop(key, None)
+                getattr(self, "_last_session_provider", {}).pop(key, None)
         getattr(self, "_last_done_task_ids", {}).pop(key, None)
 
         if had_worktree_close and not recovery_close:
@@ -8426,9 +8481,43 @@ class Orchestrator(
         # Provider/model belong to the still-live session until close, even
         # though the completed assignment's state has been retired.
         session_state = self._ps(key)
-        session_state.provider_override = _ps_done.provider_override
-        session_state.model_override = _ps_done.model_override
-        session_state.effort_override = _ps_done.effort_override
+        session_state.provider_override = getattr(_ps_done, "provider_override", None)
+        session_state.model_override = getattr(_ps_done, "model_override", None)
+        session_state.effort_override = getattr(_ps_done, "effort_override", None)
+        _done_uuid_cand = (
+            getattr(_ps_done, "session_uuid", None)
+            or self._session_uuid_for(key)
+            or getattr(getattr(pane, "model", None), "session_uuid", None)
+        )
+        _done_uuid = (
+            _done_uuid_cand if isinstance(_done_uuid_cand, str) and _done_uuid_cand else None
+        )
+        _done_cwd_cand = (
+            getattr(_ps_done, "session_uuid_cwd", "") or getattr(pane, "_session_cwd", "") or ""
+        )
+        _done_cwd = _done_cwd_cand if isinstance(_done_cwd_cand, str) else ""
+        _done_prov_cand = (
+            getattr(_ps_done, "session_provider", "")
+            or getattr(getattr(pane, "model", None), "provider_name", "")
+            or getattr(_ps_done, "provider_override", "")
+            or "claude"
+        )
+        _done_prov = (
+            _done_prov_cand if isinstance(_done_prov_cand, str) and _done_prov_cand else "claude"
+        )
+
+        if not hasattr(self, "_last_session_uuid"):
+            self._last_session_uuid = {}
+        if _done_uuid:
+            self._last_session_uuid[key] = _done_uuid
+        if not hasattr(self, "_last_session_cwd"):
+            self._last_session_cwd = {}
+        if _done_cwd:
+            self._last_session_cwd[key] = _done_cwd
+        if not hasattr(self, "_last_session_provider"):
+            self._last_session_provider = {}
+        if _done_prov:
+            self._last_session_provider[key] = _done_prov
         _done_sess = pane.session
         # #554: cross-poll-tick idle tracking for the still-live-children
         # path below — one closure per done() call, reset whenever the
@@ -8922,12 +9011,12 @@ class Orchestrator(
         self._last_session_uuid[key] = session_id
         if cwd:
             ps.session_uuid_cwd = cwd
-        # Also push the rollover onto the *live* pane (issue #129): the token
-        # meter reads pane.model.session_uuid every 5 s tick, a separate copy
-        # from PaneState.session_uuid stamped at attach time. Without this, a
-        # manual /resume or /clear inside the pane would update PaneState but
-        # leave the meter polling the pre-rollover uuid's (now-stale) file.
         pane = self._panes_by_project.get(project_ns, {}).get(from_role)
+        ps.session_provider = (
+            getattr(getattr(pane, "model", None), "provider_name", "")
+            or getattr(ps, "session_provider", "")
+            or "claude"
+        )
         if pane is not None:
             pane.model.set_session_uuid(session_id)
         _log_event(
@@ -13894,6 +13983,7 @@ class Orchestrator(
                         project=project_name,
                         suppress_pipeline=True,
                         suppress_auto_chain=True,
+                        preserve_resume=True,
                     )
                 except Exception:
                     _log_event("done_pane_ttl_close_error", role=role, project=project_name)
@@ -14622,6 +14712,11 @@ class Orchestrator(
         snap_provider_override = _ps_snap.provider_override if _ps_snap is not None else None
         snap_model_override = _ps_snap.model_override if _ps_snap is not None else None
         snap_effort_override = _ps_snap.effort_override if _ps_snap is not None else None
+        snap_provider = (
+            getattr(_ps_snap, "session_provider", "")
+            if _ps_snap is not None
+            else getattr(getattr(pane, "model", None), "provider_name", "") or "claude"
+        )
 
         self._ps(key).last_stuck_recover = now
         # silent_for_s = raw-byte silence. It is frequently 0 even on a genuine
@@ -14730,6 +14825,8 @@ class Orchestrator(
             if snap_assign_dirty_snapshot is not None:
                 self._ps(key).assign_dirty_snapshot = snap_assign_dirty_snapshot
             self._ps(key).assign_non_git = snap_assign_non_git
+            if snap_provider:
+                self._ps(key).session_provider = snap_provider
             # m3 fix: if PTY teardown hasn't fired _on_session_exit yet (takes
             # longer than the 2s singleShot on a slow machine), _recent_exits
             # has no entry and spawn()'s can_resume returns False → blank session.
@@ -14738,6 +14835,7 @@ class Orchestrator(
                 self._recent_exits[key] = {
                     "cwd": snap_uuid_cwd or cwd or "",
                     "ts": time.time(),
+                    "provider": snap_provider or "claude",
                 }
             ok, msg = self.spawn(
                 role,

@@ -702,6 +702,7 @@ class PaneState:
     # _session_uuids: uuid+cwd for the current/last session
     session_uuid: str | None = None
     session_uuid_cwd: str = ""
+    session_provider: str = ""
     # Stable identity for the current assign intent. Completion notification
     # idempotency derives from this instead of terminal text/timing heuristics.
     task_id: str | None = None
@@ -2131,6 +2132,11 @@ class SpawnEngineMixin:
             if resume_uuid:
                 self._ps(_ekey).session_uuid = resume_uuid
                 self._ps(_ekey).session_uuid_cwd = spawn_cwd
+            else:
+                self._ps(_ekey).session_uuid = None
+                self._ps(_ekey).session_uuid_cwd = ""
+                getattr(self, "_recent_exits", {}).pop(_ekey, None)
+            self._ps(_ekey).session_provider = label
             self._fire_parked_respawn_replay(
                 project_ns,
                 role_name,
@@ -3855,11 +3861,17 @@ class SpawnEngineMixin:
             _ps_new = self._ps(_ekey_spawn)
             _ps_new.session_uuid = resume_uuid
             _ps_new.session_uuid_cwd = spawn_cwd
+            _ps_new.session_provider = CLAUDE
         else:
             _ps_pre = self._pane_state.get(_ekey_spawn)
             prior_uuid = _ps_pre.session_uuid if _ps_pre is not None else None
             prior_uuid_cwd = _ps_pre.session_uuid_cwd if _ps_pre is not None else ""
             prior_exit = self._recent_exits.get(_ekey_spawn)
+            prior_provider = (
+                (prior_exit.get("provider") if prior_exit else None)
+                or (getattr(_ps_pre, "session_provider", None) if _ps_pre is not None else None)
+                or CLAUDE
+            )
             # L5: normalize both sides before comparing — see
             # _normalize_cwd_for_compare's docstring for why a raw string
             # compare can miss two spellings of the same directory.
@@ -3870,16 +3882,21 @@ class SpawnEngineMixin:
                 == _normalize_cwd_for_compare(spawn_cwd)
                 and prior_exit is not None
                 and (time.time() - prior_exit.get("ts", 0)) < RESUME_WINDOW_SEC
+                and prior_provider == CLAUDE
+                and effective_provider == CLAUDE
             )
             if can_resume:
                 resume_argv.extend(["--resume", prior_uuid])
                 resumed = True
+                _ps_new = self._ps(_ekey_spawn)
+                _ps_new.session_provider = CLAUDE
             else:
                 new_uuid = str(_uuid.uuid4())
                 resume_argv.extend(["--session-id", new_uuid])
                 _ps_new = self._ps(_ekey_spawn)
                 _ps_new.session_uuid = new_uuid
                 _ps_new.session_uuid_cwd = spawn_cwd
+                _ps_new.session_provider = CLAUDE
 
         # Whichever branch above ran, `_ps(_ekey_spawn).session_uuid` now
         # holds the exact uuid this spawn is using — pass it straight to the
@@ -4005,6 +4022,7 @@ class SpawnEngineMixin:
                 session_uuid=_spawned_session_uuid,
             )
             self._ps(_ekey_spawn).corrupt_spawn_retries = 0
+            self._ps(_ekey_spawn).session_provider = CLAUDE
             self._finish_spawn_initial_task(
                 role_name,
                 project_ns,
@@ -4381,7 +4399,17 @@ class SpawnEngineMixin:
         lines snapshotted to disk for post-mortem — see
         `_write_pane_exit_snapshot`.
         """
-        self._recent_exits[_exit_key(project, role_name)] = {"cwd": cwd, "ts": time.time()}
+        _pane_exit = getattr(self, "_panes_by_project", {}).get(project, {}).get(role_name)
+        _prov = (
+            getattr(getattr(_pane_exit, "model", None), "provider_name", "")
+            or getattr(self._pane_state.get(_exit_key(project, role_name)), "session_provider", "")
+            or "claude"
+        )
+        self._recent_exits[_exit_key(project, role_name)] = {
+            "cwd": cwd,
+            "ts": time.time(),
+            "provider": _prov,
+        }
 
         # #406: an unexpected exit (crash/OOM/`/exit`) never goes through
         # `close()`, so check here too whether this was the last pane keeping

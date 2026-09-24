@@ -20,10 +20,12 @@ from unittest.mock import MagicMock, patch
 import pytest
 from PyQt6.QtCore import QCoreApplication
 
+from agent_takkub import orchestrator as orch_mod
 from agent_takkub.orchestrator import (
     DONE_CLOSE_LIVE_CHILD_GRACE_S,
     DONE_CLOSE_LIVE_CHILD_POLL_MS,
     Orchestrator,
+    _exit_key,
 )
 
 TEST_PROJECT = "done-close-defer-test"
@@ -293,3 +295,261 @@ class TestDoneCloseSurvivesNaturalExit:
             close_cb()
 
         close_mock.assert_not_called()
+
+
+class TestDeferredClosePreservesResume722:
+    """Issue #722: Regression tests for #683 session resume after deferred close.
+
+    When done() auto-close is deferred because of live children (e.g. bash.exe),
+    the eventual close (whether via children clearing or grace expiring) must
+    preserve the session uuid and stamp _recent_exits, so that re-assigning within
+    RESUME_WINDOW_SEC resumes the prior Claude session with --resume <uuid>.
+    Provider override (--role gemini --provider claude) must also resume when
+    the new spawn provider equals the prior session provider, and must never bleed
+    Claude's UUID into a non-claude spawn.
+    """
+
+    UUID = "e9aaa908-1111-4000-a000-000000000001"
+
+    def test_deferred_close_preserves_resume_and_reassign_resumes(
+        self, orch: Orchestrator, tmp_path
+    ) -> None:
+        orch.paneClosed.connect(
+            lambda role, project, o=orch: o.unregister_pane(role, project=project)
+        )
+        key = _exit_key(TEST_PROJECT, "gemini")
+        pane = _make_working_pane(cwd=str(tmp_path))
+        pane.model = MagicMock()
+        pane.model.provider_name = "claude"
+        pane.model.session_uuid = self.UUID
+        orch._panes_by_project.setdefault(TEST_PROJECT, {})["gemini"] = pane
+        orch._panes_by_project[TEST_PROJECT]["lead"] = _make_lead_pane()
+
+        ps = orch._ps(key)
+        ps.session_uuid = self.UUID
+        ps.session_uuid_cwd = str(tmp_path)
+        ps.session_provider = "claude"
+        ps.provider_override = "claude"
+        ps.last_assigned_task = "remember word ม่วง-683"
+        ps.task_id = "task-1"
+        ps.task_delivered = True
+
+        scheduled: list = []
+        with patch(
+            "agent_takkub.orchestrator.QTimer.singleShot",
+            side_effect=lambda ms, cb: scheduled.append((ms, cb)),
+        ):
+            ok, msg = orch.done("gemini", note="done", project=TEST_PROJECT)
+            assert ok, msg
+
+        close_cb = next(cb for ms, cb in scheduled if ms == 2500)
+
+        # First tick: children are still running (bash.exe) -> close is deferred
+        poll_timers: list = []
+        with (
+            patch.object(
+                orch, "_live_non_scaffolding_children", return_value=["bash.exe", "bash.exe"]
+            ),
+            patch(
+                "agent_takkub.orchestrator.QTimer.singleShot",
+                side_effect=lambda ms, cb: poll_timers.append((ms, cb)),
+            ),
+        ):
+            close_cb()
+
+        poll_cb = next(cb for ms, cb in poll_timers if ms == DONE_CLOSE_LIVE_CHILD_POLL_MS)
+
+        # Second tick: children clear -> close runs for real
+        with patch.object(orch, "_live_non_scaffolding_children", return_value=[]):
+            poll_cb()
+
+        # Verify close seeded resume state and stamped _recent_exits
+        seeded = orch._pane_state.get(key)
+        assert seeded is not None
+        assert seeded.session_uuid == self.UUID
+        assert seeded.session_uuid_cwd == str(tmp_path)
+        assert seeded.session_provider == "claude"
+
+        exit_rec = orch._recent_exits.get(key)
+        assert exit_rec is not None
+        assert exit_rec["cwd"] == str(tmp_path)
+        assert exit_rec["provider"] == "claude"
+
+        # Re-assign within RESUME_WINDOW_SEC with --provider claude:
+        # spawn argv must contain --resume <self.UUID>
+        new_pane = _make_working_pane(cwd=str(tmp_path))
+        new_pane.session = None
+        new_pane.state = "empty"
+        orch.paneRequested.connect(
+            lambda role, project, o=orch, p=new_pane: o._panes_by_project.setdefault(
+                project, {}
+            ).__setitem__(role, p)
+        )
+
+        captured_argv: list[list[str]] = []
+        fake_sess = MagicMock()
+        fake_sess.processExited = MagicMock()
+        fake_sess.processExited.connect = MagicMock()
+
+        with (
+            patch("agent_takkub.spawn_engine._cwd_within_project", return_value=True),
+            patch("agent_takkub.orchestrator.find_claude_executable", return_value="claude"),
+            patch.object(orch_mod.PtySession, "__new__", return_value=fake_sess),
+            patch.object(
+                fake_sess,
+                "spawn",
+                side_effect=lambda argv, cwd, env, **kwargs: captured_argv.append(list(argv)),
+            ),
+            patch.object(orch, "_send_when_ready"),
+        ):
+            ok, msg = orch.assign(
+                "gemini",
+                cwd=str(tmp_path),
+                task="what was the word?",
+                provider="claude",
+                project=TEST_PROJECT,
+            )
+            print("ASSIGN RESULT:", ok, msg)
+            assert ok, msg
+            assert captured_argv
+            argv = captured_argv[0]
+            assert "--resume" in argv
+            assert argv[argv.index("--resume") + 1] == self.UUID
+            assert "--session-id" not in argv
+
+    def test_deferred_close_provider_mismatch_does_not_resume_claude_uuid(
+        self, orch: Orchestrator, tmp_path
+    ) -> None:
+        orch.paneClosed.connect(
+            lambda role, project, o=orch: o.unregister_pane(role, project=project)
+        )
+        key = _exit_key(TEST_PROJECT, "gemini")
+        pane = _make_working_pane(cwd=str(tmp_path))
+        pane.model = MagicMock()
+        pane.model.provider_name = "claude"
+        pane.model.session_uuid = self.UUID
+        orch._panes_by_project.setdefault(TEST_PROJECT, {})["gemini"] = pane
+        orch._panes_by_project[TEST_PROJECT]["lead"] = _make_lead_pane()
+
+        ps = orch._ps(key)
+        ps.session_uuid = self.UUID
+        ps.session_uuid_cwd = str(tmp_path)
+        ps.session_provider = "claude"
+        ps.provider_override = "claude"
+        ps.last_assigned_task = "remember word ม่วง-683"
+        ps.task_id = "task-1"
+        ps.task_delivered = True
+
+        scheduled: list = []
+        with patch(
+            "agent_takkub.orchestrator.QTimer.singleShot",
+            side_effect=lambda ms, cb: scheduled.append((ms, cb)),
+        ):
+            orch.done("gemini", note="done", project=TEST_PROJECT)
+
+        close_cb = next(cb for ms, cb in scheduled if ms == 2500)
+
+        poll_timers: list = []
+        with (
+            patch.object(orch, "_live_non_scaffolding_children", return_value=["bash.exe"]),
+            patch(
+                "agent_takkub.orchestrator.QTimer.singleShot",
+                side_effect=lambda ms, cb: poll_timers.append((ms, cb)),
+            ),
+        ):
+            close_cb()
+
+        poll_cb = next(cb for ms, cb in poll_timers if ms == DONE_CLOSE_LIVE_CHILD_POLL_MS)
+        with patch.object(orch, "_live_non_scaffolding_children", return_value=[]):
+            poll_cb()
+
+        # Second assign without provider override (role gemini defaults to gemini provider)
+        new_pane = _make_working_pane(cwd=str(tmp_path))
+        new_pane.session = None
+        new_pane.state = "empty"
+        orch.paneRequested.connect(
+            lambda role, project, o=orch, p=new_pane: o._panes_by_project.setdefault(
+                project, {}
+            ).__setitem__(role, p)
+        )
+
+        captured_argv: list[list[str]] = []
+        fake_sess = MagicMock()
+        fake_sess.processExited = MagicMock()
+        fake_sess.processExited.connect = MagicMock()
+
+        with (
+            patch("agent_takkub.spawn_engine._cwd_within_project", return_value=True),
+            patch.object(orch_mod.PtySession, "__new__", return_value=fake_sess),
+            patch.object(
+                fake_sess,
+                "spawn",
+                side_effect=lambda argv, cwd, env, **kwargs: captured_argv.append(list(argv)),
+            ),
+            patch.object(orch, "_send_when_ready"),
+        ):
+            ok, msg = orch.assign(
+                "gemini",
+                cwd=str(tmp_path),
+                task="what was the word?",
+                project=TEST_PROJECT,
+            )
+            assert ok, msg
+            assert captured_argv
+            argv = captured_argv[0]
+            assert "--resume" not in argv
+            assert self.UUID not in argv
+
+    def test_grace_expired_deferred_close_preserves_resume(
+        self, orch: Orchestrator, tmp_path
+    ) -> None:
+        key = _exit_key(TEST_PROJECT, "backend")
+        pane = _make_working_pane(cwd=str(tmp_path))
+        pane.model = MagicMock()
+        pane.model.provider_name = "claude"
+        pane.model.session_uuid = self.UUID
+        orch._panes_by_project.setdefault(TEST_PROJECT, {})["backend"] = pane
+        orch._panes_by_project[TEST_PROJECT]["lead"] = _make_lead_pane()
+
+        ps = orch._ps(key)
+        ps.session_uuid = self.UUID
+        ps.session_uuid_cwd = str(tmp_path)
+        ps.session_provider = "claude"
+        ps.last_assigned_task = "task-grace"
+        ps.task_id = "task-2"
+        ps.task_delivered = True
+
+        scheduled: list = []
+        with patch(
+            "agent_takkub.orchestrator.QTimer.singleShot",
+            side_effect=lambda ms, cb: scheduled.append((ms, cb)),
+        ):
+            orch.done("backend", note="done", project=TEST_PROJECT)
+
+        close_cb = next(cb for ms, cb in scheduled if ms == 2500)
+
+        # Fast-forward time past grace period
+        clock = {"t": 1000.0}
+        with (
+            patch("agent_takkub.orchestrator.time.time", side_effect=lambda: clock["t"]),
+            patch.object(orch, "_live_non_scaffolding_children", return_value=["hung_child.exe"]),
+        ):
+            poll_timers: list = []
+            with patch(
+                "agent_takkub.orchestrator.QTimer.singleShot",
+                side_effect=lambda ms, cb: poll_timers.append((ms, cb)),
+            ):
+                close_cb()
+
+            poll_cb = next(cb for ms, cb in poll_timers if ms == DONE_CLOSE_LIVE_CHILD_POLL_MS)
+            clock["t"] += DONE_CLOSE_LIVE_CHILD_GRACE_S + 10.0
+            poll_cb()
+
+        # Verify close on grace expiration preserved resume
+        seeded = orch._pane_state.get(key)
+        assert seeded is not None
+        assert seeded.session_uuid == self.UUID
+        assert seeded.session_provider == "claude"
+        exit_rec = orch._recent_exits.get(key)
+        assert exit_rec is not None
+        assert exit_rec["provider"] == "claude"
