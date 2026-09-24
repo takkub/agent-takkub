@@ -361,6 +361,7 @@ class TerminalWidget(QWidget):
     """
 
     inputBytes = pyqtSignal(bytes)
+    lockedInput = pyqtSignal(str)
     resized = pyqtSignal(int, int)
     fontSizeChanged = pyqtSignal(int)
     openInEditorRequested = pyqtSignal(str)  # absolute path — #365 phase 2 "Open in Takkub"
@@ -754,6 +755,12 @@ class TerminalWidget(QWidget):
         if not data:
             return
         if self._input_locked:
+            try:
+                self.lockedInput.emit(data)
+            except RuntimeError:
+                # A few pure lock tests use a __new__ shell without
+                # initialising QWidget; there is no Qt signal instance there.
+                pass
             return
         self.inputBytes.emit(data.encode("utf-8"))
 

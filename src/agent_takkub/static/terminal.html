@@ -146,7 +146,6 @@
       lastEmittedText = data;
       lastEmittedTime = Date.now();
       pendingCharText = '';
-      if (inputLocked) return;  // pane is input-locked — swallow keystrokes
       if (bridge && bridge.sendInput) {
         bridge.sendInput(data);
       } else {
@@ -213,7 +212,7 @@
         // If xterm.js did NOT emit this character within 50ms:
         const emittedByXterm = (lastEmittedText === capturedVal) && (Date.now() - lastEmittedTime <= 50);
         if (!emittedByXterm) {
-          if (!inputLocked && bridge && bridge.sendInput) {
+          if (bridge && bridge.sendInput) {
             bridge.sendInput(capturedVal);
             lastEmittedText = capturedVal;
             lastEmittedTime = Date.now();

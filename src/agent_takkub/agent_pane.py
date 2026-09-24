@@ -377,8 +377,22 @@ class AgentPane(QFrame):
             self.composer.questionAnswered.connect(self.leadQuestionAnswered)
             self.composer.set_send_guard(self._composer_send_blocker)
             self._terminal.set_input_locked(True)
+            locked_input = getattr(self._terminal, "lockedInput", None)
+            if hasattr(locked_input, "connect"):
+                locked_input.connect(self._move_locked_input_to_composer)
+            root.addSpacing(10)
             root.addWidget(self.composer)
             bg_pool.submit(lambda: prune_attachments(RUNTIME_DIR))
+
+    def _move_locked_input_to_composer(self, data: str) -> None:
+        """Move printable Lead-terminal input into the cockpit composer."""
+        editor = self.composer.editor
+        editor.setFocus()
+        if data.isprintable():
+            cursor = editor.textCursor()
+            cursor.movePosition(cursor.MoveOperation.End)
+            editor.setTextCursor(cursor)
+            editor.insertPlainText(data)
 
     def _composer_send_blocker(self) -> str | None:
         if self.session is None or not getattr(self.session, "is_alive", False):
