@@ -250,6 +250,14 @@ def _ask_question_options(rec: dict) -> dict | None:
     return None
 
 
+def _claude_ask_closed(rec: dict) -> bool:
+    """#717: Claude writes every step past a picker as a `type=="user"`
+    record — the AskUserQuestion tool_result (answer or Esc rejection), the
+    "[Request interrupted…]" marker, or the next typed prompt. None of them
+    are written while the picker is still on screen."""
+    return rec.get("type") == "user"
+
+
 def _ask_question_prompt(rec: dict) -> str | None:
     """Return the short question text if `rec` is an assistant record whose
     content includes an `AskUserQuestion` tool_use block, else None. Only the
@@ -1709,6 +1717,9 @@ class _HistoryScanner:
     live_users: Callable[[dict], list[dict]] = lambda _rec: []
     live_activity: Callable[[dict], str | None] = lambda _rec: None
     live_ask: Callable[[dict], dict | None] = lambda _rec: None
+    # #717: True for a record that proves an earlier picker is over (answered,
+    # rejected with Esc, interrupted, or a new prompt typed past it).
+    live_ask_closed: Callable[[dict], bool] = lambda _rec: False
     requires_session_uuid: bool = True
     # False only for a store shared across sessions/projects (OpenCode's one
     # sqlite db): there, a non-empty file with zero rows *for this session*
@@ -1727,6 +1738,7 @@ _HISTORY_SCANNERS: dict[str, _HistoryScanner] = {
         live_users=_claude_live_users,
         live_activity=_lead_activity,
         live_ask=_ask_question_options,
+        live_ask_closed=_claude_ask_closed,
     ),
     "gemini": _HistoryScanner(
         resolve_session=lambda project, uuid, _spawn_ts: _resolve_gemini_jsonl_path(project, uuid),
@@ -1955,6 +1967,8 @@ def current_ask_state(orch, project_ns: str) -> dict | None:
             continue
         if scanner.live_texts(rec):
             return None  # a real reply already superseded any picker
+        if scanner.live_ask_closed(rec):
+            return None  # #717: answered/rejected/typed past — no live picker
         ask = scanner.live_ask(rec)
         if ask is not None:
             return ask
@@ -2370,6 +2384,8 @@ class LeadNotifier(QObject):
                 continue
             for user_payload in scanner.live_users(rec):
                 self._broadcaster.push("user", user_payload, project_ns)
+            if scanner.live_ask_closed(rec):
+                ask_payload = None  # #717: picker answered/rejected in this batch
             texts = scanner.live_texts(rec)
             if texts:
                 joined = "\n".join(texts)[:_MAX_EVENT_CHARS]

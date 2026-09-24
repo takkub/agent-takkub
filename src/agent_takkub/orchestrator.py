@@ -1572,7 +1572,6 @@ class Orchestrator(
     # #714: new work just started while other backlog items are still open —
     # MainWindow shows the owner the pending list itself (never relies on the
     # Lead remembering to relay it).
-    backlogPendingNotice = pyqtSignal(str, str, int)  # project_ns, report text, pending count
     # Emitted after every successful Task Ledger (A7) write — assign/done/
     # fail/close. The Task Tree dock (A8) connects this straight to its
     # refresh_project(project_ns) slot instead of polling the state file, so
@@ -11066,12 +11065,11 @@ class Orchestrator(
             if verb == "assign":
                 return self._backlog_assign(project_ns, req)
             if verb == "start":
-                item, is_new = backlog.start_lead_work(
+                item, _is_new = backlog.start_lead_work(
                     project_ns, item_id=req.get("id", ""), title=req.get("title", "")
                 )
-                report = self._report_backlog_pending(project_ns, item, is_new, role="lead")
                 msg = f"เริ่มงาน [{item['id']}] {item['title']} (lead ทำเอง)"
-                return True, (f"{msg}\n\n{report}" if report else msg), {"id": item["id"]}
+                return True, msg, {"id": item["id"]}
             if verb == "pending":
                 report = backlog.pending_report(project_ns, limit=50)
                 return True, report or "backlog ไม่มีงานค้าง", {}
@@ -11136,7 +11134,6 @@ class Orchestrator(
         # Compose a task spec from the card so the pane gets the source, files,
         # and severity/impact context, not just a bare title.
         task = self._compose_backlog_task(item)
-        was_doing = item.get("status") == "doing"
         # #714: link first — assign() binds the task id it mints to this link.
         backlog.link_assign(project_ns, item["id"], role)
         ok, msg = self.assign(
@@ -11148,21 +11145,17 @@ class Orchestrator(
         )
         if not ok:
             return False, msg, {}
-        report = self._report_backlog_pending(project_ns, item, not was_doing, role=role)
-        out = f"assign [{item['id']}] → {role}: {msg}"
-        return True, (f"{out}\n\n{report}" if report else out), {"id": item["id"]}
+        return True, f"assign [{item['id']}] → {role}: {msg}", {"id": item["id"]}
 
     # #714 ─────────────────────────────────────────────────────────────────
-    _BACKLOG_NOTICE_DEDUP_S = 600.0
-
     def backlog_for_assign(
         self, project: str | None, role: str, task: str, backlog_id: str | None = None
     ) -> tuple[bool, str, str]:
         """The mandatory backlog step of every `takkub assign` (#714): link the
         given card, or create one from the task text. Returns
         `(ok, note_for_the_ack, item_id)`; not ok only for a bad --backlog id.
-        The note carries the pending report whenever this assign starts NEW
-        work, and the same report goes to the owner via backlogPendingNotice."""
+        Pending cards are not pushed at the owner on every new job (they found
+        it a nag) — `takkub backlog pending` and the Tasks popup show them."""
         from . import backlog
 
         project_ns = self._resolve_project(project)
@@ -11185,43 +11178,7 @@ class Orchestrator(
         head = f"📋 backlog [{item['id']}] {item['title']}" + (
             " (สร้างใบให้อัตโนมัติ)" if not backlog_id and is_new else ""
         )
-        report = self._report_backlog_pending(project_ns, item, is_new, role=role)
-        return True, (f"{head}\n\n{report}" if report else head), item["id"]
-
-    def _report_backlog_pending(
-        self, project_ns: str, item: dict, is_new: bool, *, role: str
-    ) -> str:
-        """Pending report owed when *item* starts new work: the text for the
-        Lead's ack (with the relay instruction) — and the owner-facing notice,
-        emitted once per distinct pending set per `_BACKLOG_NOTICE_DEDUP_S`."""
-        if not is_new:
-            return ""
-        from . import backlog
-
-        report = backlog.pending_report(project_ns, exclude_ids=(item["id"],))
-        if not report:
-            return ""
-        count = len(backlog.pending_items(project_ns)) - 1
-        sent = getattr(self, "_backlog_notice_sent", None)
-        if sent is None:
-            sent = self._backlog_notice_sent = {}
-        sig = (project_ns, report)
-        now = time.time()
-        if now - sent.get(sig, 0.0) > self._BACKLOG_NOTICE_DEDUP_S:
-            sent[sig] = now
-            notice = f"เริ่มงานใหม่: [{item['id']}] {item['title']} → {role}\n{report}"
-            self.backlogPendingNotice.emit(project_ns, notice, max(count, 0))
-            _log_event(
-                "backlog_pending_reported",
-                role=role,
-                project=project_ns,
-                item=item["id"],
-                pending=max(count, 0),
-            )
-        return (
-            f"{report}\n→ แจ้ง user ในคำตอบถัดไปด้วยว่ามีงานค้างเหล่านี้ "
-            "(ถามว่าจะให้หยิบใบไหนต่อหลังงานนี้ หรือ defer/wont ใบที่ไม่ทำแล้ว)"
-        )
+        return True, head, item["id"]
 
     @staticmethod
     def _compose_backlog_task(item: dict) -> str:

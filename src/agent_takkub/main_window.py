@@ -275,7 +275,6 @@ class MainWindow(
         self.orch.leadNotified.connect(self._on_lead_notified)
         self.orch.sessionCapNotice.connect(self._on_session_cap_notice)
         self.orch.idleReminderNotice.connect(self._on_idle_reminder_notice)
-        self.orch.backlogPendingNotice.connect(self._on_backlog_pending_notice)
         # #715: question cards for the Lead composer (polls the active Lead).
         from .lead_composer_host import LeadQuestionHost
 
@@ -1215,46 +1214,6 @@ class MainWindow(
         host = getattr(self, "_lead_questions", None)
         if host is not None:
             host.wire(pane, project)
-
-    def _on_backlog_pending_notice(self, project_ns: str, text: str, count: int) -> None:
-        """#714: new work just started while other backlog cards are still
-        pending — show the owner the list directly (status bar + tray + a
-        non-modal box with a shortcut into the Backlog popup), independent of
-        whether the Lead relays it."""
-        self._status.showMessage(
-            f"📋 [{project_ns}] เริ่มงานใหม่ — มีงานค้างใน backlog {count} ใบ", 30_000
-        )
-        if self._tray and QSystemTrayIcon.isSystemTrayAvailable():
-            self._tray.showMessage(
-                "งานค้างใน backlog",
-                f"[{project_ns}] {count} ใบ",
-                QSystemTrayIcon.MessageIcon.Information,
-                10_000,
-            )
-        prev = getattr(self, "_backlog_pending_box", None)
-        if prev is not None:
-            try:
-                prev.close()
-            except RuntimeError:
-                pass
-        box = QMessageBox(self)
-        box.setWindowTitle(f"งานค้างใน backlog — {project_ns}")
-        box.setIcon(QMessageBox.Icon.Information)
-        box.setText(text)
-        # One card per line reads as a list only when lines don't re-wrap.
-        box.setStyleSheet("QLabel#qt_msgbox_label { min-width: 620px; }")
-        open_btn = box.addButton("เปิด Backlog", QMessageBox.ButtonRole.ActionRole)
-        box.addButton("รับทราบ", QMessageBox.ButtonRole.AcceptRole)
-        box.setModal(False)
-        box.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
-
-        def _on_clicked(btn, _open=open_btn):
-            if btn is _open:
-                QTimer.singleShot(0, self._open_backlog_dialog)
-
-        box.buttonClicked.connect(_on_clicked)
-        self._backlog_pending_box = box
-        box.show()
 
     # ──────────────────────────────────────────────────────────────
     # toolbar buttons

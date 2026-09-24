@@ -29,12 +29,6 @@ class _FakeOrch:
         self._render_backlog_detail = Orchestrator._render_backlog_detail
         self._backlog_simple = Orchestrator._backlog_simple
         self._backlog_result = Orchestrator._backlog_result
-        self._report_backlog_pending = Orchestrator._report_backlog_pending.__get__(self)
-        self._BACKLOG_NOTICE_DEDUP_S = Orchestrator._BACKLOG_NOTICE_DEDUP_S
-        self.notices: list[tuple] = []
-        self.backlogPendingNotice = type(
-            "_Sig", (), {"emit": lambda _s, *a: self.notices.append(a)}
-        )()
         self.assign_calls: list[dict] = []
         self._pane_state: dict = {}
 

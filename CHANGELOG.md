@@ -2,7 +2,7 @@
 
 All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses [SemVer](https://semver.org/).
 
-## [vNEXT]
+## [v2.1.34] - 2026-09-24
 
 ### Added (เพิ่ม)
 
@@ -24,18 +24,23 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 - **`takkub done` จาก pane codex บน Windows ไม่ถึง Lead (#716)** — เครื่องที่ไม่มี Git Bash `bash` คือ WSL: shim `sh` เจอ
   `C:/.../python.exe` ที่ไม่ใช่ path ใน WSL ("cockpit interpreter missing") และตัวแปร TAKKUB_* ของ pane ไม่ข้ามเข้า WSL เลย ·
   shim แปลง path ด้วย `wslpath`/`cygpath` ก่อนตรวจ และ env ของ pane บน Windows ใส่ตัวแปร cockpit ทั้งหมดลง `WSLENV`
+- **การ์ดคำถามของ Lead ค้างหลังกด Esc ปฏิเสธ แล้วคำตอบหล่นเป็นข้อความ "111"/"1121" ส่งหา Lead (#717, live test #715)** —
+  `remote/notify.current_ask_state` หยุดไล่ transcript แค่ตอน Lead ตอบ/ใช้ tool อื่น จึงนับคำถามที่ถูกปฏิเสธ (tool_result
+  rejected, "[Request interrupted…]", ข้อความใหม่) ว่ายังค้าง → การ์ดยิงคีย์ picker ใส่ช่องพิมพ์ปกติ · แก้: scanner hook ใหม่
+  `live_ask_closed` (claude: record `type=="user"` ใดๆ หลังคำถาม = จบแล้ว) ใช้ทั้งการ์ดและตัวแจ้งเตือนมือถือ + การ์ดส่งคีย์เฉพาะเมื่อเห็น
+  เมนู picker บนจอ Lead จริง (`lead_composer_answer_refused`) + 2 เทส
 
 ### Changed (เปลี่ยน)
 
-- **backlog เป็นกฎบังคับก่อนเริ่มงาน + รายงานงานค้างก่อนเริ่มงานใหม่ (#714)** — #684 ออกไปเป็นแค่บรรทัดแนะนำในคู่มือ Lead
+- **backlog เป็นกฎบังคับก่อนเริ่มงาน (#714)** — #684 ออกไปเป็นแค่บรรทัดแนะนำในคู่มือ Lead
   ไม่มีด่านในระบบ จึงไม่มีใครใช้เลย (dev มี 5 ใบทั้งหมดจาก live-test) · ตอนนี้บังคับที่ระบบ:
   - `takkub assign` ทุกครั้งวิ่งใต้ใบ backlog — `--backlog <id>` หรือระบบสร้างใบจากเนื้องานให้เอง (shard ของงานเดียวกันใช้ใบเดียว)
     แล้วผูก task id ที่ assign สร้าง (`bind_task_id`) → done ครบทุก shard ใบเปลี่ยนเป็น "รอยืนยัน" · quota reroute ย้ายลิงก์ตามให้
   - Lead แก้ไฟล์โปรเจคเองไม่ได้จนกว่าจะมีใบ `doing` (`takkub backlog start --title …` / `start <id>`) — guard
     `lead_direct_edit:no_backlog_card` ใช้กับ preset ทำเองด้วย · ไฟล์ note/scratchpad/runtime ยกเว้นเหมือนเดิม
-  - เริ่มงานใหม่ขณะมีใบค้าง → cockpit แจ้งเจ้าของเองจากระบบ (status bar + tray + กล่องรายการพร้อมปุ่ม "เปิด Backlog")
-    และแนบรายการเดียวกันในผลคำสั่งให้ Lead แจ้ง user · `takkub backlog pending` / `list --status pending` รวม deferred
-  - gap: ด่านแก้ไฟล์ของ Lead ใช้ PreToolUse hook ซึ่งมีแค่ claude — Lead provider อื่นยังโดนแค่ด่านฝั่ง assign/แจ้งงานค้าง
+  - งานค้างไม่เด้งเตือนทุกครั้งที่เริ่มงาน (live test: เจ้าของบอกว่ารำคาญ — ถอด popup/tray/status bar และคำสั่งให้ Lead
+    แจ้งออกทั้งสาย) · ดูเองได้ที่ปุ่ม 📋 Tasks หรือ `takkub backlog pending` / `list --status pending` (รวม deferred)
+  - gap: ด่านแก้ไฟล์ของ Lead ใช้ PreToolUse hook ซึ่งมีแค่ claude — Lead provider อื่นยังโดนแค่ด่านฝั่ง assign
 
 - **หน้าต่าง Remote ไม่มีช่อง "cloudflared executable" แล้ว** (`remote/settings_dialog.py`) — ทั้งโหมด Named (มี domain) และ Quick
   หา cloudflared เองตอนกด Enable: path ที่เคยเซฟไว้ (ถ้ายังมีไฟล์อยู่) → ไฟล์ข้าง credentials → PATH → `DATA_HOME/bin` →

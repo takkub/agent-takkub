@@ -254,13 +254,16 @@ class TestLeadPaneWiring:
 
 
 class TestQuestionHost:
-    def _host(self, qapp, state, *, answer_ok=True):
+    def _host(self, qapp, state, *, answer_ok=True, screen=None):
         from agent_takkub import lead_composer_host
 
         composer = SimpleNamespace(shown=[], statuses=[], set_question=None, show_status=None)
         composer.set_question = lambda s: composer.shown.append(s)
         composer.show_status = lambda t: composer.statuses.append(t)
-        pane = SimpleNamespace(composer=composer, session=SimpleNamespace(is_alive=True))
+        if screen is None:
+            screen = ["❯ 1. a", "Enter to select · Tab/Arrow keys to navigate · Esc to cancel"]
+        session = SimpleNamespace(is_alive=True, display_lines=lambda: screen)
+        pane = SimpleNamespace(composer=composer, session=session)
         calls: list = []
         orch = SimpleNamespace(
             _project_panes=lambda _p: {"lead": pane},
@@ -294,6 +297,20 @@ class TestQuestionHost:
         host._apply_state("p", state)
         assert composer.shown[-1] is None
 
+    def test_no_picker_on_screen_sends_nothing(self, qapp, monkeypatch) -> None:
+        """#717: a question the transcript still reports but the TUI already
+        closed — picker keys at a plain prompt were sent as "111"/"1121"."""
+        from agent_takkub import lead_composer_host
+
+        state = {"questions": [{"prompt": "q", "multiSelect": False, "options": [{"index": 0}]}]}
+        host, composer, calls, mods = self._host(
+            qapp, state, screen=["❯ ", "⏵⏵ bypass permissions on (shift+tab to cycle)"]
+        )
+        monkeypatch.setattr(lead_composer_host, "_remote", lambda name: mods.get(name))
+        host.answer("p", [[0]])
+        assert calls == []
+        assert composer.shown[-1] is None
+
     def test_stale_question_is_not_answered(self, qapp, monkeypatch) -> None:
         from agent_takkub import lead_composer_host
 
@@ -302,3 +319,43 @@ class TestQuestionHost:
         host.answer("p", [[0]])
         assert calls == []
         assert composer.statuses and "ตอบไปแล้ว" in composer.statuses[-1]
+
+
+def test_rejected_question_is_not_live(tmp_path, monkeypatch) -> None:
+    """#717: Esc-rejecting an AskUserQuestion, or typing past it, ends it —
+    the transcript records after the tool_use are all `type=="user"`."""
+    import json
+
+    from agent_takkub.remote import notify
+
+    ask = {
+        "type": "assistant",
+        "message": {
+            "content": [
+                {
+                    "type": "tool_use",
+                    "id": "t1",
+                    "name": "AskUserQuestion",
+                    "input": {"questions": [{"question": "q?", "options": [{"label": "a"}]}]},
+                }
+            ]
+        },
+    }
+    rejected = {
+        "type": "user",
+        "message": {"content": [{"type": "tool_result", "tool_use_id": "t1", "is_error": True}]},
+    }
+    typed = {"type": "user", "message": {"content": "1121"}}
+    queued = {"type": "queue-operation"}
+    path = tmp_path / "s.jsonl"
+    monkeypatch.setattr(notify, "lead_provider_name", lambda _o, _p: "claude")
+    monkeypatch.setattr(notify, "resolve_lead_jsonl", lambda _o, _p, _prov: path)
+
+    def state(*recs):
+        path.write_text("".join(json.dumps(r) + "\n" for r in recs), encoding="utf-8")
+        return notify.current_ask_state(None, "p")
+
+    assert state(ask) is not None
+    assert state(ask, queued) is not None
+    assert state(ask, rejected) is None
+    assert state(ask, typed) is None

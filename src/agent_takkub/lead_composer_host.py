@@ -37,6 +37,23 @@ _POLL_MS = 1500
 _ANSWERED_HIDE_S = 8.0
 
 
+# #717: footer text of Claude's AskUserQuestion picker (question tabs and the
+# review screen). Picker keys typed at a plain prompt become a chat message,
+# so nothing is sent unless one of these is on the Lead's screen.
+_PICKER_SCREEN_MARKERS = ("Esc to cancel", "to navigate", "Enter to select")
+_PICKER_SCREEN_TAIL_LINES = 40
+
+
+def _picker_on_screen(pane) -> bool:
+    session = getattr(pane, "session", None)
+    try:
+        lines = [ln for ln in session.display_lines() if ln.strip()]
+    except Exception:
+        return False
+    tail = "\n".join(lines[-_PICKER_SCREEN_TAIL_LINES:])
+    return any(marker in tail for marker in _PICKER_SCREEN_MARKERS)
+
+
 def _remote(name: str):
     try:
         return importlib.import_module(f"agent_takkub.remote.{name}")
@@ -134,6 +151,13 @@ class LeadQuestionHost(QObject):
             if not state:
                 composer.set_question(None)
                 composer.show_status("คำถามนี้ถูกตอบไปแล้ว หรือ Lead ไปต่อแล้ว")
+                return
+            if not _picker_on_screen(pane):
+                composer.set_question(None)
+                composer.show_status("ไม่เห็นเมนูคำถามบนจอ Lead แล้ว — ไม่ได้ส่งคำตอบ")
+                _log_event(
+                    "lead_composer_answer_refused", project=project, reason="no_picker_on_screen"
+                )
                 return
             keys = api._build_picker_key_sequence(state["questions"], answers)
         except Exception as exc:

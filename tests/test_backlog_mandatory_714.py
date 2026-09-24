@@ -3,7 +3,8 @@
 - every assign runs under a card (linked via --backlog, or auto-created)
 - the card follows the task through assign → done (links + bound task ids)
 - Lead may not edit project files until a card is `doing`
-- starting new work reports every other pending card to the owner
+- starting new work does NOT push the pending list at the owner (it nagged);
+  `takkub backlog pending` shows it on demand
 """
 
 from __future__ import annotations
@@ -151,66 +152,46 @@ class TestStartLeadWork:
             backlog.start_lead_work("p")
 
 
-class _NoticeOrch:
-    """Real backlog_for_assign/_report_backlog_pending/backlog_command on a
-    minimal host — enough to check the owner notice and the ack text."""
+class _BacklogOrch:
+    """Real backlog_for_assign/backlog_command on a minimal host."""
 
     def __init__(self) -> None:
         from agent_takkub.orchestrator import Orchestrator
 
         self.backlog_for_assign = Orchestrator.backlog_for_assign.__get__(self)
-        self._report_backlog_pending = Orchestrator._report_backlog_pending.__get__(self)
         self.backlog_command = Orchestrator.backlog_command.__get__(self)
-        self._BACKLOG_NOTICE_DEDUP_S = Orchestrator._BACKLOG_NOTICE_DEDUP_S
-        self.notices: list[tuple] = []
-        self.backlogPendingNotice = type(
-            "_Sig", (), {"emit": lambda _s, *a: self.notices.append(a)}
-        )()
 
     @staticmethod
     def _resolve_project(project):
         return project or "default"
 
 
-class TestOwnerNotice:
-    def test_new_work_with_pending_notifies_owner_and_lead(self, runtime) -> None:
-        orch = _NoticeOrch()
-        old = backlog.add_item("p", "งานค้างเก่า")
+class TestNoPendingNag:
+    def test_new_work_with_pending_does_not_nag(self, runtime) -> None:
+        orch = _BacklogOrch()
+        backlog.add_item("p", "งานค้างเก่า")
         ok, note, item_id = orch.backlog_for_assign("p", "backend", "งานใหม่")
         assert ok and item_id
         assert "สร้างใบให้อัตโนมัติ" in note
-        assert old["id"] in note and "แจ้ง user" in note
-        assert len(orch.notices) == 1
-        project, text, count = orch.notices[0]
-        assert project == "p" and count == 1 and old["id"] in text
-
-    def test_no_pending_no_notice(self, runtime) -> None:
-        orch = _NoticeOrch()
-        ok, note, _ = orch.backlog_for_assign("p", "backend", "งานเดียว")
-        assert ok and "งานค้าง" not in note
-        assert orch.notices == []
-
-    def test_continuing_work_does_not_renotify(self, runtime) -> None:
-        orch = _NoticeOrch()
-        backlog.add_item("p", "งานค้างเก่า")
-        _ok, _n, item_id = orch.backlog_for_assign("p", "backend", "งานใหม่")
-        # fix loop on the same card = continuing, not new work
-        _ok, note2, _ = orch.backlog_for_assign("p", "backend", "แก้ตาม review", item_id)
-        assert "งานค้าง" not in note2
-        assert len(orch.notices) == 1
+        assert "งานค้าง" not in note and "แจ้ง user" not in note
 
     def test_bad_backlog_id_fails_the_assign(self, runtime) -> None:
-        orch = _NoticeOrch()
+        orch = _BacklogOrch()
         ok, note, _ = orch.backlog_for_assign("p", "backend", "x", "missing")
         assert not ok and "ไม่พบ" in note
 
-    def test_backlog_start_verb_reports_pending(self, runtime) -> None:
-        orch = _NoticeOrch()
+    def test_backlog_start_verb_does_not_nag(self, runtime) -> None:
+        orch = _BacklogOrch()
         old = backlog.add_item("p", "ค้าง")
         ok, msg, payload = orch.backlog_command("start", {"title": "Lead ทำเอง"}, project="p")
         assert ok and payload["id"]
-        assert old["id"] in msg
-        assert len(orch.notices) == 1
+        assert old["id"] not in msg
+
+    def test_pending_verb_still_lists_on_demand(self, runtime) -> None:
+        orch = _BacklogOrch()
+        old = backlog.add_item("p", "ค้าง")
+        ok, msg, _ = orch.backlog_command("pending", {}, project="p")
+        assert ok and old["id"] in msg
 
 
 class TestLeadEditGate:
