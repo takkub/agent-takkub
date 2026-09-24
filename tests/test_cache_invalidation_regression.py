@@ -130,17 +130,23 @@ def test_graft_cli_cache_invalidation(monkeypatch: pytest.MonkeyPatch) -> None:
 
     def mock_which(cmd):
         calls.append(cmd)
-        return "/bin/graft" if "graft" in cmd else None
+        return f"/bin/{cmd}"
 
-    # When monkeypatched, graft_cli_path delegates to which
     monkeypatch.setattr(graft_store.shutil, "which", mock_which)
     p1 = graft_store.graft_cli_path()
-    assert p1 == "/bin/graft"
+    assert p1 == "/bin/graft.cmd"
+    assert len(calls) == 1
 
-    # Invalidate helper
+    # Second call returns cached value without calling which
+    p_cached = graft_store.graft_cli_path()
+    assert p_cached == "/bin/graft.cmd"
+    assert len(calls) == 1
+
+    # Invalidate drops cache, causing re-probe
     graft_store.invalidate_graft_cli_cache()
     p2 = graft_store.graft_cli_path()
-    assert p2 == "/bin/graft"
+    assert p2 == "/bin/graft.cmd"
+    assert len(calls) == 2
 
 
 def test_gemini_helper_agy_cache_invalidation(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -156,7 +162,15 @@ def test_gemini_helper_agy_cache_invalidation(monkeypatch: pytest.MonkeyPatch) -
     monkeypatch.setattr(gemini_helper.shutil, "which", mock_which)
     p1 = gemini_helper.find_agy_executable()
     assert p1 == "/bin/agy"
+    assert len(calls) == 1
 
+    # Second call returns cached value without calling which
+    p_cached = gemini_helper.find_agy_executable()
+    assert p_cached == "/bin/agy"
+    assert len(calls) == 1
+
+    # Invalidate drops cache, causing re-probe
     gemini_helper.invalidate_agy_executable_cache()
     p2 = gemini_helper.find_agy_executable()
     assert p2 == "/bin/agy"
+    assert len(calls) == 2

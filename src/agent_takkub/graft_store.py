@@ -334,7 +334,6 @@ def iter_store_dirs() -> list[Path]:
         return []
 
 
-_ORIGINAL_WHICH = shutil.which
 _GRAFT_CLI_CACHE: tuple[str | None, float] | None = None
 _GRAFT_CLI_TTL_S: float = 30.0
 
@@ -356,14 +355,12 @@ def graft_cli_path() -> str | None:
     Cached for `_GRAFT_CLI_TTL_S` to avoid blocking Qt main thread with PATH scans.
     """
     global _GRAFT_CLI_CACHE
-    if shutil.which is _ORIGINAL_WHICH:
-        now = time.monotonic()
-        if _GRAFT_CLI_CACHE is not None and now - _GRAFT_CLI_CACHE[1] < _GRAFT_CLI_TTL_S:
-            return _GRAFT_CLI_CACHE[0]
-        res = shutil.which("graft.cmd") or shutil.which("graft")
-        _GRAFT_CLI_CACHE = (res, now)
-        return res
-    return shutil.which("graft.cmd") or shutil.which("graft")
+    now = time.monotonic()
+    if _GRAFT_CLI_CACHE is not None and now - _GRAFT_CLI_CACHE[1] < _GRAFT_CLI_TTL_S:
+        return _GRAFT_CLI_CACHE[0]
+    res = shutil.which("graft.cmd") or shutil.which("graft")
+    _GRAFT_CLI_CACHE = (res, now)
+    return res
 
 
 _BUILD_MARKER_NAME = "built.json"

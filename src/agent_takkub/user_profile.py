@@ -490,14 +490,6 @@ def default_provider(project: str) -> str:
     return provider if provider in VALID_PROVIDERS else "claude"
 
 
-def invalidate_project_profile_cache(project: str | None = None) -> None:
-    """Drop stat-cached entries for project profile file(s)."""
-    if project is None:
-        cached_read.invalidate()
-    else:
-        cached_read.invalidate(_project_profile_path(project))
-
-
 def set_default_provider(project: str, provider: str) -> None:
     """Set the active provider for *project*."""
     provider = normalize_provider(provider)

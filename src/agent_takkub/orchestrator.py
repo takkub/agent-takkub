@@ -5796,7 +5796,7 @@ class Orchestrator(
         hit = cache.get(pid)
         if hit is not None and not sync and time.monotonic() - hit[0] < self._CHILD_SCAN_TTL_S:
             return list(hit[1])
-        if sync:
+        if sync or hit is None:
             procs = self._scan_child_procs(project_ns, role_name, pid)
             cache[pid] = (time.monotonic(), procs)
             return list(procs)
@@ -5813,7 +5813,7 @@ class Orchestrator(
                     inflight.discard(pid)
 
             bg_pool.submit(_refresh)
-        return list(hit[1]) if hit is not None else []
+        return list(hit[1])
 
     def _scan_child_procs(self, project_ns: str, role_name: str, pid: int) -> list:
         """The uncached scan behind `_live_non_scaffolding_child_procs`."""
@@ -5908,9 +5908,17 @@ class Orchestrator(
                 with child.oneshot():
                     status = child.status()
                     if sys.platform == "win32":
+                        # No zombie state on Windows — a PID enumerated a moment ago
+                        # can still have exited by now (the job-object teardown this
+                        # warning precedes races against the child's own exit), so
+                        # recheck liveness directly rather than trusting the status
+                        # string alone.
                         if not child.is_running():
                             continue
                     elif status == psutil.STATUS_ZOMBIE:
+                        # POSIX: exited but not yet reaped by its own parent — the
+                        # exact #412 shape (a finished `vite build`). Still enumerable
+                        # by name, but not "still running" by any meaningful sense.
                         continue
                     child_name = child.name()
                     if normalize_process_name(child_name) in scaffolding:
@@ -5919,6 +5927,9 @@ class Orchestrator(
                         continue
                     procs.append(child)
             except Exception:
+                # Vanished between the children() snapshot and this check —
+                # gone is the opposite of "still running", never a reason to
+                # warn.
                 continue
         return procs
 

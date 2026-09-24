@@ -84,8 +84,6 @@ def _default_agy_paths() -> list[Path]:
     return candidates
 
 
-_ORIGINAL_WHICH = shutil.which
-_ORIGINAL_DEFAULT_AGY_PATHS = _default_agy_paths
 _AGY_EXEC_CACHE: tuple[str | None, float] | None = None
 _AGY_EXEC_TTL_S = 30.0
 
@@ -120,17 +118,14 @@ def find_agy_executable() -> str | None:
          binary but didn't put its dir on PATH.
 
     Cached for 30s in production to avoid repetitive PATH scans on Qt main thread.
-    Bypassed if shutil.which or _default_agy_paths is monkeypatched (unit tests).
     """
     global _AGY_EXEC_CACHE
-    if shutil.which is _ORIGINAL_WHICH and _default_agy_paths is _ORIGINAL_DEFAULT_AGY_PATHS:
-        now = time.monotonic()
-        if _AGY_EXEC_CACHE is not None and now - _AGY_EXEC_CACHE[1] < _AGY_EXEC_TTL_S:
-            return _AGY_EXEC_CACHE[0]
-        res = _find_agy_executable_uncached()
-        _AGY_EXEC_CACHE = (res, now)
-        return res
-    return _find_agy_executable_uncached()
+    now = time.monotonic()
+    if _AGY_EXEC_CACHE is not None and now - _AGY_EXEC_CACHE[1] < _AGY_EXEC_TTL_S:
+        return _AGY_EXEC_CACHE[0]
+    res = _find_agy_executable_uncached()
+    _AGY_EXEC_CACHE = (res, now)
+    return res
 
 
 def _normalize_path_for_compare(path: str) -> str:

@@ -91,11 +91,22 @@ def _auth_payload(cmd: str, **extra) -> dict:
     return {"cmd": cmd, "from": "lead", "auth": _REAL_TOKEN, **extra}
 
 
+def _wait_for_response(sock: _FakeSock, timeout: float = 2.0) -> dict:
+    from PyQt6.QtTest import QTest
+
+    t0 = time.monotonic()
+    while time.monotonic() - t0 < timeout:
+        QTest.qWait(10)
+        if sock._buf:
+            return sock.last_response()
+    raise TimeoutError(f"no response received on sock within {timeout}s")
+
+
 class TestHarvestDispatch:
     def test_harvest_calls_harvest_info_and_returns_artifacts(self, srv_and_sock) -> None:
         srv, sock, mock_orch = srv_and_sock
         srv._dispatch(sock, _auth_payload("harvest", role="backend"))
-        resp = sock.last_response()
+        resp = _wait_for_response(sock)
         assert resp["ok"] is True
         assert resp["artifacts"] == _SAMPLE_ARTIFACTS
         assert resp["state"] == "working"
@@ -108,7 +119,7 @@ class TestHarvestDispatch:
         # Construct an HH:MM that is definitely in the past today
         past_hhmm = "00:01"
         srv._dispatch(sock, _auth_payload("harvest", role="backend", since=past_hhmm))
-        resp = sock.last_response()
+        resp = _wait_for_response(sock)
         assert resp["ok"] is True
         call_kwargs = mock_orch.harvest_info.call_args
         since_arg = call_kwargs[1].get("since_ts") or call_kwargs[0][2]
@@ -120,7 +131,7 @@ class TestHarvestDispatch:
         sock.reset()
         mock_orch.harvest_info.return_value = (False, "role not running: qa", {})
         srv._dispatch(sock, _auth_payload("harvest", role="qa"))
-        resp = sock.last_response()
+        resp = _wait_for_response(sock)
         assert resp["ok"] is False
         assert "role not running" in resp["msg"]
 
@@ -128,7 +139,7 @@ class TestHarvestDispatch:
         srv, sock, _mock_orch = srv_and_sock
         sock.reset()
         srv._dispatch(sock, _auth_payload("harvest", role="backend", since="bad"))
-        resp = sock.last_response()
+        resp = _wait_for_response(sock)
         assert resp["ok"] is False
         assert "--since" in resp["msg"] or "format" in resp["msg"]
 
@@ -147,6 +158,8 @@ class TestHarvestDispatch:
             },
         )
         srv._dispatch(sock, _auth_payload("harvest", role="backend", limit=42))
+        resp = _wait_for_response(sock)
+        assert resp["ok"] is True
         call_kwargs = mock_orch.harvest_info.call_args
         limit_arg = call_kwargs[1].get("limit") or call_kwargs[0][3]
         assert limit_arg == 42

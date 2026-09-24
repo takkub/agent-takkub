@@ -691,12 +691,6 @@ def load_projects() -> dict:
     return UnreadableProjects(out) if read_failed else out
 
 
-def invalidate_projects_cache() -> None:
-    """Drop stat-cached entries for projects registry and projects.json."""
-    cached_read.invalidate(_v2_project_registry_path())
-    cached_read.invalidate(PROJECTS_JSON)
-
-
 def save_projects_json(data: dict) -> bool:
     """Persist the full projects document (see :func:`load_projects`).
     Every writer of project data (this module's own project-tab helpers
@@ -1229,14 +1223,14 @@ def reconcile_inherited_pane_env() -> list[str]:
     return changed
 
 
-def check_cockpit_port_alive(port: int, timeout: float = 0.15) -> tuple[bool, dict | None]:
+def check_cockpit_port_alive(port: int, timeout: float = 0.5) -> tuple[bool, dict | None]:
     """Check if an existing cockpit server is actively listening on loopback port.
 
     Connects to 127.0.0.1:<port> and probes with 'instance-identity' and/or 'ping'.
     Returns (True, info_dict) if an active agent-takkub cockpit responded,
     (False, None) if the port is closed, unresponsive, or not an agent-takkub server.
     Stdlib-only (pure-leaf safe). Strictly bounds total socket wait time to `timeout`
-    (default 150ms) to avoid stalling Qt main thread.
+    (default 500ms) to avoid false-negative detection under machine load.
     """
     if not isinstance(port, int) or not (1 <= port <= 65535):
         return False, None

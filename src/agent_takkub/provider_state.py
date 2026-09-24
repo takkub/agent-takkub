@@ -172,13 +172,6 @@ def _save_quota_resets(state: dict[str, float]) -> None:
     invalidate(path)
 
 
-def invalidate_quota_resets_cache() -> None:
-    """Drop the in-memory stat-cached entry for quota_path()."""
-    from .cached_read import invalidate
-
-    invalidate(quota_path())
-
-
 def set_quota_reset_at(provider: str, reset_at: float) -> None:
     """Record that `provider` is quota-hit until `reset_at` (epoch seconds).
     Overwrites any earlier recorded reset for the same provider."""
