@@ -193,15 +193,19 @@ class UserActionsMixin:
             menu.addSeparator()
 
         if _proj:
-            from .provider_config import effective_provider_for
+            from . import provider_state
+            from .provider_config import _provider_available, effective_provider_for
 
             lead_provider = effective_provider_for("lead", _proj)
             lead_menu = menu.addMenu("Lead ใช้ provider")
-            for prov in ("claude", "codex", "gemini"):
-                spec = PROVIDER_REGISTRY.get(prov)
-                if spec is None:
-                    continue
+            for prov, spec in PROVIDER_REGISTRY.items():
                 act = QAction(spec.display_name or prov.capitalize(), self)
+                if provider_state.is_disabled(prov):
+                    act.setText(f"{act.text()} (ปิดอยู่ใน Settings)")
+                    act.setEnabled(False)
+                elif not _provider_available(prov):
+                    act.setText(f"{act.text()} (ยังไม่ได้ติดตั้ง)")
+                    act.setEnabled(False)
                 act.setCheckable(True)
                 act.setChecked(prov == lead_provider)
                 act.triggered.connect(

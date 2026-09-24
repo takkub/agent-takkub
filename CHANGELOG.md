@@ -11,6 +11,16 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
   ถอดแถวแป้นกดสำรอง (1-9 ลูกศร Enter Esc Tab Shift+Tab Ctrl+C) และปุ่ม "🔓 พิมพ์ใน terminal" ออกทั้งสาย (`rawKeys`,
   `KEYPAD_KEYS`) · ปุ่ม "ตอบใน terminal แทน" บนการ์ดคำถามพาเข้าโหมด CLI
 
+### Fixed (แก้)
+
+- **เมนู "Lead ใช้ provider" มีแค่ Claude/Codex/Gemini — ตั้ง opencode/kimi/cursor เป็น Lead ไม่ได้เลย** — รายการเขียนตายตัวตั้งแต่
+  1.0.50 ก่อนมี provider อื่น (`user_actions.py`) · ตอนนี้แสดงทุก provider ใน `PROVIDER_REGISTRY` · ตัวที่ปิดใน Settings
+  หรือยังไม่ติดตั้งแสดงเป็นสีจางพร้อมเหตุผล แทนที่จะหายไปเงียบๆ
+- **shim ของ `takkub` ชวน agent รัน `npm install -g agent-takkub --force` เอง (#718)** — pane codex ทำตามจริงจนอัปเกรด prod
+  ขณะ cockpit รันอยู่ · ข้อความเปลี่ยนเป็น "ห้ามติดตั้งใหม่จาก pane ให้แจ้ง Lead/เจ้าของ" (`cli_shim.py` ทั้ง sh และ cmd) ·
+  ต้นเหตุหลักของ #718 (shim ใน WSL ตรวจ path `C:/` ไม่เจอ) แก้แล้วใน #716 v2.1.34 — prod ที่ยังรันโค้ด 2.1.33 อยู่ในหน่วยความจำ
+  จะเขียน shim เก่าทับจนกว่าจะรีสตาร์ต
+
 ## [v2.1.35] - 2026-09-24
 
 ### Changed (เปลี่ยน)
