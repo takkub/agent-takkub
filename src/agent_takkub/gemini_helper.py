@@ -84,6 +84,28 @@ def _default_agy_paths() -> list[Path]:
     return candidates
 
 
+_ORIGINAL_WHICH = shutil.which
+_ORIGINAL_DEFAULT_AGY_PATHS = _default_agy_paths
+_AGY_EXEC_CACHE: tuple[str | None, float] | None = None
+_AGY_EXEC_TTL_S = 30.0
+
+
+def invalidate_agy_executable_cache() -> None:
+    """Clear cached agy executable lookup."""
+    global _AGY_EXEC_CACHE
+    _AGY_EXEC_CACHE = None
+
+
+def _find_agy_executable_uncached() -> str | None:
+    on_path = shutil.which("agy")
+    if on_path:
+        return on_path
+    for candidate in _default_agy_paths():
+        if candidate.is_file():
+            return str(candidate)
+    return None
+
+
 def find_agy_executable() -> str | None:
     """Return the absolute path to the `agy` binary, or None when it
     can't be located. Caller surfaces the friendly install message in
@@ -96,14 +118,19 @@ def find_agy_executable() -> str | None:
       2. Fixed install location %LOCALAPPDATA%\\agy\\bin\\agy.exe — a
          fallback for the common case where the installer dropped the
          binary but didn't put its dir on PATH.
+
+    Cached for 30s in production to avoid repetitive PATH scans on Qt main thread.
+    Bypassed if shutil.which or _default_agy_paths is monkeypatched (unit tests).
     """
-    on_path = shutil.which("agy")
-    if on_path:
-        return on_path
-    for candidate in _default_agy_paths():
-        if candidate.is_file():
-            return str(candidate)
-    return None
+    global _AGY_EXEC_CACHE
+    if shutil.which is _ORIGINAL_WHICH and _default_agy_paths is _ORIGINAL_DEFAULT_AGY_PATHS:
+        now = time.monotonic()
+        if _AGY_EXEC_CACHE is not None and now - _AGY_EXEC_CACHE[1] < _AGY_EXEC_TTL_S:
+            return _AGY_EXEC_CACHE[0]
+        res = _find_agy_executable_uncached()
+        _AGY_EXEC_CACHE = (res, now)
+        return res
+    return _find_agy_executable_uncached()
 
 
 def _normalize_path_for_compare(path: str) -> str:

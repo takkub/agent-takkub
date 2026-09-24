@@ -1894,12 +1894,20 @@ _FILE_ACTIVITY_SKIP_DIRS = frozenset(
 )
 
 
+_recent_activity_cache: dict[tuple[str, int], tuple[bool, float]] = {}
+
+
+def invalidate_cwd_file_activity_cache() -> None:
+    """Clear cached cwd recent file activity results."""
+    _recent_activity_cache.clear()
+
+
 def _cwd_has_recent_file_activity(
     cwd: str,
     since_ts: float,
     *,
-    max_entries: int = 4000,
-    time_budget_s: float = 0.4,
+    max_entries: int = 2000,
+    time_budget_s: float = 0.05,
 ) -> bool:
     """Best-effort, bounded check: has any file under *cwd* been modified
     since *since_ts* (#599)?
@@ -1913,11 +1921,18 @@ def _cwd_has_recent_file_activity(
     Deliberately bounded — this can run on the Qt main thread, and a full
     walk of a JS monorepo's `node_modules` would freeze the UI. Vendored/
     generated directories are skipped outright and the walk bails the
-    moment either the entry-count or wall-clock budget is exhausted, same
-    "inconclusive, not false" contract as every other best-effort probe in
+    moment either the entry-count or wall-clock budget (default 50ms) is exhausted,
+    same "inconclusive, not false" contract as every other best-effort probe in
     this module: a budget exhausted mid-walk returns False (caller treats
     that as "no evidence found", not "proven idle" — callers must already
     be prepared for that per the watchdog's own idiom elsewhere)."""
+    cache_key = (cwd, int(since_ts))
+    now_mono = time.monotonic()
+    if cache_key in _recent_activity_cache:
+        hit, ts = _recent_activity_cache[cache_key]
+        if now_mono - ts < 3.0:
+            return hit
+
     root = pathlib.Path(cwd)
     if not root.is_dir():
         return False
@@ -1926,6 +1941,7 @@ def _cwd_has_recent_file_activity(
     stack = [root]
     while stack:
         if visited >= max_entries or (time.monotonic() - start) >= time_budget_s:
+            _recent_activity_cache[cache_key] = (False, now_mono)
             return False
         current = stack.pop()
         try:

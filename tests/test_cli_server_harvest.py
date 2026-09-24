@@ -9,10 +9,13 @@ synthesize-done IPC path.
 from __future__ import annotations
 
 import json
+import threading
+import time
 from unittest.mock import MagicMock
 
 import pytest
 from PyQt6.QtCore import QCoreApplication
+from PyQt6.QtTest import QTest
 
 from agent_takkub.cli_server import CliServer
 
@@ -147,6 +150,53 @@ class TestHarvestDispatch:
         call_kwargs = mock_orch.harvest_info.call_args
         limit_arg = call_kwargs[1].get("limit") or call_kwargs[0][3]
         assert limit_arg == 42
+
+    def test_status_responds_immediately_during_slow_harvest(self, qapp: QCoreApplication) -> None:
+        harvest_started = threading.Event()
+        harvest_finish = threading.Event()
+
+        class SlowHarvestOrch:
+            _lead_token = _REAL_TOKEN
+
+            def harvest_info(self, *args, **kwargs):
+                harvest_started.set()
+                harvest_finish.wait(timeout=5.0)
+                return (
+                    True,
+                    "ok",
+                    {"state": "working", "spawn_ts": 0.0, "since_ts": 0.0, "artifacts": []},
+                )
+
+            def pane_status_report(self, *args, **kwargs):
+                return {"panes": {}}
+
+        orch = SlowHarvestOrch()
+        srv = CliServer(orch)
+        harvest_sock = _FakeSock()
+        status_sock = _FakeSock()
+
+        # Dispatch harvest off-thread
+        srv._dispatch(harvest_sock, _auth_payload("harvest", role="backend"))
+        assert harvest_started.wait(timeout=2.0), "harvest background thread did not start"
+
+        # While harvest is running in background, dispatch status
+        t0 = time.perf_counter()
+        srv._dispatch(status_sock, {"cmd": "status"})
+        elapsed = time.perf_counter() - t0
+
+        status_resp = status_sock.last_response()
+        assert status_resp["ok"] is True
+        assert elapsed < 2.0, f"status took {elapsed:.4f}s during harvest, expected <2s"
+
+        # Release harvest and process Qt events
+        harvest_finish.set()
+        for _ in range(50):
+            QTest.qWait(20)
+            if harvest_sock._buf:
+                break
+
+        harvest_resp = harvest_sock.last_response()
+        assert harvest_resp["ok"] is True
 
 
 class TestHarvestDoneDispatch:

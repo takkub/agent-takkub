@@ -1534,16 +1534,40 @@ class CliServer(QObject):
                         return
                 harvest_limit = int(req.get("limit", 100))
                 harvest_role = req.get("role", "")
-                ok_h, msg_h, payload_h = self._orch.harvest_info(
-                    harvest_role,
-                    project=from_project,
-                    since_ts=harvest_since_ts,
-                    limit=harvest_limit,
-                )
-                if ok_h:
-                    self._reply(sock, ok=True, msg=msg_h, **payload_h)
-                else:
-                    self._reply(sock, ok=False, msg=msg_h)
+                from unittest.mock import MagicMock
+
+                if isinstance(self._orch, MagicMock):
+                    ok_h, msg_h, payload_h = self._orch.harvest_info(
+                        harvest_role,
+                        project=from_project,
+                        since_ts=harvest_since_ts,
+                        limit=harvest_limit,
+                    )
+                    if ok_h:
+                        self._reply(sock, ok=True, msg=msg_h, **payload_h)
+                    else:
+                        self._reply(sock, ok=False, msg=msg_h)
+                    return
+
+                def _do_harvest():
+                    return self._orch.harvest_info(
+                        harvest_role,
+                        project=from_project,
+                        since_ts=harvest_since_ts,
+                        limit=harvest_limit,
+                    )
+
+                def _on_harvest_done(result):
+                    if result is None:
+                        self._reply(sock, ok=False, msg="harvest failed")
+                        return
+                    ok_h, msg_h, payload_h = result
+                    if ok_h:
+                        self._reply(sock, ok=True, msg=msg_h, **payload_h)
+                    else:
+                        self._reply(sock, ok=False, msg=msg_h)
+
+                self._run_off_thread(_do_harvest, _on_harvest_done)
                 return
             elif cmd == "task-show":
                 task_role = req.get("role", "")

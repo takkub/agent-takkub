@@ -399,8 +399,7 @@ def profile_for(project: str, provider: str = "claude") -> str:
     provider = normalize_provider(provider)
     path = _project_profile_path(project)
     try:
-        raw = path.read_text(encoding="utf-8")
-        data = json.loads(raw)
+        data = cached_read.read_cached(path, json.loads, missing={})
     except (OSError, json.JSONDecodeError):
         return DEFAULT_PROFILE
     if not isinstance(data, dict):
@@ -480,8 +479,7 @@ def default_provider(project: str) -> str:
     """Return the active provider selected for *project* (defaults to "claude")."""
     path = _project_profile_path(project)
     try:
-        raw = path.read_text(encoding="utf-8")
-        data = json.loads(raw)
+        data = cached_read.read_cached(path, json.loads, missing={})
     except (OSError, json.JSONDecodeError):
         return "claude"
     if not isinstance(data, dict):
@@ -490,6 +488,14 @@ def default_provider(project: str) -> str:
     from .provider_config import VALID_PROVIDERS
 
     return provider if provider in VALID_PROVIDERS else "claude"
+
+
+def invalidate_project_profile_cache(project: str | None = None) -> None:
+    """Drop stat-cached entries for project profile file(s)."""
+    if project is None:
+        cached_read.invalidate()
+    else:
+        cached_read.invalidate(_project_profile_path(project))
 
 
 def set_default_provider(project: str, provider: str) -> None:
