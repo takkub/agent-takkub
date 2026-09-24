@@ -4,6 +4,12 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 
 ## [vNEXT]
 
+### Changed (เปลี่ยน)
+
+- **หน้าต่าง Remote ไม่มีช่อง "cloudflared executable" แล้ว** (`remote/settings_dialog.py`) — ทั้งโหมด Named (มี domain) และ Quick
+  หา cloudflared เองตอนกด Enable: path ที่เคยเซฟไว้ (ถ้ายังมีไฟล์อยู่) → ไฟล์ข้าง credentials → PATH → `DATA_HOME/bin` →
+  ดาวน์โหลดตัว official เข้า `DATA_HOME/bin` (#710 เดิมทำให้แค่ Quick) · dev ignore `bin/cloudflared*` ที่ดาวน์โหลดมา
+
 ## [v2.1.33] - 2026-09-24
 
 รอบนี้มาจาก **system review ทั้งระบบ** (2026-09-22/23): 26 ทีมอ่านโค้ดทุก subsystem (170k LOC) ได้ 335 ข้อ →

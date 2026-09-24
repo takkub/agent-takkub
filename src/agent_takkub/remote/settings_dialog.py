@@ -126,10 +126,8 @@ def derive_hostname(credentials_json: str) -> str | None:
 def derive_cloudflared_bin(credentials_json: str) -> str | None:
     """Best-effort: look for a cloudflared executable sitting next to the
     user's credentials file — a common setup is a tunnel repo folder
-    holding both — so the field can be prefilled when cloudflared isn't on
-    PATH. Returns None when nothing is found (user must Browse manually,
-    e.g. for quick-tunnel mode where there's no credentials file to look
-    beside)."""
+    holding both — so Enable uses it instead of downloading another copy
+    when cloudflared isn't on PATH. Returns None when nothing is found."""
     if not credentials_json:
         return None
     folder = Path(credentials_json).parent
@@ -319,14 +317,9 @@ class RemoteSettingsDialog(cockpit_theme.CockpitDialog):
         self._quick_note.setStyleSheet(f"color:{cockpit_theme.TEXT_MUTED};")
         layout.addWidget(self._quick_note)
 
-        self._bin_row = QHBoxLayout()
-        self._cloudflared_bin_edit = QLineEdit(current.tunnel.cloudflared_bin)
-        self._cloudflared_bin_edit.setPlaceholderText("blank = auto-detect (PATH or Browse…)")
-        self._bin_browse_btn = QPushButton("Browse…")
-        self._bin_browse_btn.clicked.connect(self._on_browse_cloudflared_bin)
-        self._bin_row.addWidget(self._cloudflared_bin_edit, 1)
-        self._bin_row.addWidget(self._bin_browse_btn, 0)
-        self._form.addRow("cloudflared executable:", self._bin_row)
+        # No cloudflared path field: both Cloudflare modes find the binary
+        # themselves at Enable (`_ensure_cloudflared`) and download the
+        # official release into DATA_HOME/bin when there is none (#710).
 
         # ── ngrok provider fields ─────────────────────────────────────────
         self._ngrok_token_edit = QLineEdit()
@@ -512,7 +505,6 @@ class RemoteSettingsDialog(cockpit_theme.CockpitDialog):
         self._form.setRowVisible(self._cred_row, is_cloudflare and is_named)
         self._form.setRowVisible(self._public_url_edit, is_cloudflare and is_named)
         self._quick_note.setVisible(is_cloudflare and not is_named)
-        self._form.setRowVisible(self._bin_row, is_cloudflare)
 
         is_ngrok = not is_cloudflare
         is_fixed = self._ngrok_fixed.isChecked()
@@ -547,8 +539,6 @@ class RemoteSettingsDialog(cockpit_theme.CockpitDialog):
             self._tunnel_quick,
             self._browse_btn,
             self._public_url_edit,
-            self._cloudflared_bin_edit,
-            self._bin_browse_btn,
             self._ngrok_token_edit,
             self._ngrok_random,
             self._ngrok_fixed,
@@ -600,19 +590,10 @@ class RemoteSettingsDialog(cockpit_theme.CockpitDialog):
             hostname = derive_hostname(path)
             if hostname:
                 self._public_url_edit.setText(f"https://{hostname}")
-        if not self._cloudflared_bin_edit.text().strip():
-            cloudflared_bin = derive_cloudflared_bin(path)
-            if cloudflared_bin:
-                self._cloudflared_bin_edit.setText(cloudflared_bin)
-
-    def _on_browse_cloudflared_bin(self) -> None:
-        path, _ = QFileDialog.getOpenFileName(self, "Select cloudflared executable")
-        if path:
-            self._cloudflared_bin_edit.setText(path)
 
     def _on_browse_ngrok_bin(self) -> None:
-        # No filter, mirroring `_on_browse_cloudflared_bin` — a Mac ngrok
-        # binary has no `.exe` extension a filter could match on.
+        # No filter — a Mac ngrok binary has no `.exe` extension a filter
+        # could match on.
         path, _ = QFileDialog.getOpenFileName(self, "Select ngrok executable")
         if path:
             self._ngrok_bin_edit.setText(path)
@@ -706,19 +687,6 @@ class RemoteSettingsDialog(cockpit_theme.CockpitDialog):
         tunnel_type = "cloudflared" if is_named else "quick"
         credentials_json = self._cred_edit.text().strip()
         public_url = self._public_url_edit.text().strip()
-        cloudflared_bin = self._cloudflared_bin_edit.text().strip()
-
-        if not is_named:
-            # #710: Quick tunnel's whole point is "no setup" — a machine with
-            # no cloudflared anywhere gets the official binary fetched into
-            # DATA_HOME/bin here, instead of failing at Enable with
-            # "the tunnel couldn't start" and a manual install chase.
-            resolved = self._ensure_cloudflared_for_quick(cloudflared_bin)
-            if resolved is None:
-                return None
-            if resolved != cloudflared_bin:
-                cloudflared_bin = resolved
-                self._cloudflared_bin_edit.setText(resolved)
 
         if is_named and not credentials_json:
             QMessageBox.warning(
@@ -732,6 +700,16 @@ class RemoteSettingsDialog(cockpit_theme.CockpitDialog):
                 "Please enter the tunnel's Public URL (e.g. https://your-domain.com).",
             )
             return None
+
+        # #710: neither mode asks for a cloudflared path — a machine with no
+        # cloudflared anywhere gets the official binary fetched into
+        # DATA_HOME/bin here, instead of failing at Enable with "the tunnel
+        # couldn't start" and a manual install chase.
+        cloudflared_bin = self._ensure_cloudflared(
+            self._preferred_cloudflared_bin(credentials_json if is_named else "")
+        )
+        if cloudflared_bin is None:
+            return None
         return (
             tunnel_type,
             credentials_json if is_named else "",
@@ -742,8 +720,18 @@ class RemoteSettingsDialog(cockpit_theme.CockpitDialog):
             "",
         )
 
-    def _ensure_cloudflared_for_quick(self, explicit: str) -> str | None:
-        """#710: the cloudflared path Quick tunnel will run, downloading the
+    def _preferred_cloudflared_bin(self, credentials_json: str) -> str:
+        """A cloudflared the user already has that `resolve_cloudflared`
+        would not find on its own: the path saved by an earlier Enable (kept
+        only while it still exists — there is no field left to fix a stale
+        one), else a binary sitting next to the named-tunnel credentials."""
+        saved = self._current.tunnel.cloudflared_bin
+        if saved and Path(saved).is_file():
+            return saved
+        return derive_cloudflared_bin(credentials_json) or ""
+
+    def _ensure_cloudflared(self, explicit: str) -> str | None:
+        """#710: the cloudflared path the tunnel will run, downloading the
         official release into DATA_HOME/bin when nothing is installed.
         Returns None (after telling the user) when it cannot be provided.
         The download runs on a plain worker thread and this dialog polls it
@@ -763,7 +751,7 @@ class RemoteSettingsDialog(cockpit_theme.CockpitDialog):
             return found
 
         progress = QProgressDialog("Downloading cloudflared…", None, 0, 100, self)
-        progress.setWindowTitle("Quick tunnel setup")
+        progress.setWindowTitle("cloudflared setup")
         progress.setMinimumDuration(0)
         progress.setValue(0)
         state: dict = {"done": False, "path": None, "error": None, "pct": 0}
@@ -801,10 +789,10 @@ class RemoteSettingsDialog(cockpit_theme.CockpitDialog):
             QMessageBox.warning(
                 self,
                 "cloudflared not available",
-                "Quick tunnel needs the cloudflared binary and the cockpit could not "
-                f"download it ({state['error'] or 'unknown error'}). Install it "
-                "(winget install Cloudflare.cloudflared / brew install cloudflared) or "
-                "Browse to the executable above, then try again.",
+                "The Cloudflare tunnel needs the cloudflared binary and the cockpit could "
+                f"not download it ({state['error'] or 'unknown error'}). Install it "
+                "(winget install Cloudflare.cloudflared / brew install cloudflared) "
+                "so it is on PATH, then try again.",
             )
             return None
         return str(state["path"])

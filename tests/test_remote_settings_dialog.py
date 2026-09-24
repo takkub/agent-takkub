@@ -427,6 +427,69 @@ class TestDialogEnableValidation:
 
         assert warnings == []
 
+    def test_dialog_has_no_cloudflared_path_field(self):
+        dlg = self._dlg()
+        assert not hasattr(dlg, "_cloudflared_bin_edit")
+        assert not hasattr(dlg, "_bin_row")
+
+    def test_named_mode_downloads_cloudflared_when_none_found(self, monkeypatch, tmp_path):
+        """Named (domain) mode resolves cloudflared the same way Quick does —
+        nothing on PATH/DATA_HOME means download, and the result is saved."""
+        from agent_takkub.remote import cloudflared_install
+
+        creds = tmp_path / "creds.json"
+        creds.write_text("{}", encoding="utf-8")
+        downloaded = str(tmp_path / "bin" / "cloudflared.exe")
+        calls = []
+
+        def _fake_resolve(explicit="", *, download=False, progress=None):
+            calls.append((explicit, download))
+            return downloaded if download else None
+
+        monkeypatch.setattr(cloudflared_install, "resolve_cloudflared", _fake_resolve)
+        on_apply = MagicMock(return_value=(True, "", "https://x/#tok"))
+        dlg = self._dlg(on_apply)
+        dlg._cred_edit.setText(str(creds))
+        dlg._public_url_edit.setText("https://tunnel.example.com")
+        dlg._password_edit.setText("hunter22")
+        dlg._on_toggle()
+
+        assert calls == [("", False), ("", True)]
+        config, _enable = on_apply.call_args[0]
+        assert config.tunnel.type == "cloudflared"
+        assert config.tunnel.cloudflared_bin == downloaded
+
+    def test_saved_cloudflared_path_is_reused_while_it_exists(self, monkeypatch, tmp_path):
+        from agent_takkub.remote import cloudflared_install
+
+        saved = tmp_path / "cloudflared.exe"
+        saved.write_text("", encoding="utf-8")
+        seen = []
+        monkeypatch.setattr(
+            cloudflared_install,
+            "resolve_cloudflared",
+            lambda explicit="", **kw: seen.append(explicit) or explicit or None,
+        )
+        on_apply = MagicMock(return_value=(True, "", ""))
+        dlg = self._dlg(on_apply, tunnel=TunnelConfig(type="quick", cloudflared_bin=str(saved)))
+        dlg._password_edit.setText("hunter22")
+        dlg._on_toggle()
+        assert seen == [str(saved)]
+        assert on_apply.call_args[0][0].tunnel.cloudflared_bin == str(saved)
+
+        saved.unlink()
+        seen.clear()
+        dlg2 = self._dlg(on_apply, tunnel=TunnelConfig(type="quick", cloudflared_bin=str(saved)))
+        dlg2._password_edit.setText("hunter22")
+        monkeypatch.setattr(sd.QMessageBox, "warning", lambda *a, **kw: None)
+        monkeypatch.setattr(
+            cloudflared_install,
+            "resolve_cloudflared",
+            lambda explicit="", **kw: seen.append(explicit) or "/on/path/cloudflared",
+        )
+        dlg2._on_toggle()
+        assert seen == [""]  # stale saved path dropped, auto-resolve instead
+
 
 class TestDialogPairingReuse:
     """The identity survives an idle auto-suspend (#252), but a user-clicked
@@ -677,11 +740,9 @@ class TestProviderToggle:
         )
         dlg._provider_ngrok.setChecked(True)
         assert dlg._form.isRowVisible(dlg._ngrok_token_edit) is True
-        assert dlg._form.isRowVisible(dlg._bin_row) is False
         assert dlg._form.isRowVisible(dlg._ngrok_bin_row) is True
         dlg._provider_cloudflare.setChecked(True)
         assert dlg._form.isRowVisible(dlg._ngrok_token_edit) is False
-        assert dlg._form.isRowVisible(dlg._bin_row) is True
         assert dlg._form.isRowVisible(dlg._ngrok_bin_row) is False
 
     def test_ngrok_bin_prefilled_from_current_config(self):
