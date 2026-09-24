@@ -517,6 +517,64 @@ def resolve_pane_session(
     return None
 
 
+def provider_session_id_for_cwd(
+    provider: str,
+    cwd: str | Path,
+    *,
+    session_uuid: str | None = None,
+    not_before: float = 0.0,
+) -> str | None:
+    """Resolve the provider-NATIVE session id for `cwd`'s session, for
+    close-time resume preservation (#723).
+
+    claude's session uuid resumes as-is (`--resume <uuid>`), but every other
+    resume-capable provider mints its own id at boot, which the cockpit never
+    sees at spawn:
+    - codex: the `id`/`session_id` recorded in the newest rollout file's
+      `session_meta` (resumed via `codex resume <id>`);
+    - gemini (agy): the `conversations/<id>.db` stem of the newest antigravity
+      transcript (resumed via `agy --conversation <id>`);
+    - opencode: the `session.id` from `opencode.db` (resumed via
+      `opencode --session <id>`).
+
+    Returns None for providers that can't resume (kimi/cursor) or when no
+    session is resolvable yet. Best-effort: resolution errors degrade to None,
+    never raise into the closing pane's signal path.
+    """
+    try:
+        cwd = str(cwd)
+        if provider == "claude":
+            return session_uuid or None
+
+        if provider == "codex":
+            from .codex_helper import read_codex_session_meta
+
+            cand = resolve_pane_session(
+                "codex", cwd, session_uuid=session_uuid, not_before=not_before
+            )
+            if cand is None:
+                return None
+            meta = read_codex_session_meta(cand)
+            return str(meta.get("id") or meta.get("session_id") or "").strip() or None
+
+        if provider == "gemini":
+            if session_uuid:
+                return session_uuid
+            from .gemini_helper import find_antigravity_sessions
+
+            found = find_antigravity_sessions(cwd, limit=1)
+            return str(found[0][0]) if found else None
+
+        if provider == "opencode":
+            from .opencode_helper import resolve_opencode_session
+
+            resolved = resolve_opencode_session(cwd, session_uuid, not_before)
+            return str(resolved[1]) if resolved else None
+    except Exception:
+        return None
+    return None
+
+
 def read_pane_usage(provider: str, cand: object) -> dict | None:
     """Read the unified usage dict at an already-resolved `cand` (from
     `resolve_pane_session`). Returns None only when `cand` itself is falsy —

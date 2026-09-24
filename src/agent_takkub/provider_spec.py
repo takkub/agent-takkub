@@ -1361,6 +1361,9 @@ opencode_spec = ProviderSpec(
     input_swallow_recovery=True,
     supports_mirror=False,
     supports_resume=True,
+    # auto-resume via the generic spawn branch (#723): `opencode --session <id>`
+    # (session id from opencode.db, see opencode_helper.resolve_opencode_session).
+    session_resume_flag="--session",
     supports_slash_commands=False,
     supports_hooks=False,
     model_flag="--model",  # `-m provider/model` — per-role model selection hook
