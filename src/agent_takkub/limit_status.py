@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import dataclasses
+import functools
 import json
 import logging
 import random
@@ -387,11 +388,18 @@ def fetch_usage(config_dir: Path | None = None) -> UsageData | None:
     return None
 
 
-def _resolve_config_dir(config_dir: Path | None) -> Path:
-    """Resolve a config_dir to an absolute canonical Path for use as a dict key."""
-    if config_dir is None:
+@functools.lru_cache(maxsize=128)
+def _resolve_config_dir_cached(config_dir_str: str | None) -> Path:
+    if config_dir_str is None:
         return (Path.home() / ".claude").resolve()
-    return Path(config_dir).resolve()
+    return Path(config_dir_str).resolve()
+
+
+def _resolve_config_dir(config_dir: Path | str | None) -> Path:
+    """Resolve a config_dir to an absolute canonical Path for use as a dict key.
+    Cached with LRU cache to avoid repeated Path.resolve() disk stalls on Qt main thread."""
+    key = str(config_dir) if config_dir is not None else None
+    return _resolve_config_dir_cached(key)
 
 
 # ── cross-process shared fetch state ─────────────────────────────────────────

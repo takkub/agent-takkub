@@ -71,6 +71,7 @@ import pathlib
 import re
 import shutil
 import subprocess
+from pathlib import Path
 
 from ._win_console import SUBPROCESS_NO_WINDOW
 
@@ -158,15 +159,50 @@ class McpResolutionError(RuntimeError):
     """
 
 
+_codex_mcp_names_cache: dict[tuple, list[str]] = {}
+
+
+def invalidate_codex_mcp_names_cache() -> None:
+    """Clear cached codex resolved MCP server names."""
+    _codex_mcp_names_cache.clear()
+
+
+def _get_codex_config_mtime(env: dict[str, str], cwd: str) -> tuple[float | None, float | None]:
+    global_cfg = env.get("CODEX_HOME")
+    if global_cfg:
+        g_path = Path(global_cfg) / "config.toml"
+    else:
+        g_path = Path.home() / ".codex" / "config.toml"
+    try:
+        g_mtime = g_path.stat().st_mtime
+    except OSError:
+        g_mtime = None
+
+    l_path = Path(cwd) / ".codex" / "config.toml"
+    try:
+        l_mtime = l_path.stat().st_mtime
+    except OSError:
+        l_mtime = None
+
+    return (g_mtime, l_mtime)
+
+
 def _codex_resolved_mcp_names(provider_bin: str, cwd: str, env: dict[str, str]) -> list[str]:
     """Ask Codex for config-defined MCP names without loading plugin MCPs.
 
-    Runs once per codex-family spawn, uncached: measured ~180-225ms
-    across 3 local runs against a real `codex-cli` binary (2026-08-05),
-    negligible next to the rest of the spawn path (PTY/process launch).
-    The 5s timeout is a safety ceiling, not the expected case — revisit
-    session-level caching only if that assumption stops holding.
+    Cached per binary and config mtime so repeated spawns do not run subprocess.run
+    on the Qt main thread.
     """
+    resolved = shutil.which(provider_bin) or provider_bin
+    try:
+        bin_mtime = os.stat(resolved).st_mtime
+    except OSError:
+        bin_mtime = None
+    g_mtime, l_mtime = _get_codex_config_mtime(env, cwd)
+    cache_key = (provider_bin, bin_mtime, g_mtime, l_mtime, cwd)
+    if cache_key in _codex_mcp_names_cache:
+        return list(_codex_mcp_names_cache[cache_key])
+
     try:
         result = subprocess.run(
             [provider_bin, "-c", "features.plugins=false", "mcp", "list", "--json"],
@@ -188,6 +224,7 @@ def _codex_resolved_mcp_names(provider_bin: str, cwd: str, env: dict[str, str]) 
     names = [server.get("name") for server in servers if isinstance(server, dict)]
     if not all(isinstance(name, str) and _TOML_BARE_KEY_RE.fullmatch(name) for name in names):
         raise McpResolutionError("Codex MCP list contained an unsupported server name")
+    _codex_mcp_names_cache[cache_key] = list(names)
     return names
 
 

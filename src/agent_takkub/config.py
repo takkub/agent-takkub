@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import glob
 import json
 import logging
@@ -626,6 +627,36 @@ class UnreadableProjects(dict):
     in-place mutation those writers do because it is the object's type."""
 
 
+_PARSE_FAILED = object()
+
+
+def _parse_v2_project_registry(text: str) -> dict | object:
+    try:
+        registry = json.loads(text)
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        _log.warning("could not read V2 project registry (%r) — falling back to projects.json", exc)
+        return _PARSE_FAILED
+    if isinstance(registry, dict) and isinstance(registry.get("data"), dict):
+        return registry["data"]
+    if registry is not None:
+        _log.warning(
+            "V2 project registry has no usable 'data' object — falling back to projects.json"
+        )
+    return _PARSE_FAILED
+
+
+def _parse_v1_projects(text: str) -> dict | object:
+    try:
+        data = json.loads(text)
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        _log.warning("could not read projects.json (%r) — falling back to empty project list", exc)
+        return _PARSE_FAILED
+    if not isinstance(data, dict):
+        _log.warning("projects.json root is not an object — falling back to empty project list")
+        return _PARSE_FAILED
+    return data
+
+
 def load_projects() -> dict:
     """projects.json — reads the promoted V2 project registry when it
     exists (post `core.migration.steps_v1.ProjectMigrationStep` +
@@ -635,41 +666,29 @@ def load_projects() -> dict:
     checkout, where the boot migration ladder never runs
     (`auto_migrate_boot.is_dev_checkout`).
 
+    Stat-validated cache via cached_read (#658). Returned dict is deepcopied
+    so in-place mutations by callers do not corrupt the cache.
+
     A store that exists but cannot be read is returned as
     :class:`UnreadableProjects` (same shape, refused by writers) — a read
     failure must never be indistinguishable from an empty project list."""
     empty = {"active": None, "projects": {}}
     registry_path = _v2_project_registry_path()
     read_failed = False
-    if registry_path.exists():
-        try:
-            registry = json.loads(registry_path.read_text(encoding="utf-8"))
-        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
-            _log.warning(
-                "could not read V2 project registry (%r) — falling back to projects.json", exc
-            )
-            registry = None
-            read_failed = True
-        if isinstance(registry, dict) and isinstance(registry.get("data"), dict):
-            return registry["data"]
-        if registry is not None:
-            _log.warning(
-                "V2 project registry has no usable 'data' object — falling back to projects.json"
-            )
-            read_failed = True
-    if not PROJECTS_JSON.exists():
+
+    v2_res = cached_read.read_cached(registry_path, _parse_v2_project_registry, missing=None)
+    if v2_res is not None:
+        if v2_res is not _PARSE_FAILED and isinstance(v2_res, dict):
+            return copy.deepcopy(v2_res)
+        read_failed = True
+
+    v1_res = cached_read.read_cached(PROJECTS_JSON, _parse_v1_projects, missing=None)
+    if v1_res is None:
         return UnreadableProjects(empty) if read_failed else empty
-    try:
-        data = json.loads(PROJECTS_JSON.read_text(encoding="utf-8"))
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
-        _log.warning("could not read projects.json (%r) — falling back to empty project list", exc)
+    if v1_res is _PARSE_FAILED:
         return UnreadableProjects(empty)
-    if not isinstance(data, dict):
-        _log.warning("projects.json root is not an object — falling back to empty project list")
-        return UnreadableProjects(empty)
-    # The registry is the authority once it exists; V1 data read past a
-    # failed registry read is good enough to display but not to write back.
-    return UnreadableProjects(data) if read_failed else data
+    out = copy.deepcopy(v1_res) if isinstance(v1_res, dict) else empty
+    return UnreadableProjects(out) if read_failed else out
 
 
 def save_projects_json(data: dict) -> bool:
@@ -1210,34 +1229,27 @@ def check_cockpit_port_alive(port: int, timeout: float = 0.5) -> tuple[bool, dic
     Connects to 127.0.0.1:<port> and probes with 'instance-identity' and/or 'ping'.
     Returns (True, info_dict) if an active agent-takkub cockpit responded,
     (False, None) if the port is closed, unresponsive, or not an agent-takkub server.
-    Stdlib-only (pure-leaf safe).
+    Stdlib-only (pure-leaf safe). Strictly bounds total socket wait time to `timeout`
+    (default 500ms) to avoid false-negative detection under machine load.
     """
     if not isinstance(port, int) or not (1 <= port <= 65535):
         return False, None
     import socket
 
+    deadline = time.monotonic() + timeout
     try:
-        with socket.create_connection(("127.0.0.1", port), timeout=timeout) as s:
-            s.settimeout(timeout)
+        conn_timeout = max(0.01, deadline - time.monotonic())
+        with socket.create_connection(("127.0.0.1", port), timeout=conn_timeout) as s:
+            rem = max(0.01, deadline - time.monotonic())
+            s.settimeout(rem)
             # Try instance-identity first (supported across all takkub cockpit versions)
             s.sendall(b'{"cmd": "instance-identity"}\n')
             buf = b""
             while b"\n" not in buf and len(buf) < 4096:
-                chunk = s.recv(1024)
-                if not chunk:
-                    break
-                buf += chunk
-            if buf:
-                try:
-                    resp = json.loads(buf.decode("utf-8"))
-                    if resp.get("ok"):
-                        return True, resp
-                except Exception:
-                    pass
-            # Fallback to ping
-            s.sendall(b'{"cmd": "ping"}\n')
-            buf = b""
-            while b"\n" not in buf and len(buf) < 4096:
+                rem = max(0.005, deadline - time.monotonic())
+                if time.monotonic() >= deadline:
+                    return False, None
+                s.settimeout(rem)
                 chunk = s.recv(1024)
                 if not chunk:
                     break
@@ -1249,6 +1261,26 @@ def check_cockpit_port_alive(port: int, timeout: float = 0.5) -> tuple[bool, dic
                         return True, resp
                 except Exception:
                     pass
+            # Fallback to ping ONLY if we still have time budget
+            if time.monotonic() < deadline:
+                s.sendall(b'{"cmd": "ping"}\n')
+                buf = b""
+                while b"\n" not in buf and len(buf) < 4096:
+                    rem = max(0.005, deadline - time.monotonic())
+                    if time.monotonic() >= deadline:
+                        return False, None
+                    s.settimeout(rem)
+                    chunk = s.recv(1024)
+                    if not chunk:
+                        break
+                    buf += chunk
+                if buf:
+                    try:
+                        resp = json.loads(buf.decode("utf-8"))
+                        if resp.get("ok") or resp.get("msg", "").startswith("unknown cmd:"):
+                            return True, resp
+                    except Exception:
+                        pass
     except Exception:
         pass
     return False, None

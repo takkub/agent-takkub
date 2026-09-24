@@ -5914,37 +5914,32 @@ class Orchestrator(
         procs = []
         for child in children:
             try:
-                status = child.status()
+                with child.oneshot():
+                    status = child.status()
+                    if sys.platform == "win32":
+                        # No zombie state on Windows — a PID enumerated a moment ago
+                        # can still have exited by now (the job-object teardown this
+                        # warning precedes races against the child's own exit), so
+                        # recheck liveness directly rather than trusting the status
+                        # string alone.
+                        if not child.is_running():
+                            continue
+                    elif status == psutil.STATUS_ZOMBIE:
+                        # POSIX: exited but not yet reaped by its own parent — the
+                        # exact #412 shape (a finished `vite build`). Still enumerable
+                        # by name, but not "still running" by any meaningful sense.
+                        continue
+                    child_name = child.name()
+                    if normalize_process_name(child_name) in scaffolding:
+                        continue
+                    if is_mcp_helper_process(child):
+                        continue
+                    procs.append(child)
             except Exception:
                 # Vanished between the children() snapshot and this check —
                 # gone is the opposite of "still running", never a reason to
                 # warn.
                 continue
-            if sys.platform == "win32":
-                # No zombie state on Windows — a PID enumerated a moment ago
-                # can still have exited by now (the job-object teardown this
-                # warning precedes races against the child's own exit), so
-                # recheck liveness directly rather than trusting the status
-                # string alone.
-                try:
-                    if not child.is_running():
-                        continue
-                except Exception:
-                    continue
-            elif status == psutil.STATUS_ZOMBIE:
-                # POSIX: exited but not yet reaped by its own parent — the
-                # exact #412 shape (a finished `vite build`). Still enumerable
-                # by name, but not "still running" by any meaningful sense.
-                continue
-            try:
-                child_name = child.name()
-            except Exception:
-                continue
-            if normalize_process_name(child_name) in scaffolding:
-                continue
-            if is_mcp_helper_process(child):
-                continue
-            procs.append(child)
         return procs
 
     def _live_non_scaffolding_children(

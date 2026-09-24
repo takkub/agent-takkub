@@ -430,6 +430,21 @@ class _AbundantVM:
 
 
 @pytest.fixture(autouse=True)
+def _clear_cli_path_caches():
+    gmod = _maybe_module("agent_takkub.graft_store", force=False)
+    if gmod is not None and hasattr(gmod, "invalidate_graft_cli_cache"):
+        gmod.invalidate_graft_cli_cache()
+    hmod = _maybe_module("agent_takkub.gemini_helper", force=False)
+    if hmod is not None and hasattr(hmod, "invalidate_agy_executable_cache"):
+        hmod.invalidate_agy_executable_cache()
+    yield
+    if gmod is not None and hasattr(gmod, "invalidate_graft_cli_cache"):
+        gmod.invalidate_graft_cli_cache()
+    if hmod is not None and hasattr(hmod, "invalidate_agy_executable_cache"):
+        hmod.invalidate_agy_executable_cache()
+
+
+@pytest.fixture(autouse=True)
 def _isolate_runtime(monkeypatch: pytest.MonkeyPatch, tmp_path):
     cfg = _maybe_module("agent_takkub.config", force=True)
     # Most orchestration unit tests intentionally assert the legacy

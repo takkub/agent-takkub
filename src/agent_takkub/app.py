@@ -1133,6 +1133,39 @@ def main(argv: list[str] | None = None) -> int:
     _load_custom_roles()
     _set_macos_app_name("agent-takkub")
 
+    # Check effective port file before constructing QApplication so any socket
+    # probe runs outside the Qt main thread event loop. If dead, remove the
+    # stale port file so MainWindow._boot -> cli_server.listen -> write_port
+    # doesn't repeat the socket probe on the Qt main thread.
+    if not _should_allow_multi():
+        _effective_pf = config._effective_port_file_for_app()
+        if _effective_pf.exists():
+            try:
+                _ep = int(_effective_pf.read_text(encoding="utf-8").strip())
+            except (ValueError, OSError):
+                _ep = None
+            if _ep is not None:
+                _alive, _info = config.check_cockpit_port_alive(_ep, timeout=0.5)
+                if _alive:
+                    _pid_str = f" (pid {_info.get('pid')})" if _info and _info.get("pid") else ""
+                    _boot_log(
+                        f"[single-instance] active cockpit already running on port {_ep}{_pid_str} "
+                        f"for DATA_HOME={config.DATA_HOME} — refusing second instance"
+                    )
+                    try:
+                        if sys.__stderr__ is not None:
+                            sys.__stderr__.write(
+                                f"agent-takkub already running on port {_ep}{_pid_str}\n"
+                            )
+                    except Exception:
+                        pass
+                    return 1
+                else:
+                    try:
+                        _effective_pf.unlink(missing_ok=True)
+                    except OSError:
+                        pass
+
     app = QApplication(argv or sys.argv)
     app.setApplicationName("agent-takkub")
     _warn_if_data_home_unwritable()

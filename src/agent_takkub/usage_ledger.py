@@ -265,31 +265,40 @@ def _month_of(ts_iso: str) -> str:
 # ── low-level jsonl I/O ─────────────────────────────────────────────────────
 
 
+def _parse_jsonl_text(text: str) -> list[dict]:
+    out: list[dict] = []
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            row = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(row, dict):
+            out.append(row)
+    return out
+
+
 def _read_jsonl(path: Path) -> list[dict]:
     if not path.is_file():
         return []
-    out: list[dict] = []
+    from .cached_read import read_cached
+
     try:
-        with path.open("r", encoding="utf-8", errors="replace") as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    row = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                if isinstance(row, dict):
-                    out.append(row)
+        data = read_cached(path, _parse_jsonl_text, missing=[])
+        return [dict(d) for d in data] if isinstance(data, list) else []
     except OSError:
         return []
-    return out
 
 
 def _append_jsonl(path: Path, row: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as f:
         f.write(json.dumps(row, ensure_ascii=False) + "\n")
+    from .cached_read import invalidate
+
+    invalidate(path)
 
 
 def _last_jsonl_row(path: Path, *, chunk: int = 4096) -> dict | None:

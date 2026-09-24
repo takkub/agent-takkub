@@ -334,6 +334,16 @@ def iter_store_dirs() -> list[Path]:
         return []
 
 
+_GRAFT_CLI_CACHE: tuple[str | None, float] | None = None
+_GRAFT_CLI_TTL_S: float = 30.0
+
+
+def invalidate_graft_cli_cache() -> None:
+    """Drop the cached graft CLI path so the next call resolves again."""
+    global _GRAFT_CLI_CACHE
+    _GRAFT_CLI_CACHE = None
+
+
 def graft_cli_path() -> str | None:
     """Resolved path to the `graft` CLI, or `None` if not on PATH.
 
@@ -342,8 +352,15 @@ def graft_cli_path() -> str | None:
     from one probe instead of two copies drifting apart. `.cmd` first: on
     Windows PATHEXT would resolve the bare name anyway, and on macOS/Linux
     the `.cmd` probe simply misses and falls through to the bare name.
+    Cached for `_GRAFT_CLI_TTL_S` to avoid blocking Qt main thread with PATH scans.
     """
-    return shutil.which("graft.cmd") or shutil.which("graft")
+    global _GRAFT_CLI_CACHE
+    now = time.monotonic()
+    if _GRAFT_CLI_CACHE is not None and now - _GRAFT_CLI_CACHE[1] < _GRAFT_CLI_TTL_S:
+        return _GRAFT_CLI_CACHE[0]
+    res = shutil.which("graft.cmd") or shutil.which("graft")
+    _GRAFT_CLI_CACHE = (res, now)
+    return res
 
 
 _BUILD_MARKER_NAME = "built.json"

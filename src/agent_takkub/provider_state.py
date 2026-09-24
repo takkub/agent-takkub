@@ -135,15 +135,9 @@ def quota_path() -> Path:
     return _QUOTA_PATH
 
 
-def load_quota_resets() -> dict[str, float]:
-    """Return ``{provider: reset_at epoch}`` for providers currently
-    recorded as quota-hit. Missing file or corrupt JSON -> empty dict
-    (never blocks the reroute picker)."""
-    path = quota_path()
-    if not path.exists():
-        return {}
+def _parse_quota_resets(text: str) -> dict[str, float]:
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
+        data = json.loads(text)
     except (OSError, json.JSONDecodeError):
         return {}
     if not isinstance(data, dict):
@@ -157,12 +151,25 @@ def load_quota_resets() -> dict[str, float]:
     return out
 
 
+def load_quota_resets() -> dict[str, float]:
+    """Return ``{provider: reset_at epoch}`` for providers currently
+    recorded as quota-hit. Missing file or corrupt JSON -> empty dict
+    (never blocks the reroute picker). Stat-validated cache (#658)."""
+    from .cached_read import read_cached
+
+    data = read_cached(quota_path(), _parse_quota_resets, missing={})
+    return dict(data) if isinstance(data, dict) else {}
+
+
 def _save_quota_resets(state: dict[str, float]) -> None:
     path = quota_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(path.suffix + ".tmp")
     tmp.write_text(json.dumps(state, indent=2) + "\n", encoding="utf-8")
     tmp.replace(path)
+    from .cached_read import invalidate
+
+    invalidate(path)
 
 
 def set_quota_reset_at(provider: str, reset_at: float) -> None:
