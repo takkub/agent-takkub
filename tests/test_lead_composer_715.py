@@ -2,8 +2,8 @@
 
 Covers the parts that decide what reaches the Lead PTY: the message format
 (text + attachment paths), Enter/Shift+Enter, the paste+Enter write through
-`inputBytes`, the terminal lock, keypad bytes, the question card's
-validation, and the host that answers a question with picker keys.
+`inputBytes`, the terminal/input mode switch, the question card's validation,
+and the host that answers a question with picker keys.
 """
 
 from __future__ import annotations
@@ -18,7 +18,6 @@ from PyQt6.QtGui import QColor, QImage, QKeyEvent
 from PyQt6.QtWidgets import QApplication, QWidget
 
 import agent_takkub.agent_pane as agent_pane_mod
-from agent_takkub import lead_composer
 from agent_takkub.agent_pane import AgentPane
 from agent_takkub.lead_composer import LeadComposer, answers_valid, compose_message
 from agent_takkub.roles import LEAD, by_name
@@ -162,16 +161,6 @@ class TestComposerWidget:
         c.remove_attachment("a.png")
         assert c.attachments() == ["b.pdf"]
 
-    def test_keypad_emits_terminal_bytes(self, qapp, tmp_path) -> None:
-        c = LeadComposer(tmp_path)
-        got: list[bytes] = []
-        c.rawKeys.connect(got.append)
-        keys = dict(lead_composer.KEYPAD_KEYS)
-        for label in ("1", "↓", "Enter", "Esc"):
-            btn = next(b for b in c._keypad.findChildren(type(c._btn_send)) if b.text() == label)
-            btn.click()
-        assert got == [keys["1"], b"\x1b[B", b"\r", b"\x1b"]
-
     def test_question_card_replaces_editor_and_validates(self, qapp, tmp_path) -> None:
         c = LeadComposer(tmp_path)
         c.show()
@@ -246,11 +235,17 @@ class TestLeadPaneWiring:
     def test_unlock_toggle_and_relock_on_send(self, qapp) -> None:
         lead = AgentPane(LEAD)
         lead.model.session = SimpleNamespace(is_alive=True)
+        lead.composer.editor.setPlainText("x")
+        assert lead.composer.editor.isEnabled()
         lead.composer.set_terminal_unlocked(True)
         assert not lead._terminal.locked
-        lead.composer.editor.setPlainText("x")
+        assert lead.composer._btn_keys.isChecked()
+        assert not lead.composer.editor.isEnabled()
+        assert "โหมด CLI" in lead.composer.editor.placeholderText()
         lead.composer.submit()
         assert lead._terminal.locked
+        assert not lead.composer._btn_keys.isChecked()
+        assert lead.composer.editor.isEnabled()
 
 
 class TestQuestionHost:

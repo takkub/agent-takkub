@@ -370,10 +370,7 @@ class AgentPane(QFrame):
 
             self.composer = LeadComposer(RUNTIME_DIR, self)
             self.composer.textSubmitted.connect(self._send_composer_text)
-            self.composer.rawKeys.connect(lambda data: self.inputBytes.emit(self.role.name, data))
-            self.composer.terminalUnlockChanged.connect(
-                lambda on: self._terminal.set_input_locked(not on)
-            )
+            self.composer.terminalUnlockChanged.connect(self._set_lead_terminal_mode)
             self.composer.questionAnswered.connect(self.leadQuestionAnswered)
             self.composer.set_send_guard(self._composer_send_blocker)
             self._terminal.set_input_locked(True)
@@ -383,6 +380,15 @@ class AgentPane(QFrame):
             root.addSpacing(10)
             root.addWidget(self.composer)
             bg_pool.submit(lambda: prune_attachments(RUNTIME_DIR))
+
+    def _set_lead_terminal_mode(self, unlocked: bool) -> None:
+        """Switch the Lead between composer input and direct CLI input."""
+        self._terminal.set_input_locked(not unlocked)
+        if unlocked:
+            # TerminalWidget.setFocus() forwards focus to its WebEngine view.
+            self._terminal.setFocus()
+        else:
+            self.composer.editor.setFocus()
 
     def _move_locked_input_to_composer(self, data: str) -> None:
         """Move printable Lead-terminal input into the cockpit composer."""

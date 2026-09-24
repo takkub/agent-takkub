@@ -3,7 +3,7 @@
 Typing straight into a provider's TUI inherits every limit of that TUI —
 no real text editing, no file picker, no drag-and-drop, and a different
 set of quirks per CLI. The composer replaces it: the Lead terminal is
-locked (like every teammate pane) and this bar is the one way in.
+locked in input mode, with an explicit switch for direct CLI typing.
 
 - multi-line editor: Enter sends, Shift+Enter adds a line
 - attachments: 📎 file picker, drag-and-drop, or Ctrl+V an image — shown as
@@ -13,9 +13,8 @@ locked (like every teammate pane) and this bar is the one way in.
   provider-specific upload protocol is needed.
 - question card: when the Lead is sitting at a multiple-choice question the
   bar turns into radio/checkbox choices; answering sends the picker keys.
-- keypad: 1-9, arrows, Enter, Esc, Tab, Shift+Tab, Ctrl+C for any TUI menu the
-  card can't read — so a locked terminal never leaves the owner stuck.
-- "พิมพ์ใน terminal": temporary unlock as the last resort (re-locks on send).
+- keyboard mode switch: input mode keeps the terminal locked and CLI mode
+  unlocks it for direct typing.
 
 This module is UI only. It emits signals; `AgentPane` turns text into PTY
 writes and `MainWindow` supplies/answers question state.
@@ -48,24 +47,14 @@ from PyQt6.QtWidgets import (
 
 from . import cockpit_theme
 
-# Keypad: label → bytes a real keyboard would send to the TUI.
-KEYPAD_KEYS: tuple[tuple[str, bytes], ...] = (
-    *((str(n), str(n).encode()) for n in range(1, 10)),
-    ("↑", b"\x1b[A"),
-    ("↓", b"\x1b[B"),
-    ("←", b"\x1b[D"),
-    ("→", b"\x1b[C"),
-    ("Enter", b"\r"),
-    ("Esc", b"\x1b"),
-    ("Tab", b"\t"),
-    ("Shift+Tab", b"\x1b[Z"),
-    ("Ctrl+C", b"\x03"),
-)
-
 IMAGE_SUFFIXES = frozenset({".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"})
 _ATTACHMENT_KEEP_DAYS = 14
 _EDITOR_MIN_LINES = 2
 _EDITOR_MAX_LINES = 8
+_INPUT_PLACEHOLDER = "พิมพ์ถึง Lead…  (Enter ส่ง · Shift+Enter ขึ้นบรรทัด · ลากไฟล์/Ctrl+V รูป มาวางได้)"
+_CLI_PLACEHOLDER = "โหมด CLI — พิมพ์ใน terminal ได้เลย · กด ⌨ เพื่อกลับ"
+_INPUT_MODE_TOOLTIP = "โหมด input — terminal ล็อกอยู่ · กดเพื่อสลับไปพิมพ์ใน terminal"
+_CLI_MODE_TOOLTIP = "โหมด CLI — พิมพ์ใน terminal ได้ · กดเพื่อกลับโหมด input"
 
 
 def attachments_dir(runtime_dir: pathlib.Path, *, now: datetime | None = None) -> pathlib.Path:
@@ -288,7 +277,6 @@ class LeadComposer(QFrame):
     """The input bar. See module docstring."""
 
     textSubmitted = pyqtSignal(str)
-    rawKeys = pyqtSignal(bytes)
     terminalUnlockChanged = pyqtSignal(bool)
     questionAnswered = pyqtSignal(list)
 
@@ -324,9 +312,7 @@ class LeadComposer(QFrame):
         row.setSpacing(6)
         self.editor = ComposerEdit(self)
         self.editor.setObjectName("composerEdit")
-        self.editor.setPlaceholderText(
-            "พิมพ์ถึง Lead…  (Enter ส่ง · Shift+Enter ขึ้นบรรทัด · ลากไฟล์/Ctrl+V รูป มาวางได้)"
-        )
+        self.editor.setPlaceholderText(_INPUT_PLACEHOLDER)
         self.editor.setTabChangesFocus(True)
         self.editor.submitRequested.connect(self.submit)
         self.editor.filesDropped.connect(self.add_attachments)
@@ -340,35 +326,16 @@ class LeadComposer(QFrame):
         row.addWidget(self._btn_attach, 0, Qt.AlignmentFlag.AlignBottom)
         self._btn_keys = QToolButton()
         self._btn_keys.setText("⌨")
+        self._btn_keys.setObjectName("composerModeToggle")
         self._btn_keys.setCheckable(True)
-        self._btn_keys.setToolTip("แป้นกดสำรอง — ตอบเมนูของ provider (เลข/ลูกศร/Enter/Esc)")
-        self._btn_keys.toggled.connect(self._on_keys_toggled)
+        self._btn_keys.setToolTip(_INPUT_MODE_TOOLTIP)
+        self._btn_keys.toggled.connect(self._on_terminal_mode_toggled)
         row.addWidget(self._btn_keys, 0, Qt.AlignmentFlag.AlignBottom)
         self._btn_send = QPushButton("ส่ง ➤")
         self._btn_send.setObjectName("composerPrimary")
         self._btn_send.clicked.connect(self.submit)
         row.addWidget(self._btn_send, 0, Qt.AlignmentFlag.AlignBottom)
         root.addWidget(self._input_row)
-
-        self._keypad = QWidget(self)
-        kp = QHBoxLayout(self._keypad)
-        kp.setContentsMargins(0, 0, 0, 0)
-        kp.setSpacing(3)
-        for label, data in KEYPAD_KEYS:
-            b = QPushButton(label)
-            b.setObjectName("composerKey")
-            b.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-            b.clicked.connect(lambda _=False, d=data: self.rawKeys.emit(d))
-            kp.addWidget(b)
-        kp.addStretch(1)
-        self._btn_unlock = QPushButton("🔓 พิมพ์ใน terminal")
-        self._btn_unlock.setObjectName("composerKey")
-        self._btn_unlock.setCheckable(True)
-        self._btn_unlock.setToolTip("ปลด lock terminal ของ Lead ชั่วคราว — lock กลับเองเมื่อส่งจากแถบนี้")
-        self._btn_unlock.toggled.connect(self._on_unlock_toggled)
-        kp.addWidget(self._btn_unlock)
-        self._keypad.setVisible(False)
-        root.addWidget(self._keypad)
 
         self._status = QLabel("")
         self._status.setObjectName("composerStatus")
@@ -413,10 +380,7 @@ class LeadComposer(QFrame):
         return self.card.isVisible()
 
     def set_terminal_unlocked(self, unlocked: bool) -> None:
-        if self._btn_unlock.isChecked() != unlocked:
-            self._btn_unlock.setChecked(unlocked)  # emits via _on_unlock_toggled
-        if unlocked and not self._keypad.isVisible():
-            self._btn_keys.setChecked(True)
+        self._btn_keys.setChecked(bool(unlocked))
 
     def show_status(self, text: str) -> None:
         self._status.setText(text)
@@ -442,8 +406,8 @@ class LeadComposer(QFrame):
         self._attachments = []
         self._render_chips()
         self.show_status("")
-        if self._btn_unlock.isChecked():
-            self._btn_unlock.setChecked(False)
+        if self._btn_keys.isChecked():
+            self._btn_keys.setChecked(False)
 
     # ── internals ───────────────────────────────────────────────────────
     def _on_browse(self) -> None:
@@ -471,11 +435,13 @@ class LeadComposer(QFrame):
             self._chips.insertWidget(self._chips.count() - 1, chip)
         self._chips_row.setVisible(bool(self._attachments) and not self.card.isVisible())
 
-    def _on_keys_toggled(self, on: bool) -> None:
-        self._keypad.setVisible(on)
-
-    def _on_unlock_toggled(self, on: bool) -> None:
-        self._btn_unlock.setText("🔒 lock terminal กลับ" if on else "🔓 พิมพ์ใน terminal")
+    def _on_terminal_mode_toggled(self, on: bool) -> None:
+        input_enabled = not on
+        self.editor.setEnabled(input_enabled)
+        self._btn_attach.setEnabled(input_enabled)
+        self._btn_send.setEnabled(input_enabled)
+        self.editor.setPlaceholderText(_CLI_PLACEHOLDER if on else _INPUT_PLACEHOLDER)
+        self._btn_keys.setToolTip(_CLI_MODE_TOOLTIP if on else _INPUT_MODE_TOOLTIP)
         self.terminalUnlockChanged.emit(on)
 
     def _fit_editor(self) -> None:
@@ -508,6 +474,11 @@ class LeadComposer(QFrame):
                 font-weight: 600;
             }}
             QPushButton#composerPrimary:hover {{ background: {t.GOLD_GRAD_HOVER_TOP}; }}
+            QPushButton#composerPrimary:disabled {{
+                background: {t.NEUTRAL_CHIP_BG};
+                color: {t.TEXT_FAINT};
+                border: 1px solid {t.BORDER_CARD};
+            }}
             QPushButton#composerKey {{
                 background: {t.NEUTRAL_CHIP_BG};
                 color: {t.TEXT_SECONDARY};
@@ -551,10 +522,10 @@ class LeadComposer(QFrame):
                 padding: 4px 6px;
             }}
             QToolButton:hover {{ background: {t.HOVER_WEAK}; color: {t.TEXT_PRIMARY}; }}
-            QToolButton:checked {{
-                background: {t.GOLD_CHIP_BG};
-                color: {t.GOLD_CHIP_TEXT};
-                border-color: {t.GOLD_CHIP_BORDER};
+            QToolButton#composerModeToggle:checked {{
+                background: {t.ACCENT_GOLD};
+                color: {t.GOLD_TEXT_ON};
+                border-color: {t.ACCENT_GOLD};
             }}
             QFrame#composerChip QToolButton {{ border: none; padding: 0 2px; font-size: 11px; }}
             QFrame#composerChip QLabel {{ color: {t.GOLD_CHIP_TEXT}; background: transparent; }}

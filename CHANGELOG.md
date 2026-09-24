@@ -2,6 +2,15 @@
 
 All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses [SemVer](https://semver.org/).
 
+## [v2.1.36] - 2026-09-24
+
+### Changed (เปลี่ยน)
+
+- **แถบพิมพ์ของ Lead: ปุ่ม ⌨ เป็นสวิตช์โหมด input ↔ CLI (#715, user สั่งจาก live test)** — กด = ปลดล็อก terminal ของ Lead
+  แล้วย้าย focus ไปพิมพ์ใน CLI ได้ทันที (แถบพิมพ์จางลงบอกว่าอยู่โหมด CLI) · กดอีกครั้ง = ล็อกกลับ focus กลับแถบพิมพ์ ·
+  ถอดแถวแป้นกดสำรอง (1-9 ลูกศร Enter Esc Tab Shift+Tab Ctrl+C) และปุ่ม "🔓 พิมพ์ใน terminal" ออกทั้งสาย (`rawKeys`,
+  `KEYPAD_KEYS`) · ปุ่ม "ตอบใน terminal แทน" บนการ์ดคำถามพาเข้าโหมด CLI
+
 ## [v2.1.35] - 2026-09-24
 
 ### Changed (เปลี่ยน)
