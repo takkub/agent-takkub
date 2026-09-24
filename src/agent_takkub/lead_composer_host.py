@@ -30,28 +30,43 @@ from PyQt6.QtCore import QObject, QTimer, pyqtSignal
 from .orchestrator_text import _log_event
 
 # Providers whose `remote.notify` scanner implements `live_ask` today.
-_ASK_PROVIDERS = frozenset({"claude"})
+_ASK_PROVIDERS = frozenset({"claude", "gemini", "opencode"})
 _POLL_MS = 1500
 # After answering, the transcript still shows the question until the CLI
 # writes its tool result — don't redraw the same card in that window.
 _ANSWERED_HIDE_S = 8.0
 
 
-# #717: footer text of Claude's AskUserQuestion picker (question tabs and the
-# review screen). Picker keys typed at a plain prompt become a chat message,
-# so nothing is sent unless one of these is on the Lead's screen.
-_PICKER_SCREEN_MARKERS = ("Esc to cancel", "to navigate", "Enter to select")
+# #717: provider-specific text captured from each real picker. Picker keys
+# typed at a plain prompt become a chat message, so nothing is sent unless a
+# complete marker group is on the Lead's screen.
+_PICKER_SCREEN_MARKERS = {
+    "claude": (("Esc to cancel",), ("to navigate", "Enter to select")),
+    "opencode": (("enter submit", "esc dismiss"),),
+    "gemini": (
+        ("Question 1/", "enter Select", "esc Skip"),
+        ("Question 1/", "space Toggle", "enter Submit", "esc Skip"),
+    ),
+    "agy": (
+        ("Question 1/", "enter Select", "esc Skip"),
+        ("Question 1/", "space Toggle", "enter Submit", "esc Skip"),
+    ),
+}
 _PICKER_SCREEN_TAIL_LINES = 40
 
 
-def _picker_on_screen(pane) -> bool:
+def _picker_on_screen(pane, provider: str) -> bool:
     session = getattr(pane, "session", None)
     try:
         lines = [ln for ln in session.display_lines() if ln.strip()]
     except Exception:
         return False
     tail = "\n".join(lines[-_PICKER_SCREEN_TAIL_LINES:])
-    return any(marker in tail for marker in _PICKER_SCREEN_MARKERS)
+    folded = tail.casefold()
+    groups = _PICKER_SCREEN_MARKERS.get(provider, ())
+    if any(all(marker.casefold() in folded for marker in group) for group in groups):
+        return True
+    return False
 
 
 def _remote(name: str):
@@ -152,14 +167,17 @@ class LeadQuestionHost(QObject):
                 composer.set_question(None)
                 composer.show_status("คำถามนี้ถูกตอบไปแล้ว หรือ Lead ไปต่อแล้ว")
                 return
-            if not _picker_on_screen(pane):
+            provider = notify.lead_provider_name(self._orch, project)
+            if provider not in _ASK_PROVIDERS or not _picker_on_screen(pane, provider):
                 composer.set_question(None)
                 composer.show_status("ไม่เห็นเมนูคำถามบนจอ Lead แล้ว — ไม่ได้ส่งคำตอบ")
                 _log_event(
                     "lead_composer_answer_refused", project=project, reason="no_picker_on_screen"
                 )
                 return
-            keys = api._build_picker_key_sequence(state["questions"], answers)
+            keys = api._build_picker_key_sequence_for_provider(
+                provider, state["questions"], answers
+            )
         except Exception as exc:
             composer.show_status(f"ส่งคำตอบไม่ได้: {exc}")
             return

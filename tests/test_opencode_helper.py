@@ -176,6 +176,48 @@ class TestOpencodeSessionResolution:
         assert resolved_2[1] == "ses_2"
 
 
+class TestOpencodeQuestionRecords:
+    def test_reads_live_118_tool_record_and_terminal_update(self, tmp_path):
+        db_path = tmp_path / "opencode.db"
+        conn = _create_test_db(db_path)
+        running = {
+            "type": "tool",
+            "tool": "question",
+            "callID": "call_337",
+            "state": {
+                "status": "running",
+                "input": {
+                    "questions": [
+                        {
+                            "question": "ทดสอบการ์ด #715: เลือกสี",
+                            "options": [{"label": "Red"}, {"label": "Blue"}],
+                        }
+                    ]
+                },
+                "time": {"start": 1},
+            },
+        }
+        conn.execute(
+            "INSERT INTO part VALUES (?, ?, ?, ?, ?, ?)",
+            ("prt_q", "msg_a", "ses_q", 1, json.dumps(running), 1),
+        )
+        conn.commit()
+        records = opencode_helper.read_opencode_question_records(db_path, "ses_q")
+        assert records[0]["state"]["status"] == "running"
+        assert records[0]["state"]["input"]["questions"][0]["question"].endswith("เลือกสี")
+
+        running["state"].update({"status": "completed", "metadata": {"answers": [["Blue"]]}})
+        conn.execute(
+            "UPDATE part SET data = ?, time_updated = ? WHERE id = ?",
+            (json.dumps(running), 2, "prt_q"),
+        )
+        conn.commit()
+        conn.close()
+        records = opencode_helper.read_opencode_question_records(db_path, "ses_q")
+        assert records[0]["state"]["status"] == "completed"
+        assert records[0]["state"]["metadata"]["answers"] == [["Blue"]]
+
+
 class TestOpencodeMessageReading:
     def test_read_messages_formats_kinds_and_strips_prefix(self, tmp_path):
         db_path = tmp_path / "opencode.db"
@@ -716,3 +758,68 @@ class TestOpencodeLeadNotifierIntegration:
         lead_events = [e for e in broadcaster.events if e[0] == "lead" and e[2] == "myproj"]
         assert len(lead_events) == 1
         assert lead_events[0][1] == "Hello from OpenCode Lead!"
+
+    def test_running_question_is_live_and_terminal_update_closes_it(self, tmp_path, monkeypatch):
+        db_path = tmp_path / "opencode.db"
+        conn = _create_test_db(db_path)
+        project = str(tmp_path / "myproj")
+        conn.execute(
+            "INSERT INTO session VALUES (?, ?, ?, ?, ?)",
+            ("ses_q", project, "Question", 1000, 1000),
+        )
+        question = {
+            "type": "tool",
+            "tool": "question",
+            "state": {
+                "status": "running",
+                "input": {
+                    "questions": [
+                        {
+                            "question": "เลือกสี",
+                            "options": [{"label": "Red"}, {"label": "Blue"}],
+                        }
+                    ]
+                },
+                "time": {"start": 1100},
+            },
+        }
+        conn.execute(
+            "INSERT INTO part VALUES (?, ?, ?, ?, ?, ?)",
+            ("prt_q", "msg_q", "ses_q", 1100, json.dumps(question), 1100),
+        )
+        conn.commit()
+        monkeypatch.setenv("OPENCODE_DB_PATH", str(db_path))
+        monkeypatch.setattr("agent_takkub.config.lead_cwd", lambda _p: project)
+        orch = _FakeOrch("myproj", provider="opencode")
+        broadcaster = _FakeBroadcaster()
+        notifier = LeadNotifier(orch, broadcaster=broadcaster)
+        notifier._timer.stop()
+        try:
+            notifier._poll_all()
+            expected = {
+                "questions": [
+                    {
+                        "prompt": "เลือกสี",
+                        "options": [
+                            {"index": 0, "label": "Red"},
+                            {"index": 1, "label": "Blue"},
+                        ],
+                        "multiSelect": False,
+                    }
+                ]
+            }
+            assert ("blocked_on_picker", expected, "myproj") in broadcaster.events
+            assert notify_mod.current_ask_state(orch, "myproj") == expected
+
+            question["state"].update({"status": "completed", "metadata": {"answers": [["Blue"]]}})
+            conn.execute(
+                "UPDATE part SET data = ?, time_updated = 1200 WHERE id = 'prt_q'",
+                (json.dumps(question),),
+            )
+            conn.commit()
+            assert notify_mod.current_ask_state(orch, "myproj") is None
+            notifier._poll_all()
+            assert notifier._tails["myproj"].ask_fingerprint is None
+        finally:
+            conn.close()
+            notifier.stop()

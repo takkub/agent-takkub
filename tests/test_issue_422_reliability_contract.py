@@ -172,6 +172,19 @@ class TestCapabilityMatrix:
         codex = next(f for f in findings if f.name == "codex")
         assert "partial: " in codex.detail and "skills" in codex.detail
 
+    def test_lead_question_support_and_codex_gap_are_explicit(self) -> None:
+        for provider in ("claude", "gemini", "opencode"):
+            assert capability_state(provider, "lead_questions") == "supported"
+        assert capability_state("codex", "lead_questions") == "unsupported"
+        assert "Plan-mode-only" in (PROVIDER_REGISTRY["codex"].lead_question_gap or "")
+        assert capability_state("kimi", "lead_questions") == "unsupported"
+        assert "not been live-tested" in (PROVIDER_REGISTRY["kimi"].lead_question_gap or "")
+
+        from agent_takkub.doctor import check_provider_capabilities
+
+        codex = next(f for f in check_provider_capabilities() if f.name == "codex")
+        assert "lead_questions gap:" in codex.detail
+
 
 # ── item 4: takkub skills CLI ──────────────────────────────────────────────
 

@@ -11,6 +11,7 @@ import os
 import time
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import ClassVar
 
 import pytest
 from PyQt6.QtCore import QCoreApplication, QObject, pyqtSignal
@@ -610,9 +611,9 @@ class TestLeadMirrorDiagnosis:
 
     def test_no_scanner_is_provider_unsupported(self, config_dir):
         orch = _FakeOrch()
-        orch.set_lead("proj", None, provider="kimi")
+        orch.set_lead("proj", None, provider="unknown-cli")
         result = notify_mod.lead_mirror_diagnosis(orch, "proj")
-        assert result == {"code": "provider_unsupported", "provider": "kimi"}
+        assert result == {"code": "provider_unsupported", "provider": "unknown-cli"}
 
     def test_claude_without_session_uuid_is_no_session_uuid(self, config_dir):
         orch = _FakeOrch()
@@ -1090,12 +1091,155 @@ class TestCurrentAskState:
         orch.set_lead("proj", "uuid-1")
         assert notify_mod.current_ask_state(orch, "proj") is None
 
-    def test_non_claude_provider_is_none(self, qapp, tmp_path, config_dir):
-        # Only Claude has a live_ask scanner -- same #103 gap the fallback
-        # banner already documents.
+    def test_provider_without_a_live_question_is_none(self, qapp, tmp_path, config_dir):
         orch = _FakeOrch()
-        orch.set_lead("proj", "uuid-1", provider="gemini")
+        orch.set_lead("proj", "uuid-1", provider="codex")
         assert notify_mod.current_ask_state(orch, "proj") is None
+
+
+class TestProviderQuestionRecords:
+    """Schemas captured from live #715 picker records, with terminal states
+    pinning the expensive #717 stale-card boundary."""
+
+    EXPECTED: ClassVar[dict] = {
+        "questions": [
+            {
+                "prompt": "ทดสอบการ์ด #715: เลือกสี",
+                "options": [{"index": 0, "label": "Red"}, {"index": 1, "label": "Blue"}],
+                "multiSelect": False,
+            }
+        ]
+    }
+
+    def test_opencode_118_running_and_completed_records(self):
+        record = {
+            "type": "tool",
+            "tool": "question",
+            "callID": "call_337",
+            "state": {
+                "status": "running",
+                "input": {
+                    "questions": [
+                        {
+                            "question": "ทดสอบการ์ด #715: เลือกสี",
+                            "header": "การ์ด #715",
+                            "options": [
+                                {"label": "Red", "description": "เลือกสีแดง"},
+                                {"label": "Blue", "description": "เลือกสีน้ำเงิน"},
+                            ],
+                        }
+                    ]
+                },
+            },
+        }
+        assert notify_mod._opencode_ask_question_options(record) == self.EXPECTED
+        record["state"]["status"] = "completed"
+        record["state"]["metadata"] = {"answers": [["Blue"]]}
+        assert notify_mod._opencode_ask_question_options(record) is None
+        assert notify_mod._opencode_ask_closed(record) is True
+
+    def test_opencode_dismissed_record_closes_picker(self):
+        record = {
+            "type": "tool",
+            "tool": "question",
+            "state": {"status": "error", "error": "The user dismissed this question"},
+        }
+        assert notify_mod._opencode_ask_closed(record) is True
+
+    def test_agy_129_pending_and_skipped_statuses(self):
+        record = {
+            "type": "agy_question",
+            "status": 9,
+            "input": {
+                "questions": [
+                    {
+                        "is_multi_select": False,
+                        "options": ["Red", "Blue"],
+                        "question": "ทดสอบการ์ด #715: เลือกสี",
+                    }
+                ]
+            },
+            "step_index": 4,
+        }
+        assert notify_mod._agy_ask_question_options(record) == self.EXPECTED
+        record["status"] = 3
+        assert notify_mod._agy_ask_question_options(record) is None
+        assert notify_mod._agy_ask_closed(record) is True
+
+    def test_agy_129_protobuf_sqlite_record_and_terminal_update(self, tmp_path, monkeypatch):
+        import sqlite3
+
+        def proto_field(field: int, value: bytes) -> bytes:
+            size = len(value)
+            encoded = bytearray()
+            while size >= 0x80:
+                encoded.append((size & 0x7F) | 0x80)
+                size >>= 7
+            encoded.append(size)
+            return bytes([(field << 3) | 2]) + bytes(encoded) + value
+
+        root = tmp_path / "antigravity-cli"
+        session_id = "a733b910-552a-431a-aef8-45f2188b1b50"
+        transcript = root / "brain" / session_id / ".system_generated" / "logs" / "transcript.jsonl"
+        transcript.parent.mkdir(parents=True)
+        transcript.write_text("{}\n", encoding="utf-8")
+        conversations = root / "conversations"
+        conversations.mkdir()
+        db_path = conversations / f"{session_id}.db"
+        question_json = json.dumps(
+            {
+                "questions": [
+                    {
+                        "is_multi_select": False,
+                        "options": ["Red", "Blue"],
+                        "question": "ทดสอบการ์ด #715: เลือกสี",
+                    }
+                ]
+            },
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ).encode()
+        blob = proto_field(1, b"ask_question") + proto_field(2, question_json)
+        conn = sqlite3.connect(db_path)
+        conn.execute(
+            "CREATE TABLE steps (idx INTEGER, status INTEGER, step_type INTEGER, "
+            "metadata BLOB, step_payload BLOB)"
+        )
+        conn.execute("INSERT INTO steps VALUES (4, 9, 132, ?, ?)", (blob, b""))
+        conn.commit()
+        monkeypatch.setattr(gemini_helper, "antigravity_root", lambda: root)
+
+        records = notify_mod._agy_live_question_records(transcript, "proj")
+        assert records[0]["status"] == 9
+        assert records[0]["input"] == json.loads(question_json)
+
+        conn.execute("UPDATE steps SET status = 3 WHERE idx = 4")
+        conn.commit()
+        conn.close()
+        assert notify_mod._agy_live_question_records(transcript, "proj")[0]["status"] == 3
+
+    def test_normalizer_exposes_only_card_fields_and_requires_schema_types(self):
+        raw = [
+            {
+                "question": "Safe prompt",
+                "header": "private header",
+                "options": [
+                    {"label": "A", "description": "private description", "secret": "x"},
+                    {"label": {"nested": "not a string"}},
+                ],
+                "multiple": "false",
+                "callID": "private-call-id",
+            }
+        ]
+        assert notify_mod._structured_question_options(raw, multi_keys=("multiple",)) == {
+            "questions": [
+                {
+                    "prompt": "Safe prompt",
+                    "options": [{"index": 0, "label": "A"}],
+                    "multiSelect": False,
+                }
+            ]
+        }
 
 
 class TestLeadOutputTailAskQuestion:

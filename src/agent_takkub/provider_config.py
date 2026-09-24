@@ -879,6 +879,10 @@ _LEAD_CAPABILITY_LABELS: tuple[tuple[str, str], ...] = (
     ("supports_mirror", "mobile mirror (มือถือ mirror หน้าจอ Lead)"),
     ("supports_resume", "session resume (--resume · มือถือปุ่ม Resume)"),
     ("supports_remote_history", "remote-control history (มือถือดูประวัติแชท Lead ย้อนหลัง)"),
+    (
+        "supports_lead_questions",
+        "question card (การ์ดคำถามในแถบพิมพ์ Lead — provider ไม่มี picker ที่ตรวจยืนยันได้)",
+    ),
     ("supports_token_meter", "token/limit meter (usage แถบสถานะ อิง JSONL transcript)"),
     ("supports_hooks", "SessionStart hook (session-report auto session-uuid tracking)"),
     (

@@ -249,7 +249,7 @@ class TestLeadPaneWiring:
 
 
 class TestQuestionHost:
-    def _host(self, qapp, state, *, answer_ok=True, screen=None):
+    def _host(self, qapp, state, *, answer_ok=True, screen=None, provider="claude"):
         from agent_takkub import lead_composer_host
 
         composer = SimpleNamespace(shown=[], statuses=[], set_question=None, show_status=None)
@@ -265,7 +265,8 @@ class TestQuestionHost:
             answer_picker=lambda keys, project=None: calls.append(keys) or (answer_ok, "x"),
         )
         notify = SimpleNamespace(
-            current_ask_state=lambda _o, _p: state, lead_provider_name=lambda _o, _p: "claude"
+            current_ask_state=lambda _o, _p: state,
+            lead_provider_name=lambda _o, _p: provider,
         )
         from agent_takkub.remote import api
 
@@ -314,6 +315,54 @@ class TestQuestionHost:
         host.answer("p", [[0]])
         assert calls == []
         assert composer.statuses and "ตอบไปแล้ว" in composer.statuses[-1]
+
+    @pytest.mark.parametrize(
+        ("provider", "screen", "answers", "expected"),
+        [
+            (
+                "opencode",
+                ["1. Red", "2. Blue", "3. Type your own answer", "enter submit  esc dismiss"],
+                [[1]],
+                ["2"],
+            ),
+            (
+                "gemini",
+                ["Question 1/1:", "1. Red", "2. Blue", "Navigate · enter Select · esc Skip"],
+                [[1]],
+                ["\x1b[B", "\r"],
+            ),
+            (
+                "gemini",
+                [
+                    "Question 1/1:",
+                    "> 1. [ ] A",
+                    "2. [ ] B",
+                    "Navigate · space Toggle · enter Submit · esc Skip",
+                ],
+                [[0, 1]],
+                [" ", "\x1b[B", " ", "\r"],
+            ),
+        ],
+    )
+    def test_provider_marker_and_key_builder_are_paired(
+        self, qapp, monkeypatch, provider, screen, answers, expected
+    ) -> None:
+        from agent_takkub import lead_composer_host
+
+        state = {
+            "questions": [
+                {
+                    "prompt": "q",
+                    "multiSelect": any("space Toggle" in line for line in screen),
+                    "options": [{"index": 0}, {"index": 1}],
+                }
+            ]
+        }
+        host, composer, calls, mods = self._host(qapp, state, screen=screen, provider=provider)
+        monkeypatch.setattr(lead_composer_host, "_remote", lambda name: mods.get(name))
+        host.answer("p", answers)
+        assert calls == [expected]
+        assert composer.shown[-1] is None
 
 
 def test_rejected_question_is_not_live(tmp_path, monkeypatch) -> None:

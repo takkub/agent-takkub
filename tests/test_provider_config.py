@@ -780,6 +780,7 @@ class TestLeadCapabilityGapForProvider:
         missing = provider_config.lead_capability_gap_for_provider("codex")
         assert missing
         assert any("mirror" in m for m in missing)
+        assert any("question card" in m for m in missing)
 
     def test_unknown_provider_reports_every_label(self) -> None:
         missing = provider_config.lead_capability_gap_for_provider("nonexistent")

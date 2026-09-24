@@ -242,6 +242,11 @@ class ProviderSpec:
     produces_jsonl_transcript: bool = False
     supports_token_meter: bool = False
     supports_remote_history: bool = False
+    supports_lead_questions: bool = False
+    # Human-readable evidence for an explicit provider gap.  `takkub doctor`
+    # includes this beside the capability matrix instead of silently treating
+    # every unsupported question picker as equivalent.
+    lead_question_gap: str | None = None
 
     # ─── 11. Generic non-claude spawn-branch knobs (#103 Phase 1) ───
     # These three encode the ONLY real divergences between the old
@@ -721,6 +726,7 @@ claude_spec = ProviderSpec(
     produces_jsonl_transcript=True,
     supports_token_meter=True,
     supports_remote_history=True,
+    supports_lead_questions=True,
     # ⚠ NOT yet verified against a real claude auth-failure screen (#248/#247
     # round 2) — claude's own login flow runs mostly outside the pane (see
     # doctor.check_claude's credential-file check), so no confirmed in-pane
@@ -947,6 +953,16 @@ codex_spec = ProviderSpec(
     # dispatches to codex_helper.read_codex_token_usage for this provider.
     supports_token_meter=True,
     supports_remote_history=True,
+    # Codex 0.156.1 exposes request_user_input only in Plan mode. Cockpit
+    # sessions run the default mode with approval_policy=never and
+    # default_mode_request_user_input=false; 801 sampled rollouts contained no
+    # request_user_input call. There is therefore no live picker/store record
+    # to parse under this configuration (#715).
+    supports_lead_questions=False,
+    lead_question_gap=(
+        "request_user_input is Plan-mode-only; cockpit runs default mode with "
+        "approval_policy=never and default_mode_request_user_input=false"
+    ),
     auto_trust=True,  # spawn_engine.py codex branch: auto_trust=True
     early_exit_watch=True,  # spawn_engine.py codex branch: codex_exit=True
     # ⚠ NOT yet verified against a real codex auth-failure screen (#248/#247
@@ -1134,6 +1150,7 @@ gemini_spec = ProviderSpec(
     # blank the way an armed=False provider does.
     supports_token_meter=True,
     supports_remote_history=True,
+    supports_lead_questions=True,
     prepend_bin_dir_to_path=True,  # spawn_engine.py gemini branch: agy_dir on PATH
     auto_trust=True,  # spawn_engine.py gemini branch: auto_trust=True
     project_scope_flag="--project",  # agy 1.1.6 --help: "Project ID for the
@@ -1296,6 +1313,7 @@ opencode_spec = ProviderSpec(
     # opencode_helper.read_opencode_token_usage for this provider.
     supports_token_meter=True,
     supports_remote_history=True,
+    supports_lead_questions=True,
     prepend_bin_dir_to_path=False,
     auto_trust=False,  # no folder-trust modal observed on first boot (1.18.3)
     early_exit_watch=False,
@@ -1438,6 +1456,16 @@ kimi_spec = ProviderSpec(
     # _HistoryScanner entry exists for kimi, so a kimi Lead pane never
     # mirrors a reply to Remote Mobile even though delivery itself works.
     supports_remote_history=False,
+    supports_lead_questions=False,
+    # #715 gap (2026-09-24): the installed 1.50 typed source confirms a
+    # QuestionRequest in sessions/*/*/wire.jsonl (multi_select + automatic
+    # Other), but this provider is disabled and not paid for on the test
+    # machine. It was explicitly deferred until a real picker can be tested;
+    # no parser/key builder is shipped on source inspection alone.
+    lead_question_gap=(
+        "not implemented — provider is disabled and has not been live-tested; "
+        "survey found QuestionRequest in wire.jsonl"
+    ),
     prepend_bin_dir_to_path=False,
     auto_trust=False,
     early_exit_watch=False,
@@ -1607,6 +1635,7 @@ CAPABILITY_NAMES: tuple[str, ...] = (
     "remote_mirror",  # Remote/PWA mirror of the pane
     "token_meter",  # per-pane token accounting
     "remote_history",  # transcript readable from Remote
+    "lead_questions",  # Lead composer can detect and answer provider picker
     "file_read_tool",  # structured file-read tool (long-task handoff pointer)
     "modal_detection",  # ready/blocker markers known (permission/modal prompts)
     "tool_stuck_detection",  # shell-tool running markers known
@@ -1634,6 +1663,7 @@ def capability_matrix(spec: ProviderSpec) -> dict[str, str]:
     m["remote_mirror"] = "supported" if spec.supports_mirror else "unsupported"
     m["token_meter"] = "supported" if spec.supports_token_meter else "unsupported"
     m["remote_history"] = "supported" if spec.supports_remote_history else "unsupported"
+    m["lead_questions"] = "supported" if spec.supports_lead_questions else "unsupported"
     m["file_read_tool"] = "supported" if spec.supports_agent_file_read else "unsupported"
     m["modal_detection"] = "supported" if spec.ready_hard_blockers else "partial"
     m["tool_stuck_detection"] = "supported" if spec.tool_running_markers else "unsupported"

@@ -55,6 +55,7 @@ from __future__ import annotations
 
 import json
 import re
+import sqlite3
 import time
 from collections import Counter
 from collections.abc import Callable, Iterator
@@ -150,6 +151,9 @@ class _Tail:
     # still streaming (see `opencode_helper.poll_opencode_delta`), which
     # re-queries settled neighbours — this makes those re-reads idempotent.
     emitted_parts: set[str] = field(default_factory=set)
+    # Fingerprint of the structured picker last pushed for SQLite-backed
+    # providers. Their pending/closed state can change without a JSONL append.
+    ask_fingerprint: str | None = None
 
 
 # Map a Claude tool name → a coarse activity category the phone can show as
@@ -248,6 +252,97 @@ def _ask_question_options(rec: dict) -> dict | None:
             return None
         return {"questions": out_questions}
     return None
+
+
+def _structured_question_options(
+    raw_questions: object,
+    *,
+    multi_keys: tuple[str, ...],
+) -> dict | None:
+    """Normalize a provider question list to the card's trust-boundary shape.
+
+    Only prompt, option labels, contiguous local indices, and the multi-select
+    bit cross the boundary.  Headers, descriptions, tool ids, command args,
+    and provider-private metadata stay local.
+    """
+    if isinstance(raw_questions, str):
+        try:
+            raw_questions = json.loads(raw_questions)
+        except ValueError:
+            return None
+    if not isinstance(raw_questions, list) or not raw_questions:
+        return None
+    out: list[dict] = []
+    for raw_q in raw_questions[:_MAX_ASK_QUESTIONS]:
+        if not isinstance(raw_q, dict):
+            continue
+        raw_prompt = raw_q.get("question") or raw_q.get("prompt")
+        if not isinstance(raw_prompt, str):
+            continue
+        prompt = raw_prompt.strip()
+        if not prompt:
+            continue
+        options: list[dict] = []
+        raw_options = raw_q.get("options")
+        if isinstance(raw_options, list):
+            for raw_opt in raw_options[:_MAX_ASK_OPTIONS]:
+                raw_label = raw_opt.get("label") if isinstance(raw_opt, dict) else raw_opt
+                label = raw_label.strip() if isinstance(raw_label, str) else ""
+                if label:
+                    options.append(
+                        {
+                            "index": len(options),
+                            "label": label[:_MAX_OPTION_LABEL_CHARS],
+                        }
+                    )
+        if not options:
+            continue
+        multi = any(raw_q.get(key) is True for key in multi_keys)
+        out.append(
+            {
+                "prompt": prompt[:_MAX_ASK_QUESTION_CHARS],
+                "options": options,
+                "multiSelect": multi,
+            }
+        )
+    return {"questions": out} if out else None
+
+
+def _opencode_ask_question_options(rec: dict) -> dict | None:
+    if rec.get("type") != "tool" or str(rec.get("tool") or "").lower() != "question":
+        return None
+    state = rec.get("state")
+    if not isinstance(state, dict) or state.get("status") not in {"pending", "running"}:
+        return None
+    inp = state.get("input")
+    if not isinstance(inp, dict):
+        return None
+    return _structured_question_options(
+        inp.get("questions"), multi_keys=("multiple", "multiSelect", "multi_select")
+    )
+
+
+def _opencode_ask_closed(rec: dict) -> bool:
+    if rec.get("type") != "tool" or str(rec.get("tool") or "").lower() != "question":
+        return False
+    state = rec.get("state")
+    return isinstance(state, dict) and state.get("status") not in {"pending", "running"}
+
+
+def _agy_ask_question_options(rec: dict) -> dict | None:
+    # agy 1.2.9: protobuf steps.status=9 while ask_question is awaiting input.
+    if rec.get("type") != "agy_question" or rec.get("status") != 9:
+        return None
+    inp = rec.get("input")
+    if not isinstance(inp, dict):
+        return None
+    return _structured_question_options(
+        inp.get("questions"), multi_keys=("is_multi_select", "multi_select")
+    )
+
+
+def _agy_ask_closed(rec: dict) -> bool:
+    return rec.get("type") == "agy_question" and rec.get("status") != 9
 
 
 def _claude_ask_closed(rec: dict) -> bool:
@@ -1646,6 +1741,136 @@ def _list_recent_opencode_sessions(
     return list_recent_opencode_sessions(cwd, limit)
 
 
+def _opencode_live_question_records(path: Path, project_ns: str) -> list[dict]:
+    from ..opencode_helper import read_opencode_question_records
+
+    sid = _LAST_OPENCODE_SESSION_BY_PROJECT.get(project_ns, "")
+    return read_opencode_question_records(path, sid)
+
+
+def _read_proto_varint(data: bytes, pos: int) -> tuple[int, int] | None:
+    value = 0
+    shift = 0
+    while pos < len(data) and shift < 70:
+        byte = data[pos]
+        pos += 1
+        value |= (byte & 0x7F) << shift
+        if byte < 0x80:
+            return value, pos
+        shift += 7
+    return None
+
+
+def _protobuf_text_values(data: bytes, *, depth: int = 0) -> list[str]:
+    """Walk valid length-delimited fields in agy's private protobuf."""
+    if depth > 8 or not data:
+        return []
+    pos = 0
+    out: list[str] = []
+    while pos < len(data):
+        key_read = _read_proto_varint(data, pos)
+        if key_read is None:
+            return out
+        key, pos = key_read
+        wire = key & 7
+        if key >> 3 == 0:
+            return out
+        if wire == 0:
+            value_read = _read_proto_varint(data, pos)
+            if value_read is None:
+                return out
+            _, pos = value_read
+        elif wire == 1:
+            pos += 8
+        elif wire == 2:
+            size_read = _read_proto_varint(data, pos)
+            if size_read is None:
+                return out
+            size, pos = size_read
+            end = pos + size
+            if end > len(data):
+                return out
+            chunk = data[pos:end]
+            pos = end
+            try:
+                text = chunk.decode("utf-8")
+            except UnicodeDecodeError:
+                text = ""
+            if text and all(ch.isprintable() or ch in "\r\n\t" for ch in text):
+                out.append(text)
+            out.extend(_protobuf_text_values(chunk, depth=depth + 1))
+        elif wire == 5:
+            pos += 4
+        else:
+            return out
+        if pos > len(data):
+            return out
+    return out
+
+
+def _agy_question_input(*blobs: object) -> dict | None:
+    values: list[str] = []
+    for blob in blobs:
+        if isinstance(blob, bytes):
+            values.extend(_protobuf_text_values(blob))
+    if "ask_question" not in values:
+        return None
+    for value in values:
+        if not value.lstrip().startswith("{") or "questions" not in value:
+            continue
+        try:
+            parsed = json.loads(value)
+        except (TypeError, ValueError):
+            continue
+        if isinstance(parsed, dict) and "questions" in parsed:
+            return parsed
+    return None
+
+
+def _agy_live_question_records(path: Path, _project_ns: str) -> list[dict]:
+    """Read agy 1.2.9 ask_question steps; status 9 is pending, 3 terminal."""
+    try:
+        session_id = path.parents[2].name
+    except IndexError:
+        return []
+    db_path = gemini_helper.antigravity_root() / "conversations" / f"{session_id}.db"
+    if not db_path.is_file():
+        return []
+    try:
+        conn = sqlite3.connect(f"file:{db_path.as_posix()}?mode=ro", uri=True, timeout=0.2)
+        conn.row_factory = sqlite3.Row
+    except sqlite3.Error:
+        return []
+    try:
+        rows = conn.execute(
+            """
+            SELECT idx, status, metadata, step_payload
+            FROM steps
+            WHERE step_type = 132
+            ORDER BY idx DESC
+            LIMIT 20
+            """
+        ).fetchall()
+        out: list[dict] = []
+        for row in reversed(rows):
+            question_input = _agy_question_input(row["metadata"], row["step_payload"])
+            if question_input is None:
+                continue
+            out.append(
+                {
+                    "type": "agy_question",
+                    "status": int(row["status"]),
+                    "input": question_input,
+                    "step_index": int(row["idx"]),
+                }
+            )
+        return out
+    except (sqlite3.Error, OSError):
+        return []
+    finally:
+        conn.close()
+
+
 # ── Cursor JSONL transcript adapter ──────────────────────────────────────────
 def _resolve_cursor_jsonl_path(
     project_ns: str, session_uuid: str | None, not_before: float = 0.0
@@ -1720,6 +1945,11 @@ class _HistoryScanner:
     # #717: True for a record that proves an earlier picker is over (answered,
     # rejected with Esc, interrupted, or a new prompt typed past it).
     live_ask_closed: Callable[[dict], bool] = lambda _rec: False
+    # Structured stores may need to materialise records differently from a
+    # JSONL tail. OpenCode reads question-tool parts from SQLite; agy decodes
+    # question steps from its protobuf SQLite store. None keeps the ordinary
+    # provider JSONL path.
+    live_records: Callable[[Path, str], list[dict]] | None = None
     requires_session_uuid: bool = True
     # False only for a store shared across sessions/projects (OpenCode's one
     # sqlite db): there, a non-empty file with zero rows *for this session*
@@ -1746,6 +1976,9 @@ _HISTORY_SCANNERS: dict[str, _HistoryScanner] = {
         list_sessions=_list_recent_gemini_sessions,
         live_texts=_gemini_live_text_blocks,
         live_users=_gemini_live_users,
+        live_ask=_agy_ask_question_options,
+        live_ask_closed=_agy_ask_closed,
+        live_records=_agy_live_question_records,
         requires_session_uuid=False,
     ),
     "codex": _HistoryScanner(
@@ -1762,6 +1995,9 @@ _HISTORY_SCANNERS: dict[str, _HistoryScanner] = {
         list_sessions=_list_recent_opencode_sessions,
         live_texts=lambda _rec: [],
         live_users=lambda _rec: [],
+        live_ask=_opencode_ask_question_options,
+        live_ask_closed=_opencode_ask_closed,
+        live_records=_opencode_live_question_records,
         requires_session_uuid=False,
         exclusive_store=False,
     ),
@@ -1936,10 +2172,9 @@ def current_ask_state(orch, project_ns: str) -> dict | None:
     ever was one, is no longer the pane's current state, so this returns
     None rather than let a stale picker answer get typed into a live turn.
 
-    Only providers with a `live_ask` scanner (currently just Claude) can
-    ever return non-None here — every other provider's scanner defaults
-    `live_ask` to a no-op lambda, so this naturally returns None for them
-    (same gap `_ask_question_options`'s docstring already flags, #103)."""
+    JSONL providers are scanned backward from a bounded tail. Structured
+    stores materialise only their durable question records via
+    ``scanner.live_records`` (OpenCode SQLite and agy protobuf SQLite)."""
     provider = lead_provider_name(orch, project_ns)
     scanner = history_scanner(provider)
     if scanner is None:
@@ -1947,24 +2182,34 @@ def current_ask_state(orch, project_ns: str) -> dict | None:
     path = resolve_lead_jsonl(orch, project_ns, provider)
     if path is None:
         return None
-    try:
-        size = path.stat().st_size
-        with path.open("rb") as fh:
-            fh.seek(max(0, size - _ASK_STATE_SCAN_BYTES))
-            chunk = fh.read()
-    except OSError:
-        return None
-    lines = chunk.split(b"\n")
-    if size > _ASK_STATE_SCAN_BYTES:
-        lines = lines[1:]  # first line may be a mid-record fragment
-    for raw in reversed(lines):
-        line = raw.strip()
-        if not line:
-            continue
+    if scanner.live_records is not None:
         try:
-            rec = json.loads(line)
-        except ValueError:
-            continue
+            records = scanner.live_records(path, project_ns)
+        except (OSError, ValueError, TypeError):
+            return None
+    else:
+        try:
+            size = path.stat().st_size
+            with path.open("rb") as fh:
+                fh.seek(max(0, size - _ASK_STATE_SCAN_BYTES))
+                chunk = fh.read()
+        except OSError:
+            return None
+        lines = chunk.split(b"\n")
+        if size > _ASK_STATE_SCAN_BYTES:
+            lines = lines[1:]  # first line may be a mid-record fragment
+        records = []
+        for raw in lines:
+            line = raw.strip()
+            if not line:
+                continue
+            try:
+                rec = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(rec, dict):
+                records.append(rec)
+    for rec in reversed(records):
         if scanner.live_texts(rec):
             return None  # a real reply already superseded any picker
         if scanner.live_ask_closed(rec):
@@ -2308,6 +2553,39 @@ class LeadNotifier(QObject):
         self._emit_lead_working_transitions()
 
     def _poll_one(self, project_ns: str, tail: _Tail) -> None:
+        scanner = history_scanner(tail.provider)
+        if scanner is None:
+            return
+
+        def structured_ask() -> tuple[bool, dict | None]:
+            """Return (question history observed, currently pending payload)."""
+            if scanner.live_records is None:
+                return False, None
+            try:
+                records = scanner.live_records(tail.path, project_ns)
+            except (OSError, ValueError, TypeError):
+                return False, None
+            for rec in reversed(records):
+                if scanner.live_ask_closed(rec):
+                    return True, None
+                ask = scanner.live_ask(rec)
+                if ask is not None:
+                    return True, ask
+            return False, None
+
+        def push_structured_ask() -> bool:
+            observed, payload = structured_ask()
+            if not observed:
+                return False
+            if payload is None:
+                tail.ask_fingerprint = None
+                return False
+            fingerprint = json.dumps(payload, sort_keys=True, ensure_ascii=False)
+            if fingerprint != tail.ask_fingerprint:
+                tail.ask_fingerprint = fingerprint
+                self._broadcaster.push("blocked_on_picker", payload, project_ns)
+            return True
+
         if tail.provider == "opencode":
             from ..opencode_helper import poll_opencode_delta
 
@@ -2333,14 +2611,20 @@ class LeadNotifier(QObject):
                     ask_payload = None
                 elif ev_type == "working":
                     activity = str(payload)
-                elif ev_type == "blocked_on_picker" and isinstance(payload, dict):
+                elif (
+                    ev_type == "blocked_on_picker"
+                    and isinstance(payload, dict)
+                    and scanner.live_records is None
+                ):
                     ask_payload = payload
             # #660: `ask_payload` is already cleared by any reply text that
             # came AFTER it, so a surviving payload is the batch's newest
             # state — push it even when earlier text in the same batch was
             # sent (a Lead that says "4 things to decide" and then opens the
             # picker in one turn lands both in one poll tick).
-            if ask_payload is not None:
+            if scanner.live_records is not None:
+                push_structured_ask()
+            elif ask_payload is not None:
                 self._broadcaster.push("blocked_on_picker", ask_payload, project_ns)
             elif activity is not None and not pushed_text:
                 if not self._lead_working.get(project_ns, False):
@@ -2357,6 +2641,7 @@ class LeadNotifier(QObject):
         except OSError:
             return
         if size <= tail.offset:
+            push_structured_ask()
             return
         try:
             with tail.path.open("rb") as fh:
@@ -2371,9 +2656,6 @@ class LeadNotifier(QObject):
         activity: str | None = None
         ask_payload: dict | None = None
         pushed_text = False
-        scanner = history_scanner(tail.provider)
-        if scanner is None:
-            return
         for raw_line in lines:
             line = raw_line.strip()
             if not line:
@@ -2417,7 +2699,9 @@ class LeadNotifier(QObject):
         # suppress the picker — that exact ordering ("here are 4 things to
         # decide" + AskUserQuestion in one turn) left the phone with no
         # options and no banner at all.
-        if ask_payload is not None:
+        if scanner.live_records is not None and push_structured_ask():
+            pass
+        elif ask_payload is not None:
             self._broadcaster.push("blocked_on_picker", ask_payload, project_ns)
         elif activity is not None and not pushed_text:
             # Only signal "working" when this batch showed activity but
