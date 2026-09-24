@@ -2,6 +2,22 @@
 
 All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses [SemVer](https://semver.org/).
 
+## [v2.1.35] - 2026-09-24
+
+### Changed (เปลี่ยน)
+
+- **หน้า Backlog popup ออกแบบใหม่ (แบบ A ที่ user อนุมัติ, mockup `docs/mockups/2026-09-24-backlog-popup.html`)** — เดิมแต่ละใบ
+  เป็นข้อความบรรทัดเดียวโดนตัด มี scrollbar แนวนอน และพาเนลขวาว่าง · ตอนนี้: การ์ดต่อใบ (pill สถานะสี · severity · ดอง Nd ·
+  ชื่อ wrap ไม่ตัด), chip กรองมีตัวเลข, ช่องค้นหาชื่อ/#id, แถบความคืบหน้า, พาเนลรายละเอียดเป็นบล็อก (ผลกระทบ/ที่มา/ไฟล์/ลิงก์ +
+  รายละเอียด) และหน้าว่างตอนยังไม่เลือกใบ · ทั้งธีมมืดและสว่าง (token ใหม่ใน `cockpit_theme`) · พฤติกรรมเดิมครบ (โหมดเลือกลำดับงาน,
+  พักไว้/เสร็จแล้ว/สั่งทำ)
+
+### Fixed (แก้)
+
+- **แถบพิมพ์ของ Lead: พิมพ์ใส่ terminal ของ Lead (ที่ล็อกอยู่) แล้วตัวอักษรหายเงียบ (#715, live test)** — prompt ของ CLI ในจอ
+  หน้าตาเหมือนช่องพิมพ์ user จึงคลิกผิดบ่อย · `terminal.html` ส่ง input ตอนล็อกต่อให้ Python (ซึ่งยังไม่ส่งเข้า PTY) →
+  `TerminalWidget.lockedInput` → pane Lead ย้าย focus และตัวอักษร (รวมไทย/IME) ไปที่แถบพิมพ์ · แถบเว้นห่างจาก terminal 10px
+
 ## [v2.1.34] - 2026-09-24
 
 ### Added (เพิ่ม)

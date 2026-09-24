@@ -154,6 +154,46 @@ ERROR_CHIP_BORDER = "rgba(217,90,90,0.35)"
 ERROR_CHIP_TEXT = "#e58080"
 
 # ──────────────────────────────────────────────────────────────
+# Backlog status & severity badges (backlog popup redesign)
+# ──────────────────────────────────────────────────────────────
+STATE_DOING_TEXT = "#818CF8"
+STATE_DOING_BG = "rgba(99,102,241,0.15)"
+STATE_DOING_BORDER = "rgba(99,102,241,0.35)"
+
+STATE_REVIEW_TEXT = "#C084FC"
+STATE_REVIEW_BG = "rgba(168,85,247,0.15)"
+STATE_REVIEW_BORDER = "rgba(168,85,247,0.35)"
+
+STATE_TODO_TEXT = "#94A3B8"
+STATE_TODO_BG = "rgba(148,163,184,0.12)"
+STATE_TODO_BORDER = "rgba(148,163,184,0.25)"
+
+STATE_BLOCKED_TEXT = "#F87171"
+STATE_BLOCKED_BG = "rgba(239,68,68,0.15)"
+STATE_BLOCKED_BORDER = "rgba(239,68,68,0.35)"
+
+STATE_DEFERRED_TEXT = "#94A3B8"
+STATE_DEFERRED_BG = "rgba(100,116,139,0.12)"
+STATE_DEFERRED_BORDER = "rgba(100,116,139,0.25)"
+
+STATE_DONE_TEXT = "#34D399"
+STATE_DONE_BG = "rgba(16,185,129,0.15)"
+STATE_DONE_BORDER = "rgba(16,185,129,0.35)"
+
+SEV_HIGH_TEXT = "#F87171"
+SEV_HIGH_BG = "rgba(239,68,68,0.15)"
+SEV_MED_TEXT = "#FBBF24"
+SEV_MED_BG = "rgba(245,158,11,0.15)"
+SEV_LOW_TEXT = "#94A3B8"
+SEV_LOW_BG = "rgba(100,116,139,0.15)"
+
+BADGE_CUSTOMER_TEXT = "#FB923C"
+BADGE_CUSTOMER_BG = "rgba(249,115,22,0.15)"
+BADGE_CUSTOMER_BORDER = "rgba(249,115,22,0.35)"
+
+BADGE_AGE_WARN = "#FBBF24"
+
+# ──────────────────────────────────────────────────────────────
 # Provider brand colors (codex/gemini panes) — identity, NOT "active/
 # primary". Kept distinct from the gold accent. Mirrored by roles.py
 # Role.color for the matching roles; equality is guarded by
@@ -359,6 +399,35 @@ _THEMED_TOKEN_NAMES: tuple[str, ...] = (
     "ERROR_CHIP_BG",
     "ERROR_CHIP_BORDER",
     "ERROR_CHIP_TEXT",
+    # backlog badges
+    "STATE_DOING_TEXT",
+    "STATE_DOING_BG",
+    "STATE_DOING_BORDER",
+    "STATE_REVIEW_TEXT",
+    "STATE_REVIEW_BG",
+    "STATE_REVIEW_BORDER",
+    "STATE_TODO_TEXT",
+    "STATE_TODO_BG",
+    "STATE_TODO_BORDER",
+    "STATE_BLOCKED_TEXT",
+    "STATE_BLOCKED_BG",
+    "STATE_BLOCKED_BORDER",
+    "STATE_DEFERRED_TEXT",
+    "STATE_DEFERRED_BG",
+    "STATE_DEFERRED_BORDER",
+    "STATE_DONE_TEXT",
+    "STATE_DONE_BG",
+    "STATE_DONE_BORDER",
+    "SEV_HIGH_TEXT",
+    "SEV_HIGH_BG",
+    "SEV_MED_TEXT",
+    "SEV_MED_BG",
+    "SEV_LOW_TEXT",
+    "SEV_LOW_BG",
+    "BADGE_CUSTOMER_TEXT",
+    "BADGE_CUSTOMER_BG",
+    "BADGE_CUSTOMER_BORDER",
+    "BADGE_AGE_WARN",
     # state colors
     "STATE_OK",
     "STATE_WARN",
@@ -469,6 +538,35 @@ LIGHT_TOKENS: dict[str, object] = {
     "ERROR_CHIP_BG": "rgba(185,28,28,0.08)",
     "ERROR_CHIP_BORDER": "rgba(185,28,28,0.35)",
     "ERROR_CHIP_TEXT": "#b91c1c",
+    # backlog badges
+    "STATE_DOING_TEXT": "#4338CA",
+    "STATE_DOING_BG": "rgba(79,70,229,0.12)",
+    "STATE_DOING_BORDER": "rgba(79,70,229,0.25)",
+    "STATE_REVIEW_TEXT": "#7E22CE",
+    "STATE_REVIEW_BG": "rgba(126,34,206,0.10)",
+    "STATE_REVIEW_BORDER": "rgba(126,34,206,0.25)",
+    "STATE_TODO_TEXT": "#475569",
+    "STATE_TODO_BG": "rgba(100,116,139,0.10)",
+    "STATE_TODO_BORDER": "rgba(100,116,139,0.20)",
+    "STATE_BLOCKED_TEXT": "#B91C1C",
+    "STATE_BLOCKED_BG": "rgba(220,38,38,0.10)",
+    "STATE_BLOCKED_BORDER": "rgba(220,38,38,0.25)",
+    "STATE_DEFERRED_TEXT": "#475569",
+    "STATE_DEFERRED_BG": "rgba(100,116,139,0.10)",
+    "STATE_DEFERRED_BORDER": "rgba(100,116,139,0.20)",
+    "STATE_DONE_TEXT": "#047857",
+    "STATE_DONE_BG": "rgba(5,150,105,0.10)",
+    "STATE_DONE_BORDER": "rgba(5,150,105,0.25)",
+    "SEV_HIGH_TEXT": "#B91C1C",
+    "SEV_HIGH_BG": "rgba(220,38,38,0.10)",
+    "SEV_MED_TEXT": "#B45309",
+    "SEV_MED_BG": "rgba(217,119,6,0.12)",
+    "SEV_LOW_TEXT": "#475569",
+    "SEV_LOW_BG": "rgba(100,116,139,0.10)",
+    "BADGE_CUSTOMER_TEXT": "#C2410C",
+    "BADGE_CUSTOMER_BG": "rgba(249,115,22,0.10)",
+    "BADGE_CUSTOMER_BORDER": "rgba(249,115,22,0.25)",
+    "BADGE_AGE_WARN": "#B45309",
     # state colors
     "STATE_OK": "#059669",
     "STATE_WARN": "#D97706",

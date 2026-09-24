@@ -1,0 +1,1897 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Design Mockups — Cockpit Backlog Popup Redesign</title>
+  <style>
+    /* CSS Variables matching cockpit_theme.py */
+    :root {
+      /* Dark Theme (Default) */
+      --bg-body: #08090D;
+      --bg-window: #111318;
+      --bg-titlebar: #0B0C10;
+      --bg-panel: #181B22;
+      --bg-panel-alt: #1C2029;
+      --bg-inset: #14171E;
+      --bg-input: #0F172A;
+      --bg-hover: rgba(255, 255, 255, 0.05);
+
+      --border-hairline: rgba(255, 255, 255, 0.07);
+      --border-med: rgba(255, 255, 255, 0.10);
+      --border-strong: rgba(255, 255, 255, 0.14);
+      --border-card: #262B36;
+      --border-card-row: #1F232C;
+
+      --text-primary: #F3F4F6;
+      --text-secondary: #9CA3AF;
+      --text-muted: #6B7280;
+      --text-faint: #4B5563;
+
+      --accent: #6366F1;
+      --accent-hover: #7B7FF4;
+      --accent-text: #A5A6F5;
+      --accent-chip-bg: rgba(99, 102, 241, 0.16);
+      --accent-chip-border: rgba(99, 102, 241, 0.4);
+
+      /* Semantic Status Colors */
+      --state-doing-text: #818CF8;
+      --state-doing-bg: rgba(99, 102, 241, 0.15);
+      --state-doing-border: rgba(99, 102, 241, 0.35);
+
+      --state-review-text: #C084FC;
+      --state-review-bg: rgba(168, 85, 247, 0.15);
+      --state-review-border: rgba(168, 85, 247, 0.35);
+
+      --state-todo-text: #94A3B8;
+      --state-todo-bg: rgba(148, 163, 184, 0.12);
+      --state-todo-border: rgba(148, 163, 184, 0.25);
+
+      --state-blocked-text: #F87171;
+      --state-blocked-bg: rgba(239, 68, 68, 0.15);
+      --state-blocked-border: rgba(239, 68, 68, 0.35);
+
+      --state-deferred-text: #94A3B8;
+      --state-deferred-bg: rgba(100, 116, 139, 0.12);
+      --state-deferred-border: rgba(100, 116, 139, 0.25);
+
+      --state-done-text: #34D399;
+      --state-done-bg: rgba(16, 185, 129, 0.15);
+      --state-done-border: rgba(16, 185, 129, 0.35);
+
+      /* Severity Colors */
+      --sev-high-text: #F87171;
+      --sev-high-bg: rgba(239, 68, 68, 0.15);
+      --sev-med-text: #FBBF24;
+      --sev-med-bg: rgba(245, 158, 11, 0.15);
+      --sev-low-text: #94A3B8;
+      --sev-low-bg: rgba(100, 116, 139, 0.15);
+    }
+
+    /* Light Theme */
+    body.theme-light {
+      --bg-body: #E2E8F0;
+      --bg-window: #F8FAFC;
+      --bg-titlebar: #EEF2F7;
+      --bg-panel: #FFFFFF;
+      --bg-panel-alt: #F8FAFC;
+      --bg-inset: #F1F5F9;
+      --bg-input: #FFFFFF;
+      --bg-hover: rgba(16, 24, 40, 0.05);
+
+      --border-hairline: rgba(16, 24, 40, 0.08);
+      --border-med: rgba(16, 24, 40, 0.12);
+      --border-strong: rgba(16, 24, 40, 0.18);
+      --border-card: #E2E8F0;
+      --border-card-row: #EDF1F6;
+
+      --text-primary: #0F172A;
+      --text-secondary: #475569;
+      --text-muted: #64748B;
+      --text-faint: #94A3B8;
+
+      --accent: #4F46E5;
+      --accent-hover: #4338CA;
+      --accent-text: #4338CA;
+      --accent-chip-bg: rgba(79, 70, 229, 0.10);
+      --accent-chip-border: rgba(79, 70, 229, 0.30);
+
+      --state-doing-text: #4338CA;
+      --state-doing-bg: rgba(79, 70, 229, 0.12);
+      --state-doing-border: rgba(79, 70, 229, 0.25);
+
+      --state-review-text: #7E22CE;
+      --state-review-bg: rgba(126, 34, 206, 0.10);
+      --state-review-border: rgba(126, 34, 206, 0.25);
+
+      --state-todo-text: #475569;
+      --state-todo-bg: rgba(100, 116, 139, 0.10);
+      --state-todo-border: rgba(100, 116, 139, 0.20);
+
+      --state-blocked-text: #B91C1C;
+      --state-blocked-bg: rgba(220, 38, 38, 0.10);
+      --state-blocked-border: rgba(220, 38, 38, 0.25);
+
+      --state-deferred-text: #475569;
+      --state-deferred-bg: rgba(100, 116, 139, 0.10);
+      --state-deferred-border: rgba(100, 116, 139, 0.20);
+
+      --state-done-text: #047857;
+      --state-done-bg: rgba(5, 150, 105, 0.10);
+      --state-done-border: rgba(5, 150, 105, 0.25);
+
+      --sev-high-text: #B91C1C;
+      --sev-high-bg: rgba(220, 38, 38, 0.10);
+      --sev-med-text: #B45309;
+      --sev-med-bg: rgba(217, 119, 6, 0.12);
+      --sev-low-text: #475569;
+      --sev-low-bg: rgba(100, 116, 139, 0.10);
+    }
+
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Noto Sans Thai", Helvetica, Arial, sans-serif;
+      background-color: var(--bg-body);
+      color: var(--text-primary);
+      line-height: 1.5;
+      padding: 30px 20px 80px;
+      transition: background-color 0.2s, color 0.2s;
+    }
+
+    /* Page Navigation & Top Control Bar */
+    .top-toolbar {
+      position: sticky;
+      top: 0;
+      z-index: 1000;
+      background: var(--bg-window);
+      border: 1px solid var(--border-card);
+      border-radius: 12px;
+      padding: 12px 20px;
+      margin-bottom: 35px;
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: space-between;
+      align-items: center;
+      gap: 15px;
+      box-shadow: 0 4px 20px rgba(0, 0, 0, 0.3);
+    }
+
+    .toolbar-title h1 {
+      font-size: 18px;
+      font-weight: 700;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .toolbar-title span {
+      font-size: 13px;
+      color: var(--text-secondary);
+      font-weight: normal;
+    }
+
+    .toolbar-controls {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      flex-wrap: wrap;
+    }
+
+    .btn-toggle {
+      background: var(--bg-inset);
+      color: var(--text-primary);
+      border: 1px solid var(--border-med);
+      padding: 6px 14px;
+      border-radius: 8px;
+      font-size: 13px;
+      font-weight: 600;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      transition: all 0.15s;
+    }
+
+    .btn-toggle:hover {
+      background: var(--bg-hover);
+      border-color: var(--accent);
+    }
+
+    .btn-toggle.active {
+      background: var(--accent);
+      color: #FFFFFF;
+      border-color: var(--accent);
+    }
+
+    .nav-links {
+      display: flex;
+      gap: 10px;
+    }
+
+    .nav-link {
+      color: var(--text-secondary);
+      text-decoration: none;
+      font-size: 13px;
+      padding: 5px 10px;
+      border-radius: 6px;
+      transition: all 0.15s;
+    }
+
+    .nav-link:hover {
+      color: var(--text-primary);
+      background: var(--bg-hover);
+    }
+
+    /* Section Container */
+    .mockup-section {
+      margin-bottom: 60px;
+      scroll-margin-top: 90px;
+    }
+
+    .section-header {
+      margin-bottom: 16px;
+      display: flex;
+      align-items: baseline;
+      gap: 12px;
+    }
+
+    .section-header h2 {
+      font-size: 20px;
+      font-weight: 700;
+      color: var(--text-primary);
+    }
+
+    .section-header .tag {
+      font-size: 12px;
+      font-weight: 600;
+      padding: 2px 8px;
+      border-radius: 6px;
+      background: var(--accent-chip-bg);
+      color: var(--accent-text);
+      border: 1px solid var(--accent-chip-border);
+    }
+
+    .section-header .tag-rec {
+      background: rgba(16, 185, 129, 0.15);
+      color: var(--state-done-text);
+      border-color: rgba(16, 185, 129, 0.35);
+    }
+
+    /* Dialog Wrapper (Scaled to ~900x600 size) */
+    .dialog-frame {
+      width: 900px;
+      height: 590px;
+      background: var(--bg-panel);
+      border: 1px solid var(--border-card);
+      border-radius: 10px;
+      overflow: hidden;
+      display: flex;
+      flex-direction: column;
+      box-shadow: 0 12px 36px rgba(0, 0, 0, 0.45);
+      position: relative;
+      margin: 0 auto 20px auto;
+    }
+
+    /* Window Titlebar */
+    .dialog-titlebar {
+      height: 34px;
+      background: var(--bg-titlebar);
+      border-bottom: 1px solid var(--border-hairline);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0 12px;
+      user-select: none;
+    }
+
+    .titlebar-caption {
+      font-size: 12px;
+      font-family: "IBM Plex Mono", Consolas, monospace;
+      color: var(--text-secondary);
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .titlebar-buttons {
+      display: flex;
+      gap: 8px;
+    }
+
+    .titlebar-btn {
+      width: 12px;
+      height: 12px;
+      border-radius: 50%;
+      display: inline-block;
+      opacity: 0.7;
+    }
+    .btn-min { background: #EAB308; }
+    .btn-max { background: #22C55E; }
+    .btn-close { background: #EF4444; }
+
+    /* Dialog Content Interior */
+    .dialog-body {
+      flex: 1;
+      padding: 14px 16px;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      overflow: hidden;
+    }
+
+    /* Common Header Inside Dialog */
+    .dialog-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      height: 28px;
+    }
+
+    .dialog-title {
+      font-size: 15px;
+      font-weight: 700;
+      color: var(--text-primary);
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .dialog-progress {
+      font-size: 12px;
+      color: var(--text-secondary);
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .progress-bar-mini {
+      width: 60px;
+      height: 6px;
+      background: var(--border-strong);
+      border-radius: 999px;
+      overflow: hidden;
+    }
+
+    .progress-bar-fill {
+      height: 100%;
+      background: var(--state-done-text);
+      width: 0%;
+    }
+
+    /* Chips Row */
+    .chips-row {
+      display: flex;
+      gap: 6px;
+      overflow-x: auto;
+      padding-bottom: 2px;
+      align-items: center;
+    }
+
+    .filter-chip {
+      background: transparent;
+      border: 1px solid var(--border-strong);
+      color: var(--text-secondary);
+      border-radius: 999px;
+      padding: 3px 10px;
+      font-size: 11.5px;
+      font-weight: 600;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      white-space: nowrap;
+      transition: all 0.15s;
+    }
+
+    .filter-chip:hover {
+      background: var(--bg-hover);
+      color: var(--text-primary);
+    }
+
+    .filter-chip.active {
+      background: var(--accent-chip-bg);
+      border-color: var(--accent);
+      color: var(--accent-text);
+    }
+
+    .chip-count {
+      font-size: 10px;
+      opacity: 0.8;
+      background: rgba(0, 0, 0, 0.2);
+      padding: 1px 5px;
+      border-radius: 999px;
+    }
+
+    /* Common Footer */
+    .dialog-footer {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding-top: 8px;
+      border-top: 1px solid var(--border-hairline);
+      height: 38px;
+    }
+
+    .footer-left {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+
+    .custom-checkbox {
+      display: inline-flex;
+      align-items: center;
+      gap: 7px;
+      font-size: 12.5px;
+      color: var(--text-secondary);
+      cursor: pointer;
+      user-select: none;
+    }
+
+    .custom-checkbox input[type="checkbox"] {
+      width: 15px;
+      height: 15px;
+      accent-color: var(--accent);
+      cursor: pointer;
+    }
+
+    .pick-status-lbl {
+      font-size: 11.5px;
+      color: var(--accent-text);
+      font-weight: 600;
+    }
+
+    .footer-right {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .btn-secondary {
+      background: transparent;
+      border: 1px solid var(--border-strong);
+      color: var(--text-secondary);
+      border-radius: 8px;
+      padding: 6px 14px;
+      font-size: 12.5px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all 0.15s;
+    }
+
+    .btn-secondary:hover {
+      background: var(--bg-hover);
+      color: var(--text-primary);
+    }
+
+    .btn-primary {
+      background: linear-gradient(180deg, var(--accent-hover) 0%, var(--accent) 100%);
+      border: none;
+      color: #FFFFFF;
+      border-radius: 8px;
+      padding: 6px 16px;
+      font-size: 12.5px;
+      font-weight: 700;
+      cursor: pointer;
+      box-shadow: 0 4px 12px rgba(99, 102, 241, 0.4);
+      transition: all 0.15s;
+    }
+
+    .btn-primary:hover {
+      filter: brightness(1.1);
+    }
+
+    /* Badges */
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      padding: 2px 7px;
+      border-radius: 4px;
+      font-size: 10.5px;
+      font-weight: 600;
+      line-height: 1.2;
+      white-space: nowrap;
+    }
+
+    .badge-doing { background: var(--state-doing-bg); color: var(--state-doing-text); border: 1px solid var(--state-doing-border); }
+    .badge-review { background: var(--state-review-bg); color: var(--state-review-text); border: 1px solid var(--state-review-border); }
+    .badge-todo { background: var(--state-todo-bg); color: var(--state-todo-text); border: 1px solid var(--state-todo-border); }
+    .badge-blocked { background: var(--state-blocked-bg); color: var(--state-blocked-text); border: 1px solid var(--state-blocked-border); }
+    .badge-deferred { background: var(--state-deferred-bg); color: var(--state-deferred-text); border: 1px solid var(--state-deferred-border); }
+    .badge-done { background: var(--state-done-bg); color: var(--state-done-text); border: 1px solid var(--state-done-border); }
+
+    .badge-sev-high { background: var(--sev-high-bg); color: var(--sev-high-text); font-weight: 700; }
+    .badge-sev-med { background: var(--sev-med-bg); color: var(--sev-med-text); font-weight: 600; }
+    .badge-sev-low { background: var(--sev-low-bg); color: var(--sev-low-text); }
+
+    .badge-customer {
+      background: rgba(249, 115, 22, 0.15);
+      color: #FB923C;
+      border: 1px solid rgba(249, 115, 22, 0.35);
+    }
+
+    .badge-age {
+      font-size: 10px;
+      color: var(--text-muted);
+      font-family: "IBM Plex Mono", Consolas, monospace;
+    }
+    .badge-age.warn {
+      color: #FBBF24;
+    }
+
+    /* ══════════════════════════════════════════════════════════════
+       MOCKUP A SPECIFIC STYLES: Master-Detail Modern Cards
+       ══════════════════════════════════════════════════════════════ */
+    .master-detail-body {
+      display: flex;
+      gap: 12px;
+      flex: 1;
+      min-height: 0;
+    }
+
+    /* Left Card List */
+    .card-list {
+      flex: 1.15;
+      background: var(--bg-inset);
+      border: 1px solid var(--border-card);
+      border-radius: 8px;
+      padding: 6px;
+      overflow-y: auto;
+      display: flex;
+      flex-direction: column;
+      gap: 5px;
+    }
+
+    .backlog-card {
+      background: var(--bg-panel-alt);
+      border: 1px solid var(--border-hairline);
+      border-radius: 7px;
+      padding: 8px 10px;
+      cursor: pointer;
+      display: flex;
+      flex-direction: column;
+      gap: 5px;
+      transition: all 0.15s ease;
+      position: relative;
+    }
+
+    .backlog-card:hover {
+      background: var(--bg-hover);
+      border-color: var(--border-med);
+    }
+
+    .backlog-card.selected {
+      background: var(--bg-panel);
+      border-color: var(--accent);
+      box-shadow: 0 0 0 1px var(--accent), 0 3px 10px rgba(0, 0, 0, 0.2);
+    }
+
+    .card-header-line {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 6px;
+    }
+
+    .card-badges-left {
+      display: flex;
+      align-items: center;
+      gap: 5px;
+      flex-wrap: nowrap;
+    }
+
+    .card-order-badge {
+      width: 18px;
+      height: 18px;
+      border-radius: 50%;
+      background: var(--accent);
+      color: #FFFFFF;
+      font-size: 10px;
+      font-weight: 700;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      margin-right: 2px;
+    }
+
+    .card-title-line {
+      font-size: 12.5px;
+      font-weight: 600;
+      color: var(--text-primary);
+      line-height: 1.35;
+      word-break: break-word;
+      display: -webkit-box;
+      -webkit-line-clamp: 2;
+      -webkit-box-orient: vertical;
+      overflow: hidden;
+    }
+
+    .card-subline {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 10.5px;
+      color: var(--text-muted);
+    }
+
+    .card-reason {
+      font-size: 11px;
+      color: var(--state-blocked-text);
+      font-style: italic;
+    }
+
+    /* Right Detail Inspector */
+    .detail-inspector {
+      flex: 0.95;
+      background: var(--bg-inset);
+      border: 1px solid var(--border-card);
+      border-radius: 8px;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+
+    /* Inspector - Populated State */
+    .inspector-populated {
+      display: flex;
+      flex-direction: column;
+      height: 100%;
+    }
+
+    .inspector-top {
+      padding: 14px 14px 10px 14px;
+      border-bottom: 1px solid var(--border-card-row);
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      background: var(--bg-panel);
+    }
+
+    .inspector-id-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+
+    .item-id-pill {
+      font-family: "IBM Plex Mono", Consolas, monospace;
+      font-size: 11px;
+      color: var(--text-muted);
+      background: var(--bg-inset);
+      padding: 2px 7px;
+      border-radius: 4px;
+      border: 1px solid var(--border-med);
+    }
+
+    .inspector-title {
+      font-size: 14px;
+      font-weight: 700;
+      color: var(--text-primary);
+      line-height: 1.35;
+    }
+
+    .inspector-meta-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 8px;
+      background: var(--bg-panel-alt);
+      border: 1px solid var(--border-hairline);
+      border-radius: 6px;
+      padding: 8px 10px;
+      font-size: 11px;
+    }
+
+    .meta-item {
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+    }
+
+    .meta-label {
+      color: var(--text-muted);
+      font-size: 10px;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+
+    .meta-value {
+      color: var(--text-primary);
+      font-weight: 500;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .meta-file-tag {
+      font-family: "IBM Plex Mono", Consolas, monospace;
+      font-size: 10px;
+      color: var(--accent-text);
+      background: var(--accent-chip-bg);
+      border: 1px solid var(--accent-chip-border);
+      padding: 2px 6px;
+      border-radius: 4px;
+      display: inline-block;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .inspector-scroll-content {
+      flex: 1;
+      padding: 12px 14px;
+      overflow-y: auto;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+
+    .content-block-label {
+      font-size: 11px;
+      font-weight: 600;
+      color: var(--text-secondary);
+      display: flex;
+      align-items: center;
+      gap: 5px;
+    }
+
+    .detail-body-text {
+      font-size: 12px;
+      color: var(--text-primary);
+      line-height: 1.5;
+      background: var(--bg-panel);
+      border: 1px solid var(--border-hairline);
+      border-radius: 6px;
+      padding: 10px;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+
+    .inspector-actions-bar {
+      padding: 10px 14px;
+      background: var(--bg-panel);
+      border-top: 1px solid var(--border-card-row);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+    }
+
+    .action-btn-small {
+      padding: 5px 10px;
+      font-size: 11.5px;
+      border-radius: 6px;
+      cursor: pointer;
+      font-weight: 600;
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      border: 1px solid var(--border-med);
+      background: var(--bg-panel-alt);
+      color: var(--text-secondary);
+      transition: all 0.15s;
+    }
+
+    .action-btn-small:hover {
+      background: var(--bg-hover);
+      color: var(--text-primary);
+    }
+
+    .action-btn-small.danger:hover {
+      border-color: #EF4444;
+      color: #F87171;
+    }
+
+    .action-btn-small.primary-small {
+      background: var(--accent);
+      border-color: var(--accent);
+      color: #FFFFFF;
+    }
+
+    /* Inspector - Empty State */
+    .inspector-empty {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      height: 100%;
+      padding: 24px;
+      text-align: center;
+      gap: 12px;
+      color: var(--text-muted);
+    }
+
+    .empty-icon-circle {
+      width: 52px;
+      height: 52px;
+      border-radius: 50%;
+      background: var(--bg-panel-alt);
+      border: 1px dashed var(--border-strong);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 24px;
+    }
+
+    .empty-title {
+      font-size: 13.5px;
+      font-weight: 600;
+      color: var(--text-secondary);
+    }
+
+    .empty-desc {
+      font-size: 11.5px;
+      line-height: 1.5;
+      max-width: 250px;
+    }
+
+    .empty-metrics {
+      display: flex;
+      gap: 10px;
+      margin-top: 8px;
+    }
+
+    .empty-metric-pill {
+      background: var(--bg-panel);
+      border: 1px solid var(--border-hairline);
+      border-radius: 6px;
+      padding: 4px 8px;
+      font-size: 10.5px;
+      display: flex;
+      align-items: center;
+      gap: 4px;
+    }
+
+    /* ══════════════════════════════════════════════════════════════
+       MOCKUP B SPECIFIC STYLES: 3-Column Triage Workflow
+       ══════════════════════════════════════════════════════════════ */
+    .kanban-body {
+      display: flex;
+      gap: 10px;
+      flex: 1;
+      min-height: 0;
+    }
+
+    .kanban-col {
+      flex: 1;
+      background: var(--bg-inset);
+      border: 1px solid var(--border-card);
+      border-radius: 8px;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+
+    .kanban-col-header {
+      padding: 8px 10px;
+      background: var(--bg-panel-alt);
+      border-bottom: 1px solid var(--border-hairline);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+
+    .kanban-col-title {
+      font-size: 12px;
+      font-weight: 700;
+      color: var(--text-primary);
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .kanban-col-badge {
+      font-size: 10px;
+      background: var(--bg-panel);
+      border: 1px solid var(--border-med);
+      padding: 1px 6px;
+      border-radius: 999px;
+      color: var(--text-secondary);
+    }
+
+    .kanban-cards-area {
+      flex: 1;
+      padding: 6px;
+      overflow-y: auto;
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+
+    .k-card {
+      background: var(--bg-panel);
+      border: 1px solid var(--border-card-row);
+      border-radius: 6px;
+      padding: 8px 9px;
+      display: flex;
+      flex-direction: column;
+      gap: 5px;
+      cursor: pointer;
+      box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+      transition: all 0.15s;
+    }
+
+    .k-card:hover {
+      border-color: var(--border-strong);
+      transform: translateY(-1px);
+    }
+
+    .k-card.active {
+      border-color: var(--accent);
+      box-shadow: 0 0 0 1px var(--accent);
+    }
+
+    .k-card-title {
+      font-size: 11.5px;
+      font-weight: 600;
+      color: var(--text-primary);
+      line-height: 1.35;
+    }
+
+    .k-card-footer {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-top: 2px;
+      font-size: 10px;
+      color: var(--text-muted);
+    }
+
+    /* ══════════════════════════════════════════════════════════════
+       MOCKUP C SPECIFIC STYLES: Compact Table View & Inspector
+       ══════════════════════════════════════════════════════════════ */
+    .table-layout-body {
+      display: flex;
+      gap: 12px;
+      flex: 1;
+      min-height: 0;
+    }
+
+    .table-container {
+      flex: 1.3;
+      background: var(--bg-inset);
+      border: 1px solid var(--border-card);
+      border-radius: 8px;
+      overflow-y: auto;
+      display: flex;
+      flex-direction: column;
+    }
+
+    .compact-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 11.5px;
+      text-align: left;
+    }
+
+    .compact-table th {
+      background: var(--bg-panel-alt);
+      padding: 8px 10px;
+      font-weight: 600;
+      color: var(--text-secondary);
+      border-bottom: 1px solid var(--border-card);
+      position: sticky;
+      top: 0;
+      z-index: 2;
+    }
+
+    .compact-table td {
+      padding: 7px 10px;
+      border-bottom: 1px solid var(--border-hairline);
+      color: var(--text-primary);
+      vertical-align: middle;
+    }
+
+    .compact-table tr {
+      cursor: pointer;
+      transition: background 0.1s;
+    }
+
+    .compact-table tr:hover td {
+      background: var(--bg-hover);
+    }
+
+    .compact-table tr.selected td {
+      background: rgba(99, 102, 241, 0.12);
+      border-bottom-color: rgba(99, 102, 241, 0.3);
+    }
+
+    .table-title-cell {
+      font-weight: 500;
+      max-width: 240px;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .side-inspector {
+      flex: 0.85;
+      background: var(--bg-inset);
+      border: 1px solid var(--border-card);
+      border-radius: 8px;
+      padding: 12px;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      overflow-y: auto;
+    }
+
+    /* Analysis & Review Box */
+    .analysis-card {
+      background: var(--bg-window);
+      border: 1px solid var(--border-card);
+      border-radius: 10px;
+      padding: 18px 22px;
+      max-width: 900px;
+      margin: 0 auto;
+    }
+
+    .analysis-card h3 {
+      font-size: 14px;
+      font-weight: 700;
+      margin-bottom: 8px;
+      color: var(--text-primary);
+    }
+
+    .analysis-card p {
+      font-size: 13px;
+      color: var(--text-secondary);
+      line-height: 1.6;
+      margin-bottom: 6px;
+    }
+
+    .analysis-card strong {
+      color: var(--text-primary);
+    }
+
+    .difficulty-meter {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      font-weight: 600;
+      font-size: 12px;
+      padding: 2px 8px;
+      border-radius: 4px;
+    }
+
+    .diff-low { background: rgba(16, 185, 129, 0.15); color: #34D399; }
+    .diff-med { background: rgba(245, 158, 11, 0.15); color: #FBBF24; }
+    .diff-high { background: rgba(239, 68, 68, 0.15); color: #F87171; }
+
+    /* Final Recommendation Section */
+    .recommendation-banner {
+      background: linear-gradient(135deg, rgba(99, 102, 241, 0.12) 0%, rgba(168, 85, 247, 0.12) 100%);
+      border: 1.5px solid var(--accent);
+      border-radius: 12px;
+      padding: 24px;
+      max-width: 900px;
+      margin: 40px auto 0 auto;
+      box-shadow: 0 8px 30px rgba(99, 102, 241, 0.2);
+    }
+
+    .rec-header {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin-bottom: 14px;
+    }
+
+    .rec-badge {
+      background: var(--accent);
+      color: #FFFFFF;
+      font-size: 11px;
+      font-weight: 700;
+      padding: 3px 10px;
+      border-radius: 999px;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+
+    .rec-title {
+      font-size: 18px;
+      font-weight: 700;
+      color: var(--text-primary);
+    }
+
+    .rec-list {
+      margin-left: 20px;
+      margin-top: 10px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      font-size: 13.5px;
+      color: var(--text-secondary);
+    }
+
+    .rec-list li strong {
+      color: var(--text-primary);
+    }
+  </style>
+</head>
+<body>
+
+  <!-- Top Sticky Navigation & Global Controls -->
+  <header class="top-toolbar">
+    <div class="toolbar-title">
+      <h1>📋 ออกแบบหน้า Backlog Popup ใหม่ <span>(Cockpit Redesign)</span></h1>
+    </div>
+    <div class="toolbar-controls">
+      <nav class="nav-links">
+        <a href="#mockup-a" class="nav-link">แบบ A (Master-Detail)</a>
+        <a href="#mockup-b" class="nav-link">แบบ B (Kanban Triage)</a>
+        <a href="#mockup-c" class="nav-link">แบบ C (Compact Table)</a>
+        <a href="#recommendation" class="nav-link" style="color: var(--accent-text); font-weight: 600;">⭐ แบบที่แนะนำ</a>
+      </nav>
+      <div style="width: 1px; height: 20px; background: var(--border-strong);"></div>
+      <!-- Theme Switcher -->
+      <button class="btn-toggle" id="btn-theme-toggle" onclick="toggleTheme()">
+        <span id="theme-icon">☀️</span> <span id="theme-text">โหมดสว่าง</span>
+      </button>
+    </div>
+  </header>
+
+  <!-- ══════════════════════════════════════════════════════════════
+       MOCKUP A: MASTER-DETAIL CARD LIST
+       ══════════════════════════════════════════════════════════════ -->
+  <section class="mockup-section" id="mockup-a">
+    <div class="section-header" style="max-width: 900px; margin: 0 auto 12px auto;">
+      <h2>แบบ A: Two-Column Structured Card List (Master-Detail)</h2>
+      <span class="tag tag-rec">⭐ แนะนำสูงสุด</span>
+      <span class="tag">PyQt6 QListWidget + Custom Delegate / QFrame</span>
+    </div>
+
+    <!-- Interactive Sub-control for Mockup A state -->
+    <div style="max-width: 900px; margin: 0 auto 10px auto; display: flex; align-items: center; justify-content: space-between;">
+      <span style="font-size: 12px; color: var(--text-muted);">ขนาดจำลองจริง: 900 &times; 590 px &middot; ลองคลิกเปลี่ยนสถานะหน้าจอ:</span>
+      <div style="display: flex; gap: 8px;">
+        <button class="btn-toggle active" id="btn-state-selected" onclick="setMockupAState('selected')">เลือกการ์ดแล้ว (#5)</button>
+        <button class="btn-toggle" id="btn-state-empty" onclick="setMockupAState('empty')">ยังไม่เลือกการ์ด (Empty)</button>
+        <button class="btn-toggle" id="btn-state-order" onclick="setMockupAState('order')">โหมดเลือกลำดับงาน</button>
+      </div>
+    </div>
+
+    <!-- Mockup A Window -->
+    <div class="dialog-frame" id="dialog-a">
+      <!-- Titlebar -->
+      <div class="dialog-titlebar">
+        <div class="titlebar-caption">
+          <span>📋</span> <strong>Backlog</strong> &mdash; agent-takkub
+        </div>
+        <div class="titlebar-buttons">
+          <span class="titlebar-btn btn-min"></span>
+          <span class="titlebar-btn btn-max"></span>
+          <span class="titlebar-btn btn-close"></span>
+        </div>
+      </div>
+
+      <!-- Dialog Body -->
+      <div class="dialog-body">
+        <!-- Header -->
+        <div class="dialog-header">
+          <div class="dialog-title">📋 Backlog ของโปรเจค</div>
+          <div class="dialog-progress">
+            <span><strong>0/8</strong> เสร็จ (0%)</span>
+            <div class="progress-bar-mini">
+              <div class="progress-bar-fill"></div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Filter Chips (Cleaned up, organized with counters) -->
+        <div class="chips-row">
+          <button class="filter-chip active">ทั้งหมด <span class="chip-count">8</span></button>
+          <button class="filter-chip">ค้างอยู่ <span class="chip-count">7</span></button>
+          <button class="filter-chip">กำลังทำ <span class="chip-count">1</span></button>
+          <button class="filter-chip">รอยืนยัน <span class="chip-count">2</span></button>
+          <button class="filter-chip">ยังไม่ทำ <span class="chip-count">3</span></button>
+          <button class="filter-chip">ติดอยู่ <span class="chip-count">1</span></button>
+          <button class="filter-chip">พักไว้ <span class="chip-count">1</span></button>
+          <button class="filter-chip">เสร็จ <span class="chip-count">0</span></button>
+        </div>
+
+        <!-- Master-Detail Body -->
+        <div class="master-detail-body">
+          <!-- Left: Card List -->
+          <div class="card-list" id="mock-a-list">
+            <!-- Card 1 -->
+            <div class="backlog-card" onclick="selectCardA(this, 'card-1')">
+              <div class="card-header-line">
+                <div class="card-badges-left">
+                  <span class="card-order-badge card-order-item" style="display: none;">1</span>
+                  <span class="badge badge-doing">กำลังทำ</span>
+                  <span class="badge badge-sev-med">MED</span>
+                </div>
+                <span class="badge-age">วันนี้</span>
+              </div>
+              <div class="card-title-line">#717 การ์ดคำถามค้างหลังปฏิเสธ &rarr; key หล่นเป็นข้อความ</div>
+              <div class="card-subline">
+                <span>👤 lead ทำเอง</span>
+              </div>
+            </div>
+
+            <!-- Card 2 -->
+            <div class="backlog-card" onclick="selectCardA(this, 'card-2')">
+              <div class="card-header-line">
+                <div class="card-badges-left">
+                  <span class="card-order-badge card-order-item" style="display: none;">2</span>
+                  <span class="badge badge-review">รอยืนยัน</span>
+                  <span class="badge badge-sev-med">MED</span>
+                </div>
+                <span class="badge-age">วันนี้</span>
+              </div>
+              <div class="card-title-line">#715 Lead composer: แถบพิมพ์ + แนบไฟล์ + การ์ดคำถาม</div>
+              <div class="card-subline">
+                <span>👤 lead ทำเอง</span>
+              </div>
+            </div>
+
+            <!-- Card 3 -->
+            <div class="backlog-card" onclick="selectCardA(this, 'card-3')">
+              <div class="card-header-line">
+                <div class="card-badges-left">
+                  <span class="card-order-badge card-order-item" style="display: none;">3</span>
+                  <span class="badge badge-review">รอยืนยัน</span>
+                  <span class="badge badge-sev-med">MED</span>
+                </div>
+                <span class="badge-age">วันนี้</span>
+              </div>
+              <div class="card-title-line">#714 backlog บังคับก่อนเริ่มงาน + รายงานงานค้าง</div>
+              <div class="card-subline">
+                <span>👤 lead ทำเอง</span>
+              </div>
+            </div>
+
+            <!-- Card 4 -->
+            <div class="backlog-card" onclick="selectCardA(this, 'card-4')">
+              <div class="card-header-line">
+                <div class="card-badges-left">
+                  <span class="badge badge-todo">ยังไม่ทำ</span>
+                  <span class="badge badge-sev-low">LOW</span>
+                </div>
+                <span class="badge-age warn">ดอง 4d</span>
+              </div>
+              <div class="card-title-line">live-verify #683 done&rarr;close&rarr;resume กับ pane claude จริง</div>
+              <div class="card-subline">
+                <span>🔍 live test v2.1.25</span>
+              </div>
+            </div>
+
+            <!-- Card 5 (Selected Default) -->
+            <div class="backlog-card selected" id="card-5" onclick="selectCardA(this, 'card-5')">
+              <div class="card-header-line">
+                <div class="card-badges-left">
+                  <span class="badge badge-todo">ยังไม่ทำ</span>
+                  <span class="badge badge-sev-med">MED</span>
+                </div>
+                <span class="badge-age warn">ดอง 4d</span>
+              </div>
+              <div class="card-title-line">takkub harvest บล็อก main thread จน CLI timeout ทั้งระบบ (~60s บน repo ใหญ่)</div>
+              <div class="card-subline">
+                <span>📁 orchestrator.py:10920</span>
+              </div>
+            </div>
+
+            <!-- Card 6 -->
+            <div class="backlog-card" onclick="selectCardA(this, 'card-6')">
+              <div class="card-header-line">
+                <div class="card-badges-left">
+                  <span class="badge badge-todo">ยังไม่ทำ</span>
+                  <span class="badge badge-sev-low">LOW</span>
+                </div>
+                <span class="badge-age warn">ดอง 4d</span>
+              </div>
+              <div class="card-title-line">takkub send เติม prefix [lead &rarr; role] ทำให้ shell pane รันคำสั่งที่ส่งไม่ได้</div>
+              <div class="card-subline">
+                <span>🔍 live test v2.1.24</span>
+              </div>
+            </div>
+
+            <!-- Card 7 -->
+            <div class="backlog-card" onclick="selectCardA(this, 'card-7')">
+              <div class="card-header-line">
+                <div class="card-badges-left">
+                  <span class="badge badge-blocked">ติดอยู่</span>
+                  <span class="badge badge-sev-low">LOW</span>
+                </div>
+                <span class="badge-age warn">ดอง 4d</span>
+              </div>
+              <div class="card-title-line">UI stall main-thread I/O ประปราย (5 ครั้ง/24ชม. สูงสุด 1.2s)</div>
+              <div class="card-reason">⚠️ รอสัญญาณซ้ำจาก log ก่อน ยังไม่คุ้มแก้</div>
+            </div>
+
+            <!-- Card 8 -->
+            <div class="backlog-card" onclick="selectCardA(this, 'card-8')">
+              <div class="card-header-line">
+                <div class="card-badges-left">
+                  <span class="badge badge-deferred">พักไว้</span>
+                  <span class="badge badge-sev-med">MED</span>
+                </div>
+                <span class="badge-age warn">ดอง 4d</span>
+              </div>
+              <div class="card-title-line">ตรวจหน้าตา Backlog popup จริงบน dev (กดปุ่ม 📋 Tasks)</div>
+              <div class="card-subline">
+                <span>📦 batch v2.1.24</span>
+              </div>
+            </div>
+          </div>
+
+          <!-- Right: Detail Inspector -->
+          <div class="detail-inspector" id="mock-a-inspector">
+            <!-- Populated State (Active for Card 5) -->
+            <div class="inspector-populated" id="panel-populated">
+              <div class="inspector-top">
+                <div class="inspector-id-row">
+                  <span class="item-id-pill">#5f0eedcf</span>
+                  <div style="display: flex; gap: 5px;">
+                    <span class="badge badge-todo">ยังไม่ทำ</span>
+                    <span class="badge badge-sev-med">MED</span>
+                  </div>
+                </div>
+                <h3 class="inspector-title">takkub harvest บล็อก main thread จน CLI timeout ทั้งระบบ (~60s บน repo ใหญ่)</h3>
+
+                <div class="inspector-meta-grid">
+                  <div class="meta-item">
+                    <span class="meta-label">ผลกระทบ</span>
+                    <span class="meta-value">ภายใน (internal)</span>
+                  </div>
+                  <div class="meta-item">
+                    <span class="meta-label">ระยะเวลาในคลัง</span>
+                    <span class="meta-value">ดอง 4 วัน (2026-09-20)</span>
+                  </div>
+                  <div class="meta-item">
+                    <span class="meta-label">ที่มา</span>
+                    <span class="meta-value">live test v2.1.24</span>
+                  </div>
+                  <div class="meta-item">
+                    <span class="meta-label">ไฟล์ที่แตะ</span>
+                    <span class="meta-file-tag" title="src/agent_takkub/orchestrator.py:10920">orchestrator.py:10920</span>
+                  </div>
+                </div>
+              </div>
+
+              <!-- Content Scrollable -->
+              <div class="inspector-scroll-content">
+                <div>
+                  <div class="content-block-label">
+                    <span>📝 รายละเอียด / ข้อสังเกต:</span>
+                  </div>
+                  <div class="detail-body-text">scan_artifacts รัน sync ใน harvest_info บน Qt main thread &mdash; เห็น main_thread_stall ใน events.log ระหว่าง live test
+
+แนวทางแก้:
+ควร offload ไป QThreadPool แบบ project_nav #386
+
+(หมายเหตุ: ใบเดิม f08162bc หายเพราะ lost-update bug ที่แก้ใน 2.1.25)</div>
+                </div>
+              </div>
+
+              <!-- Actions on Selected Card -->
+              <div class="inspector-actions-bar">
+                <div style="display: flex; gap: 6px;">
+                  <button class="action-btn-small" title="ย้ายไปสถานะพักไว้">⏸ พักไว้</button>
+                  <button class="action-btn-small" title="มาร์กว่างานนี้เสร็จแล้ว">✓ เสร็จแล้ว</button>
+                </div>
+                <button class="action-btn-small primary-small" title="สั่งมอบหมายให้ Lead เริ่มงานนี้ทันที">🚀 สั่งทำใบนี้</button>
+              </div>
+            </div>
+
+            <!-- Empty State -->
+            <div class="inspector-empty" id="panel-empty" style="display: none;">
+              <div class="empty-icon-circle">📋</div>
+              <div class="empty-title">ยังไม่ได้เลือกรายการ</div>
+              <div class="empty-desc">คลิกเลือกการ์ดงานจากรายการฝั่งซ้ายเพื่อดูรายละเอียด ลิงก์ไฟล์ และสั่งเริ่มงาน</div>
+              <div class="empty-metrics">
+                <span class="empty-metric-pill">⏳ รอทำ 3</span>
+                <span class="empty-metric-pill">⚡ กำลังทำ 1</span>
+                <span class="empty-metric-pill">🚫 ติดขัด 1</span>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Footer -->
+        <div class="dialog-footer">
+          <div class="footer-left">
+            <label class="custom-checkbox">
+              <input type="checkbox" id="order-cb-a" onchange="toggleOrderModeA(this.checked)">
+              <span>โหมดเลือกลำดับงาน</span>
+            </label>
+            <span class="pick-status-lbl" id="pick-lbl-a"></span>
+          </div>
+          <div class="footer-right">
+            <button class="btn-secondary">ปิด</button>
+            <button class="btn-primary" id="btn-ok-a">ตกลง &mdash; สั่งทำงานที่เลือก</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Review & Analysis for Mockup A -->
+    <div class="analysis-card">
+      <h3>การวิเคราะห์แบบ A (Two-Column Structured Card List)</h3>
+      <p><strong>แนวคิด:</strong> ยกระดับ Master-Detail เดิมด้วยการ์ด 2 บรรทัด (Title wrap ไม่โดนตัดข้อความ + Badges แยกสีตาม semantic), แก้ปัญหาขวาว่างด้วย Empty State สรุปสถิติงาน, และย้าย Quick Action (พักไว้/เสร็จแล้ว/สั่งทำ) เข้าไปอยู่ในพาเนลขวาของใบที่เลือกโดยตรง</p>
+      <p><strong>ข้อดี / ข้อเสีย:</strong> ข้อมูลครบถ้วน อ่านง่าย สบายตา สอดคล้องกับพฤติกรรม cockpit ที่สุด / มีพื้นที่ list ซ้ายประมาณ 50-55% หากชื่อยาวมากเกิน 3 บรรทัดอาจต้อง clamp หรือเลื่อนดู</p>
+      <p><strong>ความยากในการทำด้วย Qt:</strong> <span class="difficulty-meter diff-low">ต่ำ (ง่ายสุด)</span> ใช้ <code>QListWidget</code> เดิมคู่กับ <code>setItemWidget(row, BacklogCardWidget)</code> หรือ <code>QStyledItemDelegate</code> ส่วนพาเนลขวาเป็น <code>QFrame</code> + <code>QVBoxLayout</code> ธรรมดา ไม่ต้องแก้ architecture หลักของ <code>backlog_dialog.py</code></p>
+    </div>
+  </section>
+
+
+  <!-- ══════════════════════════════════════════════════════════════
+       MOCKUP B: 3-COLUMN WORKFLOW BOARD (KANBAN-INSPIRED)
+       ══════════════════════════════════════════════════════════════ -->
+  <section class="mockup-section" id="mockup-b">
+    <div class="section-header" style="max-width: 900px; margin: 0 auto 12px auto;">
+      <h2>แบบ B: Kanban-Inspired Triage Board (3 คอลัมน์ Workflow)</h2>
+      <span class="tag">Workflow-Oriented Visual Board</span>
+      <span class="tag">PyQt6 QHBoxLayout + 3 QScrollArea / QListWidget</span>
+    </div>
+
+    <!-- Mockup B Window -->
+    <div class="dialog-frame">
+      <!-- Titlebar -->
+      <div class="dialog-titlebar">
+        <div class="titlebar-caption">
+          <span>📋</span> <strong>Backlog Board</strong> &mdash; agent-takkub
+        </div>
+        <div class="titlebar-buttons">
+          <span class="titlebar-btn btn-min"></span>
+          <span class="titlebar-btn btn-max"></span>
+          <span class="titlebar-btn btn-close"></span>
+        </div>
+      </div>
+
+      <!-- Dialog Body -->
+      <div class="dialog-body">
+        <!-- Header -->
+        <div class="dialog-header">
+          <div class="dialog-title">📋 Backlog &mdash; Visual Triage Board</div>
+          <div class="dialog-progress">
+            <span><strong>0/8</strong> เสร็จ &middot; ทั้งหมด 8 ใบ</span>
+          </div>
+        </div>
+
+        <!-- Kanban 3 Columns Body -->
+        <div class="kanban-body">
+          <!-- Col 1: To Do & Blocked -->
+          <div class="kanban-col">
+            <div class="kanban-col-header">
+              <span class="kanban-col-title">📥 ยังไม่ทำ / ติดค้าง</span>
+              <span class="kanban-col-badge">5</span>
+            </div>
+            <div class="kanban-cards-area">
+              <!-- Item 5 -->
+              <div class="k-card active">
+                <div class="card-header-line">
+                  <span class="badge badge-todo">ยังไม่ทำ</span>
+                  <span class="badge badge-sev-med">MED</span>
+                </div>
+                <div class="k-card-title">takkub harvest บล็อก main thread จน CLI timeout ทั้งระบบ (~60s)</div>
+                <div class="k-card-footer">
+                  <span>orchestrator.py</span>
+                  <span class="badge-age warn">ดอง 4d</span>
+                </div>
+              </div>
+
+              <!-- Item 4 -->
+              <div class="k-card">
+                <div class="card-header-line">
+                  <span class="badge badge-todo">ยังไม่ทำ</span>
+                  <span class="badge badge-sev-low">LOW</span>
+                </div>
+                <div class="k-card-title">live-verify #683 done&rarr;close&rarr;resume กับ pane claude จริง</div>
+                <div class="k-card-footer">
+                  <span>live test</span>
+                  <span class="badge-age warn">ดอง 4d</span>
+                </div>
+              </div>
+
+              <!-- Item 7 (Blocked) -->
+              <div class="k-card" style="border-left: 3px solid #EF4444;">
+                <div class="card-header-line">
+                  <span class="badge badge-blocked">ติดอยู่</span>
+                  <span class="badge badge-sev-low">LOW</span>
+                </div>
+                <div class="k-card-title">UI stall main-thread I/O ประปราย (5 ครั้ง/24ชม.)</div>
+                <div class="card-reason" style="font-size: 10px;">รอสัญญาณซ้ำจาก log ก่อน</div>
+              </div>
+
+              <!-- Item 6 -->
+              <div class="k-card">
+                <div class="card-header-line">
+                  <span class="badge badge-todo">ยังไม่ทำ</span>
+                  <span class="badge badge-sev-low">LOW</span>
+                </div>
+                <div class="k-card-title">takkub send เติม prefix [lead &rarr; role] ทำให้ shell รันไม่ได้</div>
+                <div class="k-card-footer">
+                  <span>live test</span>
+                  <span class="badge-age warn">ดอง 4d</span>
+                </div>
+              </div>
+
+              <!-- Item 8 -->
+              <div class="k-card">
+                <div class="card-header-line">
+                  <span class="badge badge-deferred">พักไว้</span>
+                  <span class="badge badge-sev-med">MED</span>
+                </div>
+                <div class="k-card-title">ตรวจหน้าตา Backlog popup จริงบน dev (กดปุ่ม 📋 Tasks)</div>
+                <div class="k-card-footer">
+                  <span>dev check</span>
+                  <span class="badge-age warn">ดอง 4d</span>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Col 2: Doing & Review -->
+          <div class="kanban-col">
+            <div class="kanban-col-header">
+              <span class="kanban-col-title">⚡ กำลังทำ &amp; รอยืนยัน</span>
+              <span class="kanban-col-badge">3</span>
+            </div>
+            <div class="kanban-cards-area">
+              <!-- Item 1 -->
+              <div class="k-card">
+                <div class="card-header-line">
+                  <span class="badge badge-doing">กำลังทำ</span>
+                  <span class="badge badge-sev-med">MED</span>
+                </div>
+                <div class="k-card-title">#717 การ์ดคำถามค้างหลังปฏิเสธ &rarr; key หล่นเป็นข้อความ</div>
+                <div class="k-card-footer">
+                  <span>👤 lead</span>
+                  <span class="badge-age">วันนี้</span>
+                </div>
+              </div>
+
+              <!-- Item 2 -->
+              <div class="k-card">
+                <div class="card-header-line">
+                  <span class="badge badge-review">รอยืนยัน</span>
+                  <span class="badge badge-sev-med">MED</span>
+                </div>
+                <div class="k-card-title">#715 Lead composer: แถบพิมพ์ + แนบไฟล์ + การ์ดคำถาม</div>
+                <div class="k-card-footer">
+                  <span>👤 lead</span>
+                  <span class="badge-age">วันนี้</span>
+                </div>
+              </div>
+
+              <!-- Item 3 -->
+              <div class="k-card">
+                <div class="card-header-line">
+                  <span class="badge badge-review">รอยืนยัน</span>
+                  <span class="badge badge-sev-med">MED</span>
+                </div>
+                <div class="k-card-title">#714 backlog บังคับก่อนเริ่มงาน + รายงานงานค้าง</div>
+                <div class="k-card-footer">
+                  <span>👤 lead</span>
+                  <span class="badge-age">วันนี้</span>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Col 3: Selected Card Quick Inspector / Dispatch Queue -->
+          <div class="kanban-col" style="flex: 1.1; background: var(--bg-panel);">
+            <div class="kanban-col-header" style="background: var(--bg-inset);">
+              <span class="kanban-col-title">🔍 รายละเอียดการ์ด #5f0eedcf</span>
+              <span class="badge badge-sev-med">MED</span>
+            </div>
+            <div style="padding: 10px; display: flex; flex-direction: column; gap: 8px; flex: 1; overflow-y: auto;">
+              <h4 style="font-size: 13px; font-weight: 700; color: var(--text-primary); line-height: 1.35;">
+                takkub harvest บล็อก main thread จน CLI timeout ทั้งระบบ (~60s)
+              </h4>
+              <div style="font-size: 11px; color: var(--text-muted);">
+                📁 ไฟล์: <code style="color: var(--accent-text);">orchestrator.py:10920</code>
+              </div>
+              <div style="font-size: 11.5px; color: var(--text-secondary); line-height: 1.45; background: var(--bg-inset); padding: 8px; border-radius: 6px; border: 1px solid var(--border-hairline);">
+                scan_artifacts รัน sync ใน harvest_info บน Qt main thread &mdash; เห็น main_thread_stall ใน events.log ระหว่าง live test ควร offload ไป QThreadPool
+              </div>
+              <div style="margin-top: auto; display: flex; flex-direction: column; gap: 6px;">
+                <button class="action-btn-small" style="justify-content: center;">⏸ พักไว้</button>
+                <button class="action-btn-small" style="justify-content: center;">✓ เสร็จแล้ว</button>
+                <button class="action-btn-small primary-small" style="justify-content: center; padding: 7px;">🚀 สั่ง Lead ทำใบนี้</button>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Footer -->
+        <div class="dialog-footer">
+          <div class="footer-left">
+            <span style="font-size: 11.5px; color: var(--text-secondary);">💡 ลากหรือคลิกการ์ดเพื่อจัดคิวทำงาน</span>
+          </div>
+          <div class="footer-right">
+            <button class="btn-secondary">ปิด</button>
+            <button class="btn-primary">ตกลง &mdash; สั่งทำงานที่เลือก</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Review & Analysis for Mockup B -->
+    <div class="analysis-card">
+      <h3>การวิเคราะห์แบบ B (Kanban-Inspired Triage Board)</h3>
+      <p><strong>แนวคิด:</strong> จัดกลุ่มงานตาม lifecycle จริงเป็น 3 คอลัมน์ (ยังไม่ทำ/ติดค้าง &middot; กำลังทำ/รอยืนยัน &middot; รายละเอียด/คิวสั่ง) ทำให้เจ้าของโปรเจคมองเห็นสถานะความคืบหน้าของงานทั้งหมดได้ในพริบตา</p>
+      <p><strong>ข้อดี / ข้อเสีย:</strong> เหมาะมากสำหรับการ triage และเห็นคอขวด (เช่น งานติดบล็อกหรืองานรอยืนยันสะสม) / แต่ในความกว้าง 900px การแบ่ง 3 คอลัมน์ทำให้การ์ดแต่ละใบแคบ (~270px) ต้องย่อข้อความ</p>
+      <p><strong>ความยากในการทำด้วย Qt:</strong> <span class="difficulty-meter diff-med">ปานกลาง</span> ต้องใช้ <code>QHBoxLayout</code> บรรจุ 3 <code>QScrollArea</code> และจัดการ layout synchronization ตอนเลือกการ์ด</p>
+    </div>
+  </section>
+
+
+  <!-- ══════════════════════════════════════════════════════════════
+       MOCKUP C: COMPACT DATA TABLE & INSPECTOR
+       ══════════════════════════════════════════════════════════════ -->
+  <section class="mockup-section" id="mockup-c">
+    <div class="section-header" style="max-width: 900px; margin: 0 auto 12px auto;">
+      <h2>แบบ C: Compact Split Grid &amp; Inspector (Linear / Developer View)</h2>
+      <span class="tag">High-Density Developer Table</span>
+      <span class="tag">PyQt6 QTableWidget + QSplitter</span>
+    </div>
+
+    <!-- Mockup C Window -->
+    <div class="dialog-frame">
+      <!-- Titlebar -->
+      <div class="dialog-titlebar">
+        <div class="titlebar-caption">
+          <span>📋</span> <strong>Backlog Table</strong> &mdash; agent-takkub
+        </div>
+        <div class="titlebar-buttons">
+          <span class="titlebar-btn btn-min"></span>
+          <span class="titlebar-btn btn-max"></span>
+          <span class="titlebar-btn btn-close"></span>
+        </div>
+      </div>
+
+      <!-- Dialog Body -->
+      <div class="dialog-body">
+        <!-- Header -->
+        <div class="dialog-header">
+          <div class="dialog-title">📋 Backlog &mdash; ตารางงานค้าง</div>
+          <div class="chips-row" style="margin: 0;">
+            <button class="filter-chip active">ค้างอยู่ (7)</button>
+            <button class="filter-chip">เสร็จสิ้น (0)</button>
+            <button class="filter-chip">ทั้งหมด (8)</button>
+          </div>
+        </div>
+
+        <!-- Table + Inspector Layout -->
+        <div class="table-layout-body">
+          <!-- Table -->
+          <div class="table-container">
+            <table class="compact-table">
+              <thead>
+                <tr>
+                  <th style="width: 32px;">#</th>
+                  <th style="width: 80px;">สถานะ</th>
+                  <th style="width: 45px;">Sev</th>
+                  <th>ชื่องาน</th>
+                  <th style="width: 65px; text-align: right;">อายุ</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td><code>1</code></td>
+                  <td><span class="badge badge-doing">กำลังทำ</span></td>
+                  <td><span class="badge badge-sev-med">MED</span></td>
+                  <td class="table-title-cell">#717 การ์ดคำถามค้างหลังปฏิเสธ &rarr; key หล่นเป็นข้อความ</td>
+                  <td style="text-align: right; color: var(--text-muted);">วันนี้</td>
+                </tr>
+                <tr>
+                  <td><code>2</code></td>
+                  <td><span class="badge badge-review">รอยืนยัน</span></td>
+                  <td><span class="badge badge-sev-med">MED</span></td>
+                  <td class="table-title-cell">#715 Lead composer: แถบพิมพ์ + แนบไฟล์ + การ์ดคำถาม</td>
+                  <td style="text-align: right; color: var(--text-muted);">วันนี้</td>
+                </tr>
+                <tr>
+                  <td><code>3</code></td>
+                  <td><span class="badge badge-review">รอยืนยัน</span></td>
+                  <td><span class="badge badge-sev-med">MED</span></td>
+                  <td class="table-title-cell">#714 backlog บังคับก่อนเริ่มงาน + รายงานงานค้าง</td>
+                  <td style="text-align: right; color: var(--text-muted);">วันนี้</td>
+                </tr>
+                <tr>
+                  <td><code>4</code></td>
+                  <td><span class="badge badge-todo">ยังไม่ทำ</span></td>
+                  <td><span class="badge badge-sev-low">LOW</span></td>
+                  <td class="table-title-cell">live-verify #683 done&rarr;close&rarr;resume กับ pane claude จริง</td>
+                  <td style="text-align: right; color: #FBBF24;">4d</td>
+                </tr>
+                <tr class="selected">
+                  <td><code>5</code></td>
+                  <td><span class="badge badge-todo">ยังไม่ทำ</span></td>
+                  <td><span class="badge badge-sev-med">MED</span></td>
+                  <td class="table-title-cell"><strong>takkub harvest บล็อก main thread จน CLI timeout</strong></td>
+                  <td style="text-align: right; color: #FBBF24;">4d</td>
+                </tr>
+                <tr>
+                  <td><code>6</code></td>
+                  <td><span class="badge badge-todo">ยังไม่ทำ</span></td>
+                  <td><span class="badge badge-sev-low">LOW</span></td>
+                  <td class="table-title-cell">takkub send เติม prefix [lead &rarr; role] ทำให้ shell pane รันไม่ได้</td>
+                  <td style="text-align: right; color: #FBBF24;">4d</td>
+                </tr>
+                <tr>
+                  <td><code>7</code></td>
+                  <td><span class="badge badge-blocked">ติดอยู่</span></td>
+                  <td><span class="badge badge-sev-low">LOW</span></td>
+                  <td class="table-title-cell">UI stall main-thread I/O ประปราย (5 ครั้ง/24ชม.)</td>
+                  <td style="text-align: right; color: #FBBF24;">4d</td>
+                </tr>
+                <tr>
+                  <td><code>8</code></td>
+                  <td><span class="badge badge-deferred">พักไว้</span></td>
+                  <td><span class="badge badge-sev-med">MED</span></td>
+                  <td class="table-title-cell">ตรวจหน้าตา Backlog popup จริงบน dev (กดปุ่ม 📋 Tasks)</td>
+                  <td style="text-align: right; color: #FBBF24;">4d</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+
+          <!-- Inspector Side Panel -->
+          <div class="side-inspector">
+            <div style="display: flex; justify-content: space-between; align-items: center;">
+              <span class="item-id-pill">#5f0eedcf</span>
+              <span class="badge badge-sev-med">MED</span>
+            </div>
+            <h4 style="font-size: 13px; font-weight: 700; color: var(--text-primary); line-height: 1.35;">
+              takkub harvest บล็อก main thread จน CLI timeout ทั้งระบบ (~60s)
+            </h4>
+            <div style="font-size: 11px; display: flex; flex-direction: column; gap: 4px; color: var(--text-secondary);">
+              <div><strong>สถานะ:</strong> <span class="badge badge-todo">ยังไม่ทำ</span></div>
+              <div><strong>แหล่งที่มา:</strong> live test v2.1.24</div>
+              <div><strong>ไฟล์:</strong> <code style="color: var(--accent-text);">orchestrator.py:10920</code></div>
+            </div>
+            <div style="font-size: 11.5px; color: var(--text-primary); background: var(--bg-panel); border: 1px solid var(--border-hairline); border-radius: 6px; padding: 8px; flex: 1; overflow-y: auto;">
+              scan_artifacts รัน sync ใน harvest_info บน Qt main thread &mdash; เห็น main_thread_stall ใน events.log ควร offload ไป QThreadPool
+            </div>
+            <div style="display: flex; gap: 6px;">
+              <button class="action-btn-small" style="flex: 1; justify-content: center;">⏸ พักไว้</button>
+              <button class="action-btn-small" style="flex: 1; justify-content: center;">✓ เสร็จ</button>
+            </div>
+            <button class="action-btn-small primary-small" style="justify-content: center; padding: 7px;">🚀 สั่งทำใบนี้</button>
+          </div>
+        </div>
+
+        <!-- Footer -->
+        <div class="dialog-footer">
+          <div class="footer-left">
+            <span style="font-size: 12px; color: var(--text-secondary);">เลือก 1 รายการ &middot; ใช้ลูกศรขึ้น-ลงเพื่อเลื่อนดูได้อย่างรวดเร็ว</span>
+          </div>
+          <div class="footer-right">
+            <button class="btn-secondary">ปิด</button>
+            <button class="btn-primary">ตกลง &mdash; สั่งทำงานที่เลือก</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Review & Analysis for Mockup C -->
+    <div class="analysis-card">
+      <h3>การวิเคราะห์แบบ C (Compact Data Table &amp; Inspector)</h3>
+      <p><strong>แนวคิด:</strong> ออกแบบสไตล์ Linear / VS Code Issues ด้วยตารางที่มี Data Density สูง คอลัมน์ชัดเจน แยกสัดส่วนด้วยเส้นแบ่ง รองรับการดูข้อมูลเยอะๆ พร้อม Inspector Drawer ด้านข้าง</p>
+      <p><strong>ข้อดี / ข้อเสีย:</strong> ดูข้อมูลได้เร็ว รองรับจำนวนแถวเยอะๆ (20-50 ใบ) ได้ดี เลื่อนคีย์บอร์ดได้เป็นธรรมชาติ / แต่ดูเป็นตารางงานเชิงเทคนิค ขาดความรู้สึกเป็นการ์ดที่จับต้องได้ง่าย และชื่อแถวในตารางยังอาจถูกตัดบางส่วน</p>
+      <p><strong>ความยากในการทำด้วย Qt:</strong> <span class="difficulty-meter diff-med">ปานกลาง</span> ใช้ <code>QTableWidget</code> หรือ <code>QTreeView</code> + <code>QSplitter</code> ต้องเขียน delegate สำหรับ custom cell rendering (badges)</p>
+    </div>
+  </section>
+
+
+  <!-- ══════════════════════════════════════════════════════════════
+       FINAL RECOMMENDATION & COMPARISON
+       ══════════════════════════════════════════════════════════════ -->
+  <section class="recommendation-banner" id="recommendation">
+    <div class="rec-header">
+      <span class="rec-badge">บทสรุป &middot; แนะนำเลือกใช้งาน</span>
+      <h2 class="rec-title">แนะนำ "แบบ A: Two-Column Structured Card List"</h2>
+    </div>
+    <p style="font-size: 13.5px; color: var(--text-primary); line-height: 1.6;">
+      จากการวิเคราะห์ทั้งในแง่ของ <strong>UX/UI, ความสมดุลของพื้นที่ขนาด 900&times;600 px</strong> และ <strong>ความเป็นไปได้ทางเทคนิคใน PyQt6</strong> ขอแนะนำ <strong>แบบ A</strong> เป็นตัวเลือกหลัก ด้วยเหตุผล 4 ประการ:
+    </p>
+    <ul class="rec-list">
+      <li>
+        <strong>1. แก้ไขปัญหาเดิมได้อย่างตรงจุด 100%:</strong>
+        ข้อความไม่ถูกตัดขอบอีกต่อไปเพราะการ์ดรองรับ 2-3 บรรทัดพร้อม semantic color badges ที่สะดุดตา, พาเนลขวามี Empty State ที่มีประโยชน์เมื่อยังไม่ได้เลือกใบ, และมีปุ่ม Action ในตัวทำให้ผู้ใช้ทราบทันทีว่ากำลังกระทำกับใบงานใด
+      </li>
+      <li>
+        <strong>2. สอดรับกับขนาดหน้าจอ 900&times;600 px อย่างลงตัวที่สุด:</strong>
+        สัดส่วน 55% : 45% ทำให้การ์ดฝั่งซ้ายกว้างพอที่จะแสดงชื่อยาวๆ ได้ครบถ้วน ในขณะที่ฝั่งขวามีพื้นที่เหลือเฟือสำหรับอ่าน Technical Detail และแสดงไฟล์แนบโดยไม่ต้องเลื่อนหน้าจอมากเกินไป
+      </li>
+      <li>
+        <strong>3. ความเสี่ยงต่ำสุดในการ Implement ด้วย PyQt6:</strong>
+        สถาปัตยกรรมเดิมของ <code>backlog_dialog.py</code> ใช้ <code>QHBoxLayout</code> ซ้าย-ขวาอยู่แล้ว แค่เปลี่ยนจาก Item text ก้อนเดียวไปใช้ <code>QListWidget.setItemWidget(item, CardWidget)</code> หรือ <code>QStyledItemDelegate</code> และจัด layout พาเนลขวาใหม่ โดยไม่ต้องรื้อโค้ด state logic หรือ connection ของ Dialog เลย
+      </li>
+      <li>
+        <strong>4. รองรับ Cockpit Design System สมบูรณ์แบบ:</strong>
+        ทั้งโทนสีเข้ม (Dark) และสว่าง (Light) ใช้ token สีเดียวกับ <code>cockpit_theme.py</code> (Electric Indigo, Slate Neutrals, Semantic Emerald/Amber/Red) ทำให้เข้ากับหน้าต่างหลักของ cockpit ได้อย่างไร้รอยต่อ
+      </li>
+    </ul>
+  </section>
+
+  <!-- Interactive Script (Pure Vanilla JS, 0 dependencies) -->
+  <script>
+    // Theme toggle logic
+    function toggleTheme() {
+      const body = document.body;
+      const isLight = body.classList.toggle('theme-light');
+      const icon = document.getElementById('theme-icon');
+      const text = document.getElementById('theme-text');
+      if (isLight) {
+        icon.textContent = '🌙';
+        text.textContent = 'โหมดมืด';
+      } else {
+        icon.textContent = '☀️';
+        text.textContent = 'โหมดสว่าง';
+      }
+    }
+
+    // Mockup A interactive states
+    function setMockupAState(state) {
+      const btnSel = document.getElementById('btn-state-selected');
+      const btnEmp = document.getElementById('btn-state-empty');
+      const btnOrd = document.getElementById('btn-state-order');
+      const panelPop = document.getElementById('panel-populated');
+      const panelEmp = document.getElementById('panel-empty');
+      const orderCb = document.getElementById('order-cb-a');
+      const pickLbl = document.getElementById('pick-lbl-a');
+      const btnOk = document.getElementById('btn-ok-a');
+      const card5 = document.getElementById('card-5');
+      const orderBadges = document.querySelectorAll('.card-order-item');
+
+      btnSel.classList.remove('active');
+      btnEmp.classList.remove('active');
+      btnOrd.classList.remove('active');
+
+      if (state === 'selected') {
+        btnSel.classList.add('active');
+        panelPop.style.display = 'flex';
+        panelEmp.style.display = 'none';
+        orderCb.checked = false;
+        pickLbl.textContent = '';
+        btnOk.textContent = 'ตกลง — สั่งทำงานที่เลือก';
+        card5.classList.add('selected');
+        orderBadges.forEach(b => b.style.display = 'none');
+      } else if (state === 'empty') {
+        btnEmp.classList.add('active');
+        panelPop.style.display = 'none';
+        panelEmp.style.display = 'flex';
+        orderCb.checked = false;
+        pickLbl.textContent = '';
+        btnOk.textContent = 'ตกลง — สั่งทำงานที่เลือก';
+        document.querySelectorAll('#mock-a-list .backlog-card').forEach(c => c.classList.remove('selected'));
+        orderBadges.forEach(b => b.style.display = 'none');
+      } else if (state === 'order') {
+        btnOrd.classList.add('active');
+        panelPop.style.display = 'flex';
+        panelEmp.style.display = 'none';
+        orderCb.checked = true;
+        pickLbl.textContent = 'เลือกไว้ 3 งาน (เรียงลำดับ ⟨1⟩ ⟨2⟩ ⟨3⟩)';
+        btnOk.textContent = 'ตกลง — สั่งทำ 3 งานตามลำดับ';
+        orderBadges.forEach(b => b.style.display = 'inline-flex');
+      }
+    }
+
+    function toggleOrderModeA(checked) {
+      if (checked) {
+        setMockupAState('order');
+      } else {
+        setMockupAState('selected');
+      }
+    }
+
+    function selectCardA(elem, cardId) {
+      document.querySelectorAll('#mock-a-list .backlog-card').forEach(c => c.classList.remove('selected'));
+      elem.classList.add('selected');
+      document.getElementById('panel-populated').style.display = 'flex';
+      document.getElementById('panel-empty').style.display = 'none';
+      document.getElementById('btn-state-selected').classList.add('active');
+      document.getElementById('btn-state-empty').classList.remove('active');
+    }
+  </script>
+</body>
+</html>
