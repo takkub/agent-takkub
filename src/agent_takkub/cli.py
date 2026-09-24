@@ -1055,6 +1055,7 @@ def cmd_assign(args: argparse.Namespace) -> dict:
                     "mode": mode_requested,
                     "team": team,
                     "distinct_from": distinct_from,
+                    "backlog_id": (getattr(args, "backlog", None) or "").strip(),
                     "scope": scope,
                 }
             )
@@ -1104,6 +1105,7 @@ def cmd_assign(args: argparse.Namespace) -> dict:
                         "mode": mode_requested,
                         "team": team,
                         "distinct_from": distinct_from,
+                        "backlog_id": (getattr(args, "backlog", None) or "").strip(),
                         "scope": scope,
                     }
                 )
@@ -1150,6 +1152,7 @@ def cmd_assign(args: argparse.Namespace) -> dict:
                         "mode": mode_requested,
                         "team": team,
                         "distinct_from": distinct_from,
+                        "backlog_id": (getattr(args, "backlog", None) or "").strip(),
                         "scope": scope,
                     }
                 )
@@ -1207,6 +1210,7 @@ def cmd_assign(args: argparse.Namespace) -> dict:
                 "mode": mode,
                 "team": team,
                 "distinct_from": distinct_from,
+                "backlog_id": (getattr(args, "backlog", None) or "").strip(),
                 "scope": scope,
             }
         )
@@ -2678,7 +2682,7 @@ def backlog_severities() -> tuple[str, ...]:
 
 
 def cmd_backlog(args: argparse.Namespace) -> dict:
-    """`takkub backlog <add|list|show|done|block|defer|status|assign|import>`
+    """`takkub backlog <add|list|show|done|block|defer|status|assign|start|pending|import>`
     — the project backlog (#684): work noticed but not yet done, kept across
     sessions so nothing gets dropped when the Lead session ends."""
     sub = args.b_cmd
@@ -2745,6 +2749,19 @@ def cmd_backlog(args: argparse.Namespace) -> dict:
                 }
             )
         )
+    if sub == "start":
+        return _request(
+            _with_project(
+                {
+                    "cmd": "backlog-start",
+                    "id": args.id or "",
+                    "title": args.title or "",
+                    "from": _from_role(),
+                }
+            )
+        )
+    if sub == "pending":
+        return _request(_with_project({"cmd": "backlog-pending", "from": _from_role()}))
     if sub == "import":
         import pathlib
 
@@ -5486,6 +5503,15 @@ def build_parser() -> argparse.ArgumentParser:
         "already-running pane keeps its current effort",
     )
     sa.add_argument(
+        "--backlog",
+        default=None,
+        metavar="ID",
+        help="(#714) run this task under backlog card ID. Every assign runs "
+        "under a card: without --backlog one is created from the task text "
+        "automatically. Starting new work prints the other pending cards — "
+        "tell the user about them.",
+    )
+    sa.add_argument(
         "--distinct-from",
         default=None,
         metavar="ROLE",
@@ -6206,7 +6232,8 @@ def build_parser() -> argparse.ArgumentParser:
     bll.add_argument(
         "--status",
         default="",
-        help="filter: todo/doing/review/waiting/blocked/deferred/done/wont, or 'open'",
+        help="filter: todo/doing/review/waiting/blocked/deferred/done/wont, "
+        "'open' (active) or 'pending' (everything not done/wont)",
     )
     bls = bl_sub.add_parser("show", help="show one item's full detail")
     bls.add_argument("id", help="item id")
@@ -6224,6 +6251,14 @@ def build_parser() -> argparse.ArgumentParser:
     blas = bl_sub.add_parser("assign", help="fire `takkub assign` for an item and link it")
     blas.add_argument("id", help="item id")
     blas.add_argument("--role", required=True, help="role to assign the item to")
+    blsr = bl_sub.add_parser(
+        "start",
+        help="(#714) Lead is about to do work itself: mark card ID doing, or create "
+        "one with --title — required before Lead edits files",
+    )
+    blsr.add_argument("id", nargs="?", default="", help="existing item id")
+    blsr.add_argument("--title", default="", help="create a new card with this title")
+    bl_sub.add_parser("pending", help="(#714) list every pending card (not done/wont)")
     bli = bl_sub.add_parser("import", help="import a markdown table of items")
     bli.add_argument("file", help="path to a .md file containing a pipe table")
     bli.add_argument("--source", default="", help="source label (defaults to the file path)")

@@ -29,6 +29,12 @@ class _FakeOrch:
         self._render_backlog_detail = Orchestrator._render_backlog_detail
         self._backlog_simple = Orchestrator._backlog_simple
         self._backlog_result = Orchestrator._backlog_result
+        self._report_backlog_pending = Orchestrator._report_backlog_pending.__get__(self)
+        self._BACKLOG_NOTICE_DEDUP_S = Orchestrator._BACKLOG_NOTICE_DEDUP_S
+        self.notices: list[tuple] = []
+        self.backlogPendingNotice = type(
+            "_Sig", (), {"emit": lambda _s, *a: self.notices.append(a)}
+        )()
         self.assign_calls: list[dict] = []
         self._pane_state: dict = {}
 
@@ -46,6 +52,8 @@ class _FakeOrch:
         ps = PaneState()
         ps.task_id = f"task-{len(self.assign_calls)}"
         self._pane_state[_exit_key(project or "default", role)] = ps
+        # Mirrors the real assign(): bind the minted task id to the card (#714).
+        backlog.bind_task_id(project or "default", role, ps.task_id)
         return True, f"assigned to {role}"
 
 
@@ -93,7 +101,10 @@ class TestBacklogCommand:
         # item flipped to doing + linked to the ledger task id
         item = backlog.get_item("p", item_id)
         assert item["status"] == "doing"
-        assert item["ledger_task_id"] == "task-1"
+        assert [(ln["role"], ln["task_id"]) for ln in item["links"]] == [("frontend", "task-1")]
+        # and done on that task flips it to review
+        backlog.on_ledger_done("p", "task-1")
+        assert backlog.get_item("p", item_id)["status"] == "review"
 
     def test_assign_missing_role(self, runtime) -> None:
         orch = _FakeOrch()

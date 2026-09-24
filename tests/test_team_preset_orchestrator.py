@@ -355,13 +355,20 @@ class TestDirectEditCapsPresetAware:
         )
         team_preset.set_current("solo-lead", TEST_PROJECT)
 
-        verdict = pane_guard.evaluate_lead_direct_edit(
-            "Write",
-            self._write_input(str(tmp_path / "api" / "big.py"), 20),
-            project=TEST_PROJECT,
-            state_file=tmp_path / "lead_edits_state.json",
-        )
-        assert verdict.allowed is True
+        def _edit():
+            return pane_guard.evaluate_lead_direct_edit(
+                "Write",
+                self._write_input(str(tmp_path / "api" / "big.py"), 20),
+                project=TEST_PROJECT,
+                state_file=tmp_path / "lead_edits_state.json",
+            )
+
+        # #714: solo-lead lifts the caps but still needs a backlog card doing.
+        assert _edit().rule == "lead_direct_edit:no_backlog_card"
+        from agent_takkub import backlog
+
+        backlog.start_lead_work(TEST_PROJECT, title="solo-lead work")
+        assert _edit().allowed is True
 
     def test_full_preset_keeps_line_cap(self, tmp_path, seed_projects):
         from agent_takkub import pane_guard

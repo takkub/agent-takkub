@@ -1173,6 +1173,35 @@ def _direct_edit_diff_text(tool_name: str, tool_input: dict) -> str:
     return str(tool_input.get("content") or "")
 
 
+def _lead_backlog_gate(file_path: str, cwd: str | None, project: str | None) -> Verdict | None:
+    """#714: backlog is mandatory before work starts. Checked only at the
+    points where `evaluate_lead_direct_edit` would otherwise ALLOW the edit
+    (every other rule keeps its own, more specific deny) — so it bites
+    exactly when Lead is about to change a project file with no card
+    `doing`, solo-lead included (the "Lead does it itself" case).
+    Scratchpad/runtime/outside-root files never need a card, and an
+    unreadable backlog store never blocks on its own."""
+    if not project or _is_direct_edit_exempt(file_path, cwd, project):
+        return None
+    try:
+        from .backlog import has_active_item
+
+        if has_active_item(project):
+            return None
+    except Exception:
+        return None
+    return Verdict(
+        False,
+        rule="lead_direct_edit:no_backlog_card",
+        reason=(
+            "ยังไม่มีใบ backlog ที่กำลังทำ (#714 — backlog บังคับก่อนเริ่มงาน) · "
+            'เปิดใบก่อน: takkub backlog start --title "<งานที่จะทำ>" '
+            "(หรือ takkub backlog start <id> ถ้ามีใบอยู่แล้ว) แล้วแจ้ง user "
+            "ถึงงานค้างที่คำสั่งนั้นแสดง จากนั้นค่อยแก้ไฟล์"
+        ),
+    )
+
+
 def evaluate_lead_direct_edit(
     tool_name: str,
     tool_input: dict,
@@ -1247,7 +1276,7 @@ def evaluate_lead_direct_edit(
             from .team_preset import lead_may_implement
 
             if lead_may_implement(project):
-                return Verdict(True)
+                return _lead_backlog_gate(file_path, cwd, project) or Verdict(True)
         except Exception:
             pass
 
@@ -1459,6 +1488,10 @@ def evaluate_lead_direct_edit(
                 f"(เพดานจะรีเซ็ตเองใน {remaining_minutes} นาที หรือใช้ takkub lead-edits --reset)"
             ),
         )
+
+    backlog_denied = _lead_backlog_gate(file_path, cwd, project)
+    if backlog_denied is not None:
+        return backlog_denied
 
     # Update state
     if s_path:

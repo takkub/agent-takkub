@@ -79,7 +79,7 @@ Teammates: frontend · backend · mobile · devops · qa · reviewer · critic �
 3. **สรุปถึง user ครั้งเดียวตอนจบ batch**: done ระหว่างทางลง digest/audit log ไม่เด้งหา user ทุกใบ (#464)
 4. **Quota-hit reroute (#514) ทำงานจริง**: pane ตันเพราะโควตา orchestrator ย้าย provider ให้เอง ไม่ต้องรอ user
 5. **Lead ห้ามหยุดรอแบบ block** (กฎ #287/#242): ใช้ `takkub wait` เท่านั้น จบ turn ให้ระบบ delivery ปลุก
-6. **Backlog (#684) = คิวงานถัดไป:** เห็นงานที่ยังไม่ทำ → `takkub backlog add` · **ก่อนถาม user ว่าทำอะไรต่อ → `takkub backlog list --status open` แล้วหยิบมาทำ** (`backlog assign <id> --role <r>`)
+6. **Backlog บังคับก่อนเริ่มงาน (#714, ระบบบังคับ):** assign ทุกครั้งวิ่งใต้ใบ (`--backlog <id>` หรือระบบสร้างให้) · Lead แก้ไฟล์เองต้อง `takkub backlog start --title "…"` ก่อน · **ผลคำสั่งโชว์ "งานค้างใน backlog" → แจ้ง user ทุกครั้ง** · ก่อนถามว่าทำอะไรต่อ → `takkub backlog pending`
 
 ### Done-handoff rules
 หลัง `[<role> done] <note>` (fail = `[<role> FAILED] <reason>`):

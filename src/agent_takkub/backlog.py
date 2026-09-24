@@ -131,11 +131,13 @@ def _save(project: str, store: dict) -> None:
 
 
 def list_items(project: str, *, status: str | None = None) -> list[dict]:
-    """Items newest-first, optionally filtered by status ('open' = any
-    non-terminal)."""
+    """Items newest-first, optionally filtered by status ('open' = active
+    work, 'pending' = everything not done/wont incl. deferred)."""
     items = load(project)["items"]
     if status == "open":
         items = [it for it in items if it.get("status") in _OPEN_STATUSES]
+    elif status == "pending":
+        items = [it for it in items if it.get("status") in _PENDING_STATUSES]
     elif status:
         items = [it for it in items if it.get("status") == status]
     return sorted(items, key=lambda it: (it.get("seq", 0), it.get("created_ts", 0.0)), reverse=True)
@@ -228,17 +230,211 @@ def assign_item(project: str, item_id: str, ledger_task_id: str | None) -> dict 
 
 def on_ledger_done(project: str, ledger_task_id: str) -> dict | None:
     """When a pane reports done for a task that a backlog item triggered, flip
-    the item to `review` (owner confirms) instead of closing it silently."""
+    the item to `review` (owner confirms) instead of closing it silently.
+
+    #714: an item assigned to several panes (shard fan-out) keeps one link per
+    role and only flips once every linked task has reported done."""
     if not ledger_task_id:
         return None
     store = load(project)
     for it in store["items"]:
-        if it.get("ledger_task_id") == ledger_task_id and it.get("status") == "doing":
+        if it.get("status") != "doing":
+            continue
+        links = it.get("links") or []
+        hit = next((ln for ln in links if ln.get("task_id") == ledger_task_id), None)
+        if hit is None and it.get("ledger_task_id") != ledger_task_id:
+            continue
+        if hit is not None:
+            hit["done"] = True
+        if all(ln.get("done") for ln in links if ln.get("role") != "lead"):
             it["status"] = "review"
+        it["updated_ts"] = _now()
+        _save(project, store)
+        return it
+    return None
+
+
+# ── #714: backlog is the mandatory entry point for new work ──────────────────
+# `takkub assign` without a card gets one created from the task text; a card
+# records which roles it was handed to (`links`), and orchestrator.assign binds
+# each link to the ledger task id it mints so `on_ledger_done` can flip it.
+
+# Everything not closed — `deferred` included: a parked item is still work the
+# owner has not let go of, and the pending report must show it.
+_PENDING_STATUSES = frozenset({"todo", "doing", "review", "waiting", "blocked", "deferred"})
+_AUTO_TITLE_MAX = 90
+# Two assigns with the same task text inside this window (shard fan-out sends
+# one request per shard; a client retry resends) share one auto-created card.
+_AUTO_REUSE_WINDOW_S = 120.0
+_ROLE_TAG_RE = re.compile(r"^\s*\[[^\]]{0,80}\]\s*")
+
+
+def pending_items(project: str) -> list[dict]:
+    """Every item not yet done/wont, oldest first (the longest-waiting work
+    leads the pending report)."""
+    items = [it for it in load(project)["items"] if it.get("status") in _PENDING_STATUSES]
+    return sorted(items, key=lambda it: (it.get("created_ts", 0.0), it.get("seq", 0)))
+
+
+def has_active_item(project: str) -> bool:
+    """True when at least one item is `doing` — the Lead direct-edit gate."""
+    return any(it.get("status") == "doing" for it in load(project)["items"])
+
+
+def title_from_task(task: str) -> str:
+    """A card title from a free-form task spec: first meaningful line, leading
+    `[ROLE: …]`-style tags stripped, capped at `_AUTO_TITLE_MAX` chars."""
+    for raw in (task or "").splitlines():
+        line = raw.strip()
+        while True:
+            stripped = _ROLE_TAG_RE.sub("", line, count=1)
+            if stripped == line:
+                break
+            line = stripped.strip()
+        line = line.lstrip("#>*- ").strip()
+        if line:
+            if len(line) > _AUTO_TITLE_MAX:
+                line = line[: _AUTO_TITLE_MAX - 1].rstrip() + "…"
+            return line
+    return "(งานไม่มีชื่อ)"
+
+
+def _add_link(item: dict, role: str) -> None:
+    links = item.setdefault("links", [])
+    links.append({"role": role, "task_id": None, "done": False, "ts": _now()})
+
+
+def link_assign(project: str, item_id: str, role: str) -> dict | None:
+    """Mark *item_id* as handed to *role* (status → doing). The ledger task id
+    is bound later by `bind_task_id`, from inside orchestrator.assign."""
+    store = load(project)
+    for it in store["items"]:
+        if it.get("id") == item_id:
+            _add_link(it, role)
+            it["status"] = "doing"
+            it["reason"] = ""
             it["updated_ts"] = _now()
             _save(project, store)
             return it
     return None
+
+
+def ensure_for_assign(
+    project: str, role: str, task: str, backlog_id: str | None = None
+) -> tuple[dict, bool]:
+    """The card an assign runs under. With *backlog_id* that card (must exist
+    and not be closed); without one a card is created from *task* — or reused
+    when the same task text was auto-carded moments ago (shard fan-out,
+    client retry). Returns `(item, is_new_work)`: new work = a card that was
+    not already `doing`, i.e. the moment the pending report is owed."""
+    backlog_id = (backlog_id or "").strip()
+    if backlog_id:
+        item = get_item(project, backlog_id)
+        if item is None:
+            raise ValueError(f"ไม่พบ backlog id {backlog_id}")
+        if item.get("status") in _TERMINAL_STATUSES:
+            raise ValueError(
+                f"backlog [{backlog_id}] ปิดไปแล้ว ({item.get('status')}) — "
+                "เปิดใหม่ด้วย `takkub backlog status <id> todo` หรือไม่ใส่ --backlog ให้สร้างใบใหม่"
+            )
+        was_doing = item.get("status") == "doing"
+        linked = link_assign(project, backlog_id, role) or item
+        return linked, not was_doing
+    fingerprint = (task or "").strip()
+    now = _now()
+    for it in load(project)["items"]:
+        if (
+            it.get("auto_task") == fingerprint
+            and it.get("status") == "doing"
+            and now - it.get("created_ts", 0.0) <= _AUTO_REUSE_WINDOW_S
+        ):
+            linked = link_assign(project, it["id"], role) or it
+            return linked, False
+    item = add_item(
+        project,
+        title_from_task(task),
+        detail=(task or "").strip(),
+        source=f"auto · takkub assign → {role}",
+        status="doing",
+    )
+    store = load(project)
+    for it in store["items"]:
+        if it.get("id") == item["id"]:
+            it["auto_task"] = fingerprint
+            _add_link(it, role)
+            _save(project, store)
+            return it, True
+    return item, True
+
+
+def bind_task_id(project: str, role: str, task_id: str) -> dict | None:
+    """Called by orchestrator.assign once it has minted *task_id* for *role*.
+    Fills the newest unbound link for that role; with none unbound (a quota
+    reroute / queue re-dispatch re-assigning the same work) the newest open
+    link for the role moves to the new id so done still finds the card."""
+    if not task_id:
+        return None
+    store = load(project)
+    doing = [it for it in store["items"] if it.get("status") == "doing"]
+    doing.sort(key=lambda it: it.get("updated_ts", 0.0), reverse=True)
+    target = None
+    for want_unbound in (True, False):
+        for it in doing:
+            for ln in reversed(it.get("links") or []):
+                if ln.get("role") != role or ln.get("done"):
+                    continue
+                if want_unbound and ln.get("task_id"):
+                    continue
+                target = (it, ln)
+                break
+            if target:
+                break
+        if target:
+            break
+    if target is None:
+        return None
+    it, ln = target
+    if ln.get("task_id") == task_id:
+        return it
+    ln["task_id"] = task_id
+    it["updated_ts"] = _now()
+    _save(project, store)
+    return it
+
+
+def start_lead_work(project: str, *, item_id: str = "", title: str = "") -> tuple[dict, bool]:
+    """`takkub backlog start` — the Lead is about to do work itself. Returns
+    `(item, is_new_work)` like `ensure_for_assign`."""
+    item_id = (item_id or "").strip()
+    if item_id:
+        item = get_item(project, item_id)
+        if item is None:
+            raise ValueError(f"ไม่พบ backlog id {item_id}")
+        if item.get("status") in _TERMINAL_STATUSES:
+            raise ValueError(f"backlog [{item_id}] ปิดไปแล้ว ({item.get('status')})")
+        was_doing = item.get("status") == "doing"
+        return (link_assign(project, item_id, "lead") or item), not was_doing
+    if not (title or "").strip():
+        raise ValueError("backlog start ต้องมี <id> หรือ --title")
+    item = add_item(project, title, source="lead ทำเอง", status="doing")
+    return (link_assign(project, item["id"], "lead") or item), True
+
+
+def pending_report(project: str, *, exclude_ids: tuple[str, ...] = (), limit: int = 10) -> str:
+    """The "งานค้างก่อนเริ่มงานใหม่" block: every pending item except the one
+    just started, oldest first. Empty string when nothing else is pending."""
+    items = [it for it in pending_items(project) if it.get("id") not in exclude_ids]
+    if not items:
+        return ""
+    now = _now()
+    lines = [f"📋 งานค้างใน backlog {len(items)} ใบ (ก่อนเริ่มงานใหม่):"]
+    for it in items[:limit]:
+        lines.append("  " + render_line(it, now=now))
+    if len(items) > limit:
+        lines.append(
+            f"  … อีก {len(items) - limit} ใบ — ดูทั้งหมด: takkub backlog list --status pending"
+        )
+    return "\n".join(lines)
 
 
 def remove(project: str, item_id: str) -> bool:

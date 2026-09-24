@@ -47,6 +47,9 @@ takkub backlog add "<title>" [--detail ..] [--source ..] [--file p:line] [--impa
 takkub backlog list [--status open|todo|doing|blocked|deferred|done]   # คิวงานถัดไป — ดูก่อนถาม user ว่าทำอะไรต่อ
 takkub backlog show <id> · done <id> · block <id> "<reason>" · defer <id> · status <id> <status>
 takkub backlog assign <id> --role <role>                # ยิง takkub assign จากใบ backlog แล้วผูก id ให้เอง
+takkub backlog start [<id>] [--title "<งาน>"]          # (#714) Lead จะทำเอง — ต้องมีใบ doing ก่อนแก้ไฟล์ (guard บังคับ) · แสดงงานค้างให้แจ้ง user
+takkub backlog pending                                  # (#714) ใบที่ยังไม่ปิดทั้งหมด (รวม deferred) เรียงจากค้างนานสุด
+takkub assign ... --backlog <id>                        # (#714) ผูกงานกับใบที่มีอยู่ · ไม่ใส่ = ระบบสร้างใบจาก task ให้เอง
 takkub backlog import <file.md>                         # นำเข้าตาราง markdown (| title | detail | ... |) เป็นใบ backlog
 takkub close --role qa                                 # ปิด pane เดียว — 2.1.17: pane ไม่ปิดเองหลัง done แล้ว (นั่งรอ 30 นาที) assign role เดิมซ้ำ = paste เข้า session เดิม ไม่ boot ใหม่ · close เองเฉพาะจะเปลี่ยน provider/model หรือเลิกใช้ (เปลี่ยน worktree ระบบปิด+เปิดใหม่ให้เอง)
 takkub close-all                                       # ปิด teammate ทั้งหมด (Lead รอด)

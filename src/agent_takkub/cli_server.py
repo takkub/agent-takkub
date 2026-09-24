@@ -937,6 +937,34 @@ class CliServer(QObject):
                             ),
                         )
                         return
+                # #714: backlog is the mandatory entry point for new work —
+                # every assign runs under a card (`--backlog <id>`, or one
+                # created from the task text), and starting new work reports
+                # what else is still pending. Synchronous so a bad id fails
+                # the ack and the card id + pending list ride back on it.
+                backlog_note = ""
+                _backlog_fn = getattr(self._orch, "backlog_for_assign", None)
+                if (
+                    cmd == "assign"
+                    and callable(_backlog_fn)
+                    and str(role).split("#", 1)[0].strip().lower() != "lead"
+                ):
+                    try:
+                        b_res = _backlog_fn(
+                            from_project,
+                            str(role),
+                            str(req.get("task", "") or ""),
+                            (str(req.get("backlog_id", "") or "").strip() or None),
+                        )
+                    except Exception:
+                        # Backlog trouble never blocks the assign itself.
+                        b_res = None
+                    if isinstance(b_res, tuple) and len(b_res) == 3:
+                        b_ok, b_note, _b_id = b_res
+                        if b_ok is False:
+                            self._reply(sock, ok=False, msg=str(b_note))
+                            return
+                        backlog_note = b_note if isinstance(b_note, str) else ""
                 if cmd == "assign" and mode == "subagent":
                     ok, msg = self._orch.assign(
                         role,
@@ -958,6 +986,8 @@ class CliServer(QObject):
                     )
                     if auto_mode_note:
                         msg = f"{msg}\n[{auto_mode_note}]"
+                    if backlog_note:
+                        msg = f"{msg}\n{backlog_note}"
                     self._reply(sock, ok=ok, msg=msg)
                     return
                 if cmd == "spawn":
@@ -1086,6 +1116,8 @@ class CliServer(QObject):
                     queued_notice = self._queued_no_pane_suffix(project_ns_fp, role)
                     if queued_notice:
                         ack_msg = f"{ack_msg}\n{queued_notice}"
+                    if backlog_note:
+                        ack_msg = f"{ack_msg}\n{backlog_note}"
                     self._reply(sock, ok=True, msg=ack_msg)
                 return
             elif cmd == "send":
