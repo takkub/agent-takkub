@@ -457,6 +457,24 @@ class TestResumeUuidMatchesProviderCwd:
         assert _resume_uuid_matches_provider_cwd("default", "codex", "codex-uuid", str(tmp_path))
         assert seen == {"cwd": str(tmp_path), "uuid": "codex-uuid"}
 
+    def test_opencode_uses_provider_core_resolver(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
+    ) -> None:
+        from agent_takkub import opencode_helper
+        from agent_takkub.spawn_engine import _resume_uuid_matches_provider_cwd
+
+        session_id = "ses_01j_resume_723"
+        seen: dict[str, str | None] = {}
+
+        def _resolve(cwd: str, wanted_id: str | None = None):
+            seen.update(cwd=cwd, uuid=wanted_id)
+            return tmp_path / "opencode.db", session_id
+
+        monkeypatch.setattr(opencode_helper, "resolve_opencode_session", _resolve)
+
+        assert _resume_uuid_matches_provider_cwd("default", "opencode", session_id, str(tmp_path))
+        assert seen == {"cwd": str(tmp_path), "uuid": session_id}
+
 
 class TestSpawnResumeUuid:
     # role_name deliberately not "lead" — a lead spawn also renders

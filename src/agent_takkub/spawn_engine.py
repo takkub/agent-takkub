@@ -552,6 +552,10 @@ def _resume_uuid_matches_provider_cwd(
         from .codex_helper import resolve_codex_jsonl_for_cwd
 
         return resolve_codex_jsonl_for_cwd(cwd, session_uuid) is not None
+    if provider == "opencode":
+        from .opencode_helper import resolve_opencode_session
+
+        return resolve_opencode_session(cwd, session_uuid) is not None
     return False
 
 
@@ -3033,8 +3037,32 @@ class SpawnEngineMixin:
                     )
 
             resume_argv: list[str] = []
+            _ekey_spawn = _exit_key(project_ns, role_name)
+            if not resume_uuid and spec.supports_resume and spec.session_resume_flag:
+                _ps_pre = self._pane_state.get(_ekey_spawn)
+                _prior_uuid = _ps_pre.session_uuid if _ps_pre is not None else None
+                _prior_cwd = _ps_pre.session_uuid_cwd if _ps_pre is not None else ""
+                _prior_exit = self._recent_exits.get(_ekey_spawn)
+                _prior_provider = (_prior_exit.get("provider") if _prior_exit else None) or (
+                    getattr(_ps_pre, "session_provider", None) if _ps_pre is not None else None
+                )
+                if (
+                    _prior_uuid
+                    and _prior_cwd
+                    and _normalize_cwd_for_compare(_prior_cwd)
+                    == _normalize_cwd_for_compare(spawn_cwd)
+                    and _prior_exit is not None
+                    and (time.time() - _prior_exit.get("ts", 0)) < RESUME_WINDOW_SEC
+                    and _prior_provider == spec.name
+                ):
+                    resume_uuid = _prior_uuid
+
             if resume_uuid:
                 resume_argv.extend([spec.session_resume_flag, resume_uuid])
+                _ps_new = self._ps(_ekey_spawn)
+                _ps_new.session_uuid = resume_uuid
+                _ps_new.session_uuid_cwd = spawn_cwd
+                _ps_new.session_provider = spec.name
 
             tools_argv: list[str] = []
             if role_name != LEAD.name and spec.tools_flag:
