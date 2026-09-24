@@ -932,11 +932,11 @@ class TestLeadSay:
 
     def test_success_flags_unsupported_mirror_provider(self, monkeypatch, fake_orch):
         """2026-08-13 remote-mirror fix: a provider with no history scanner
-        (opencode/kimi/cursor) still delivers the message, but the response
+        still delivers the message, but the response
         must tell the PWA not to expect a live mirrored reply — this is the
         signal that stops the phone's spinner from hanging forever with zero
         explanation (e.g. for providers without remote history support)."""
-        monkeypatch.setattr(api.notify, "lead_provider_name", lambda orch, ns: "kimi")
+        monkeypatch.setattr(api.notify, "lead_provider_name", lambda orch, ns: "unknown-cli")
         srv = _FakeCliServer({"ok": True, "msg": "sent to lead"})
         _patch_port(monkeypatch, srv.port)
         try:
@@ -944,10 +944,10 @@ class TestLeadSay:
         finally:
             srv.close()
         assert result["ok"] is True
-        assert result["provider"] == "kimi"
+        assert result["provider"] == "unknown-cli"
         assert result["mirror_supported"] is False
         assert result["lead_provider_note"] is not None
-        assert "kimi" in result["lead_provider_note"]
+        assert "unknown-cli" in result["lead_provider_note"]
 
     def test_opencode_mirror_supported(self, monkeypatch, fake_orch):
         monkeypatch.setattr(api.notify, "lead_provider_name", lambda orch, ns: "opencode")
@@ -1088,6 +1088,23 @@ class TestBuildPickerKeySequence:
         with pytest.raises(api.RemoteApiError) as excinfo:
             api._build_picker_key_sequence(state["questions"], [[0, 1]])
         assert excinfo.value.status == 400
+
+    def test_opencode_uses_digit_and_review_semantics(self):
+        state = _two_question_state()
+        seq = api._build_picker_key_sequence_for_provider(
+            "opencode", state["questions"], [[0], [1]]
+        )
+        assert seq == ["1", "2", "\r"]
+
+    def test_agy_navigates_from_first_row_then_selects(self):
+        state = _one_question_state()
+        seq = api._build_picker_key_sequence_for_provider("gemini", state["questions"], [[1]])
+        assert seq == ["\x1b[B", "\r"]
+
+    def test_agy_multi_select_navigates_toggles_and_submits(self):
+        state = _one_question_state(multi_select=True)
+        seq = api._build_picker_key_sequence_for_provider("gemini", state["questions"], [[0, 2]])
+        assert seq == [" ", "\x1b[B", "\x1b[B", " ", "\r"]
 
 
 class TestAnswerPicker:
@@ -1444,18 +1461,18 @@ class TestLeadHistory:
         """A provider using the live visible-screen fallback still explains
         that saved history/session browsing is unavailable."""
         monkeypatch.setattr(
-            api.notify, "lead_history_snapshot", lambda orch, ns, limit: ("kimi", [])
+            api.notify, "lead_history_snapshot", lambda orch, ns, limit: ("unknown-cli", [])
         )
         monkeypatch.setattr(
             api.notify,
             "lead_mirror_diagnosis",
-            lambda orch, ns: {"code": "provider_unsupported", "provider": "kimi"},
+            lambda orch, ns: {"code": "provider_unsupported", "provider": "unknown-cli"},
         )
         result = api.lead_history(self._Orch(), "proj-a")
-        assert result["provider"] == "kimi"
+        assert result["provider"] == "unknown-cli"
         assert result["messages"] == []
         assert result["lead_provider_note"] is not None
-        assert "kimi" in result["lead_provider_note"]
+        assert "unknown-cli" in result["lead_provider_note"]
 
     def test_empty_reason_omitted_when_messages_present(self, monkeypatch):
         """Diagnosis is skipped entirely for a populated chat — it must never
@@ -1582,14 +1599,16 @@ class TestLeadSessions:
 
     def test_exposes_provider_and_clean_unsupported_state(self, monkeypatch):
         monkeypatch.setattr(
-            api.notify, "lead_sessions_snapshot", lambda orch, ns, limit: ("kimi", [])
+            api.notify, "lead_sessions_snapshot", lambda orch, ns, limit: ("unknown-cli", [])
         )
         result = api.lead_sessions(self._Orch(), "proj-a")
         assert result == {
             "project": "proj-a",
-            "provider": "kimi",
+            "provider": "unknown-cli",
             "sessions": [],
-            "lead_provider_note": "Lead provider = kimi — remote history/session unavailable",
+            "lead_provider_note": (
+                "Lead provider = unknown-cli — remote history/session unavailable"
+            ),
         }
 
     def test_supported_provider_has_no_degradation_note(self, monkeypatch):

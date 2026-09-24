@@ -380,14 +380,15 @@ def lead_say(orch, text: str, from_project: str | None) -> dict:
 #     key. Orchestrator.answer_picker paces a list of keys for that reason.
 _PICKER_KEY_NEXT_TAB = "\x1b[C"  # Right arrow: multiSelect -> next question / review
 _PICKER_KEY_CONFIRM = "\r"
+_PICKER_KEY_DOWN = "\x1b[B"
+_PICKER_KEY_TOGGLE = " "
 
 
-def _build_picker_key_sequence(questions: list[dict], answers: list) -> list[str]:
-    """One terminal key per list element, in press order (see the module
-    comment above for the proven semantics of each key)."""
+def _validated_picker_answers(questions: list[dict], answers: list) -> list[tuple[dict, list[int]]]:
+    """Validate the card/store trust boundary before emitting terminal keys."""
     if len(answers) != len(questions):
         raise RemoteApiError(400, "answers count does not match questions")
-    keys: list[str] = []
+    validated: list[tuple[dict, list[int]]] = []
     for q, chosen in zip(questions, answers, strict=True):
         options = q.get("options") or []
         multi = bool(q.get("multiSelect"))
@@ -400,19 +401,54 @@ def _build_picker_key_sequence(questions: list[dict], answers: list) -> list[str
             if not isinstance(idx, int) or isinstance(idx, bool) or not (0 <= idx < len(options)):
                 raise RemoteApiError(400, "invalid option index")
             if idx >= 9:
-                # the picker's own numbered list never shows a 2-digit index
-                # (_MAX_ASK_OPTIONS caps at 6) -- defensive, unreachable via the
-                # normal payload shape.
                 raise RemoteApiError(400, "option index out of digit-key range")
             if idx in seen:
                 raise RemoteApiError(400, "duplicate option index")
             seen.add(idx)
+        validated.append((q, chosen))
+    return validated
+
+
+def _build_picker_key_sequence(questions: list[dict], answers: list) -> list[str]:
+    """One terminal key per list element, in press order (see the module
+    comment above for the proven semantics of each key)."""
+    keys: list[str] = []
+    for q, chosen in _validated_picker_answers(questions, answers):
+        multi = bool(q.get("multiSelect"))
+        for idx in chosen:
             keys.append(str(idx + 1))
         if multi:
             keys.append(_PICKER_KEY_NEXT_TAB)
     if len(questions) > 1 or any(bool(q.get("multiSelect")) for q in questions):
         keys.append(_PICKER_KEY_CONFIRM)  # "Review your answers" -> "1. Submit answers" (default)
     return keys
+
+
+def _build_agy_picker_key_sequence(questions: list[dict], answers: list) -> list[str]:
+    """agy 1.2.9: arrows navigate, Space toggles multi, Enter submits."""
+    keys: list[str] = []
+    for q, chosen in _validated_picker_answers(questions, answers):
+        if q.get("multiSelect"):
+            cursor = 0
+            for idx in sorted(chosen):
+                keys.extend([_PICKER_KEY_DOWN] * (idx - cursor))
+                keys.append(_PICKER_KEY_TOGGLE)
+                cursor = idx
+        else:
+            keys.extend([_PICKER_KEY_DOWN] * chosen[0])
+        keys.append(_PICKER_KEY_CONFIRM)
+    return keys
+
+
+def _build_picker_key_sequence_for_provider(
+    provider: str, questions: list[dict], answers: list
+) -> list[str]:
+    """Build only key sequences verified against that provider's real TUI."""
+    if provider in {"claude", "opencode"}:
+        return _build_picker_key_sequence(questions, answers)
+    if provider in {"gemini", "agy"}:
+        return _build_agy_picker_key_sequence(questions, answers)
+    raise RemoteApiError(409, f"provider {provider} has no verified question picker")
 
 
 def answer_picker(orch, from_project: str | None, answers: object) -> dict:
@@ -436,7 +472,8 @@ def answer_picker(orch, from_project: str | None, answers: object) -> dict:
     state = notify.current_ask_state(orch, from_project)
     if state is None:
         raise RemoteApiError(409, "no active picker — it may already be answered on desktop")
-    keys = _build_picker_key_sequence(state["questions"], answers)
+    provider = notify.lead_provider_name(orch, _pulse_project(from_project))
+    keys = _build_picker_key_sequence_for_provider(provider, state["questions"], answers)
     resp = _lead_frame(
         orch,
         {

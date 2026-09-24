@@ -3439,6 +3439,8 @@ def check_provider_capabilities() -> list[Finding]:
         detail = " · ".join(
             f"{state}: {', '.join(sorted(caps))}" for state, caps in sorted(by_state.items())
         )
+        if spec.lead_question_gap:
+            detail += f" · lead_questions gap: {spec.lead_question_gap}"
         findings.append(
             Finding(
                 "provider-capabilities",

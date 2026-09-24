@@ -317,6 +317,56 @@ def read_opencode_session_messages(
         conn.close()
 
 
+def read_opencode_question_records(
+    db_path: Path,
+    session_id: str,
+    limit: int = 20,
+) -> list[dict]:
+    """Return durable question-tool parts for one OpenCode session.
+
+    OpenCode 1.18.32 emits an in-memory ``question.asked`` event, but the
+    same request is also persisted as a ``part.data`` tool record.  The row
+    is updated in place from ``running`` to ``completed`` or ``error`` (Esc),
+    so it provides both sides of #717 even if the cockpit missed the SSE
+    event.  Only the JSON tool envelope is returned; tool arguments are
+    consumed locally by the picker parser and never mirrored as text.
+    """
+    if not session_id:
+        return []
+    conn = _connect_ro(db_path)
+    if conn is None:
+        return []
+    try:
+        rows = conn.execute(
+            """
+            SELECT p.id, p.time_created, p.time_updated, p.data
+            FROM part p
+            WHERE p.session_id = ?
+              AND json_extract(p.data, '$.type') = 'tool'
+              AND lower(json_extract(p.data, '$.tool')) = 'question'
+            ORDER BY COALESCE(p.time_updated, p.time_created) DESC
+            LIMIT ?
+            """,
+            (session_id, max(1, limit)),
+        ).fetchall()
+        out: list[dict] = []
+        for row in reversed(rows):
+            try:
+                rec = json.loads(row["data"])
+            except (json.JSONDecodeError, TypeError):
+                continue
+            if not isinstance(rec, dict):
+                continue
+            rec["_part_id"] = str(row["id"])
+            rec["_time_updated"] = int(row["time_updated"] or row["time_created"] or 0)
+            out.append(rec)
+        return out
+    except (sqlite3.Error, OSError):
+        return []
+    finally:
+        conn.close()
+
+
 def read_opencode_token_usage(db_path: Path, session_id: str) -> dict | None:
     """Return the unified token_meter usage dict for the most recent
     assistant message in *session_id*.
