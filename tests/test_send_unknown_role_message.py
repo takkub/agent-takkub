@@ -134,6 +134,30 @@ class TestUnknownRoleVsClosedPane:
         assert ok is True
         pane.session.write.assert_called()
 
+    def test_shell_pane_gets_raw_text_without_role_header(self, orch: Orchestrator) -> None:
+        """A terminal pane (role "shell") must receive the sent text verbatim —
+        a `[lead → shell] ` header would make PowerShell parse it as type
+        literals and raise ParserError. LLM panes keep the header."""
+        shell_pane = _make_pane(session=_make_alive_session())
+        backend_pane = _make_pane(session=_make_alive_session())
+        orch._panes_by_project.setdefault("p", {})["shell"] = shell_pane
+        orch._panes_by_project["p"]["backend"] = backend_pane
+
+        ok, _msg = orch.send("shell", "echo hello-718", from_role="lead", project="p")
+        assert ok is True
+        shell_written = "".join(
+            str(c.args[0]) for c in shell_pane.session.write.call_args_list if c.args
+        )
+        assert "[lead → shell]" not in shell_written
+        assert "echo hello-718" in shell_written
+
+        ok, _msg = orch.send("backend", "check", from_role="lead", project="p")
+        assert ok is True
+        backend_written = "".join(
+            str(c.args[0]) for c in backend_pane.session.write.call_args_list if c.args
+        )
+        assert "[lead → backend]" in backend_written
+
 
 class TestQueuedMessageFlush:
     """#303 item 3: a message queued for a role with no pane must actually
