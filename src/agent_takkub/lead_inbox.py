@@ -191,6 +191,10 @@ _STALL_DEFER_MAX = 4
 # hard timeout stays wall-clock accurate.
 _READY_POLL_FIRST_MS = 300
 _READY_POLL_INTERVAL_MS = 150
+# #724: give provider auto-trust a short window to clear its prompt before
+# telling the Lead that task delivery is blocked. Count only consecutive polls
+# that still see the prompt; brief trust modals resolve in a few seconds.
+_PROMPT_BLOCK_WARNING_GRACE_MS = 20_000
 # #509 feedback/survey auto-skip budget for `_send_when_ready`'s poll loop —
 # the SAME 3 s cooldown / 3-attempt cap the watchdog sweep
 # (`Orchestrator._check_feedback_prompts`) and `_auto_trust` apply, kept on
@@ -1472,10 +1476,10 @@ class LeadInboxMixin:
         # #130: logged once (not every 150ms poll) the first time the hard
         # timeout is deferred because the pane is busy, not stuck.
         busy_wait_logged = [False]
-        # #186: logged once, the first poll that recognises the pane is
-        # blocked on an interactive prompt (trust modal / shell y-n) rather
-        # than genuinely busy or genuinely stalled.
+        # #186/#724: the warning is sent once, only after a prompt remains
+        # continuously visible through the grace period below.
         prompt_blocked_warned = [False]
+        prompt_blocked_elapsed = [0]
         # #186: accumulates only while _deliver() is deferring a would-be
         # blind paste because the pane is still on a recognised prompt.
         prompt_defer_elapsed = [0]
@@ -1970,15 +1974,22 @@ class LeadInboxMixin:
                         )
                 except Exception:
                     pass
-            if _reason and not prompt_blocked_warned[0]:
-                prompt_blocked_warned[0] = True
-                _log_event(
-                    "task_deliver_blocked_on_prompt",
-                    project=self._resolve_project(project),
-                    role=role_name,
-                    reason=_reason,
-                )
-                self._warn_lead_delivery_blocked_prompt(role_name, project, _reason)
+            if _reason:
+                prompt_blocked_elapsed[0] += _READY_POLL_INTERVAL_MS
+                if (
+                    not prompt_blocked_warned[0]
+                    and prompt_blocked_elapsed[0] >= _PROMPT_BLOCK_WARNING_GRACE_MS
+                ):
+                    prompt_blocked_warned[0] = True
+                    _log_event(
+                        "task_deliver_blocked_on_prompt",
+                        project=self._resolve_project(project),
+                        role=role_name,
+                        reason=_reason,
+                    )
+                    self._warn_lead_delivery_blocked_prompt(role_name, project, _reason)
+            else:
+                prompt_blocked_elapsed[0] = 0
             # #271: computed once per poll (not just while the #254 warning
             # below is still armed) so the elapsed>=max_wait_ms blind-paste
             # guard further down can reuse the SAME read instead of calling
