@@ -180,6 +180,14 @@ STATE_DONE_TEXT = "#34D399"
 STATE_DONE_BG = "rgba(16,185,129,0.15)"
 STATE_DONE_BORDER = "rgba(16,185,129,0.35)"
 
+# Done backlog *card* fade — closed cards recede below the active pile: a
+# nearly-invisible card ground/border plus a dimmed title colour. Separate
+# from the STATE_DONE_* badge triple above so the card can fade while the
+# still-colourful "เสร็จ" pill keeps its identity.
+BACKLOG_DONE_BG = "rgba(255,255,255,0.04)"
+BACKLOG_DONE_BORDER = "rgba(255,255,255,0.06)"
+BACKLOG_DONE_TEXT = "#6B7280"
+
 SEV_HIGH_TEXT = "#F87171"
 SEV_HIGH_BG = "rgba(239,68,68,0.15)"
 SEV_MED_TEXT = "#FBBF24"
@@ -418,6 +426,9 @@ _THEMED_TOKEN_NAMES: tuple[str, ...] = (
     "STATE_DONE_TEXT",
     "STATE_DONE_BG",
     "STATE_DONE_BORDER",
+    "BACKLOG_DONE_BG",
+    "BACKLOG_DONE_BORDER",
+    "BACKLOG_DONE_TEXT",
     "SEV_HIGH_TEXT",
     "SEV_HIGH_BG",
     "SEV_MED_TEXT",
@@ -557,6 +568,9 @@ LIGHT_TOKENS: dict[str, object] = {
     "STATE_DONE_TEXT": "#047857",
     "STATE_DONE_BG": "rgba(5,150,105,0.10)",
     "STATE_DONE_BORDER": "rgba(5,150,105,0.25)",
+    "BACKLOG_DONE_BG": "rgba(16,24,40,0.04)",
+    "BACKLOG_DONE_BORDER": "rgba(16,24,40,0.08)",
+    "BACKLOG_DONE_TEXT": "#94A3B8",
     "SEV_HIGH_TEXT": "#B91C1C",
     "SEV_HIGH_BG": "rgba(220,38,38,0.10)",
     "SEV_MED_TEXT": "#B45309",

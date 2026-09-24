@@ -24,6 +24,7 @@ from PyQt6.QtGui import QColor, QFont, QFontMetrics, QPainter
 from PyQt6.QtWidgets import (
     QCheckBox,
     QFrame,
+    QGraphicsOpacityEffect,
     QGridLayout,
     QHBoxLayout,
     QLabel,
@@ -59,6 +60,44 @@ def ordered_selection(picked_ids: list[str], items: list[dict]) -> list[dict]:
     testable directly. Ids not present in *items* are skipped."""
     by_id = {it.get("id"): it for it in items}
     return [by_id[i] for i in picked_ids if i in by_id]
+
+
+# Card display order inside every tab: status first (blocked → … → wont), then
+# severity (high → med → low), then oldest-waiting first. `done` is its own
+# lane at the bottom, sorted newest-finished-first (the owner rechecks the most
+# recently closed card, not the oldest one). `backlog.list_items` returns
+# newest-first, so the dialog re-sorts for DISPLAY ONLY — storage untouched.
+_STATUS_RANK: dict[str, int] = {
+    "blocked": 0,
+    "review": 1,
+    "waiting": 2,
+    "doing": 3,
+    "todo": 4,
+    "deferred": 5,
+    "done": 6,
+    "wont": 7,
+}
+_SEV_RANK: dict[str, int] = {"high": 0, "med": 1, "low": 2}
+
+
+def _sort_backlog_items(items: list[dict]) -> list[dict]:
+    """Return *items* in the popup's display order (see `_STATUS_RANK`)."""
+
+    def key(it: dict):
+        status = it.get("status", "")
+        created = float(it.get("created_ts") or 0.0)
+        if status == "done":
+            updated = float(it.get("updated_ts") or created)
+            return (_STATUS_RANK.get(status, 99), 0, -updated, created)
+        sev = (it.get("severity") or "med").lower()
+        return (
+            _STATUS_RANK.get(status, 99),
+            _SEV_RANK.get(sev, 1),
+            created,
+            it.get("seq", 0),
+        )
+
+    return sorted(items, key=key)
 
 
 def _to_qcolor(color_str: str) -> QColor:
@@ -152,6 +191,10 @@ class BacklogCardWidget(QFrame):
         self._selected = False
         self._has_subline = False
         self._build()
+        if self._item.get("status") == "done":
+            fade = QGraphicsOpacityEffect(self)
+            fade.setOpacity(0.7)
+            self.setGraphicsEffect(fade)
 
     def set_selected(self, selected: bool) -> None:
         if self._selected != selected:
@@ -171,6 +214,14 @@ class BacklogCardWidget(QFrame):
                 QFrame#backlogCard {{
                     background: {t.GROUND_PANEL};
                     border: 1px solid {t.ACCENT_GOLD};
+                    border-radius: 7px;
+                }}
+            """)
+        elif self._item.get("status") == "done":
+            self.setStyleSheet(f"""
+                QFrame#backlogCard {{
+                    background: {t.BACKLOG_DONE_BG};
+                    border: 1px solid {t.BACKLOG_DONE_BORDER};
                     border-radius: 7px;
                 }}
             """)
@@ -285,8 +336,9 @@ class BacklogCardWidget(QFrame):
         # Title line (wrapped <= 2 lines)
         title_lbl = QLabel(self._item.get("title", ""), self)
         title_lbl.setWordWrap(True)
+        title_color = t.BACKLOG_DONE_TEXT if self._item.get("status") == "done" else t.TEXT_PRIMARY
         title_lbl.setStyleSheet(f"""
-            color: {t.TEXT_PRIMARY};
+            color: {title_color};
             font-family: "{sans}";
             font-size: 12.5px;
             font-weight: 600;
@@ -362,7 +414,7 @@ class BacklogDialog(cockpit_theme.CockpitDialog):
     def __init__(self, orch, project: str, parent: QWidget | None = None) -> None:
         self._orch = orch
         self._project = project
-        self._filter = ""
+        self._filter = "open"
         self._order_mode = False
         self._picked: list[str] = []
         self._items: list[dict] = []
@@ -478,7 +530,7 @@ class BacklogDialog(cockpit_theme.CockpitDialog):
         footer.addWidget(self._btn_ok)
         root.addLayout(footer)
 
-        self._filter_btns[""].setChecked(True)
+        self._filter_btns["open"].setChecked(True)
         self._refresh_order_ui()
 
     def _build_inspector(self) -> None:
@@ -832,6 +884,10 @@ class BacklogDialog(cockpit_theme.CockpitDialog):
             self._items = payload.get("backlog_items", []) if ok else []
         else:
             self._items = all_items
+
+        # Display order lives here, not in backlog storage: same status first,
+        # then severity, then oldest-waiting (done = newest-finished-first).
+        self._items = _sort_backlog_items(self._items)
 
         self._rebuild_list(keep_id=keep_id)
 
