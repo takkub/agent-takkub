@@ -845,13 +845,7 @@ def _delayed_enter_verified(
             # A settle that never entered busy-queue mode carries the all-
             # default outcome (plain Enter, no stuck report) so every caller
             # can rely on a SubmitSettleOutcome, never None.
-            _outcome = outcome if outcome is not None else SubmitSettleOutcome()
-            try:
-                on_settled(_outcome)
-            except TypeError:
-                # Pre-#721 on_settled (no-arg lambda / test double) — fall back
-                # to the historical call shape rather than drop the settle.
-                on_settled()
+            on_settled(outcome if outcome is not None else SubmitSettleOutcome())
 
     def _busy_queue_mode_now() -> bool:
         """True while the pane is busy AND its provider's busy-queue footer
