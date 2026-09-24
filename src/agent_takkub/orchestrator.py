@@ -3452,11 +3452,18 @@ class Orchestrator(
         """Provider ring, spawn-failure leg: the next enabled+installed+
         quota-ready provider after `failed_provider` this role's assign
         should re-run on, or None (Lead, a forced-identity role, the one
-        allowed hop already spent, or nothing else usable). Logs + tells
-        Lead when it picks one — never a silent swap."""
+        allowed hop already spent, a pane-routing failure, or nothing else
+        usable). Logs + tells Lead when it picks one — never a silent swap."""
         from .provider_config import FORCED_ROLES, pick_substitute_provider
 
         if role_name == LEAD.name or _split_shard(role_name)[0].lower() in FORCED_ROLES:
+            return None
+        # A missing pane is a cockpit routing/registration failure, before a
+        # provider process was even attempted. Retrying the same absent pane
+        # with another provider only turns the failed assign into an async
+        # "retrying" success and skips _warn_lead_spawn_failed; it cannot
+        # repair the registry desync. Keep these failures loud and terminal.
+        if reason.startswith("could not create pane for "):
             return None
         if ps.spawn_provider_hops >= 1:
             return None
