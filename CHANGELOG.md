@@ -4,7 +4,7 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 
 ## [vNEXT]
 
-## [v2.1.33] - 2026-09-23
+## [v2.1.33] - 2026-09-24
 
 รอบนี้มาจาก **system review ทั้งระบบ** (2026-09-22/23): 26 ทีมอ่านโค้ดทุก subsystem (170k LOC) ได้ 335 ข้อ →
 คัด 39 ข้อ severity high → ให้ 2 ทีมอิสระค้านทุกข้อ (tracer ไล่ path จริง + skeptic พยายามหักล้าง หลายข้อ repro
@@ -85,6 +85,25 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 - **release rollback ทิ้ง annotated tag ไว้** (`release.py`) — ปล่อยเวอร์ชันเดิมซ้ำถูกปฏิเสธทุกครั้งพร้อมข้อความชวนเข้าใจผิด
 - **เพดานจำนวน pane จาก RAM วัดครั้งเดียวตอน boot** (`core/scheduling/facade.py`) — RAM ที่ว่างคืนมาไม่เคยยกเพดานจนกว่าจะ restart
 - **feedback prompt auto-skip เขียนคีย์ทุก 150 ms ไม่มี cooldown/cap** (`lead_inbox.py`)
+
+### Fixed (แก้) — เจอตอน live test ก่อนออก
+
+- **pane claude ต้อง /login ใหม่ทุกครั้งที่ restart** (regression จาก fix review `core/accounts/facade.py`) — ตัด `config_dir`
+  ออกจาก legacy account ทำให้ pane ใช้ curated copy (#563) เป็น `CLAUDE_CONFIG_DIR` แล้ว `ensure_curated_claude_config_dir`
+  mirror `.credentials.json` จาก base ทับ refresh token ที่ Claude Code หมุนไปแล้วทุก spawn · ถอยกลับให้ pane อยู่บน base
+  config dir ของ profile (skill gate แบบ curated กลับไปไม่มีผลเหมือนก่อน — ต้องแชร์ creds แบบ link แยกทำอีกใบ)
+- **เลือก preset ทีมแล้วสวิตช์ยังปิดหมด** (`settings`) — `pipelines.json` ที่เซฟตอน solo-lead ก่อน fix มี `rolesEnabled=False`
+  ค้างทุกตำแหน่ง กด "ทีมเต็ม" แล้ว Save กลายเป็น custom preset ปิดหมด assign ถูกปฏิเสธทุก role · ตอนนี้คลิกการ์ด preset
+  = preset ตัดสินสวิตช์เอง และ Save เขียน True ทับ False เก่าให้ทุก role ที่ preset เปิด
+- **กดอัปเดต provider ในหน้า boot แล้วเหมือนไม่เกิดอะไร** (`boot_flow`) — npm install รันบน worker โดย UI ไม่เปลี่ยน
+  (Skip แข่งกับ install ได้) ผลถูกทิ้งใน lambda ความล้มเหลว (เช่น EBUSY) หายเงียบ · ตอนนี้ล็อกปุ่ม บอกว่ากำลังอัปเดตอะไร
+  โชว์เหตุผลเมื่อพัง และ log `boot_provider_update` ทุกผลลง events.log
+- **dev กับ prod bind พอร์ต remote 9999 ซ้อนกันบน Windows** (`remote`) — `SO_REUSEADDR` บน Windows ให้ process ที่สอง
+  bind พอร์ตที่มีคนฟังอยู่ได้เงียบๆ ลิงก์จับคู่ของ dev ไปโผล่ที่ prod (404/`bad_secret_path`) · Windows ใช้
+  `SO_EXCLUSIVEADDRUSE` แล้ว instance ที่สองจึง scan ไปพอร์ตถัดไปตามดีไซน์ (POSIX คงเดิม)
+- **migration มองว่า dedup store ของ auto-issue เสีย** (`core/migration/*`, `auto_issue_capture.py`) — target
+  `state/issues/dedup.json` แบบเก่า (`{"fired","signatures"}` ไม่มี envelope) ถูกนับเป็น missing key / ไม่มีข้อมูล ·
+  ตอนนี้รับรูปแบบนั้นเป็น store ที่ยังใช้อยู่ และ validate ข้าม mapping ที่ retired แล้ว
 
 ## [v2.1.32] - 2026-09-22
 
