@@ -393,6 +393,7 @@ class TestDeferredClosePreservesResume722:
 
         with (
             patch("agent_takkub.spawn_engine._cwd_within_project", return_value=True),
+            patch("agent_takkub.provider_config._provider_available", return_value=True),
             patch("agent_takkub.orchestrator.find_claude_executable", return_value="claude"),
             patch.object(orch_mod.PtySession, "__new__", return_value=fake_sess),
             patch.object(
@@ -480,6 +481,7 @@ class TestDeferredClosePreservesResume722:
 
         with (
             patch("agent_takkub.spawn_engine._cwd_within_project", return_value=True),
+            patch("agent_takkub.gemini_helper.find_agy_executable", return_value="agy"),
             patch.object(orch_mod.PtySession, "__new__", return_value=fake_sess),
             patch.object(
                 fake_sess,

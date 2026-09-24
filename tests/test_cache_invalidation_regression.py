@@ -75,8 +75,8 @@ def test_user_profile_cache_invalidation(tmp_path: Path, monkeypatch: pytest.Mon
     monkeypatch.setattr(user_profile, "_REGISTRY_PATH", reg_path)
     monkeypatch.setattr(user_profile, "_BASE_DIR", tmp_path)
 
-    user_profile.add_profile("work", "/path/work", "claude")
-    user_profile.add_profile("personal", "/path/personal", "claude")
+    user_profile.add_profile("work", str(tmp_path / "work"), "claude")
+    user_profile.add_profile("personal", str(tmp_path / "personal"), "claude")
 
     # Initially default
     assert user_profile.profile_for("my_proj", "claude") == "default"
