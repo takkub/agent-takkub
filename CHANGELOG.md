@@ -11,6 +11,7 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 
 ### Fixed (แก้)
 
+- **Prod & Dev DATA_HOME isolation:** ป้องกันโปรแกรม Cockpit ฝั่ง Prod (`npm install -g agent-takkub` หรือ `~/.agent-takkub/venv`) ชนกับ Dev checkout โดยตรวจจับ path ของ Python venv (`sys.prefix`) แยกออกจาก `REPO_ROOT` เพื่อให้ Prod ชี้ `DATA_HOME` ไปที่ `~/.agent-takkub` เสมอแม้จะมีการติดตั้งแบบ editable ทำให้ Prod และ Dev สามารถเปิดใช้งานพร้อมกันได้โดยไม่แย่ง lock หรือ port กัน
 - **Boot flow UI & provider check:** เพิ่มข้อความสถานะกำลังตรวจสอบอัพเดต provider & cockpit บนการ์ด ไม่ให้แสดงกล่องว่างเปล่า, ปิดปุ่มและเปลี่ยนข้อความเป็น "กำลังดำเนินการ…" ทันทีที่คลิก "ข้าม" ป้องกันการกดซ้ำหรือ UI ค้าง และละเว้นผลตรวจ provider ที่ตอบกลับช้ากว่าการตัดสินใจของผู้ใช้
 - **Migration freeze on boot:** ข้ามการ hash SHA-256 ซ้ำซ้อนของไฟล์ใน archive v1 เก่า (191,304 ไฟล์) ในจังหวะบูทเมื่อขั้นตอนเคยสำเร็จแล้วและไม่มีข้อมูล V1 ค้างอยู่ ลดเวลาบูทจาก ~10 นาที เหลือ 0.11 วินาที
 - **Windows read-only cleanup & promote validation:** ปลดสิทธิ์ read-only อัตโนมัติบน Windows เมื่อลบไดเรกทอรีตกค้าง (เช่น pack files ใน `.git`) ไม่ให้เกิด WinError 5 Access is denied, บันทึก event เมื่อเกิดข้อผิดพลาดแทนการกลืน error (bare except pass) และข้ามการตรวจสอบไฟล์ ephemeral session ใน `state/sessions/` ที่ถูกเก็บกวาดตามรอบปกติ

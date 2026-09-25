@@ -204,6 +204,12 @@ def _resolve_data_home() -> Path:
     env = os.environ.get("AGENT_TAKKUB_HOME")
     if env:
         return Path(env)
+    prefix = Path(sys.prefix).resolve()
+    if prefix.name == "venv" and prefix.parent != REPO_ROOT:
+        return prefix.parent
+    for parent in prefix.parents:
+        if parent.name == ".agent-takkub":
+            return parent
     if (REPO_ROOT / "pyproject.toml").is_file() and (REPO_ROOT / "src").is_dir():
         return REPO_ROOT
     for parent in Path(__file__).resolve().parents:

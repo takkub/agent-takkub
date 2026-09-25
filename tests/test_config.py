@@ -997,3 +997,13 @@ class TestSeedProjectsFixtureTargetsV2RegistryNotV1:
 
         assert not (tmp_path / "projects.json").exists()
         assert handle.read()["active"] == "demo"
+
+    def test_resolve_data_home_prefers_external_venv_parent_over_repo_root(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        external_home = tmp_path / ".agent-takkub"
+        external_venv = external_home / "venv"
+        external_venv.mkdir(parents=True)
+        monkeypatch.delenv("AGENT_TAKKUB_HOME", raising=False)
+        monkeypatch.setattr(sys, "prefix", str(external_venv))
+        assert config._resolve_data_home() == external_home
