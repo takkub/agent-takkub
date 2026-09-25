@@ -6431,23 +6431,75 @@ class Orchestrator(
                 or "claude"
             )
 
-            if (
-                preserve_resume
-                and role_name != LEAD.name
-                and _close_uuid
-                and _close_cwd
-                and _close_prov == _CLAUDE_PRESERVE
-            ):
-                _seed_ps = self._ps(key)
-                _seed_ps.session_uuid = _close_uuid
-                _seed_ps.session_uuid_cwd = _close_cwd
-                _seed_ps.session_provider = _close_prov
-                self._recent_exits[key] = {
-                    "cwd": _close_cwd,
-                    "ts": time.time(),
-                    "provider": _close_prov,
-                }
+            # #723: the resume-preserving seed is no longer claude-only. Any
+            # provider whose spec declares `supports_resume` + a
+            # `session_resume_flag` (claude --resume, codex resume,
+            # agy --conversation, opencode --session) can keep its conversation
+            # alive past a done-driven close for the RESUME_WINDOW_SEC window.
+            from .provider_spec import PROVIDER_REGISTRY as _PROVIDER_REGISTRY_LOCAL
+
+            _spec_close = _PROVIDER_REGISTRY_LOCAL.get(_close_prov)
+            _resume_capable_close = bool(
+                _spec_close is not None
+                and _spec_close.supports_resume
+                and _spec_close.session_resume_flag
+            )
+
+            if preserve_resume and role_name != LEAD.name and _close_cwd and _resume_capable_close:
+                # Non-claude providers mint their own session id at boot, so
+                # `_close_uuid` is normally empty here — resolve the native id
+                # for the pane's cwd before seeding (best-effort; a fresh pane
+                # whose rollout/transcript isn't written yet degrades to a cold
+                # respawn, never an error).
+                _resolved_close_uuid = _close_uuid
+                if not _resolved_close_uuid:
+                    from .token_meter import provider_session_id_for_cwd
+
+                    _resolved_close_uuid = provider_session_id_for_cwd(
+                        _close_prov, _close_cwd, session_uuid=None, not_before=0.0
+                    )
+                    if _resolved_close_uuid:
+                        _log_event(
+                            "close_preserve_session_resolved",
+                            role=role_name,
+                            project=project_ns,
+                            provider=_close_prov,
+                            session_uuid=_resolved_close_uuid[:12],
+                        )
+                if _resolved_close_uuid:
+                    _seed_ps = self._ps(key)
+                    _seed_ps.session_uuid = _resolved_close_uuid
+                    _seed_ps.session_uuid_cwd = _close_cwd
+                    _seed_ps.session_provider = _close_prov
+                    self._recent_exits[key] = {
+                        "cwd": _close_cwd,
+                        "ts": time.time(),
+                        "provider": _close_prov,
+                        "session_uuid": _resolved_close_uuid,
+                    }
+                else:
+                    _log_event(
+                        "close_preserve_session_unresolved",
+                        role=role_name,
+                        project=project_ns,
+                        provider=_close_prov,
+                        cwd=_close_cwd,
+                    )
+                    getattr(self, "_recent_exits", {}).pop(key, None)
+                    getattr(self, "_last_session_uuid", {}).pop(key, None)
+                    getattr(self, "_last_session_cwd", {}).pop(key, None)
+                    getattr(self, "_last_session_provider", {}).pop(key, None)
             else:
+                if preserve_resume and role_name != LEAD.name and _close_cwd and _close_prov:
+                    _log_event(
+                        "provider_capability_fallback",
+                        role=role_name,
+                        project=project_ns,
+                        provider=_close_prov,
+                        capability="auto-resume",
+                        state="unsupported",
+                        fallback="cold-spawn",
+                    )
                 getattr(self, "_recent_exits", {}).pop(key, None)
                 getattr(self, "_last_session_uuid", {}).pop(key, None)
                 getattr(self, "_last_session_cwd", {}).pop(key, None)

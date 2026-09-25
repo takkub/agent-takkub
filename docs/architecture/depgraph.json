@@ -3354,10 +3354,11 @@
         "agent_takkub.core.versioning.probe",
         "agent_takkub.provider_spec",
         "agent_takkub.remote.notify",
+        "agent_takkub.spawn_engine",
         "agent_takkub.token_meter",
         "agent_takkub.usage_ledger"
       ],
-      "fan_in": 6,
+      "fan_in": 7,
       "fan_out": 2
     },
     {
@@ -5239,6 +5240,7 @@
         "agent_takkub.lead_context",
         "agent_takkub.mcp_bridge",
         "agent_takkub.memory_prompt",
+        "agent_takkub.opencode_helper",
         "agent_takkub.orchestrator_text",
         "agent_takkub.pane_env",
         "agent_takkub.permission_gates",
@@ -5271,7 +5273,7 @@
         "agent_takkub.remote.api"
       ],
       "fan_in": 3,
-      "fan_out": 46
+      "fan_out": 47
     },
     {
       "module": "agent_takkub.spawn_gate",

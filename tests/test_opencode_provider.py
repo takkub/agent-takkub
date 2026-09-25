@@ -9,6 +9,7 @@ branch capturing the real argv, mirroring test_spawn_codex_argv.py.
 
 from __future__ import annotations
 
+import time
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -116,13 +117,25 @@ def _make_pane(role: str = "opencode"):
 
 
 class TestOpencodeSpawnThroughGenericBranch:
-    def _spawn_and_capture(self, qapp, monkeypatch, tmp_path):
+    def _spawn_and_capture(self, qapp, monkeypatch, tmp_path, *, prior_session_id=None):
         from agent_takkub import shared_dev_tools as sdt
         from agent_takkub.provider_config import OPENCODE
 
         orch = _make_orchestrator(qapp, monkeypatch)
         pane = _make_pane("opencode")
         orch._panes_by_project[TEST_PROJECT] = {"opencode": pane}
+        if prior_session_id:
+            key = f"{TEST_PROJECT}::opencode"
+            ps = orch._ps(key)
+            ps.session_uuid = prior_session_id
+            ps.session_uuid_cwd = str(tmp_path)
+            ps.session_provider = "opencode"
+            orch._recent_exits[key] = {
+                "cwd": str(tmp_path),
+                "ts": time.time(),
+                "provider": "opencode",
+                "session_uuid": prior_session_id,
+            }
 
         monkeypatch.setattr(sdt, "SHARED_MCP_FILE", tmp_path / "shared-mcp.json")
 
@@ -148,24 +161,29 @@ class TestOpencodeSpawnThroughGenericBranch:
             ),
             patch("agent_takkub.codex_agents_md.ensure_agents_md") as mock_agents_md,
             patch("agent_takkub.orchestrator.inject_user_profile_env"),
+            patch("agent_takkub.spawn_engine._cwd_within_project", return_value=True),
         ):
             mock_pty = MagicMock()
             mock_pty.spawn.side_effect = lambda **kw: pty_spawn_calls.append(kw)
             mock_pty_cls.return_value = mock_pty
             pane.attach_session = MagicMock()
 
-            ok, msg = orch.spawn("opencode", project=TEST_PROJECT)
+            ok, msg = orch.spawn(
+                "opencode",
+                project=TEST_PROJECT,
+                cwd=str(tmp_path) if prior_session_id else None,
+            )
 
         assert ok is True, msg
         assert pty_spawn_calls, "PtySession.spawn was not called"
-        return pty_spawn_calls[0], mock_agents_md
+        return pty_spawn_calls[0], mock_agents_md, orch
 
     def test_argv_is_binary_plus_auto(self, qapp, monkeypatch, tmp_path) -> None:
-        spawn_kw, _ = self._spawn_and_capture(qapp, monkeypatch, tmp_path)
+        spawn_kw, _, _ = self._spawn_and_capture(qapp, monkeypatch, tmp_path)
         assert spawn_kw["argv"] == ["opencode", "--auto"]
 
     def test_env_has_role_and_project(self, qapp, monkeypatch, tmp_path) -> None:
-        spawn_kw, _ = self._spawn_and_capture(qapp, monkeypatch, tmp_path)
+        spawn_kw, _, _ = self._spawn_and_capture(qapp, monkeypatch, tmp_path)
         env = spawn_kw["env"]
         assert env["TAKKUB_ROLE"] == "opencode"
         assert env["TAKKUB_PROJECT"] == TEST_PROJECT
@@ -173,5 +191,17 @@ class TestOpencodeSpawnThroughGenericBranch:
     def test_agents_md_cheatsheet_planted(self, qapp, monkeypatch, tmp_path) -> None:
         """opencode reads AGENTS.md natively → the generic branch must plant
         the takkub cheatsheet exactly like it does for codex/gemini."""
-        _, mock_agents_md = self._spawn_and_capture(qapp, monkeypatch, tmp_path)
+        _, mock_agents_md, _ = self._spawn_and_capture(qapp, monkeypatch, tmp_path)
         assert mock_agents_md.called
+
+    def test_recent_exit_auto_resumes_native_session(self, qapp, monkeypatch, tmp_path) -> None:
+        session_id = "ses_01j_resume_723"
+        spawn_kw, _, orch = self._spawn_and_capture(
+            qapp, monkeypatch, tmp_path, prior_session_id=session_id
+        )
+
+        assert spawn_kw["argv"][-2:] == ["--session", session_id]
+        ps = orch._pane_state[f"{TEST_PROJECT}::opencode"]
+        assert ps.session_uuid == session_id
+        assert ps.session_uuid_cwd == str(tmp_path)
+        assert ps.session_provider == "opencode"
