@@ -278,3 +278,9 @@ class TestCodexAgentsMdOverrideRule:
         from agent_takkub.codex_agents_md import CODEX_AGENTS_MD
 
         assert "`takkub done` is a shell command, not a subagent" in CODEX_AGENTS_MD
+
+    def test_windows_long_lived_services_are_detached(self) -> None:
+        from agent_takkub.codex_agents_md import CODEX_AGENTS_MD
+
+        assert 'explorer.exe "<path>"' in CODEX_AGENTS_MD
+        assert "takkub spawn-service" in CODEX_AGENTS_MD

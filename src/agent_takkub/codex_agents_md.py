@@ -79,6 +79,7 @@ prompt (`[ROLE: ...]`). Behave like a focused specialist:
 - **No long-running foreground commands.** Background docker/dev
   servers with `&` + redirect, or use `-d`. Never `npm run dev` in
   the foreground — it never returns and the pane hangs.
+- **On Windows, detach long-lived services and GUI apps from the pane's process tree.** For example, open Docker Desktop with `explorer.exe "<path>"` or start a service with `takkub spawn-service`; this keeps it alive when the pane closes.
 - **To verify/smoke-test a Next.js page, use `next build && next
   start`, not `next dev`.** Next dev's HMR compiler forks a postcss/
   jest-worker subprocess per compile and leaks them (it once piled up
