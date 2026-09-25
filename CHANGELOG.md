@@ -4,6 +4,8 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 
 ## [vNEXT]
 
+## [v2.1.38] - 2026-09-25
+
 ### Fixed (แก้)
 
 - **delivery blocked prompt warning (#724):** หน่วงเวลาแจ้งเตือน prompt ถูกบล็อกด้วย grace period 20 วินาที เพื่อไม่ให้เตือนซ้ำซ้อนขณะประมวลผล
