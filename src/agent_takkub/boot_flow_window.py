@@ -35,12 +35,14 @@ the migrating page's active-row counter).
 from __future__ import annotations
 
 import html
+import inspect
 import logging
 import os
 import sys
 import time
 import weakref
 from collections.abc import Callable
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -1104,14 +1106,20 @@ class BootFlowWindow(QDialog):
 
     def _on_main_update_clicked(self) -> None:
         checks = getattr(self, "_provider_row_checks", {})
-        selected_names = [name for name, c in checks.items() if c.is_checked()]
-        all_selected = len(selected_names) == len(checks) and len(checks) > 0
+        provider_checks = {name: check for name, check in checks.items() if name != "cockpit"}
+        selected_names = [name for name, c in provider_checks.items() if c.is_checked()]
+        all_selected = len(selected_names) == len(provider_checks) and len(provider_checks) > 0
         self._save_remembered_choice(
             mode="update_all" if all_selected else "selected", selected=selected_names
         )
-        selected_items = [
-            item for item in self._provider_items if getattr(item, "name", None) in selected_names
-        ]
+        selected_items = []
+        for item in self._provider_items:
+            name = getattr(item, "name", None)
+            if name == "cockpit":
+                if checks.get("cockpit") is not None and checks["cockpit"].is_checked():
+                    selected_items.append(item)
+            elif name in selected_names:
+                selected_items.append(item)
         if selected_items:
             # npm installs run for a minute or more with no other sign of life
             # — without this the click looked like it did nothing, and a
@@ -2218,16 +2226,7 @@ class BootFlowWindow(QDialog):
             return
         self._set_header("กำลังตรวจสอบอัพเดต provider & cockpit…", theme.TEXT_MUTED, None)
 
-        def _check_updates():
-            fn = flow.check_provider_updates
-            import inspect
-
-            sig = inspect.signature(fn)
-            if "include_cockpit" in sig.parameters:
-                return fn(30.0, include_cockpit=True)
-            return fn(30.0)
-
-        worker = _CallWorker(_check_updates)
+        worker = _CallWorker(lambda: self._check_provider_updates(include_cockpit=True))
         worker.resultReady.connect(self._on_provider_check_done)
         self._track_worker(worker)
 
@@ -2308,22 +2307,37 @@ class BootFlowWindow(QDialog):
 
         return boot_flow
 
+    def _check_provider_updates(self, *, include_cockpit: bool) -> Any:
+        """Call newer boot-flow APIs with Cockpit support, retaining old fakes/backends."""
+        fn = self._flow.check_provider_updates
+        if "include_cockpit" in inspect.signature(fn).parameters:
+            return fn(30.0, include_cockpit=include_cockpit)
+        return fn(30.0)
+
     def _apply_remembered_choice(self, mode: str, selected_names: list[str]) -> None:
-        flow = self._flow
-        worker = _CallWorker(lambda: flow.check_provider_updates(30.0))
+        worker = _CallWorker(lambda: self._check_provider_updates(include_cockpit=True))
 
         def _on_items(items: Any) -> None:
-            if isinstance(items, _WorkerError) or not items:
+            if isinstance(items, _WorkerError):
                 self._proceed_to_migration_check()
                 return
-            if mode == "skip":
+            cockpit_items = [
+                i for i in items if getattr(i, "name", None) == "cockpit" and _has_update(i)
+            ]
+            providers = [i for i in items if getattr(i, "name", None) != "cockpit"]
+            if mode == "update_all":
+                to_run = [i for i in providers if _has_update(i)]
+            elif mode == "selected":
+                to_run = [i for i in providers if getattr(i, "name", None) in selected_names]
+            else:
+                to_run = []
+            if cockpit_items:
+                rows = cockpit_items + [replace(i, selected=i in to_run) for i in providers]
+                self._on_provider_check_done(rows)
+                return
+            if not to_run:
                 self._proceed_to_migration_check()
                 return
-            to_run = (
-                [i for i in items if _has_update(i)]
-                if mode == "update_all"
-                else [i for i in items if getattr(i, "name", None) in selected_names]
-            )
             self._run_provider_updates(to_run)
 
         worker.resultReady.connect(_on_items)

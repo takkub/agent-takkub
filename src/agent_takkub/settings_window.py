@@ -2217,8 +2217,61 @@ class SettingsWindow(
             pp_lay.addWidget(row)
         lay.addWidget(provider_panel)
 
+        # Remembered boot choice is global boot behavior, written through
+        # immediately like the response-language preference below.
+        from . import boot_flow
+
+        remembered = boot_flow.remembered_provider_choice() or {}
+        remembered_mode = remembered.get("mode", "ask")
+        remembered_selected = list(remembered.get("selected") or [])
+        boot_panel = QWidget(view)
+        boot_panel.setObjectName("panel")
+        boot_lay = QVBoxLayout(boot_panel)
+        boot_lay.setContentsMargins(16, 16, 16, 16)
+        boot_lay.setSpacing(8)
+        boot_title = QLabel("ตอนเปิดโปรแกรม: อัพเดต provider", boot_panel)
+        boot_title.setObjectName("panelTitle")
+        boot_lay.addWidget(boot_title)
+
+        self._boot_provider_choice = QComboBox(boot_panel)
+        choices = [
+            ("ask", "ถามทุกครั้ง"),
+            ("skip", "ข้าม — ใช้เวอร์ชันเดิม"),
+            ("update_all", "อัพเดตทั้งหมดอัตโนมัติ"),
+        ]
+        if remembered_mode == "selected":
+            selected_text = ", ".join(remembered_selected) or "ไม่มี"
+            choices.append(("selected", f"อัพเดตเฉพาะที่เลือกไว้ ({selected_text})"))
+        for mode, label in choices:
+            self._boot_provider_choice.addItem(label, mode)
+        idx = self._boot_provider_choice.findData(
+            remembered_mode if remembered_mode in {mode for mode, _label in choices} else "ask"
+        )
+        self._boot_provider_choice.setCurrentIndex(idx if idx >= 0 else 0)
+        self._boot_provider_choice.currentIndexChanged.connect(
+            self._on_boot_provider_choice_changed
+        )
+        boot_lay.addWidget(self._boot_provider_choice)
+        boot_hint = QLabel(
+            "การตั้งค่านี้ใช้กับ provider เท่านั้น — ถ้ามี Cockpit เวอร์ชันใหม่ จะถามทุกครั้งไม่ว่าเลือกอะไร",
+            boot_panel,
+        )
+        boot_hint.setObjectName("panelHint")
+        boot_hint.setWordWrap(True)
+        boot_lay.addWidget(boot_hint)
+        lay.addWidget(boot_panel)
+        self._boot_provider_choice_selected = remembered_selected
+
         lay.addStretch(1)
         return view
+
+    def _on_boot_provider_choice_changed(self, _index: int) -> None:
+        """Write the boot preference immediately; keep a remembered subset intact."""
+        from . import boot_flow
+
+        mode = self._boot_provider_choice.currentData() or "ask"
+        selected = self._boot_provider_choice_selected if mode == "selected" else []
+        boot_flow.remember_provider_choice({"mode": mode, "selected": selected})
 
     # ── #512: team size + roster (moved to lead this page) ─────
 
