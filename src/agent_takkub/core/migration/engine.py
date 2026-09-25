@@ -534,7 +534,13 @@ class MigrationEngine:
         archive_step = next(
             (s for s in self._steps if getattr(s, "step_id", "") == _ARCHIVE_V1_STEP_ID), None
         )
-        v1_retired = archive_step is not None and archive_step.validate().ok
+        has_pending_real = (
+            getattr(archive_step, "_pending_real_data", lambda: False)() if archive_step else False
+        )
+        v1_retired = archive_step is not None and (
+            (_ARCHIVE_V1_STEP_ID in applied_before and not has_pending_real)
+            or archive_step.validate().ok
+        )
         version_marker_step = next(
             (s for s in self._steps if getattr(s, "step_id", "") == _VERSION_MARKER_STEP_ID), None
         )
@@ -591,6 +597,22 @@ class MigrationEngine:
                 # (can't safely guarantee file integrity)
                 continue
             if step_id in applied_before:
+                if step_id in (_PROMOTE_V2_ROOT_STEP_ID, _ARCHIVE_V1_STEP_ID):
+                    pending_fn = getattr(s, "_pending", None)
+                    if callable(pending_fn) and not pending_fn():
+                        skipped_valid_steps.append(
+                            (
+                                s,
+                                step_id,
+                                StepReport(
+                                    step_id,
+                                    "validate",
+                                    True,
+                                    f"{step_id} already applied and not pending",
+                                ),
+                            )
+                        )
+                        continue
                 if _source_retired(s, step_id, v1_retired=v1_retired):
                     continue
                 # #576: call validate() exactly once here and reuse its result

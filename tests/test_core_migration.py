@@ -596,6 +596,28 @@ class TestApplyPending:
         # part is `apply()` itself is never reached.
         assert "apply" not in b.calls
 
+    def test_applied_promote_and_archive_skipped_when_not_pending(self, tmp_path):
+        journal = MigrationJournal(JsonlStore(tmp_path / "journal.jsonl"))
+        journal.record("promote-v2-root", "apply", True)
+        journal.record("archive-v1-legacy", "apply", True)
+
+        class _StructuralStep(_FakeStep):
+            def _pending(self):
+                return False
+
+            def _pending_real_data(self):
+                return False
+
+        a = _StructuralStep("promote-v2-root", ok=True)
+        b = _StructuralStep("archive-v1-legacy", ok=True)
+        engine = MigrationEngine([a, b], data_home=tmp_path, journal=journal)
+        reports = engine.apply_pending()
+        assert reports == []
+        assert "apply" not in a.calls
+        assert "apply" not in b.calls
+        assert "validate" not in a.calls
+        assert "validate" not in b.calls
+
     def test_prod_today_machine_applies_only_the_ladder_step_added_after_it_migrated(
         self, tmp_path
     ):

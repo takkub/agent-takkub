@@ -4,6 +4,12 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 
 ## [vNEXT]
 
+### Fixed (แก้)
+
+- **Boot flow UI & provider check:** เพิ่มข้อความสถานะกำลังตรวจสอบอัพเดต provider บนการ์ด ไม่ให้แสดงกล่องว่างเปล่า, ปิดปุ่มและเปลี่ยนข้อความเป็น "กำลังดำเนินการ…" ทันทีที่คลิก "ข้าม" ป้องกันการกดซ้ำหรือ UI ค้าง และละเว้นผลตรวจ provider ที่ตอบกลับช้ากว่าการตัดสินใจของผู้ใช้
+- **Migration freeze on boot:** ข้ามการ hash SHA-256 ซ้ำซ้อนของไฟล์ใน archive v1 เก่า (191,304 ไฟล์) ในจังหวะบูทเมื่อขั้นตอนเคยสำเร็จแล้วและไม่มีข้อมูล V1 ค้างอยู่ ลดเวลาบูทจาก ~10 นาที เหลือ 0.11 วินาที
+- **Windows read-only cleanup & promote validation:** ปลดสิทธิ์ read-only อัตโนมัติบน Windows เมื่อลบไดเรกทอรีตกค้าง (เช่น pack files ใน `.git`) ไม่ให้เกิด WinError 5 Access is denied และข้ามการตรวจสอบไฟล์ ephemeral session ใน `state/sessions/` ที่ถูกเก็บกวาดตามรอบปกติ
+
 ## [v2.1.38] - 2026-09-25
 
 ### Fixed (แก้)

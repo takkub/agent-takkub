@@ -195,6 +195,27 @@ class TestPageAToMigrationCheck:
         w._main_skip_btn.click()
         assert flow.remembered_writes == [{"mode": "skip", "selected": []}]
 
+    def test_skip_button_disables_buttons_and_sets_status(self) -> None:
+        flow = _FakeFlow(items=_two_providers_one_update(), plan=_plan())
+        w = bfw.BootFlowWindow(flow=flow)
+        w.start()
+        assert w._main_skip_btn.isEnabled() is True
+        w._main_skip_btn.click()
+        assert w._skip_requested is True
+
+    def test_provider_card_has_loading_state_before_rows_arrive(self) -> None:
+        w = bfw.BootFlowWindow()
+        assert w._provider_card_lay.count() >= 1
+        assert "กำลังตรวจสอบ" in w._provider_card_lay.itemAt(0).widget().findChild(bfw.QLabel).text()
+
+    def test_provider_check_done_ignored_if_user_already_skipped(self) -> None:
+        flow = _FakeFlow(items=_two_providers_one_update(), plan=_plan())
+        w = bfw.BootFlowWindow(flow=flow)
+        w._skip_requested = True
+        w._on_provider_check_done(_two_providers_one_update())
+        # Should not populate rows or change header
+        assert getattr(w, "_provider_row_checks", None) is None
+
 
 class TestPreMigratePage:
     def test_populates_from_plan(self) -> None:

@@ -305,11 +305,30 @@ def _rel_files(root: Path) -> list[Path]:
     return sorted(p.relative_to(root) for p in root.rglob("*") if p.is_file())
 
 
+def _rmtree_readonly(func, path, exc_info):
+    import stat
+
+    try:
+        os.chmod(path, stat.S_IWRITE)
+        func(path)
+    except Exception:
+        pass
+
+
 def _remove(path: Path) -> None:
     if path.is_dir():
-        shutil.rmtree(path)
+        shutil.rmtree(path, onerror=_rmtree_readonly)
     else:
-        path.unlink()
+        try:
+            path.unlink()
+        except PermissionError:
+            import stat
+
+            try:
+                os.chmod(path, stat.S_IWRITE)
+                path.unlink()
+            except Exception:
+                raise
 
 
 def _rmdir_tree(root: Path) -> None:
@@ -1947,6 +1966,11 @@ class PromoteV2RootStep:
             if paths is None:
                 continue  # pre-#504-fix manifest — no per-file record to check
             for rel in paths:
+                # Sessions are ephemeral and naturally get cleaned up when agents disconnect
+                if name == "state" and (
+                    rel.startswith("sessions/") or rel.startswith("sessions\\")
+                ):
+                    continue
                 problems.extend(
                     _committed_target_problems(
                         self.data_home / name / rel, json_shape.get(rel, False)

@@ -2407,3 +2407,47 @@ def promote_v1_ledger(data_home: Path):
     from agent_takkub.core.migration.wal import TransferLedger
 
     return TransferLedger(_archive_wal(data_home), list_key="archived", write_fn=write_json_atomic)
+
+
+def test_remove_handles_readonly_files_on_windows(tmp_path):
+    import os
+    import stat
+
+    from agent_takkub.core.migration.promote_v1 import _remove
+
+    folder = tmp_path / "test_readonly_dir"
+    folder.mkdir()
+    f = folder / "readonly_file.txt"
+    f.write_text("hello", encoding="utf-8")
+    os.chmod(f, stat.S_IREAD)  # Make read-only
+
+    _remove(folder)
+    assert not folder.exists()
+
+
+def test_promoted_member_problems_ignores_state_sessions(tmp_path, journal_backups):
+    journal, backups = journal_backups
+    data_home = tmp_path / "data_home"
+    data_home.mkdir()
+    step = PromoteV2RootStep(journal=journal, backups=backups, data_home=data_home)
+    manifest_path = step._manifest_path()
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "schema": 2,
+                "promoted": [
+                    {
+                        "name": "state",
+                        "kind": "dir",
+                        "paths": ["sessions/remote.json"],
+                        "json": {"sessions/remote.json": True},
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    # Even if sessions/remote.json is missing, validate should not report problems
+    problems = step._promoted_member_problems()
+    assert problems == []

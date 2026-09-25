@@ -866,6 +866,7 @@ class BootFlowWindow(QDialog):
         self._provider_items: list[Any] = []
         self._workers: list[QThread] = []  # keep refs alive until finished
         self._last_percent = 0
+        self._skip_requested = False
         self._phase_rows: dict[str, _PhaseDot] = {}
         self._phase_labels: dict[str, QLabel] = {}
         self._phase_count_labels: dict[str, QLabel] = {}
@@ -993,6 +994,16 @@ class BootFlowWindow(QDialog):
         self._provider_card_lay = QVBoxLayout(self._provider_card)
         self._provider_card_lay.setContentsMargins(0, 0, 0, 0)
         self._provider_card_lay.setSpacing(0)
+        loading_row = QWidget()
+        loading_lay = QHBoxLayout(loading_row)
+        loading_lay.setContentsMargins(14, 16, 14, 16)
+        loading_lbl = QLabel("กำลังตรวจสอบอัพเดต provider…")
+        loading_lbl.setFont(_font(self._sans, 12))
+        loading_lbl.setStyleSheet(
+            f"color: {theme.TEXT_MUTED}; background: transparent; border: none;"
+        )
+        loading_lay.addWidget(loading_lbl)
+        self._provider_card_lay.addWidget(loading_row)
         body_lay.addWidget(self._provider_card)
 
         remember_row = QWidget()
@@ -1031,6 +1042,8 @@ class BootFlowWindow(QDialog):
             w = child.widget()
             if w is not None:
                 w.deleteLater()
+        self._main_skip_btn.setText("ข้าม — ใช้เวอร์ชันเดิม")
+        self._main_skip_btn.setEnabled(True)
         self._provider_row_checks: dict[str, _CheckSquare] = {}
         for i, item in enumerate(items):
             row = QWidget()
@@ -1082,6 +1095,10 @@ class BootFlowWindow(QDialog):
         self._main_update_btn.setEnabled(n > 0)
 
     def _on_main_skip_clicked(self) -> None:
+        self._skip_requested = True
+        self._main_skip_btn.setEnabled(False)
+        self._main_update_btn.setEnabled(False)
+        self._main_skip_btn.setText("กำลังดำเนินการ…")
         self._save_remembered_choice(mode="skip", selected=[])
         self._proceed_to_migration_check()
 
@@ -2303,6 +2320,8 @@ class BootFlowWindow(QDialog):
         self._track_worker(worker)
 
     def _on_provider_check_done(self, items: Any) -> None:
+        if getattr(self, "_skip_requested", False):
+            return
         if isinstance(items, _WorkerError) or not items:
             self._proceed_to_migration_check()
             return
@@ -2366,6 +2385,25 @@ class BootFlowWindow(QDialog):
 
     def _proceed_to_migration_check(self) -> None:
         self._set_header("กำลังตรวจสอบโครงสร้างข้อมูล…", theme.TEXT_MUTED, None)
+        self._main_skip_btn.setEnabled(False)
+        self._main_update_btn.setEnabled(False)
+        self._main_skip_btn.setText("กำลังตรวจสอบ…")
+        if not getattr(self, "_provider_row_checks", None):
+            while self._provider_card_lay.count():
+                child = self._provider_card_lay.takeAt(0)
+                w = child.widget()
+                if w is not None:
+                    w.deleteLater()
+            msg_row = QWidget()
+            msg_lay = QHBoxLayout(msg_row)
+            msg_lay.setContentsMargins(14, 16, 14, 16)
+            msg_lbl = QLabel("กำลังตรวจสอบโครงสร้างข้อมูล… กรุณารอสักครู่")
+            msg_lbl.setFont(_font(self._sans, 12))
+            msg_lbl.setStyleSheet(
+                f"color: {theme.TEXT_MUTED}; background: transparent; border: none;"
+            )
+            msg_lay.addWidget(msg_lbl)
+            self._provider_card_lay.addWidget(msg_row)
         flow = self._flow
         worker = _CallWorker(lambda: flow.plan_migration())
         worker.resultReady.connect(self._on_plan_ready)
