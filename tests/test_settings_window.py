@@ -19,6 +19,7 @@ from PyQt6.QtWidgets import QDialog, QMessageBox
 
 from agent_takkub import (
     auto_resume,
+    boot_flow,
     claude_auth_config,
     config,
     custom_roles,
@@ -2588,6 +2589,36 @@ class TestTeamPresetView:
         dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_PROVIDERS_ROLES)
         assert dlg._stack.currentIndex() == settings_window.VIEW_PROVIDERS_ROLES
         assert dlg._nav_buttons[settings_window.VIEW_PROVIDERS_ROLES].property("active") is True
+        dlg.deleteLater()
+
+
+class TestBootProviderChoiceSetting:
+    def test_combo_writes_choice_immediately(self, tmp_path, monkeypatch) -> None:
+        choice_path = tmp_path / "config" / "boot-provider-choice.json"
+        monkeypatch.setattr(boot_flow, "_choice_path", lambda: choice_path)
+        dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_PROVIDERS_ROLES)
+
+        assert dlg._boot_provider_choice.currentData() == "ask"
+        dlg._boot_provider_choice.setCurrentIndex(dlg._boot_provider_choice.findData("skip"))
+
+        assert boot_flow.remembered_provider_choice() == {"mode": "skip", "selected": []}
+        dlg.deleteLater()
+
+    def test_selected_mode_retains_saved_provider_names(self, tmp_path, monkeypatch) -> None:
+        choice_path = tmp_path / "config" / "boot-provider-choice.json"
+        monkeypatch.setattr(boot_flow, "_choice_path", lambda: choice_path)
+        boot_flow.remember_provider_choice({"mode": "selected", "selected": ["claude"]})
+        dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_PROVIDERS_ROLES)
+
+        assert dlg._boot_provider_choice.currentData() == "selected"
+        assert "claude" in dlg._boot_provider_choice.currentText()
+        dlg._boot_provider_choice.setCurrentIndex(dlg._boot_provider_choice.findData("skip"))
+        dlg._boot_provider_choice.setCurrentIndex(dlg._boot_provider_choice.findData("selected"))
+
+        assert boot_flow.remembered_provider_choice() == {
+            "mode": "selected",
+            "selected": ["claude"],
+        }
         dlg.deleteLater()
 
 

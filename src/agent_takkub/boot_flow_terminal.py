@@ -240,6 +240,25 @@ def run_cli(argv: list[str] | None = None, *, out=None) -> int:
         emit({"type": "auto_confirmed", "reason": "--json implies --yes (no prompt possible)"})
 
     # --- Screen A: provider updates ---
+    cockpit_update = boot_flow.check_cockpit_update()
+    if (
+        cockpit_update is not None
+        and cockpit_update.status == boot_flow.PROVIDER_STATUS_UPDATE_AVAILABLE
+    ):
+        emit(
+            {
+                "type": "cockpit_update",
+                "name": cockpit_update.name,
+                "current": cockpit_update.current,
+                "latest": cockpit_update.latest,
+            }
+        )
+        if not args.json:
+            print(
+                f"มี Cockpit เวอร์ชันใหม่ {cockpit_update.current} → {cockpit_update.latest} "
+                "(npm i -g agent-takkub)",
+                file=out,
+            )
     items = boot_flow.check_provider_updates()
     remembered = boot_flow.remembered_provider_choice()
     selection_mode: str | None = None

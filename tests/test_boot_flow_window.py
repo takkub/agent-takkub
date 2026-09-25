@@ -50,8 +50,12 @@ class _FakeFlow:
     remembered_writes: list[dict] = field(default_factory=list)
     run_updates_calls: list[list[_Item]] = field(default_factory=list)
     run_migration_calls: int = 0
+    include_cockpit_calls: list[bool | None] = field(default_factory=list)
 
-    def check_provider_updates(self, timeout_s: float) -> list[_Item]:
+    def check_provider_updates(
+        self, timeout_s: float, include_cockpit: bool | None = None
+    ) -> list[_Item]:
+        self.include_cockpit_calls.append(include_cockpit)
         return list(self.items)
 
     def remembered_provider_choice(self) -> dict | None:
@@ -1895,6 +1899,37 @@ os._exit(0)
 
 
 class TestCockpitUpdateAlertOnBoot:
+    def test_remembered_skip_still_shows_cockpit_update(self) -> None:
+        cockpit_item = _Item("cockpit", "Cockpit", "2.1.38", "2.1.39", status="update_available")
+        flow = _FakeFlow(items=[cockpit_item], remembered={"mode": "skip", "selected": []})
+        w = bfw.BootFlowWindow(flow=flow)
+        w.start()
+        assert flow.include_cockpit_calls == [True]
+        assert w._stack.currentIndex() == bfw.PAGE_MAIN
+        assert [item.name for item in w._provider_items] == ["cockpit"]
+
+    def test_remembered_skip_without_cockpit_update_keeps_skipping_page_a(self) -> None:
+        provider_item = _Item("claude", "Claude", "2.1.1", "2.1.2", status="update_available")
+        flow = _FakeFlow(items=[provider_item], remembered={"mode": "skip", "selected": []})
+        w = bfw.BootFlowWindow(flow=flow)
+        w.start()
+        assert flow.include_cockpit_calls == [True]
+        assert not getattr(w, "_provider_items", [])
+        assert flow.run_updates_calls == []
+
+    def test_remembered_choice_saves_provider_selection_without_cockpit(self) -> None:
+        items = [
+            _Item("cockpit", "Cockpit", "2.1.38", "2.1.39", status="update_available"),
+            _Item("claude", "Claude", "2.1.1", "2.1.2", status="update_available"),
+        ]
+        flow = _FakeFlow(items=items)
+        w = bfw.BootFlowWindow(flow=flow)
+        w.start()
+        w._remember_check.set_checked(True)
+        w._on_main_update_clicked()
+
+        assert flow.remembered_writes == [{"mode": "update_all", "selected": ["claude"]}]
+
     def test_cockpit_update_displays_alert_header(self) -> None:
         cockpit_item = _Item(
             "cockpit",

@@ -337,3 +337,31 @@ def test_json_implies_yes_logs_auto_confirmed(monkeypatch):
     boot_flow_terminal.run_cli(["--json", "--yes"], out=out2)
     lines2 = [json.loads(line) for line in out2.getvalue().splitlines() if line.strip()]
     assert not any(line["type"] == "auto_confirmed" for line in lines2)
+
+
+def test_remembered_skip_json_still_reports_cockpit_update(monkeypatch):
+    _no_op_run_boot_stage(monkeypatch)
+    cockpit_item = boot_flow.ProviderUpdateItem(
+        "cockpit",
+        "Cockpit",
+        "2.1.38",
+        "2.1.39",
+        True,
+        boot_flow.PROVIDER_STATUS_UPDATE_AVAILABLE,
+    )
+    monkeypatch.setattr(boot_flow, "check_cockpit_update", lambda: cockpit_item)
+    monkeypatch.setattr(boot_flow, "check_provider_updates", lambda **k: [])
+    monkeypatch.setattr(
+        boot_flow, "remembered_provider_choice", lambda: {"mode": "skip", "selected": []}
+    )
+    updated = []
+    monkeypatch.setattr(boot_flow, "run_provider_updates", lambda items, **k: updated.extend(items))
+
+    out = io.StringIO()
+    assert boot_flow_terminal.run_cli(["--json"], out=out) == 0
+
+    events = [json.loads(line) for line in out.getvalue().splitlines() if line.strip()]
+    alert = next(event for event in events if event["type"] == "cockpit_update")
+    assert alert["current"] == "2.1.38"
+    assert alert["latest"] == "2.1.39"
+    assert updated == []

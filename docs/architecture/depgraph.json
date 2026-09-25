@@ -379,9 +379,10 @@
       ],
       "imported_by": [
         "agent_takkub.boot_flow_terminal",
-        "agent_takkub.boot_flow_window"
+        "agent_takkub.boot_flow_window",
+        "agent_takkub.settings_window"
       ],
-      "fan_in": 2,
+      "fan_in": 3,
       "fan_out": 13
     },
     {
@@ -5062,6 +5063,7 @@
         "agent_takkub.auto_issue_signals",
         "agent_takkub.auto_resume",
         "agent_takkub.autoskills_installer",
+        "agent_takkub.boot_flow",
         "agent_takkub.claude_auth_config",
         "agent_takkub.cockpit_theme",
         "agent_takkub.config",
@@ -5101,7 +5103,7 @@
         "agent_takkub.user_actions"
       ],
       "fan_in": 3,
-      "fan_out": 35
+      "fan_out": 36
     },
     {
       "module": "agent_takkub.shard_fanout",
