@@ -141,7 +141,9 @@ def _probe_versions(name: str, spec, timeout_s: float) -> tuple[str | None, str 
     return current, latest, not ok
 
 
-def check_provider_updates(timeout_s: float = 20.0) -> list[ProviderUpdateItem]:
+def check_provider_updates(
+    timeout_s: float = 20.0, include_cockpit: bool = False
+) -> list[ProviderUpdateItem]:
     """One row per `PROVIDER_REGISTRY` entry. A provider with no known
     latest-version probe (uv-managed, or genuinely no update mechanism at
     all) reports `latest=None` and status `up_to_date` — it is never
@@ -187,7 +189,114 @@ def check_provider_updates(timeout_s: float = 20.0) -> list[ProviderUpdateItem]:
                 status,
             )
         )
+    if include_cockpit:
+        cockpit_item = check_cockpit_update(timeout_s=min(timeout_s, 10.0))
+        if cockpit_item is not None and cockpit_item.status == PROVIDER_STATUS_UPDATE_AVAILABLE:
+            items.insert(0, cockpit_item)
     return items
+
+
+def check_cockpit_update(timeout_s: float = 10.0) -> ProviderUpdateItem | None:
+    """Check if agent-takkub (cockpit itself) has a new version on npm."""
+    from . import __version__
+    from .claude_update import compare_versions
+
+    current = __version__
+    ok, latest = _npm_view_version("agent-takkub", timeout_s)
+    if not ok or not latest:
+        return None
+    has_update = compare_versions(current, latest) < 0
+    return ProviderUpdateItem(
+        "cockpit",
+        "Cockpit",
+        current,
+        latest,
+        has_update,
+        PROVIDER_STATUS_UPDATE_AVAILABLE if has_update else PROVIDER_STATUS_UP_TO_DATE,
+    )
+
+
+def _find_global_postinstall_for_boot(npm: str | None = None) -> Path | None:
+    import subprocess
+
+    from ._win_console import SUBPROCESS_NO_WINDOW
+
+    if npm:
+        try:
+            r_root = subprocess.run(
+                [npm, "root", "-g"],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=30,
+                creationflags=SUBPROCESS_NO_WINDOW,
+            )
+            if r_root.returncode == 0 and r_root.stdout.strip():
+                root_dir = Path(r_root.stdout.strip())
+                for cand in (
+                    root_dir / "agent-takkub" / "npm" / "scripts" / "postinstall.js",
+                    root_dir / "npm" / "scripts" / "postinstall.js",
+                ):
+                    if cand.is_file():
+                        return cand
+        except OSError:
+            return None  # swallow-ok: postinstall search failure is non-fatal
+    return None
+
+
+def _update_cockpit(latest: str | None = None):
+    import os
+    import shutil
+    import subprocess
+
+    from . import __version__
+    from ._win_console import SUBPROCESS_NO_WINDOW
+    from .provider_update import STATUS_FAILED, STATUS_UPDATED, UpdateOutcome
+
+    current = __version__
+    npm = config.find_npm()
+    if not npm:
+        return UpdateOutcome("cockpit", STATUS_FAILED, "npm not found on PATH")
+
+    target_pkg = f"agent-takkub@{latest}" if latest else "agent-takkub@latest"
+    try:
+        r = subprocess.run(
+            [npm, "install", "-g", "--foreground-scripts", target_pkg],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=600,
+            creationflags=SUBPROCESS_NO_WINDOW,
+        )
+        if r.returncode != 0:
+            tail = ((r.stderr or "") + (r.stdout or "")).strip().splitlines()
+            return UpdateOutcome(
+                "cockpit", STATUS_FAILED, tail[-1] if tail else "npm install failed"
+            )
+
+        postinstall_js = _find_global_postinstall_for_boot(npm)
+        node = shutil.which("node.exe") or shutil.which("node")
+        if node and postinstall_js and postinstall_js.is_file():
+            env = dict(os.environ)
+            env["npm_config_global"] = "true"
+            try:
+                subprocess.run(
+                    [node, str(postinstall_js)],
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    timeout=300,
+                    env=env,
+                    creationflags=SUBPROCESS_NO_WINDOW,
+                )
+            except OSError as e:
+                _log.debug("postinstall trigger failed: %s", e)
+        return UpdateOutcome("cockpit", STATUS_UPDATED, f"v{current} → v{latest or 'latest'}")
+    except OSError as e:
+        return UpdateOutcome("cockpit", STATUS_FAILED, str(e))
 
 
 def _choice_path() -> Path:
@@ -248,7 +357,10 @@ def run_provider_updates(
         if not item.selected:
             out.append(item)
             continue
-        outcome = provider_update.update_provider(item.name)
+        if item.name == "cockpit":
+            outcome = _update_cockpit(item.latest)
+        else:
+            outcome = provider_update.update_provider(item.name)
         status = _OUTCOME_STATUS_MAP.get(outcome.status, PROVIDER_STATUS_FAILED)
         current = item.latest if (outcome.status == "updated" and item.latest) else item.current
         updated = replace(item, status=status, current=current, detail=outcome.detail or "")

@@ -311,8 +311,8 @@ def _rmtree_readonly(func, path, exc_info):
     try:
         os.chmod(path, stat.S_IWRITE)
         func(path)
-    except Exception:
-        pass
+    except OSError as e:
+        _log_event("rmtree_readonly_failed", path=str(path), error=str(e))
 
 
 def _remove(path: Path) -> None:
@@ -327,7 +327,8 @@ def _remove(path: Path) -> None:
             try:
                 os.chmod(path, stat.S_IWRITE)
                 path.unlink()
-            except Exception:
+            except OSError as e:
+                _log_event("remove_readonly_failed", path=str(path), error=str(e))
                 raise
 
 

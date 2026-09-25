@@ -1892,3 +1892,59 @@ os._exit(0)
         )
         assert "CHAIN" not in proc.stdout
         assert proc.returncode == 0
+
+
+class TestCockpitUpdateAlertOnBoot:
+    def test_cockpit_update_displays_alert_header(self) -> None:
+        cockpit_item = _Item(
+            "cockpit",
+            label="Cockpit",
+            current="2.1.38",
+            latest="2.1.39",
+            status="update_available",
+            selected=True,
+        )
+        flow = _FakeFlow(items=[cockpit_item], plan=_plan())
+        w = bfw.BootFlowWindow(flow=flow)
+        w.start()
+        assert w._stack.currentIndex() == bfw.PAGE_MAIN
+        assert "พบ Cockpit มีเวอร์ชันใหม่" in w._subtitle_label.text()
+        assert "ต้องการอัพเดตก่อนเข้าระบบหรือไม่" in w._subtitle_label.text()
+
+    def test_cockpit_and_provider_update_displays_combined_header(self) -> None:
+        cockpit_item = _Item(
+            "cockpit",
+            label="Cockpit",
+            current="2.1.38",
+            latest="2.1.39",
+            status="update_available",
+            selected=True,
+        )
+        claude_item = _Item(
+            "claude",
+            label="Claude",
+            current="0.2.30",
+            latest="0.2.32",
+            status="update_available",
+            selected=True,
+        )
+        flow = _FakeFlow(items=[cockpit_item, claude_item], plan=_plan())
+        w = bfw.BootFlowWindow(flow=flow)
+        w.start()
+        assert w._stack.currentIndex() == bfw.PAGE_MAIN
+        assert "Cockpit และ provider" in w._subtitle_label.text()
+
+    def test_cockpit_update_skip_proceeds_to_system(self) -> None:
+        cockpit_item = _Item(
+            "cockpit",
+            label="Cockpit",
+            current="2.1.38",
+            latest="2.1.39",
+            status="update_available",
+            selected=True,
+        )
+        flow = _FakeFlow(items=[cockpit_item], plan=None)
+        w = bfw.BootFlowWindow(flow=flow)
+        w.start()
+        w._main_skip_btn.click()
+        assert w._proceed is True

@@ -9,13 +9,14 @@
         "agent_takkub.auto_issue_capture",
         "agent_takkub.auto_issue_signals",
         "agent_takkub.auto_migrate_boot",
+        "agent_takkub.boot_flow",
         "agent_takkub.boot_flow_window",
         "agent_takkub.core.migration.steps",
         "agent_takkub.core.versioning.store",
         "agent_takkub.ram_report",
         "agent_takkub.remote.api"
       ],
-      "fan_in": 8,
+      "fan_in": 9,
       "fan_out": 0
     },
     {
@@ -51,9 +52,10 @@
       "imports": [],
       "imported_by": [
         "agent_takkub.app",
+        "agent_takkub.boot_flow_window",
         "agent_takkub.update_panel"
       ],
-      "fan_in": 2,
+      "fan_in": 3,
       "fan_out": 0
     },
     {
@@ -61,6 +63,8 @@
       "imports": [],
       "imported_by": [
         "agent_takkub.autoskills_installer",
+        "agent_takkub.boot_flow",
+        "agent_takkub.boot_flow_window",
         "agent_takkub.browser_chrome",
         "agent_takkub.claude_update",
         "agent_takkub.codex_helper",
@@ -109,7 +113,7 @@
         "agent_takkub.verify",
         "agent_takkub.worktree_manager"
       ],
-      "fan_in": 48,
+      "fan_in": 50,
       "fan_out": 0
     },
     {
@@ -359,6 +363,8 @@
     {
       "module": "agent_takkub.boot_flow",
       "imports": [
+        "agent_takkub",
+        "agent_takkub._win_console",
         "agent_takkub.auto_migrate_boot",
         "agent_takkub.claude_update",
         "agent_takkub.config",
@@ -376,7 +382,7 @@
         "agent_takkub.boot_flow_window"
       ],
       "fan_in": 2,
-      "fan_out": 11
+      "fan_out": 13
     },
     {
       "module": "agent_takkub.boot_flow_terminal",
@@ -393,6 +399,8 @@
       "module": "agent_takkub.boot_flow_window",
       "imports": [
         "agent_takkub",
+        "agent_takkub._restart_env",
+        "agent_takkub._win_console",
         "agent_takkub.boot_flow",
         "agent_takkub.cockpit_theme",
         "agent_takkub.config",
@@ -403,7 +411,7 @@
         "agent_takkub.app"
       ],
       "fan_in": 1,
-      "fan_out": 6
+      "fan_out": 8
     },
     {
       "module": "agent_takkub.browser_chrome",

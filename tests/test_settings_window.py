@@ -545,8 +545,36 @@ class TestProvidersRolesView:
             for combo in dlg._role_provider_combos.values()
         )
         assert bulk.currentIndex() == -1
+        assert dlg._bulk_role_model_combo.isEnabled() is False
+        assert dlg._bulk_role_model_combo.count() == 0
         assert dlg._bulk_role_provider_btn.isEnabled() is False
         assert dlg._dirty is False
+        dlg.deleteLater()
+
+    def test_bulk_provider_and_model_updates_every_role_and_persists(self) -> None:
+        dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_PROVIDERS_ROLES)
+        bulk_p = dlg._bulk_role_provider_combo
+        bulk_m = dlg._bulk_role_model_combo
+        assert bulk_m.isEnabled() is False
+
+        bulk_p.setCurrentIndex(bulk_p.findData("gemini"))
+        assert bulk_m.isEnabled() is True
+        bulk_m.setCurrentText("gemini-2.5-flash")
+        dlg._bulk_role_provider_btn.click()
+
+        roles = tuple(dlg._role_provider_combos)
+        assert roles
+        assert all(combo.currentData() == "gemini" for combo in dlg._role_provider_combos.values())
+        assert all(
+            settings_window._combo_model(mc) == "gemini-2.5-flash"
+            for mc in dlg._role_model_combos.values()
+        )
+        assert dlg._dirty is True
+
+        dlg._on_save_apply_clicked()
+
+        assert all(provider_config.provider_for(role) == "gemini" for role in roles)
+        assert all(role_models.model_for(role, "gemini") == "gemini-2.5-flash" for role in roles)
         dlg.deleteLater()
 
     def test_save_apply_persists_role_enabled_and_provider(self) -> None:

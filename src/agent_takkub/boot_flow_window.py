@@ -2216,8 +2216,18 @@ class BootFlowWindow(QDialog):
         if mode in ("update_all", "skip", "selected"):
             self._apply_remembered_choice(mode, (remembered or {}).get("selected") or [])
             return
-        self._set_header("กำลังตรวจสอบอัพเดต provider…", theme.TEXT_MUTED, None)
-        worker = _CallWorker(lambda: flow.check_provider_updates(30.0))
+        self._set_header("กำลังตรวจสอบอัพเดต provider & cockpit…", theme.TEXT_MUTED, None)
+
+        def _check_updates():
+            fn = flow.check_provider_updates
+            import inspect
+
+            sig = inspect.signature(fn)
+            if "include_cockpit" in sig.parameters:
+                return fn(30.0, include_cockpit=True)
+            return fn(30.0)
+
+        worker = _CallWorker(_check_updates)
         worker.resultReady.connect(self._on_provider_check_done)
         self._track_worker(worker)
 
@@ -2329,8 +2339,18 @@ class BootFlowWindow(QDialog):
         if not has_any_update:
             self._proceed_to_migration_check()
             return
+        has_cockpit = any(getattr(i, "name", "") == "cockpit" and _has_update(i) for i in items)
+        n_updates = sum(1 for i in items if _has_update(i))
+        if has_cockpit and n_updates == 1:
+            header_text = "พบ Cockpit มีเวอร์ชันใหม่ — ต้องการอัพเดตก่อนเข้าระบบหรือไม่?"
+        elif has_cockpit:
+            header_text = f"พบอัพเดตของ Cockpit และ provider รวม {n_updates} รายการ — ต้องการอัพเดตก่อนเข้าระบบหรือไม่?"
+        else:
+            header_text = (
+                f"พบอัพเดตของ provider {n_updates} รายการ — เลือกได้ว่าจะอัพเดตตอนนี้หรือใช้เวอร์ชันเดิมต่อ"
+            )
         self._set_header(
-            f"พบอัพเดตของ provider {sum(1 for i in items if _has_update(i))} รายการ — เลือกได้ว่าจะอัพเดตตอนนี้หรือใช้เวอร์ชันเดิมต่อ",
+            header_text,
             theme.TEXT_MUTED,
             None,
         )
@@ -2352,6 +2372,31 @@ class BootFlowWindow(QDialog):
         )
         self._track_worker(worker)
 
+    def _relaunch_cockpit_after_update(self) -> None:
+        import os
+        import subprocess
+        import sys
+
+        from PyQt6.QtCore import QCoreApplication
+
+        from ._restart_env import build_restart_successor_env
+        from ._win_console import SUBPROCESS_NO_WINDOW
+        from .config import REPO_ROOT
+
+        try:
+            _succ_env = build_restart_successor_env(os.environ)
+            subprocess.Popen(
+                [sys.executable, "-m", "agent_takkub"],
+                cwd=str(REPO_ROOT),
+                close_fds=True,
+                creationflags=SUBPROCESS_NO_WINDOW,
+                env=_succ_env,
+            )
+            self._finish(proceed=False)
+            QCoreApplication.quit()
+        except OSError:
+            self._proceed_to_migration_check()
+
     def _on_provider_updates_done(self, result: Any, *, interactive: bool) -> None:
         """A failed update used to be dropped on the floor (the result was
         never read) — the wizard moved on and the same update was offered
@@ -2367,7 +2412,13 @@ class BootFlowWindow(QDialog):
                 for i in (result or [])
                 if getattr(i, "status", "") == "failed"
             ]
-        if not failed or not interactive:
+        if not failed:
+            if any(
+                getattr(i, "name", "") == "cockpit" and getattr(i, "status", "") == "up_to_date"
+                for i in (result or [])
+            ):
+                self._relaunch_cockpit_after_update()
+                return
             self._proceed_to_migration_check()
             return
         parts = []

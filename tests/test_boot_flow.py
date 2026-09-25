@@ -1102,3 +1102,46 @@ class TestSkippedWithPlanIsNotSuccess:
             assert outcome.ok is True
             assert outcome.skipped_reason is None
             assert outcome.error is None
+
+
+class TestCockpitUpdateCheck:
+    def test_check_cockpit_update_available(self, monkeypatch):
+        monkeypatch.setattr("agent_takkub.__version__", "2.1.38")
+        monkeypatch.setattr(boot_flow, "_npm_view_version", lambda pkg, timeout: (True, "2.1.39"))
+        item = boot_flow.check_cockpit_update()
+        assert item is not None
+        assert item.name == "cockpit"
+        assert item.current == "2.1.38"
+        assert item.latest == "2.1.39"
+        assert item.status == boot_flow.PROVIDER_STATUS_UPDATE_AVAILABLE
+        assert item.selected is True
+
+    def test_check_cockpit_update_up_to_date(self, monkeypatch):
+        monkeypatch.setattr("agent_takkub.__version__", "2.1.38")
+        monkeypatch.setattr(boot_flow, "_npm_view_version", lambda pkg, timeout: (True, "2.1.38"))
+        item = boot_flow.check_cockpit_update()
+        assert item is not None
+        assert item.status == boot_flow.PROVIDER_STATUS_UP_TO_DATE
+        assert item.selected is False
+
+    def test_check_provider_updates_includes_cockpit_when_requested(self, monkeypatch):
+        from types import SimpleNamespace
+
+        fake_spec = SimpleNamespace(
+            name="gemini",
+            display_name="Gemini",
+            install_command=None,
+            binary_names=("gemini",),
+            custom_discovery_fn=None,
+        )
+        monkeypatch.setattr("agent_takkub.provider_spec.PROVIDER_REGISTRY", {"gemini": fake_spec})
+        monkeypatch.setattr("agent_takkub.__version__", "2.1.38")
+        monkeypatch.setattr(boot_flow, "_npm_view_version", lambda pkg, timeout: (True, "2.1.39"))
+        monkeypatch.setattr(boot_flow, "_current_version_generic", lambda spec: "1.0.0")
+
+        items = boot_flow.check_provider_updates(include_cockpit=True)
+        assert any(
+            i.name == "cockpit" and i.status == boot_flow.PROVIDER_STATUS_UPDATE_AVAILABLE
+            for i in items
+        )
+        assert items[0].name == "cockpit"
