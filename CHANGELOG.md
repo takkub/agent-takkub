@@ -2,6 +2,14 @@
 
 All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses [SemVer](https://semver.org/).
 
+## [vNEXT]
+
+### Fixed (แก้)
+
+- **delivery blocked prompt warning (#724):** หน่วงเวลาแจ้งเตือน prompt ถูกบล็อกด้วย grace period 20 วินาที เพื่อไม่ให้เตือนซ้ำซ้อนขณะประมวลผล
+- **Docker Desktop tree cleanup (#720):** ปกป้องโปรเซส Docker Desktop และเดมอนที่เกี่ยวข้องจากการถูก terminate ในจังหวะที่ปิด pane (`_tree_kill`) ป้องกัน instance และ scratch DB ดับ
+- **Generic provider session resume (#723):** รองรับการ auto-resume เซสชันข้ามการปิด pane (close-on-done) สำหรับ non-Claude providers ทั้ง Codex (`resume <id>`), Gemini/agy (`--conversation`), และ OpenCode (`--session`) พร้อมเก็บ native session id ลง `_recent_exits`
+
 ## [v2.1.37] - 2026-09-24
 
 ### Fixed (แก้)
