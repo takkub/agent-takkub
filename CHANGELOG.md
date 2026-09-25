@@ -4,6 +4,8 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 
 ## [vNEXT]
 
+## [v2.1.39] - 2026-09-25
+
 ### Added (เพิ่ม)
 
 - **Cockpit self-update alert on boot:** เพิ่มการตรวจสอบเวอร์ชันล่าสุดของ agent-takkub (Cockpit) บน npm ในจังหวะเปิดโปรแกรม (`BootFlowWindow`) หากมีเวอร์ชันใหม่จะแจ้งเตือนพร้อมแสดงความต่างของเวอร์ชัน และให้ผู้ใช้เลือกว่าจะ "อัพเดตทันที" เพื่อรีสตาร์ตเข้าเวอร์ชันใหม่ หรือ "ข้าม — ใช้เวอร์ชันเดิม" เพื่อเข้าสู่ระบบได้ทันที
