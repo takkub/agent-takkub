@@ -115,6 +115,39 @@ def _spawn_codex_and_capture_argv(
     return pty_spawn_calls[0]["argv"]
 
 
+def _assert_windows_codex_trust_and_policy(argv):
+    # On a case-sensitive host the resolved path may already be lowercase,
+    # so the duplicate lowercase trust override is unnecessary.
+    config_values = [argv[i + 1] for i, arg in enumerate(argv[:-1]) if arg == "-c"]
+    trust_values = [value for value in config_values if value.startswith("projects.'")]
+    assert 1 <= len(trust_values) <= 2
+    assert all(value.endswith('\'.trust_level="trusted"') for value in trust_values)
+    assert config_values[len(trust_values) :] == [
+        "model_reasoning_effort=high",
+        "mcp_servers={}",
+        "features.plugins=false",
+    ]
+
+
+def test_windows_codex_trust_assertion_accepts_lowercase_host_path():
+    _assert_windows_codex_trust_and_policy(
+        [
+            "codex",
+            "--dangerously-bypass-approvals-and-sandbox",
+            "--disable",
+            "apps",
+            "-c",
+            "projects.'/tmp/project'.trust_level=\"trusted\"",
+            "-c",
+            "model_reasoning_effort=high",
+            "-c",
+            "mcp_servers={}",
+            "-c",
+            "features.plugins=false",
+        ]
+    )
+
+
 class TestCodexArgvNetworkAccess:
     def test_lead_spawn_uses_provider_trust_argv(self, qapp, monkeypatch, tmp_path):
         argv = _spawn_codex_and_capture_argv(qapp, monkeypatch, tmp_path, "win32", role="lead")
@@ -157,21 +190,7 @@ class TestCodexArgvNetworkAccess:
             "--disable",
             "apps",
         ]
-        trust_args = argv[4:8]
-        assert len(trust_args) == 4
-        assert trust_args[0] == trust_args[2] == "-c"
-        assert trust_args[1].startswith("projects.'")
-        assert trust_args[1].endswith('\'.trust_level="trusted"')
-        assert trust_args[3].startswith("projects.'")
-        assert trust_args[3].endswith('\'.trust_level="trusted"')
-        assert argv[8:] == [
-            "-c",
-            "model_reasoning_effort=high",
-            "-c",
-            "mcp_servers={}",
-            "-c",
-            "features.plugins=false",
-        ]
+        _assert_windows_codex_trust_and_policy(argv)
 
     def test_provider_declares_exact_session_resume_contract(self) -> None:
         from agent_takkub.provider_spec import PROVIDER_REGISTRY
@@ -241,19 +260,7 @@ class TestCodexArgvMcpInjection:
             "--disable",
             "apps",
         ]
-        assert argv[4:8][0] == argv[4:8][2] == "-c"
-        assert all(
-            value.startswith("projects.'") and value.endswith('\'.trust_level="trusted"')
-            for value in (argv[4:8][1], argv[4:8][3])
-        )
-        assert argv[8:] == [
-            "-c",
-            "model_reasoning_effort=high",
-            "-c",
-            "mcp_servers={}",
-            "-c",
-            "features.plugins=false",
-        ]
+        _assert_windows_codex_trust_and_policy(argv)
         assert not any(str(arg).startswith("mcp_servers.") for arg in argv)
 
 
