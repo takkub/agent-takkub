@@ -392,13 +392,16 @@ class AgentPane(QFrame):
 
     def _move_locked_input_to_composer(self, data: str) -> None:
         """Move printable Lead-terminal input into the cockpit composer."""
+        # #728: ignore escape sequences and non-printable data (e.g. mouse reports,
+        # arrow keys) so they are never typed into the composer nor steal focus.
+        if not data or "\x1b" in data or not data.isprintable():
+            return
         editor = self.composer.editor
         editor.setFocus()
-        if data.isprintable():
-            cursor = editor.textCursor()
-            cursor.movePosition(cursor.MoveOperation.End)
-            editor.setTextCursor(cursor)
-            editor.insertPlainText(data)
+        cursor = editor.textCursor()
+        cursor.movePosition(cursor.MoveOperation.End)
+        editor.setTextCursor(cursor)
+        editor.insertPlainText(data)
 
     def _composer_send_blocker(self) -> str | None:
         if self.session is None or not getattr(self.session, "is_alive", False):

@@ -305,10 +305,68 @@ def _within_allowed_bases(p: Path, cwd: str | None, extra_bases: tuple[str, ...]
     return False
 
 
+# ── Mouse report filtering (#728) ──────────────────────────────────────────
+# When input is locked, teammate panes and composer-mode Lead drop keystrokes
+# and clicks to prevent accidental input. However, mouse wheel scrolling in
+# TUIs (Claude Code fullscreen, codex ratatui) must still work:
+# - SGR 1006 format: ESC[<Cb;x;y(M|m) where Cb & ~(4|8|16) in 64..67 (wheel
+#   up/down/left/right, including Shift/Alt/Ctrl modifier bits).
+# - X10 / UTF-8 format: ESC[MCbCxCy where (ord(Cb) - 32) & ~(4|8|16) in 64..67.
+#
+# A single input chunk may contain multiple reports or mixed data;
+# split_wheel_reports separates wheel reports (forwarded to PTY) from
+# non-wheel data (dropped or routed to lockedInput / composer).
+_MOUSE_REPORT_RE = re.compile(r"\x1b\[(?:<(\d+);(\d+);(\d+)[Mm]|M([\s\S])([\s\S])([\s\S]))")
+_WHEEL_MODIFIER_MASK = 4 | 8 | 16  # Shift (4), Alt/Meta (8), Ctrl (16)
+
+
+def split_wheel_reports(data: str) -> tuple[str, str]:
+    """Split input data into (wheel_reports, remaining_data).
+
+    Wheel reports (SGR 1006 with button 64..67 or X10/UTF-8 ESC[M with
+    cb-32 in 64..67, including Shift/Alt/Ctrl modifiers) are separated
+    so they can be forwarded to the PTY even when input is locked.
+    All other data (keystrokes, mouse clicks, drags) remains in remaining_data.
+    """
+    if not data or "\x1b[" not in data:
+        return "", data
+
+    wheel_parts: list[str] = []
+    remaining_parts: list[str] = []
+    last_end = 0
+
+    for match in _MOUSE_REPORT_RE.finditer(data):
+        start, end = match.span()
+        if start > last_end:
+            remaining_parts.append(data[last_end:start])
+        last_end = end
+
+        sgr_cb = match.group(1)
+        if sgr_cb is not None:
+            cb = int(sgr_cb)
+            is_wheel = 64 <= (cb & ~_WHEEL_MODIFIER_MASK) <= 67
+        else:
+            cb = ord(match.group(4)) - 32
+            is_wheel = 64 <= (cb & ~_WHEEL_MODIFIER_MASK) <= 67
+
+        if is_wheel:
+            wheel_parts.append(match.group(0))
+        else:
+            remaining_parts.append(match.group(0))
+
+    if last_end < len(data):
+        remaining_parts.append(data[last_end:])
+
+    return "".join(wheel_parts), "".join(remaining_parts)
+
+
 class _Bridge(QObject):
     """Object exposed to JS via QWebChannel."""
 
     inputData = pyqtSignal(str)  # text the user typed in xterm.js
+    wheelInputData = pyqtSignal(
+        str
+    )  # wheel arrow keys in alternate scroll without mouse tracking (#728)
     sizeChanged = pyqtSignal(int, int)  # cols, rows reported by FitAddon
     pageReady = pyqtSignal()
     imageDataPasted = pyqtSignal(str, str)  # base64_data, mime_type
@@ -319,6 +377,11 @@ class _Bridge(QObject):
     @pyqtSlot(str)
     def sendInput(self, data: str) -> None:
         self.inputData.emit(data)
+
+    @pyqtSlot(str)
+    def sendWheelInput(self, data: str) -> None:
+        """Called from JS when mouse wheel produces arrow keys in alternate buffer (#728)."""
+        self.wheelInputData.emit(data)
 
     @pyqtSlot(str)
     def openUrl(self, uri: str) -> None:
@@ -489,6 +552,7 @@ class TerminalWidget(QWidget):
         self._newline_seq: str | None = None
 
         self._bridge.inputData.connect(self._on_input_data)
+        self._bridge.wheelInputData.connect(self._on_wheel_input_data)
         self._bridge.sizeChanged.connect(self.resized.emit)
         self._bridge.pageReady.connect(self._on_page_ready)
         self._bridge.imageDataPasted.connect(self._on_image_pasted)
@@ -755,12 +819,26 @@ class TerminalWidget(QWidget):
         if not data:
             return
         if self._input_locked:
-            try:
-                self.lockedInput.emit(data)
-            except RuntimeError:
-                # A few pure lock tests use a __new__ shell without
-                # initialising QWidget; there is no Qt signal instance there.
-                pass
+            # #728: allow mouse wheel scrolling in TUIs (Claude Code fullscreen,
+            # codex ratatui) even while input is locked. Non-wheel input
+            # (keystrokes, clicks, drags) remains locked.
+            wheel_data, remaining_data = split_wheel_reports(data)
+            if wheel_data:
+                self.inputBytes.emit(wheel_data.encode("utf-8"))
+            if remaining_data:
+                try:
+                    self.lockedInput.emit(remaining_data)
+                except (RuntimeError, AttributeError):
+                    # A few pure lock tests use a __new__ shell without
+                    # initialising QWidget; there is no Qt signal instance there.
+                    pass
+            return
+        self.inputBytes.emit(data.encode("utf-8"))
+
+    def _on_wheel_input_data(self, data: str) -> None:
+        """#728: forward wheel-generated cursor escapes from alternate buffer
+        directly to PTY even when input is locked."""
+        if not data or not data.startswith("\x1b"):
             return
         self.inputBytes.emit(data.encode("utf-8"))
 

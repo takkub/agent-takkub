@@ -1014,11 +1014,17 @@ def _delayed_enter_verified(
                     )
                     _settled(SubmitSettleOutcome(queue_submit_used=True, stuck_in_composer=True))
                     return
-                if (
-                    payload is not None
-                    and busy_remaining > 0
-                    and session.shows_pending_input(content_fragment)
-                ):
+                _pending_input = False
+                if payload is not None:
+                    try:
+                        _pending = getattr(session, "shows_pending_input", None)
+                        if callable(_pending):
+                            _res_p = _pending(content_fragment)
+                            _pending_input = bool(isinstance(_res_p, bool) and _res_p)
+                    except Exception:
+                        _pending_input = False
+
+                if _pending_input and busy_remaining > 0:
                     _log_verify_decision(
                         "resend_busy_pending",
                         session=session,
@@ -1030,13 +1036,39 @@ def _delayed_enter_verified(
                         on_resend(busy_remaining)
                     _send_then_verify(remaining, busy_remaining - 1)
                     return
-                _settled()
+
+                if _pending_input:
+                    _log_verify_decision(
+                        "stuck_in_composer",
+                        session=session,
+                        payload=payload,
+                        is_ready=False,
+                        shows_pending=True,
+                    )
+                _settled(SubmitSettleOutcome(stuck_in_composer=_pending_input))
                 return
             # Ready-prompt reached. The swallow/repaste recovery below is the
             # aggressive path (risks duplicate pastes), so it stays on the small
             # bounded swallow budget — exhaust it and stop.
             if remaining <= 0:
-                _settled()
+                is_stuck_ready = False
+                if payload is not None:
+                    try:
+                        _pending = getattr(session, "shows_pending_input", None)
+                        if callable(_pending):
+                            _res_p = _pending(content_fragment)
+                            is_stuck_ready = bool(isinstance(_res_p, bool) and _res_p)
+                    except Exception:
+                        is_stuck_ready = False
+                if is_stuck_ready:
+                    _log_verify_decision(
+                        "stuck_in_composer",
+                        session=session,
+                        payload=payload,
+                        is_ready=True,
+                        shows_pending=True,
+                    )
+                _settled(SubmitSettleOutcome(stuck_in_composer=is_stuck_ready))
                 return
             # Still ready → submit didn't land. If we have the payload and the
             # input box is empty, the PASTE may have been swallowed (#26) — but
@@ -1681,33 +1713,55 @@ class LeadInboxMixin:
                 if pane.session is not _task_sess:
                     manager.mark_failed(delivery.delivery_id, "session_replaced")
                     return
-                try:
-                    accepted = not _task_sess.is_at_ready_prompt()
-                except Exception:
-                    accepted = False
-                # #721: a busy codex pane never leaves its ready prompt even
-                # when the submit DID happen — that state uses the queue
-                # confirm markers instead. The queue path reports separately
-                # through the outcome: `stuck_in_composer` means the paste is
-                # still sitting as an unsubmitted draft, which must NOT be
-                # counted as accepted.
+                # #721/#729: if the task is still sitting in the composer unsubmitted,
+                # it must never be marked accepted.
                 _stuck_in_composer = False
-                if _outcome is not None and getattr(_outcome, "stuck_in_composer", False):
-                    accepted = False
-                    _stuck_in_composer = True
-                if not accepted and not _stuck_in_composer and write_baseline is not None:
-                    # (#359) A long paste can legitimately return to the
-                    # ready prompt before the CLI visibly starts processing
-                    # it — "still ready" alone can't tell "never submitted"
-                    # from "submitted, and busy-rendering just hasn't shown
-                    # up yet". Any PTY output produced AFTER we wrote the
-                    # payload proves the bytes were received regardless.
+                if _outcome is not None:
+                    _stuck_in_composer = bool(getattr(_outcome, "stuck_in_composer", False))
+                elif payload is not None:
                     try:
-                        _latest = _timing_or_none(_task_sess.last_output_monotonic())
-                        if _latest is not None:
-                            accepted = _latest > write_baseline
+                        if hasattr(_task_sess, "shows_pending_input"):
+                            content_fragment = payload[:120] if isinstance(payload, str) else ""
+                            _res_p = _task_sess.shows_pending_input(content_fragment)
+                            _stuck_in_composer = isinstance(_res_p, bool) and _res_p
                     except Exception:
-                        pass
+                        _stuck_in_composer = False
+
+                if _stuck_in_composer:
+                    accepted = False
+                else:
+                    _shows_busy = False
+                    try:
+                        if hasattr(_task_sess, "shows_busy_marker"):
+                            _res_b = _task_sess.shows_busy_marker(_provider_deliver)
+                            _shows_busy = isinstance(_res_b, bool) and _res_b
+                    except Exception:
+                        _shows_busy = False
+
+                    try:
+                        _res_r = _task_sess.is_at_ready_prompt()
+                        _left_ready = isinstance(_res_r, bool) and not _res_r
+                    except Exception:
+                        _left_ready = False
+
+                    _queue_confirmed = bool(
+                        _outcome is not None
+                        and getattr(_outcome, "queue_submit_used", False)
+                        and not getattr(_outcome, "stuck_in_composer", False)
+                    )
+
+                    _output_produced = False
+                    if write_baseline is not None:
+                        # (#359) When composer is empty, output produced after
+                        # write confirms receipt even if still at ready prompt.
+                        try:
+                            _latest = _timing_or_none(_task_sess.last_output_monotonic())
+                            if _latest is not None and _latest > write_baseline:
+                                _output_produced = True
+                        except Exception:
+                            _output_produced = False
+
+                    accepted = _shows_busy or _left_ready or _queue_confirmed or _output_produced
                 _swallowed_by_account_pending = False
                 if accepted:
                     # (#376) A not-ready read alone is not proof the CLI is
@@ -1803,13 +1857,8 @@ class LeadInboxMixin:
                         )
                         self._warn_lead_delivery_uncertain(role_name, project)
                 elif _stuck_in_composer:
-                    # #721: the busy-queue resend budget ran out before the
-                    # provider's queue-confirm markers ever appeared — the
-                    # pasted task is still sitting as an unsubmitted draft in
-                    # the composer (codex's busy Enter swallows rather than
-                    # submits, and the Tab resends never confirmed). Surface
-                    # to Lead with the queue-specific cause so they don't read
-                    # it as a ready-prompt Enter failure.
+                    # #721/#729: the pasted task is still sitting as an unsubmitted draft
+                    # in the composer. Surface to Lead immediately with the specific cause.
                     manager.mark_uncertain(delivery.delivery_id)
                     _log_event(
                         "task_deliver_stuck_in_composer",
@@ -1817,7 +1866,12 @@ class LeadInboxMixin:
                         role=role_name,
                         delivery_id=delivery.delivery_id,
                     )
-                    self._warn_lead_delivery_composer_stuck(role_name, project)
+                    if _outcome is not None and getattr(_outcome, "queue_submit_used", False):
+                        self._warn_lead_delivery_composer_stuck(role_name, project)
+                    else:
+                        self._warn_lead_delivery_uncertain(
+                            role_name, project, stuck_in_composer=True
+                        )
                 else:
                     manager.mark_uncertain(delivery.delivery_id)
                     self._warn_lead_delivery_uncertain(role_name, project)
@@ -2834,7 +2888,9 @@ class LeadInboxMixin:
             reason=reason,
         )
 
-    def _warn_lead_delivery_uncertain(self, role_name: str, project: str | None) -> None:
+    def _warn_lead_delivery_uncertain(
+        self, role_name: str, project: str | None, *, stuck_in_composer: bool = False
+    ) -> None:
         """Tell the Lead that a delivery ended in UNCERTAIN — the pane was
         back at its ready prompt after every Enter resend was spent, so the
         task may never have been submitted at all.
@@ -2866,7 +2922,7 @@ class LeadInboxMixin:
         if role_name == LEAD.name:
             return
         project_ns = self._resolve_project(project)
-        if self._pane_shows_real_progress(project_ns, role_name):
+        if not stuck_in_composer and self._pane_shows_real_progress(project_ns, role_name):
             _log_event("delivery_uncertain_suppressed", role=role_name, project=project_ns)
             return
         lead = self._project_panes(project_ns).get(LEAD.name)

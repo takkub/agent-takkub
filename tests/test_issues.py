@@ -48,6 +48,7 @@ def _args(**kwargs):
         "open": False,
         "closed": False,
         "cwd": None,
+        "force": False,
     }
     defaults.update(kwargs)
     return types.SimpleNamespace(**defaults)
@@ -394,6 +395,67 @@ def test_cmd_new_issues_dir_deprecated_warns(capsys) -> None:
         cmd_issue_new(args)
     captured = capsys.readouterr()
     assert "deprecated" in captured.err
+
+
+# ── #741: truncated body rejection ──────────────────────────────────────────
+
+
+def test_cmd_new_rejects_truncated_body_markdown_header() -> None:
+    args = _args(title="t", body="## อาการ")
+    resp = cmd_issue_new(args)
+    assert resp["ok"] is False
+    assert "appears truncated" in resp["msg"]
+    assert "--body-file" in resp["msg"]
+
+
+def test_cmd_new_rejects_truncated_body_complex_header() -> None:
+    args = _args(
+        title="t",
+        body="## อาการ (prod 2.1.40, โปรเจค realwolrd, ~/.agent-takkub/runtime/events.log)",
+    )
+    resp = cmd_issue_new(args)
+    assert resp["ok"] is False
+    assert "appears truncated" in resp["msg"]
+
+
+def test_cmd_new_rejects_truncated_body_dangling_colon() -> None:
+    args = _args(title="t", body="Steps to reproduce:")
+    resp = cmd_issue_new(args)
+    assert resp["ok"] is False
+    assert "appears truncated" in resp["msg"]
+
+
+def test_cmd_new_truncated_body_with_force_passes() -> None:
+    with patch(
+        "agent_takkub.issues.new_issue",
+        return_value=(10, "https://github.com/takkub/agent-takkub/issues/10"),
+    ):
+        args = _args(title="t", body="## อาการ", force=True)
+        resp = cmd_issue_new(args)
+        assert resp["ok"] is True
+        assert "10" in resp["msg"]
+
+
+def test_cmd_new_multiline_markdown_body_passes() -> None:
+    with patch(
+        "agent_takkub.issues.new_issue",
+        return_value=(11, "https://github.com/takkub/agent-takkub/issues/11"),
+    ):
+        args = _args(title="t", body="## อาการ\n- Error happened\n- Detail here")
+        resp = cmd_issue_new(args)
+        assert resp["ok"] is True
+        assert "11" in resp["msg"]
+
+
+def test_cmd_new_normal_single_line_body_passes() -> None:
+    with patch(
+        "agent_takkub.issues.new_issue",
+        return_value=(12, "https://github.com/takkub/agent-takkub/issues/12"),
+    ):
+        args = _args(title="t", body="Quick one-line summary of bug")
+        resp = cmd_issue_new(args)
+        assert resp["ok"] is True
+        assert "12" in resp["msg"]
 
 
 def test_cmd_list_output(capsys) -> None:

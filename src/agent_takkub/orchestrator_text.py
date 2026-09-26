@@ -1279,7 +1279,8 @@ def _task_handoff_pointer(
 
     # Measure the task BODY, not the injected budget block (#585): the block is
     # scaffolding, and counting it flipped every short task onto the pointer path.
-    if len(task_scope.strip_budget(task)) < TASK_HANDOFF_THRESHOLD:
+    # #739: nor the new-task header, same reason.
+    if len(task_scope.strip_budget(strip_new_task_header(task))) < TASK_HANDOFF_THRESHOLD:
         return task, None
     day = _task_handoff_dir(project_ns)
     # #587 A5: two assigns to the same role within one second (e.g. Lead
@@ -1314,8 +1315,77 @@ def _task_handoff_pointer(
     if scope:
         from . import task_scope
 
-        pointer = f"{task_scope.budget_block(scope)}\n\n{pointer}"
+        # #739: trails the pointer, same order as `task_scope.inject_budget`.
+        pointer = (
+            f"{pointer}\n\n{task_scope.BUDGET_TRAILER_HEADER}\n{task_scope.budget_block(scope)}"
+        )
     return pointer, forward_path
+
+
+# #739/#740: a new assignment that lands in a session which may still hold an
+# EARLIER task (a live pane that just reported done, or a `--resume` of the
+# role's last conversation) used to arrive indistinguishable from that earlier
+# task — the pane answered with the previous report (0 files touched) and the
+# new work was silently counted done. Every such delivery now opens with this
+# header naming the new task id; done() checks the id back (`[task <id8>]`).
+NEW_TASK_HEADER_PREFIX = "[ใบงานใหม่ · task "
+_NEW_TASK_HEADER_RE = re.compile(r"^\[ใบงานใหม่ · task [0-9a-f]{8}\][^\n]*\n+")
+TASK_ID_TAG_RE = re.compile(r"\[task ([0-9a-f]{8})\]", re.IGNORECASE)
+
+
+def new_task_header(task_id: str, prev_task_id: str | None = None) -> str:
+    """One-line header for a task delivered into a session that may carry an
+    earlier one (see `NEW_TASK_HEADER_PREFIX`)."""
+    tid = (task_id or "")[:8]
+    prev = f" (ใบก่อน task {prev_task_id[:8]} ปิดไปแล้ว)" if prev_task_id else ""
+    return (
+        f"{NEW_TASK_HEADER_PREFIX}{tid}] นี่คือใบงานใหม่ แยกจากงานที่ทำ/รายงานไปแล้วใน "
+        f"session นี้{prev} — ห้ามตอบด้วยผลของงานเดิม อ่านเนื้องานข้างล่างทั้งหมดแล้วลงมือทำจริง "
+        f"· ตอน takkub done ให้ขึ้นต้นโน้ตด้วย [task {tid}]\n\n"
+    )
+
+
+# #739/#740: an implementation task reported done this soon after assign with
+# nothing changed is almost certainly the previous task's report replayed —
+# both prod incidents closed in 21-27 s.
+STALE_DONE_WINDOW_S = max(0.0, float(os.environ.get("TAKKUB_STALE_DONE_WINDOW_S", "120")))
+# Wording a pane uses when it re-serves an earlier report instead of doing the
+# new work ("รายงานรอบก่อนยังใช้ได้", "same as the previous report").
+_STALE_REPORT_RE = re.compile(
+    r"รอบก่อน|ใบก่อน|ใบเก่า|งานเดิม|เช็คซ้ำ|ตรวจซ้ำ|รายงานเดิม|ยังใช้ได้"
+    r"|previous (?:task|report|round|run)|already (?:done|reported|completed)|same as before",
+    re.IGNORECASE,
+)
+
+
+def stale_done_reasons(
+    note: str,
+    *,
+    task_id: str | None,
+    files_touched: int | None,
+    elapsed_s: float | None,
+    implementation: bool,
+) -> list[str]:
+    """Why a `done` looks like it belongs to an EARLIER task than *task_id*
+    (empty list = nothing suspicious). Advisory only — done() still records
+    the report, it just stops it from closing the task silently."""
+    reasons: list[str] = []
+    tid = (task_id or "")[:8].lower()
+    cited = {m.lower() for m in TASK_ID_TAG_RE.findall(note or "")}
+    if re.fullmatch(r"[0-9a-f]{8}", tid) and cited and tid not in cited:
+        reasons.append(f"โน้ตอ้าง task {', '.join(sorted(cited))} ไม่ใช่ {tid}")
+    if implementation and files_touched == 0:
+        if elapsed_s is not None and elapsed_s < STALE_DONE_WINDOW_S:
+            reasons.append(f"done ภายใน {int(elapsed_s)} วิหลังรับใบ implement แต่แตะ 0 ไฟล์")
+        elif _STALE_REPORT_RE.search(note or ""):
+            reasons.append("แตะ 0 ไฟล์และโน้ตอ้างผล/งานรอบก่อน")
+    return reasons
+
+
+def strip_new_task_header(text: str) -> str:
+    """*text* without a leading `new_task_header` line (task-intent checks
+    must read Lead's task, not the delivery header)."""
+    return _NEW_TASK_HEADER_RE.sub("", text or "", count=1)
 
 
 # #273: how long after assign a `done --fail` may still plausibly be about

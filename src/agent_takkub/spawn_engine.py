@@ -300,6 +300,13 @@ def _apply_v2_account_env_override(
 _CURRENT_TASK_BEGIN = "\n\n<!-- takkub-current-spawn-task:start -->"
 _CURRENT_TASK_END = "<!-- takkub-current-spawn-task:end -->"
 _CURRENT_TASK_TRIGGER = "Start the current task from the one-shot system-prompt block now."
+# #739: a `--resume`d session already holds the task it last finished; the
+# generic sentence above let it answer with that task's report again. Still
+# one short line (never bracket-pasted, see _finish_spawn_initial_task).
+_RESUMED_TASK_TRIGGER = (
+    "Start the NEW task [task {tid}] from the one-shot system-prompt block now "
+    "- it is a new assignment, not a task you already finished in this conversation."
+)
 
 
 def _prepare_spawn_system_prompt(
@@ -1996,8 +2003,14 @@ class SpawnEngineMixin:
         project_ns: str,
         *,
         preloaded: bool,
+        resumed: bool = False,
     ) -> None:
         """Finalize a one-shot task accepted by this native spawn.
+
+        *resumed* (#739): the session rejoined the role's previous
+        conversation, which already holds the task it last finished — the
+        trigger then names the NEW task id instead of the generic sentence the
+        pane could read as "continue what you were doing".
 
         A successful system-prompt preload needs only a tiny turn-start trigger,
         never the task body or pointer. If the prompt file could not be
@@ -2037,7 +2050,10 @@ class SpawnEngineMixin:
             # at ready with the preloaded system prompt and an empty
             # composer, which the idle watchdog's `[auto-reminder]` nudge
             # (IDLE_REMINDER_TEXT) picks up.
-            self._send_when_ready_no_repaste(role_name, _CURRENT_TASK_TRIGGER, project=project_ns)
+            trigger = _CURRENT_TASK_TRIGGER
+            if resumed and ps.task_id:
+                trigger = _RESUMED_TASK_TRIGGER.format(tid=ps.task_id[:8])
+            self._send_when_ready_no_repaste(role_name, trigger, project=project_ns)
             return
         ps.spawn_initial_task_state = "fallback"
         _log_event(
@@ -2895,6 +2911,23 @@ class SpawnEngineMixin:
             autonomy_argv = list(
                 spec.autonomy_flags.get(sys.platform, spec.autonomy_flags.get("default", []))
             )
+            if spec.trust_argv is not None and spawn_cwd:
+                # #730: Pass trusted folder config via session-scoped argv override (-c).
+                # Codex 0.157.1 prompts "Trust this folder?" on untrusted directories,
+                # which causes non-interactive panes to exit code 0 or stall.
+                try:
+                    _cwd_resolved = pathlib.Path(spawn_cwd).resolve()
+                    _pretrust_root = _resolve_pane_pretrust_root(spawn_cwd, project_ns)
+                    if _pretrust_root is not None:
+                        _root_resolved = pathlib.Path(_pretrust_root).resolve()
+                        # Always trust the actual session cwd. Lead commonly
+                        # launches at the registered root itself, where the
+                        # old ancestor-only branch omitted trust_argv entirely.
+                        if _root_resolved != _cwd_resolved:
+                            autonomy_argv.extend(spec.trust_argv(str(_root_resolved)))
+                        autonomy_argv.extend(spec.trust_argv(str(_cwd_resolved)))
+                except Exception:
+                    pass
             # Default for providers with no model_flag (none currently in the
             # registry, but ProviderSpec allows it) — _resolve_teammate_effort
             # below still needs a value to check against
@@ -3080,6 +3113,8 @@ class SpawnEngineMixin:
 
             provider_argv = assemble_generic_argv(
                 provider_bin,
+                provider_id=spec.name,
+                cwd=spawn_cwd,
                 autonomy_argv=autonomy_argv,
                 model_argv=model_argv,
                 effort_argv=effort_argv,
@@ -4055,6 +4090,7 @@ class SpawnEngineMixin:
                 role_name,
                 project_ns,
                 preloaded=_initial_task_preloaded,
+                resumed=resumed,
             )
             # Record exits so the auto-respawn watcher knows which project
             # namespace owned the pane that just died.  Capture the session so
@@ -4480,6 +4516,20 @@ class SpawnEngineMixin:
             return
 
         self._write_pane_exit_snapshot(role_name, project, session)
+        # A Lead replacement created by a quota reroute must never disappear
+        # into the ordinary crash-respawn path. Try another provider now; if
+        # none is usable, the original provider's reset timer owns recovery.
+        if role_name == LEAD.name:
+            try:
+                if self._handle_lead_quota_replacement_exit(project, role_name):
+                    self.leadUnavailable.emit(project, "Lead exited unexpectedly; recovering")
+                    self.statusChanged.emit()
+                    return
+            except Exception:
+                _log.exception("Lead quota replacement recovery failed")
+        if role_name == LEAD.name:
+            self.leadUnavailable.emit(project, f"Lead exited unexpectedly (code {exit_code})")
+            self.statusChanged.emit()
         self._warn_lead_pane_exited(role_name, project, exit_code)
 
         key = f"{project}::{role_name}"

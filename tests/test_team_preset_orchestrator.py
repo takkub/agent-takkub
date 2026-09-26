@@ -234,7 +234,10 @@ class TestAssignAutoPresetSuggestion:
         sent_task = send_mock.call_args.args[1]
         assert "auto team-preset suggestion" in sent_task
         assert "solo-lead" in sent_task
-        assert sent_task.endswith("fix a typo")
+        # #739: the budget block trails the task body
+        from tests import extract_task_body
+
+        assert extract_task_body(sent_task).endswith("fix a typo")
         # advisory only — the standing preset itself is untouched
         assert team_preset.current_preset_id(TEST_PROJECT) == "auto"
         assert team_preset.active_override(TEST_PROJECT) is None

@@ -70,15 +70,25 @@ def assemble_generic_argv(
     resume_argv: Sequence[str] = (),
     autocompact_argv: Sequence[str] = (),
     tools_argv: Sequence[str] = (),
+    provider_id: str | None = None,
+    cwd: str | None = None,
 ) -> list[str]:
     """Pure re-assembly of the generic non-claude branch's argv, same order
     the branch builds it in: bin, autonomy flags, model, effort, MCP,
     project-scope, resume, tools. Every *_argv piece is caller-resolved (already
     empty when that piece doesn't apply) — this function only concatenates.
     """
+    trust_argv: Sequence[str] = ()
+    if provider_id and cwd:
+        from agent_takkub.provider_spec import PROVIDER_REGISTRY
+
+        spec = PROVIDER_REGISTRY.get(provider_id.strip().lower())
+        if spec is not None and spec.trust_argv is not None:
+            trust_argv = spec.trust_argv(cwd)
     return [
         provider_bin,
         *autonomy_argv,
+        *trust_argv,
         *model_argv,
         *effort_argv,
         *mcp_argv,
@@ -113,6 +123,8 @@ def build_generic_spawn_plan(
     env.update(account_env_overrides(provider_id, account))
     argv = assemble_generic_argv(
         provider_bin,
+        provider_id=provider_id,
+        cwd=cwd,
         autonomy_argv=autonomy_argv,
         model_argv=model_argv,
         effort_argv=effort_argv,

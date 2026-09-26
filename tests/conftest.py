@@ -1066,6 +1066,10 @@ def _isolate_runtime(monkeypatch: pytest.MonkeyPatch, tmp_path):
     mcpb = _maybe_module("agent_takkub.mcp_bridge", force=True)
     if mcpb is not None:
         monkeypatch.setattr(mcpb, "_version_cache", {}, raising=False)
+        # #732: the MCP-names cache is no longer keyed on cwd, so two tests
+        # with different tmp cwds would otherwise share an entry.
+        monkeypatch.setattr(mcpb, "_codex_mcp_names_cache", {}, raising=False)
+        monkeypatch.setattr(mcpb, "_codex_file_digest_cache", {}, raising=False)
 
     # #344: re-arm every test, not just once at session start. Some test
     # (test_app_exception_guard.py) legitimately installs app.py's OWN

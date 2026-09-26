@@ -756,7 +756,7 @@ class StatusHeaderMixin:
         self._refresh_remote_chip()
         self._refresh_overage_chip()
         self._refresh_plan_badge()
-        self._refresh_team_preset_chip()
+        self._refresh_team_preset_chip(periodic=True)
         self._update_provider_chip()
         self._refresh_active_provider_usage()
         self._refresh_performance_health_chip()
@@ -1049,14 +1049,20 @@ class StatusHeaderMixin:
         self._plan_badge_cache[config_dir] = plan if isinstance(plan, str) else None
         self._refresh_plan_badge()
 
-    def _refresh_team_preset_chip(self) -> None:
+    # #732: `_update_status` runs every 2s plus on every statusChanged; the
+    # periodic repaint re-reads team_preset.json at most this often. Real
+    # changes still repaint at once: `teamPresetChanged` and the initial
+    # build call with `periodic=False`, and a project switch is detected
+    # below before the throttle applies.
+    _TEAM_PRESET_CHIP_MIN_INTERVAL_S = 15.0
+
+    def _refresh_team_preset_chip(self, *, periodic: bool = False) -> None:
         """Repaint "ทีม: <preset>" for the ACTIVE project's EFFECTIVE team
         preset (#512) — the per-task override when one is active, else the
         project's standing preset (same resolution `team_preset.current`
-        already does). A bare local-JSON read (like `team_preset.current`
-        itself), so this is cheap enough to call every `_update_status` tick
-        — same reasoning as `_refresh_plan_badge`'s cache-only contract,
-        just with no cache needed here at all."""
+        already does). One local-JSON read via `team_preset.snapshot`; the
+        periodic `_update_status` path is additionally throttled (#732 — a
+        2.9s main-thread stall was traced to this file read every tick)."""
         if "_chip_team_preset" not in self.__dict__:
             return
         from . import team_preset
@@ -1066,12 +1072,21 @@ class StatusHeaderMixin:
             proj, _ = active_project()
         except Exception:
             proj = None
+        now = time.monotonic()
+        last = self.__dict__.get("_team_preset_chip_last")
+        if (
+            periodic
+            and last is not None
+            and last[0] == proj
+            and now - last[1] < self._TEAM_PRESET_CHIP_MIN_INTERVAL_S
+        ):
+            return
+        self._team_preset_chip_last = (proj, now)
         if not proj:
             self._chip_team_preset.setText("ตั้งค่า: —")
             self._chip_team_preset.setToolTip("ยังไม่มีโปรเจคที่เปิดอยู่")
             return
-        cfg = team_preset.current(proj)
-        override = team_preset.active_override(proj)
+        cfg, override, standing = team_preset.snapshot(proj)
         label = team_preset.label(cfg["preset"])
         # No trailing dropdown glyph ("▾" tofus on IBM Plex, 2026-07-24
         # design review #4) — matches the sibling 👥 Team/🤖 Accounts chips'
@@ -1079,7 +1094,7 @@ class StatusHeaderMixin:
         self._chip_team_preset.setText(f"ตั้งค่า: {label}")
         tooltip = f"ขนาดทีมของโปรเจคนี้ตอนนี้: {label} — ตรวจงานด้วย: {team_preset.verify_mode(cfg)}"
         if override:
-            tooltip += f"\noverride เฉพาะงานนี้ (ค่าโปรเจคจริง: {team_preset.label(team_preset.current_preset_id(proj))})"
+            tooltip += f"\noverride เฉพาะงานนี้ (ค่าโปรเจคจริง: {team_preset.label(standing)})"
         tooltip += "\nคลิกเพื่อเปลี่ยน"
         self._chip_team_preset.setToolTip(tooltip)
 

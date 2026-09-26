@@ -1908,11 +1908,14 @@ def cmd_team(args: argparse.Namespace) -> dict:
 
     `status` reads `team_preset.json` directly (no cockpit/IPC needed — same
     "works even without a live cockpit" shape as `doctor`), so it's usable in
-    scripts/CI without a running pane. `set`/`clear-override` change the
+    scripts/CI without a running pane. #735: it also folds the per-project
+    Settings toggles in, so the roles it lists as assignable are the roles
+    `takkub assign` will actually accept. `set`/`clear-override` change the
     LIVE orchestrator's state (so a running Lead pane gets the `[system]`
     broadcast) and therefore round-trip through the socket like `assign`.
     """
     from . import team_preset
+    from .pipeline_config import disabled_roles as _disabled_roles_fn
 
     action = args.team_action
     project = _from_project()
@@ -1929,7 +1932,33 @@ def cmd_team(args: argparse.Namespace) -> dict:
         print(f"  checker: {cfg['checker'] or '(none — self-verify)'}")
         print(f"  lead_may_implement: {cfg['lead_may_implement']}")
         print(f"  template: {cfg['template']}  exec_mode: {cfg['exec_mode']}")
-        return {"ok": True, "msg": "ok", **cfg, "standing": standing, "override": override}
+        # #735: the preset roster above says nothing about the per-project
+        # Settings toggles, so on a project with roles switched off it read as
+        # "these roles are available" while `assign` rejected every one of them
+        # (#735 shipped exactly that contradiction and Lead picked a role off
+        # it). Report what assign would actually accept, using the same two
+        # enforcement choke points assign itself uses.
+        view = team_preset.status_roles(project, cfg)
+        assignable = sorted(r for r, v in view.items() if v["assignable"])
+        blocked = sorted(r for r, v in view.items() if not v["assignable"])
+        print(f"  assignable now: {', '.join(assignable) or '(none)'}")
+        if blocked:
+            print(f"  blocked (assign ไม่ได้): {', '.join(blocked)}")
+            for reason in sorted({view[r]["reason"] for r in blocked if view[r]["reason"]}):
+                print(f"    · {reason}")
+        _off = _disabled_roles_fn(project)
+        if _off:
+            print(f"  (disabled in Settings: {', '.join(_off)})")
+        return {
+            "ok": True,
+            "msg": "ok",
+            **cfg,
+            "standing": standing,
+            "override": override,
+            "assignable_roles": assignable,
+            "settings_disabled_roles": _off,
+            "role_status": view,
+        }
     if action == "suggest":
         # #510/#512 M2 (review 2026-09-07): routing_planner.suggest_team_size
         # had no way for Lead (a CLI-driving pane, not a Python caller) to
@@ -6595,7 +6624,14 @@ def build_parser() -> argparse.ArgumentParser:
     sin.add_argument("--role", default=None, metavar="ROLE")
     sin.add_argument("--tag", default=None, metavar="a,b,c", help="comma-separated tags")
     sin.add_argument(
-        "--body", default=None, metavar="TEXT", help="body text (opens $EDITOR if omitted on TTY)"
+        "--body",
+        default=None,
+        metavar="TEXT",
+        help=(
+            "body text (opens $EDITOR if omitted on TTY). Note: on Windows, "
+            "multiline strings passed to --body are cut at the first newline by "
+            "cmd.exe — use --body-file instead (#741)."
+        ),
     )
     sin.add_argument(
         "--body-file",
@@ -6604,9 +6640,15 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="PATH",
         help=(
             'read body text from a file, or "-" for stdin — bypasses shell '
-            "interpolation entirely, so backticks/$() in the body survive "
-            "byte-for-byte (#679; same contract as assign --task-file)"
+            "interpolation and cmd.exe newline truncation entirely (#679/#741; "
+            "recommended for multiline bodies, e.g. `$body | takkub issue new ... --body-file -`)"
         ),
+    )
+    sin.add_argument(
+        "--force",
+        action="store_true",
+        default=False,
+        help="allow filing issue even if body appears truncated (e.g. single markdown header, #741)",
     )
     sin.add_argument(
         "--cockpit-bug",

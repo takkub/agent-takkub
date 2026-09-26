@@ -55,9 +55,9 @@ _STAT_TTL_S = 3.0
 _MAX_ENTRIES = 512
 
 _lock = threading.Lock()
-# path -> (signature, parsed value, monotonic time of the last stat that
-# confirmed the signature, True when that stat saw a recent write)
-_cache: dict[str, tuple[tuple[int, int, int], Any, float, bool]] = {}
+# (path, parser identity) -> (signature, parsed value, monotonic time of the
+# last stat that confirmed the signature, True when that stat saw a recent write)
+_cache: dict[tuple[str, str], tuple[tuple[int, int, int], Any, float, bool]] = {}
 
 
 def read_cached(
@@ -75,14 +75,16 @@ def read_cached(
     callers already have their own fail-open handling and expectations, this
     helper only removes the redundant I/O.
     """
-    key = os.fspath(path)
+    path_key = os.fspath(path)
+    parser_key = f"{parse.__module__}.{parse.__qualname__}"
+    key = (path_key, parser_key)
     mono = time.monotonic()
     with _lock:
         hit = _cache.get(key)
     if hit is not None and not hit[3] and mono - hit[2] < _STAT_TTL_S:
         return hit[1]
     try:
-        st = os.stat(key)
+        st = os.stat(path_key)
     except FileNotFoundError:
         with _lock:
             _cache.pop(key, None)
@@ -95,7 +97,7 @@ def read_cached(
         with _lock:
             _cache[key] = (sig, hit[1], mono, False)
         return hit[1]
-    with open(key, encoding=encoding) as fh:
+    with open(path_key, encoding=encoding) as fh:
         text = fh.read()
     value = parse(text)
     with _lock:
@@ -106,9 +108,11 @@ def read_cached(
 
 
 def invalidate(path: Path | str | None = None) -> None:
-    """Drop one path's entry (or everything when *path* is ``None``)."""
+    """Drop every parser entry for one path (or everything when path is None)."""
     with _lock:
         if path is None:
             _cache.clear()
         else:
-            _cache.pop(os.fspath(path), None)
+            path_key = os.fspath(path)
+            for key in [key for key in _cache if key[0] == path_key]:
+                _cache.pop(key, None)

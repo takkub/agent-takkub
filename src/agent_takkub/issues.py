@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -850,6 +851,38 @@ def _scope_desc(cwd: str | Path | None, cockpit_bug: bool) -> str:
 # ── CLI entry points (called from cli.py) ─────────────────────────────────────
 
 
+_HEADER_OR_OPENER_RE = re.compile(
+    r"^(?:#{1,6}(\s+.*)?|(?:อาการ|สาเหตุ|ที่ต้องแก้|ขั้นตอน|steps?(\s+to\s+reproduce)?|reproduction|description|symptoms?|expected|actual|summary|details?|notes?)\s*[:：—\-]?)$",
+    re.IGNORECASE,
+)
+
+
+def _looks_truncated_body(body: str) -> str | None:
+    """Return a descriptive reason if body appears to be cut off by shell/cmd.exe,
+    or None if body looks complete (#741).
+    """
+    stripped = (body or "").strip()
+    if not stripped:
+        return None
+    lines = [line.strip() for line in stripped.splitlines() if line.strip()]
+    if not lines:
+        return None
+
+    # Case 1: All non-empty lines are markdown headers or section openers (no content underneath)
+    if all(_HEADER_OR_OPENER_RE.match(line) for line in lines):
+        return f"body contains only header(s) with no description ({lines[0]!r})"
+
+    # Case 2: Only 1 line received, and it looks like a header or ends with dangling colon
+    if len(lines) == 1:
+        line = lines[0]
+        if _HEADER_OR_OPENER_RE.match(line):
+            return f"body contains only a header line ({line!r}) with no description"
+        if line.endswith(":") or line.endswith("："):
+            return f"body ends with a dangling colon ({line!r}) with no description"
+
+    return None
+
+
 def cmd_issue_new(args: Any) -> dict:
     """Handler for `takkub issue new`."""
     title: str = args.title
@@ -923,6 +956,24 @@ def cmd_issue_new(args: Any) -> dict:
                 os.unlink(tmppath)
             except OSError:
                 pass
+
+    trunc_reason = _looks_truncated_body(body)
+    if trunc_reason and not getattr(args, "force", False):
+        win_hint = (
+            " On Windows (PowerShell/cmd.exe), multiline arguments passed via --body "
+            "are truncated at the first newline by cmd.exe (takkub.cmd shim, #741). "
+            'Pass multiline text using --body-file <path> (or "-" for stdin, e.g. '
+            "`$body | takkub issue new ... --body-file -`)."
+            if body_file is None
+            else ""
+        )
+        return {
+            "ok": False,
+            "msg": (
+                f"issue body appears truncated ({trunc_reason}).{win_hint} "
+                "Pass --force to file this issue anyway."
+            ),
+        }
 
     if getattr(args, "issues_dir", None):
         print(

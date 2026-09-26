@@ -597,6 +597,26 @@ class AutoResumeMixin:
             if is_lead
             else ""
         )
+        if is_lead and pane is not None and getattr(pane, "session", None) is not None:
+            try:
+                killed_children = self._live_non_scaffolding_children(
+                    project, role, pane.session, sync=True
+                )
+            except Exception:
+                killed_children = []
+            if killed_children:
+                lead_takeover += (
+                    "\n\nProcesses killed with the previous Lead during quota reroute: "
+                    + ", ".join(killed_children[:10])
+                    + ("…" if len(killed_children) > 10 else "")
+                    + ". Check whether any work needs to be restarted."
+                )
+        if is_lead:
+            # Keep the original quota provider available for reset recovery
+            # even though close() intentionally pops PaneState.
+            self.__dict__.setdefault("_lead_quota_recovery", {}).setdefault(
+                project, (hit_provider, cwd, lead_takeover, reset_at)
+            )
         key = f"{project}::{role}"
         reroute_count = ps.quota_reroute_count + 1
 
@@ -652,6 +672,13 @@ class AutoResumeMixin:
             close_kwargs["force"] = True
             close_kwargs["reason"] = "quota_reroute"
         self.close(role, **close_kwargs)
+        if is_lead:
+            try:
+                self.leadUnavailable.emit(
+                    project, f"Lead is restarting after {hit_provider} quota reroute"
+                )
+            except RuntimeError:  # bare __new__ test fixture has no Qt C++ base
+                pass
 
         def _do_reroute_respawn() -> None:
             _ps_r = self._ps(key)
@@ -710,6 +737,11 @@ class AutoResumeMixin:
                 return
             if not ok:
                 self._pane_state.pop(key, None)
+                if is_lead:
+                    try:
+                        self.leadUnavailable.emit(project, f"replacement spawn failed: {msg}")
+                    except RuntimeError:
+                        pass
                 self._notify_lead(
                     project,
                     f"⚠️ [auto-resume] ย้าย {role} ไป {new_provider} ไม่สำเร็จ: {msg} — "
@@ -734,6 +766,10 @@ class AutoResumeMixin:
                             self._advance_pipeline(project, pl_key, pl_run)
                 return
             if is_lead:
+                self.__dict__.setdefault("_lead_quota_recovery_spawned_at", {})[project] = (
+                    time.time()
+                )
+            if is_lead:
                 self._send_when_ready(role, lead_takeover, project=project)
             elif task:
                 note = (
@@ -744,6 +780,64 @@ class AutoResumeMixin:
                 self._send_when_ready(role, task + note, project=project)
 
         QTimer.singleShot(2_000, _do_reroute_respawn)
+
+    def _handle_lead_quota_replacement_exit(self, project: str, role: str) -> bool:
+        """Recover a dead quota-rerouted Lead without waiting for operator input.
+
+        Returns True when the original provider's reset timer now owns the
+        fallback. If another provider is available, immediately reroutes the
+        saved takeover context there. Called for unexpected exits across every
+        provider, not just Codex.
+        """
+        recovery = getattr(self, "_lead_quota_recovery", {}).get(project)
+        if role != LEAD.name or recovery is None:
+            return False
+        hit_provider, _cwd, _takeover, reset_at = recovery
+        spawned_at = getattr(self, "_lead_quota_recovery_spawned_at", {}).get(project, 0.0)
+        if not spawned_at or time.time() - spawned_at > 120.0:
+            # This is an ordinary later Lead exit, not a failed replacement;
+            # retain the reset snapshot only while quota is still outstanding.
+            if reset_at and time.time() >= reset_at:
+                self._lead_quota_recovery.pop(project, None)
+            return False
+        ps = self._pane_state.get(f"{project}::{role}")
+        if ps is None:
+            ps = self._ps(f"{project}::{role}")
+        current = ps.provider_override or ps.session_provider or ps.quota_reroute_from
+        if not current:
+            current = hit_provider
+        from .provider_config import pick_substitute_provider
+
+        candidate = pick_substitute_provider({hit_provider, current}, after=current)
+        if candidate:
+            _log_event(
+                "lead_quota_replacement_failed_over",
+                project=project,
+                from_provider=current,
+                to_provider=candidate,
+                reset_at=ps.rate_limited_until,
+            )
+            self._reroute_pane_to_provider(
+                project,
+                role,
+                ps,
+                candidate,
+                current,
+                ps.rate_limited_until,
+            )
+        else:
+            _log_event(
+                "lead_quota_replacement_parked",
+                project=project,
+                provider=hit_provider,
+                reset_at=ps.rate_limited_until,
+            )
+            # Before reset, leave the Lead parked for the saved timer. After
+            # reset, hand a failed replacement to the ordinary bounded crash
+            # respawn path so a provider that keeps exiting gets another try.
+            if reset_at and time.time() >= reset_at:
+                return False
+        return True
 
     def _schedule_provider_quota_reset_notice(
         self, project: str, provider: str, reset_at: float

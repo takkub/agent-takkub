@@ -128,6 +128,7 @@ from .orchestrator_text import (  # re-exported for test/app/main_window imports
     recovery_snapshot,
     scan_artifacts,
     screenshot_paths_in_note,
+    strip_new_task_header,
     ui_evidence_gate,
 )
 from .orchestrator_text import boot_phase as _boot_phase  # #640
@@ -1549,6 +1550,7 @@ class Orchestrator(
     # different pane — so a Lead notification can't slip by unseen now that the
     # panes-as-tabs layout shows only one pane at a time.
     leadNotified = pyqtSignal(str)  # project_ns
+    leadUnavailable = pyqtSignal(str, str)  # project_ns, reason; UI-only immediate alert
     # #390: `takkub report publish --send` -> `push_report()` emits this so
     # `remote.notify.LeadNotifier` (the only thing holding a reference to the
     # SSE broadcaster) can push it to the connected mobile PWA as a native
@@ -1629,6 +1631,15 @@ class Orchestrator(
             warm_graft_mcp()
         except Exception as e:
             _log_event("graft_mcp_init_error", error=repr(e))
+        # #732: `codex --version` + `codex mcp list` run synchronously inside
+        # every codex spawn on the Qt main thread (1-6s stalls) — fill their
+        # caches in the background now so the first codex spawn is a hit.
+        try:
+            from .mcp_bridge import prewarm_codex_mcp_resolution_for_boot
+
+            prewarm_codex_mcp_resolution_for_boot()
+        except Exception as e:
+            _log_event("codex_mcp_prewarm_error", error=repr(e))
         # Auto-run `graft build` for every project so the MCP above actually
         # has a graph to answer from instead of returning graceful-but-empty
         # results until the user finds out they need to run the CLI by hand.
@@ -3589,7 +3600,7 @@ class Orchestrator(
                 self._notify_lead(
                     project_ns,
                     f"⏳ [{role_name}] pane ยัง busy (งานเดิม: "
-                    f"{(current_state.last_assigned_task or '')[:80]!r}) → งานใหม่ "
+                    f"{strip_new_task_header(current_state.last_assigned_task or '')[:80]!r}) → งานใหม่ "
                     f"{pending_id[:8]} เข้าคิว จะส่งเองเมื่อ pane ว่างที่ prompt หรือ done · "
                     f"ถ้าจะแทนที่ทันที: takkub close --role {role_name} แล้ว assign ใหม่",
                     from_role=role_name,
@@ -3626,6 +3637,58 @@ class Orchestrator(
             else:
                 bucket.append(pending_item)
             return True, f"{role_name}: task {pending_id[:8]} queued after current task"
+        # #740: a live pane that already reported `done` is on its way out
+        # (close-on-done timer, or held by the live-children grace) and still
+        # holds the finished task's whole context. Pasting a new task into it
+        # made the pane answer with the previous report (0 files touched) and
+        # the new work was counted done. Step it aside instead — close, then
+        # re-run this dispatch for a fresh/resumed session, whose delivery
+        # opens with the new-task header (#739). Keep-alive mode
+        # (TAKKUB_CLOSE_ON_DONE=0) opted into pasting into kept panes; that
+        # delivery still carries the header. Lead never reports done.
+        if (
+            CLOSE_ON_DONE
+            and role_name != LEAD.name
+            and current_pane is not None
+            and getattr(current_pane, "state", None) == "done"
+            and getattr(getattr(current_pane, "session", None), "is_alive", False) is True
+        ):
+            _log_event("assign_post_done_respawn", role=role_name, project=project_ns)
+            # suppress_pipeline + keep_queue=False: done() already settled the
+            # pipeline hop, and neither drops nor re-fires `_pending_assignments`
+            # (a later queued item stays behind this one, in order).
+            self.close(
+                role_name,
+                project=project_ns,
+                suppress_pipeline=True,
+                suppress_auto_chain=True,
+                preserve_resume=True,
+            )
+            QTimer.singleShot(
+                2_000,
+                lambda: self._assign_dispatch(
+                    role_name,
+                    cwd,
+                    task,
+                    requires_commit=requires_commit,
+                    auto_chain=auto_chain,
+                    shard_total=shard_total,
+                    plan=plan,
+                    project=project_ns,
+                    worktree=worktree,
+                    feature=feature,
+                    model=model,
+                    provider=provider,
+                    effort=effort,
+                    distinct_from=distinct_from,
+                    scope=scope,
+                    _queued_task_id=_queued_task_id,
+                ),
+            )
+            return (
+                True,
+                f"{role_name}: pane just reported done — closing, respawning for the new task",
+            )
         # Task Ledger (A7) records what the caller asked for, not delivery
         # mechanics added below.
         raw_task_for_ledger = task
@@ -3646,6 +3709,21 @@ class Orchestrator(
         # model_override handling a few lines down.
         key = _exit_key(project_ns, role_name)
         ps_assign = self._ps(key)
+        # #739/#740: the task this role's session last held — a superseded
+        # in-flight one, the one it just reported done on, or (after the
+        # done-driven close) the one its resumable conversation ended with.
+        _recent_exit_a = getattr(self, "_recent_exits", {}).get(key) or {}
+        prev_task_id = (
+            ps_assign.task_id
+            or getattr(self, "_last_done_task_ids", {}).get(key)
+            or (
+                _recent_exit_a.get("task_id")
+                if time.time() - float(_recent_exit_a.get("ts", 0) or 0) < RESUME_WINDOW_SEC
+                else None
+            )
+        )
+        if not isinstance(prev_task_id, str) or prev_task_id.startswith("pane-"):
+            prev_task_id = None
         ps_assign.task_id = _queued_task_id or _uuid.uuid4().hex
         # #714: tie the backlog card this assign runs under (created/linked by
         # cli_server before dispatch) to the task id just minted, so done()
@@ -3907,6 +3985,31 @@ class Orchestrator(
             shard_idx = _split_shard(role_name)[1] or 0
             delivery_task = self._wrap_shard_task(task, shard_idx, shard_total)
 
+        # #739/#740: the session this task lands in may still hold an earlier
+        # one — a live pane (paste), or a spawn that will `--resume` the role's
+        # last conversation (`_recent_exits` inside the window). Name the new
+        # task explicitly: in the preloaded block, the handoff file (kept equal
+        # to last_assigned_task for crash replay) and the paste/pointer.
+        # `_task_handoff_pointer` measures the body without it, so the header
+        # never flips a short task onto the pointer path.
+        _new_task_header = ""
+        _resume_candidate = bool(_recent_exit_a) and (
+            time.time() - float(_recent_exit_a.get("ts", 0) or 0) < RESUME_WINDOW_SEC
+        )
+        if pane_is_running or prev_task_id or _resume_candidate:
+            from .orchestrator_text import new_task_header
+
+            _new_task_header = new_task_header(ps_assign.task_id, prev_task_id)
+            delivery_task = _new_task_header + delivery_task
+            _log_event(
+                "assign_new_task_header",
+                role=role_name,
+                project=project_ns,
+                task_id=ps_assign.task_id[:8],
+                prev_task_id=(prev_task_id or "")[:8],
+                pane_running=pane_is_running,
+            )
+
         # Materialise the reliable file handoff before spawn. Claude can attach
         # the full task to its per-spawn system-prompt file; the pointer remains
         # the fallback and is still the delivery path for a running pane and
@@ -3922,6 +4025,9 @@ class Orchestrator(
             supports_file_read=PROVIDER_REGISTRY[effective_provider].supports_agent_file_read,
             scope=scope,
         )
+        if _new_task_header and task_file:
+            # The pointer replaced the text — the header still leads the paste.
+            paste_text = _new_task_header + paste_text
         if model and pane_is_running and model != ps_assign.model_override:
             # #587 C3: same "only actually-different requests" rule as the
             # provider check above.
@@ -6476,6 +6582,9 @@ class Orchestrator(
                         "ts": time.time(),
                         "provider": _close_prov,
                         "session_uuid": _resolved_close_uuid,
+                        # #739: the task this conversation ended on — the
+                        # next assign that resumes it names it as "ใบก่อน".
+                        "task_id": getattr(self, "_last_done_task_ids", {}).get(key),
                     }
                 else:
                     _log_event(
@@ -8251,7 +8360,9 @@ class Orchestrator(
             # touched is the correct outcome, not the #278 alarm. Read from
             # `_ps_done` (the pre-pop snapshot above): the live PaneState was
             # already retired for this assignment earlier in done().
-            _assigned_task_text = getattr(_ps_done, "last_assigned_task", None) or ""
+            _assigned_task_text = strip_new_task_header(
+                getattr(_ps_done, "last_assigned_task", None) or ""
+            )
             investigate_task = detect_investigate_task(_assigned_task_text, raw_note)
             try:
                 sibling_files = (
@@ -8296,6 +8407,41 @@ class Orchestrator(
                     investigate_task=investigate_task,
                 )
                 _worktree_digest_precomputed = None
+            # #739/#740: a done that belongs to the PREVIOUS task (quoting its
+            # id, reusing its report, or arriving seconds after an
+            # implementation assign with nothing changed) must not close this
+            # one silently — tell Lead the new task may never have run.
+            try:
+                from .digest_facts import detect_investigate_task as _detect_inv_only
+                from .orchestrator_text import stale_done_reasons
+
+                _stale_reasons = stale_done_reasons(
+                    raw_note,
+                    task_id=had_task_id,
+                    files_touched=getattr(digest_facts, "files_touched", None),
+                    elapsed_s=(time.time() - had_assign_ts) if had_assign_ts else None,
+                    implementation=not (ops_task or _detect_inv_only(_assigned_task_text)),
+                )
+            except Exception:
+                _stale_reasons = []
+            if _stale_reasons:
+                _log_event(
+                    "done_suspect_stale",
+                    role=from_role,
+                    project=project_ns,
+                    task_id=str(had_task_id)[:8],
+                    reasons=_stale_reasons,
+                )
+                self._notify_lead(
+                    project_ns,
+                    f"🚩 [done-suspect] {from_role} รายงาน done ของ task {str(had_task_id)[:8]} "
+                    f"แต่น่าสงสัยว่าเป็นผลของใบเก่า ({'; '.join(_stale_reasons)}) — งานใบนี้อาจ"
+                    f"ยังไม่ถูกทำ · ตรวจงานจริงก่อนปิด ถ้ายังไม่ทำให้ takkub assign --role "
+                    f"{from_role} ใหม่",
+                    from_role=from_role,
+                    note="done_suspect_stale",
+                    kind="done-suspect",
+                )
 
         # Core V2 Second Brain Reflection hook (#309 Phase 7c) — flag OFF
         # (default, `TAKKUB_V2_BRAIN`) short-circuits before any import, so
@@ -9873,34 +10019,81 @@ class Orchestrator(
         return ts
 
     def _idle_no_progress_real_activity(
-        self, role: str, project_ns: str, pane: AgentPane, now: float
+        self,
+        role: str,
+        project_ns: str,
+        pane: AgentPane,
+        now: float,
+        *,
+        check_children: bool = True,
+        check_recent_output: bool = True,
+        check_cwd: bool = True,
+        check_subagents: bool = True,
     ) -> str:
-        """#599: evidence of real work `_real_progress_ts` can miss, checked
-        only right before the idle-no-progress notice actually fires (not
-        every tick — this is heavier than that signal on purpose).
+        """#599 / #731: evidence of real work `_real_progress_ts` can miss, checked
+        before the idle-no-progress notice or stuck-pane kill fires.
 
-        A live non-scaffolding child process (a long test/build run, e.g.
-        `qa`/`e2e` — #308's own `_live_non_scaffolding_children`, already
-        used by the content-static stuck watchdog for the identical reason)
-        or a file freshly written under the pane's own cwd within the
-        notice window both mean the pane is genuinely busy even though
-        neither a `takkub progress()` call nor a screen-scraped tool marker
-        landed this tick. Returns a short human-readable reason when found
-        (caller logs it and skips the Lead notice), "" when nothing is
-        found (fire the notice normally). Best-effort only — a probe
-        failure reads as "nothing found", never raises."""
-        session = pane.session
+        Evidence of active work (single rule):
+        1. Live child processes (qa, e2e, build tools)
+        2. Busy marker for the active provider (#729, e.g. Codex Working, Claude spinner, Gemini thinking)
+        3. Fresh terminal output (silent_for_s == 0)
+        4. Active native subagents
+        5. Fresh file modifications under the pane's own cwd
+        """
+        session = getattr(pane, "session", None)
         if session is not None:
+            if check_children:
+                try:
+                    children = self._live_non_scaffolding_children(project_ns, role, session)
+                except Exception:
+                    children = []
+                if children:
+                    return f"live child process(es): {', '.join(children[:3])}"
+
+            # #731: check provider busy marker
             try:
-                children = self._live_non_scaffolding_children(project_ns, role, session)
+                from .provider_config import effective_provider_for
+
+                _prov = effective_provider_for(role, project=project_ns)
+                _b_fn = getattr(session, "shows_busy_marker", None)
+                if callable(_b_fn):
+                    _is_busy = _b_fn(_prov)
+                    if isinstance(_is_busy, bool) and _is_busy:
+                        return f"busy marker ({_prov})"
             except Exception:
-                children = []
-            if children:
-                return f"live child process(es): {', '.join(children[:3])}"
-        cwd = getattr(pane, "_session_cwd", None)
-        if cwd:
+                pass
+
+        # #731: active native subagents
+        if check_subagents:
             try:
-                if _cwd_has_recent_file_activity(cwd, now - IDLE_NO_PROGRESS_NOTICE_S):
+                ps = self._pane_state.get(f"{project_ns}::{role}")
+                if ps is not None and getattr(ps, "subagents", None):
+                    return "active subagents"
+            except Exception:
+                pass
+
+        # #731: fresh output in the current tick (silent_for_s == 0)
+        last_out = getattr(pane, "_last_output_ts", 0.0)
+        if check_recent_output and isinstance(last_out, (int, float)) and last_out > 0:
+            at_ready_prompt = False
+            if session is not None:
+                try:
+                    ready_fn = getattr(session, "is_at_ready_prompt_cached", None)
+                    if callable(ready_fn):
+                        ready_result = ready_fn()
+                        at_ready_prompt = isinstance(ready_result, bool) and ready_result
+                except Exception:
+                    pass
+            if not at_ready_prompt and ((now - last_out) <= 0.0 or int(now - last_out) == 0):
+                return "recent output (silent_for_s=0)"
+
+        # #599 / #655 / #731: cwd file writes
+        cwd = getattr(pane, "_session_cwd", None)
+        if check_cwd and cwd:
+            try:
+                if _cwd_has_recent_file_activity(
+                    cwd, now - IDLE_NO_PROGRESS_NOTICE_S, max_entries=5000, time_budget_s=0.25
+                ):
                     return "cwd file activity"
             except Exception:
                 pass
@@ -12672,6 +12865,17 @@ class Orchestrator(
                         and (now - _ready_since) >= IDLE_AT_PROMPT_NUDGE_S
                     )
                     if _idle_at_prompt:
+                        # #729: a pane whose composer holds unsubmitted pending text
+                        # is not idle at prompt.
+                        try:
+                            _p = getattr(pane.session, "shows_pending_input", None)
+                            if callable(_p) and isinstance(_p(), bool) and _p():
+                                _idle_at_prompt = False
+                                if _ps_rd is not None:
+                                    _ps_rd.ready_since_ts = 0.0
+                        except Exception:
+                            pass
+                    if _idle_at_prompt:
                         # #706: a pane whose native subagents are still
                         # driving real child processes (pytest, docker,
                         # node — anything past the provider's scaffolding)
@@ -14022,6 +14226,22 @@ class Orchestrator(
                     continue
                 if not session_dead and getattr(self, "_pending_assignments", {}).get(key):
                     continue
+                # #731: do not reap a done pane that is still showing real activity
+                _real_act_fn = getattr(self, "_idle_no_progress_real_activity", None)
+                if not session_dead and callable(_real_act_fn):
+                    try:
+                        if _real_act_fn(
+                            role,
+                            project_name,
+                            pane,
+                            now,
+                            check_cwd=False,
+                            check_subagents=False,
+                        ):
+                            continue
+                    except Exception:
+                        pass
+
                 ps.done_kept_since = 0.0
                 _log_event(
                     "done_pane_ttl_closed",
@@ -14139,9 +14359,23 @@ class Orchestrator(
                         # PaneState.ready_since_ts). Reset the instant the
                         # pane stops reading as idle-at-prompt.
                         try:
-                            _at_prompt = bool(
-                                pane.session.is_at_ready_prompt_cached()
-                            ) and not bool(pane.session.has_background_work())
+                            _prov = getattr(getattr(pane, "model", None), "provider_name", None)
+                            _has_pending = False
+                            _p_fn = getattr(pane.session, "shows_pending_input", None)
+                            if callable(_p_fn):
+                                _r = _p_fn()
+                                _has_pending = isinstance(_r, bool) and _r
+                            _has_busy = False
+                            _b_fn = getattr(pane.session, "shows_busy_marker", None)
+                            if callable(_b_fn):
+                                _r = _b_fn(_prov)
+                                _has_busy = isinstance(_r, bool) and _r
+                            _at_prompt = (
+                                bool(pane.session.is_at_ready_prompt_cached())
+                                and not bool(pane.session.has_background_work())
+                                and not _has_pending
+                                and not _has_busy
+                            )
                         except Exception:
                             _at_prompt = False
                         if _at_prompt:
@@ -14426,29 +14660,65 @@ class Orchestrator(
                         role, project_name, pane, ps_ck, now
                     ):
                         continue
-                    # #655: last-chance gate for the idle-no-progress path
-                    # specifically. `_idle_no_progress_real_activity` (#599)
-                    # only ran before the 20-minute NOTICE — the 40-minute
-                    # KILL skipped it, so a pane whose only evidence was cwd
-                    # file writes (live children are covered by the defer
-                    # just above) still died. Runs only when a recover is
-                    # otherwise imminent (past cooldown/gave-up gates), so
-                    # the heavier probe stays off the every-tick hot path.
-                    if not content_stale and idle_no_progress_escalate:
-                        _real_act = self._idle_no_progress_real_activity(
-                            role, project_name, pane, now
-                        )
-                        if _real_act:
-                            if (now - ps_ck.idle_defer_log_ts) >= 300:
-                                _log_event(
-                                    "stuck_recover_deferred_real_activity",
-                                    role=role,
-                                    project=project_name,
-                                    no_progress_for_s=int(idle_no_progress_for),
-                                    reason=_real_act,
+                    # #655 / #731: Universal active-work gate before recovering/killing any pane.
+                    # If there is evidence of active work (recent output, busy marker,
+                    _real_act = ""
+                    _act_fn = getattr(self, "_idle_no_progress_real_activity", None)
+                    if callable(_act_fn):
+                        try:
+                            _real_act = _act_fn(role, project_name, pane, now, check_children=False)
+                        except TypeError:
+                            try:
+                                _real_act = _act_fn(role, project_name, pane, now)
+                            except Exception:
+                                _real_act = ""
+                        except Exception:
+                            _real_act = ""
+
+                    if _real_act:
+                        if (now - ps_ck.idle_defer_log_ts) >= 300:
+                            _log_event(
+                                "stuck_recover_deferred_real_activity",
+                                role=role,
+                                project=project_name,
+                                no_progress_for_s=int(idle_no_progress_for),
+                                reason=_real_act,
+                            )
+                            if idle_no_progress_escalate:
+                                self._notify_lead(
+                                    project_name,
+                                    f"⏳ [system] {role} ทำงานต่อเนื่องเกิน "
+                                    f"{int(IDLE_NO_PROGRESS_ESCALATE_S // 60)} นาที "
+                                    f"แต่ยังมีสัญญาณทำงาน ({_real_act}) — ไม่ฆ่า pane อัตโนมัติ เพื่อรักษา context",
+                                    from_role=role,
+                                    note="stuck_recover_deferred_real_activity",
+                                    kind="idle-no-progress-deferred",
                                 )
-                                ps_ck.idle_defer_log_ts = now
-                            continue
+                            ps_ck.idle_defer_log_ts = now
+                        continue
+
+                    # #731: If 40m without progress on a deep-scope task, escalate to Lead
+                    # instead of killing and losing all deep context.
+                    if idle_no_progress_escalate and ps_ck.last_assigned_scope == "deep":
+                        if (now - ps_ck.idle_defer_log_ts) >= 300:
+                            _log_event(
+                                "stuck_recover_deferred_deep_scope",
+                                role=role,
+                                project=project_name,
+                                no_progress_for_s=int(idle_no_progress_for),
+                            )
+                            self._notify_lead(
+                                project_name,
+                                f"⏳ [system] {role} งาน deep ทำงานเกิน "
+                                f"{int(IDLE_NO_PROGRESS_ESCALATE_S // 60)} นาที "
+                                "โดยไม่มี progress — แนะนำ Lead ตรวจสอบสถานะ (ระบบไม่ฆ่า pane อัตโนมัติ)",
+                                from_role=role,
+                                note="stuck_recover_deferred_deep_scope",
+                                kind="idle-no-progress-deep",
+                            )
+                            ps_ck.idle_defer_log_ts = now
+                        continue
+
                     self._auto_recover_stuck(
                         role,
                         project_name,
@@ -15477,13 +15747,57 @@ class Orchestrator(
 
         # De-dupe guard: if rate_limited_until is already 0, a previous timer
         # for the same episode already handled the reset — skip silently.
-        if _ps_rr is None or _ps_rr.rate_limited_until == 0.0:
+        recovery = (
+            getattr(self, "_lead_quota_recovery", {}).get(project) if role == LEAD.name else None
+        )
+        if (_ps_rr is None or _ps_rr.rate_limited_until == 0.0) and recovery is None:
             _log_event(
                 "rate_limit_reset_skipped",
                 role=role,
                 project=project,
                 reason="already_handled",
             )
+            return
+
+        # A quota reroute closes and recreates PaneState. If its replacement
+        # Lead died, the original reset timer must still bring Lead back using
+        # the provider whose quota just reset.
+        if recovery is not None:
+            panes = self._project_panes(project)
+            lead = panes.get(LEAD.name)
+            if lead is None or lead.session is None or not lead.session.is_alive:
+                hit_provider, cwd, takeover, _reset_at = recovery
+                ps = self._ps(f"{project}::{LEAD.name}")
+                ps.provider_override = hit_provider
+                ps.quota_reroute_count = 0
+                ps.quota_reroute_from = ""
+                ok, msg = self.spawn(LEAD.name, cwd=cwd, project=project, _from_auto_respawn=True)
+                _log_event(
+                    "lead_quota_reset_respawn",
+                    project=project,
+                    provider=hit_provider,
+                    ok=ok,
+                    msg=msg[:160],
+                )
+                if ok and not msg.endswith("already running"):
+                    self.__dict__.setdefault("_lead_quota_recovery_spawned_at", {})[project] = (
+                        time.time()
+                    )
+                    self._send_when_ready(LEAD.name, takeover, project=project)
+                    self.statusChanged.emit()
+                    return
+                if not ok:
+                    self.leadUnavailable.emit(project, f"quota reset respawn failed: {msg}")
+                    return
+            else:
+                self._lead_quota_recovery.pop(project, None)
+                getattr(self, "_lead_quota_recovery_spawned_at", {}).pop(project, None)
+
+        if _ps_rr is None:
+            # A reset-triggered Lead replacement has no surviving PaneState
+            # from the original quota pane to clear.
+            _log_event("rate_limit_reset", role=role, project=project)
+            self.statusChanged.emit()
             return
 
         # Auto-resume owns parked episodes: its wake timer resumes the teammate
@@ -15625,6 +15939,49 @@ class Orchestrator(
         if not escalate:
             return
         idle_sess = pane.session
+        if idle_sess is None or not idle_sess.is_alive:
+            return
+        # #729: Never inject/type into a pane whose input composer has pending text
+        # or is actively busy executing a turn/command.
+        _provider_name = getattr(getattr(pane, "model", None), "provider_name", None)
+        _has_pending = False
+        try:
+            _p = getattr(idle_sess, "shows_pending_input", None)
+            if callable(_p):
+                _r = _p()
+                _has_pending = isinstance(_r, bool) and _r
+        except Exception:
+            _has_pending = False
+
+        _is_busy = False
+        try:
+            _b = getattr(idle_sess, "shows_busy_marker", None)
+            if callable(_b):
+                _r = _b(_provider_name)
+                _is_busy = isinstance(_r, bool) and _r
+        except Exception:
+            _is_busy = False
+
+        _at_ready = True
+        try:
+            _r = getattr(idle_sess, "is_at_ready_prompt", None)
+            if callable(_r):
+                _r_val = _r()
+                _at_ready = isinstance(_r_val, bool) and _r_val
+        except Exception:
+            _at_ready = True
+
+        if _has_pending or _is_busy or not _at_ready:
+            _log_event(
+                "idle_reminder_pty_skipped",
+                role=role_name,
+                project=project_name,
+                has_pending=_has_pending,
+                is_busy=_is_busy,
+                at_ready=_at_ready,
+            )
+            return
+
         idle_sess.write(IDLE_REMINDER_TEXT)
         _delayed_enter(pane, idle_sess, 150)
         _log_event(
@@ -15668,6 +16025,20 @@ class Orchestrator(
             return
         if pane.session is None or not pane.session.is_alive:
             return
+        # #729: Never inject into a pane with pending input, busy, or not at ready prompt
+        _prov = getattr(getattr(pane, "model", None), "provider_name", None)
+        try:
+            _p = getattr(pane.session, "shows_pending_input", None)
+            if callable(_p) and isinstance(_p(), bool) and _p():
+                return
+            _b = getattr(pane.session, "shows_busy_marker", None)
+            if callable(_b) and isinstance(_b(_prov), bool) and _b(_prov):
+                return
+            _r = getattr(pane.session, "is_at_ready_prompt", None)
+            if callable(_r) and isinstance(_r(), bool) and not _r():
+                return
+        except Exception:
+            pass
         matched = pane.session.has_unparsed_tool_call()
         if matched is None:
             return
@@ -15695,6 +16066,20 @@ class Orchestrator(
             return
         if pane.session is None or not pane.session.is_alive:
             return
+        # #729: Never inject into a pane with pending input, busy, or not at ready prompt
+        _prov = getattr(getattr(pane, "model", None), "provider_name", None)
+        try:
+            _p = getattr(pane.session, "shows_pending_input", None)
+            if callable(_p) and isinstance(_p(), bool) and _p():
+                return
+            _b = getattr(pane.session, "shows_busy_marker", None)
+            if callable(_b) and isinstance(_b(_prov), bool) and _b(_prov):
+                return
+            _r = getattr(pane.session, "is_at_ready_prompt", None)
+            if callable(_r) and isinstance(_r(), bool) and not _r():
+                return
+        except Exception:
+            pass
         probe = getattr(pane.session, "has_typed_done_text", None)
         matched = probe() if callable(probe) else None
         if not isinstance(matched, str) or not matched:

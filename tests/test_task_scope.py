@@ -206,11 +206,13 @@ class TestBudgetBlock:
 
 
 class TestInjectBudget:
-    def test_prepends_budget_as_first_line(self) -> None:
+    def test_appends_budget_after_task_body(self) -> None:
+        # #739: Lead's task is the first thing the pane reads; the budget
+        # trails it under its own label.
         task = "[ROLE: frontend] แก้สีปุ่ม"
         injected = inject_budget(task, "tiny")
-        assert injected.startswith(budget_block("tiny"))
-        assert "[ROLE: frontend] แก้สีปุ่ม" in injected
+        assert injected.startswith("[ROLE: frontend] แก้สีปุ่ม")
+        assert injected.endswith(budget_block("tiny"))
 
     def test_idempotent_if_already_injected(self) -> None:
         task = "[ROLE: frontend] แก้สีปุ่ม"

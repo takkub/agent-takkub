@@ -142,12 +142,37 @@
     // the side-effect of nuking in-flight IME composition state (#149).
     const IS_MAC = /Mac|iPhone|iPad|iPod/.test(navigator.platform || navigator.userAgent || '');
 
+    // #728: track wheel events so onData can distinguish wheel-generated
+    // arrow keys (in alternate buffer without mouse tracking) from real
+    // arrow key presses.
+    let isWheelEvent = false;
+    term.attachCustomWheelEventHandler((ev) => {
+      isWheelEvent = true;
+      Promise.resolve().then(() => {
+        isWheelEvent = false;
+      });
+      return true;
+    });
+
     term.onData((data) => {
       lastEmittedText = data;
       lastEmittedTime = Date.now();
       pendingCharText = '';
-      if (bridge && bridge.sendInput) {
-        bridge.sendInput(data);
+      if (bridge) {
+        // #728: in alternate buffer without mouse tracking, xterm.js converts
+        // wheel to arrow keys. If the pane is input-locked, forward them via
+        // sendWheelInput so Python knows to bypass the input lock for scrolling.
+        if (inputLocked && isWheelEvent && term.buffer && term.buffer.active &&
+            term.buffer.active.type === 'alternate' &&
+            (!term.modes || term.modes.mouseTrackingMode === 'none')) {
+          if (bridge.sendWheelInput) {
+            bridge.sendWheelInput(data);
+            return;
+          }
+        }
+        if (bridge.sendInput) {
+          bridge.sendInput(data);
+        }
       } else {
         pendingKeystrokes.push(data);  // bridge not connected yet — flush on connect
       }

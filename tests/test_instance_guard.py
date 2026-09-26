@@ -614,6 +614,63 @@ class TestPythonHeredocWrites633:
         verdict = pane_guard.evaluate_instance_guard(cmd, "lead", cwd=str(home.parent))
         assert verdict is None or verdict.allowed
 
+    def test_unrelated_string_literal_is_not_a_write_target(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
+    ) -> None:
+        protected_bin = tmp_path / "bin"
+        monkeypatch.setattr(pane_guard, "_exec_dirs", lambda: frozenset({protected_bin}))
+        safe_path = tmp_path / "safe.txt"
+        cmd = (
+            "python - <<'PY'\n"
+            f"print('bin', '{safe_path.as_posix()}')\n"
+            f"open('{safe_path.as_posix()}', 'w').write('ok')\n"
+            "PY"
+        )
+        verdict = pane_guard.evaluate_instance_guard(cmd, "lead", cwd=str(tmp_path))
+        assert verdict is None or verdict.allowed
+
+    @pytest.mark.parametrize(
+        "body",
+        [
+            "open('bin/python.exe', 'w').write('x')",
+            "import shutil\nshutil.copy('source', 'bin')",
+            "from pathlib import Path\nPath('bin') / 'takkub.exe'\n(Path('bin') / 'takkub.exe').write_text('x')",
+            "import os\nos.chdir('bin')\nopen('takkub.exe', 'w').write('x')",
+            "target = 'bin/python.exe'\nopen(target, 'w').write('x')",
+        ],
+    )
+    def test_cockpit_bin_write_shapes_remain_denied(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path, body: str
+    ) -> None:
+        protected_bin = tmp_path / "bin"
+        monkeypatch.setattr(pane_guard, "_exec_dirs", lambda: frozenset({protected_bin}))
+        cmd = f"python - <<'PY'\n{body}\nPY"
+        verdict = pane_guard.evaluate_instance_guard(cmd, "lead", cwd=str(tmp_path))
+        assert verdict is not None and not verdict.allowed, body
+        assert verdict.rule == "instance_guard:cockpit_executable"
+
+    def test_path_joined_variable_still_blocks_protected_data_home(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
+    ) -> None:
+        home = tmp_path / "other-instance"
+        monkeypatch.setenv("TAKKUB_PROTECTED_DATA_HOMES", str(home))
+        cmd = (
+            "python - <<'PY'\n"
+            f"base = '{home.as_posix()}'\n"
+            "target = Path(base) / 'projects.json'\n"
+            "target.write_text('bad')\n"
+            "PY"
+        )
+        verdict = pane_guard.evaluate_instance_guard(cmd, "lead", cwd=str(tmp_path))
+        assert verdict is not None and not verdict.allowed
+        assert verdict.rule == "instance_guard:protected_data_home"
+
+    def test_opaque_write_target_fails_closed(self) -> None:
+        cmd = "python - <<'PY'\nopen(dynamic_target, 'w').write('x')\nPY"
+        verdict = pane_guard.evaluate_instance_guard(cmd, "lead")
+        assert verdict is not None and not verdict.allowed
+        assert verdict.rule == "instance_guard:dynamic_write_target"
+
     def test_non_python_heredoc_mentioning_write_is_data(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:

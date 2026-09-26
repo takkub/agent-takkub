@@ -217,6 +217,7 @@ on where the path actually leads, not its literal spelling.
 
 from __future__ import annotations
 
+import ast
 import hashlib
 import json
 import math
@@ -2982,6 +2983,222 @@ _PYTHON_INLINE_WRITE = re.compile(
     r"""(?:python[0-9.]*(?:\.exe)?|pythonw[0-9.]*(?:\.exe)?|py(?:\.exe)?)\s+[^;&|]*-c\s+["'](?P<code>.+)["']""",
     re.I,
 )
+# Threat model for executable Python heredocs (#736): a pane can overwrite the
+# cockpit interpreter/bin (for example `open("bin/python.exe", "w")` or
+# `Path("bin") / "takkub.exe"`), delete/move/copy into it, or change cwd to
+# `bin` before a relative write. It can also target another instance's
+# protected DATA_HOME with absolute paths or paths assembled through simple
+# variables/path joins. Inspect only expressions that are actual write/delete
+# operands, track statically known assignments and chdir, and fail closed when
+# a write operand cannot be resolved; unrelated strings in print/logging are
+# not filesystem targets. Apply the same resolved target checks to cockpit
+# executable and protected DATA_HOME roots.
+_PYTHON_PATH_WRITE_METHODS = frozenset({"write_text", "write_bytes", "unlink", "rmdir"})
+
+
+def _python_expr_path(expr: ast.AST, values: dict[str, str]) -> str | None:
+    """Resolve a statically known Python path expression without executing it."""
+    if isinstance(expr, ast.Constant) and isinstance(expr.value, str):
+        return expr.value
+    if isinstance(expr, ast.Name):
+        return values.get(expr.id)
+    if isinstance(expr, ast.BinOp) and isinstance(expr.op, (ast.Add, ast.Div)):
+        left = _python_expr_path(expr.left, values)
+        right = _python_expr_path(expr.right, values)
+        if left is None or right is None:
+            return None
+        if isinstance(expr.op, ast.Div):
+            return str(pathlib.PurePath(left) / right)
+        return left + right
+    if isinstance(expr, ast.Call):
+        name = _python_dotted_name(expr.func)
+        if name in {
+            "Path",
+            "PurePath",
+            "pathlib.Path",
+            "pathlib.PurePath",
+            "PureWindowsPath",
+            "PurePosixPath",
+        }:
+            pieces = [_python_expr_path(arg, values) for arg in expr.args]
+            if pieces and all(piece is not None for piece in pieces):
+                return str(pathlib.PurePath(pieces[0]).joinpath(*pieces[1:]))
+        if name in {"os.path.join", "posixpath.join", "ntpath.join"}:
+            pieces = [_python_expr_path(arg, values) for arg in expr.args]
+            if pieces and all(piece is not None for piece in pieces):
+                return str(pathlib.PurePath(pieces[0]).joinpath(*pieces[1:]))
+    return None
+
+
+def _python_dotted_name(expr: ast.AST) -> str:
+    if isinstance(expr, ast.Name):
+        return expr.id
+    if isinstance(expr, ast.Attribute):
+        parent = _python_dotted_name(expr.value)
+        return f"{parent}.{expr.attr}" if parent else expr.attr
+    return ""
+
+
+def _python_write_target_args(call: ast.Call) -> list[ast.AST] | None:
+    """Return actual path operands; None means the call is not a tracked writer."""
+    name = _python_dotted_name(call.func)
+
+    def keyword_arg(arg_name: str) -> ast.AST | None:
+        return next((kw.value for kw in call.keywords if kw.arg == arg_name), None)
+
+    if name == "open":
+        path = call.args[0] if call.args else keyword_arg("file")
+        mode = call.args[1] if len(call.args) > 1 else None
+        for keyword in call.keywords:
+            if keyword.arg == "mode":
+                mode = keyword.value
+        if path is None:
+            return []
+        if mode is not None and (
+            not isinstance(mode, ast.Constant)
+            or not isinstance(mode.value, str)
+            or any(c in mode.value for c in "wax+")
+        ):
+            return [path]
+        return []
+    if isinstance(call.func, ast.Attribute) and call.func.attr == "open":
+        mode = call.args[0] if call.args else None
+        for keyword in call.keywords:
+            if keyword.arg == "mode":
+                mode = keyword.value
+        if mode is not None and (
+            not isinstance(mode, ast.Constant)
+            or not isinstance(mode.value, str)
+            or any(c in mode.value for c in "wax+")
+        ):
+            return [call.func.value]
+        return []
+    if isinstance(call.func, ast.Attribute) and call.func.attr in _PYTHON_PATH_WRITE_METHODS:
+        return [call.func.value]
+    if name in {
+        "os.remove",
+        "os.unlink",
+        "os.rmdir",
+        "remove",
+        "unlink",
+        "rmdir",
+        "shutil.rmtree",
+        "rmtree",
+    }:
+        return call.args[:1] or ([keyword_arg("path")] if keyword_arg("path") is not None else [])
+    if name in {"os.rename", "os.replace", "rename", "replace"}:
+        return call.args[:2] or [
+            arg for arg in (keyword_arg("src"), keyword_arg("dst")) if arg is not None
+        ]
+    if name in {"shutil.move", "shutil.copy", "move", "copy"}:
+        return call.args[1:2] or ([keyword_arg("dst")] if keyword_arg("dst") is not None else [])
+    return None
+
+
+def _python_heredoc_write_targets(
+    source: str, cwd: str | None
+) -> list[tuple[str, str | None]] | None:
+    """Return (path, effective cwd) write targets; None signals an opaque target."""
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return []  # Invalid Python cannot execute its apparent write calls.
+
+    targets: list[tuple[str, str | None]] = []
+    values: dict[str, str] = {}
+    base_cwd = str(pathlib.Path(cwd or pathlib.Path.cwd()).resolve())
+    active_cwd = base_cwd
+
+    def visit(node: ast.AST) -> None:
+        nonlocal active_cwd
+        if isinstance(node, ast.Assign):
+            visit(node.value)
+            resolved = _python_expr_path(node.value, values)
+            for target in node.targets:
+                if isinstance(target, ast.Name):
+                    if resolved is None:
+                        values.pop(target.id, None)
+                    else:
+                        values[target.id] = resolved
+            return
+        if isinstance(node, ast.AnnAssign):
+            if node.value is not None:
+                visit(node.value)
+            if isinstance(node.target, ast.Name):
+                resolved = _python_expr_path(node.value, values) if node.value is not None else None
+                if resolved is None:
+                    values.pop(node.target.id, None)
+                else:
+                    values[node.target.id] = resolved
+            return
+        if isinstance(
+            node,
+            (
+                ast.If,
+                ast.For,
+                ast.AsyncFor,
+                ast.While,
+                ast.Try,
+                ast.With,
+                ast.AsyncWith,
+                ast.Match,
+                ast.FunctionDef,
+                ast.AsyncFunctionDef,
+            ),
+        ):
+            assigned: set[str] = set()
+            has_chdir = False
+            for nested in ast.walk(node):
+                if isinstance(nested, ast.Name) and isinstance(nested.ctx, ast.Store):
+                    assigned.add(nested.id)
+                if isinstance(nested, ast.Call) and _python_dotted_name(nested.func) in {
+                    "os.chdir",
+                    "chdir",
+                }:
+                    has_chdir = True
+            # Branches/loops/functions may run conditionally or more than once.
+            # Do not let one visited branch certify a variable or cwd for all
+            # executions; relative writes after a conditional chdir are opaque.
+            if has_chdir:
+                active_cwd = None
+            for child in ast.iter_child_nodes(node):
+                visit(child)
+            if has_chdir:
+                active_cwd = None
+            for name in assigned:
+                values.pop(name, None)
+            return
+        if isinstance(node, ast.Call):
+            name = _python_dotted_name(node.func)
+            if name in {"os.chdir", "chdir"} and node.args:
+                changed = _python_expr_path(node.args[0], values)
+                if changed is None:
+                    active_cwd = None  # Subsequent relative writes cannot be proven safe.
+                elif pathlib.Path(changed).is_absolute() or re.match(r"^[A-Za-z]:[/\\]", changed):
+                    active_cwd = str(pathlib.Path(changed).resolve())
+                elif active_cwd is not None:
+                    active_cwd = str((pathlib.Path(active_cwd) / changed).resolve())
+            operands = _python_write_target_args(node)
+            if operands:
+                for operand in operands:
+                    target = _python_expr_path(operand, values)
+                    is_relative = target is not None and not (
+                        pathlib.Path(target).is_absolute() or re.match(r"^[A-Za-z]:[/\\]", target)
+                    )
+                    if target is None or (is_relative and active_cwd is None):
+                        return_opaque[0] = True
+                    else:
+                        targets.append((target, active_cwd))
+        for child in ast.iter_child_nodes(node):
+            visit(child)
+
+    return_opaque = [False]
+    visit(tree)
+    if return_opaque[0]:
+        return None
+    return targets
+
+
 # File-mutating calls inside Python source handed to an interpreter — shared by
 # the `python -c "..."` check and the `python - <<'EOF'` heredoc check below.
 _PYTHON_WRITE_CALL_RE = re.compile(
@@ -3079,13 +3296,22 @@ def evaluate_instance_guard(
     # #633: Python heredoc bodies are EXECUTED, not data — check them for writes
     # into a protected DATA_HOME before `_strip_heredoc_bodies` blanks them (the
     # pre-filter below would otherwise never see them). Protected homes are only
-    # resolved when a body actually contains a file-mutating call.
+    # resolved when a body actually contains a file-mutating call. Python AST
+    # operands keep ordinary string literals (for example print("bin")) out of
+    # the path set while retaining conservative handling of opaque write paths.
     for body in _python_heredoc_bodies(cmd):
         if not _PYTHON_WRITE_CALL_RE.search(body):
             continue
-        for lit in re.findall(r"""['"]([^'"\r\n]+)['"]""", body):
+        write_targets = _python_heredoc_write_targets(body, cwd)
+        if write_targets is None:
+            return Verdict(
+                False,
+                rule="instance_guard:dynamic_write_target",
+                reason="ห้ามรัน Python heredoc ที่มีเป้าเขียนซึ่งตรวจสอบ path ไม่ได้อย่างปลอดภัย (#633/#736)",
+            )
+        for lit, target_cwd in write_targets:
             in_prot, prot_home = is_in_protected_data_home(
-                lit, cwd=cwd, own_home=own_home, protected_homes=protected_homes
+                lit, cwd=target_cwd or cwd, own_home=own_home, protected_homes=protected_homes
             )
             if in_prot:
                 return Verdict(
@@ -3093,7 +3319,7 @@ def evaluate_instance_guard(
                     rule="instance_guard:protected_data_home",
                     reason=f"ห้ามรัน Python code เขียนหรือลบไฟล์ใน Protected DATA_HOME ({prot_home}) (#633)",
                 )
-            exec_dir = cockpit_executable_target(lit, cwd=cwd)
+            exec_dir = cockpit_executable_target(lit, cwd=target_cwd or cwd)
             if exec_dir is not None:
                 return _exec_target_verdict(role, lit, exec_dir, "รัน Python code เขียนหรือลบไฟล์ใน")
 

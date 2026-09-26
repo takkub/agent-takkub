@@ -149,8 +149,13 @@ _INVESTIGATE_HEADLINE_RE = re.compile(r"\b(?:investigate|audit|review)\b", re.IG
 def detect_investigate_task(task_text: str, note: str = "") -> bool:
     """True when the assignment (or, as fallback, the done note) declares the
     task investigate/read-only (#672) — `ไฟล์ที่แตะ: 0` is then the expected
-    result and `_files_bit` renders neutral status instead of the ⚠️ alarm."""
-    for text in (task_text or "", note or ""):
+    result and `_files_bit` renders neutral status instead of the ⚠️ alarm.
+
+    #740: the note is consulted ONLY when the assignment text is unknown — a
+    pane that replayed an old read-only report onto a new implementation task
+    labelled itself "(read-only)" and the digest then called its 0 files
+    "the correct result". The assignment's own intent wins when we have it."""
+    for text in (task_text,) if (task_text or "").strip() else (note or "",):
         if not text:
             continue
         if _INVESTIGATE_STRONG_RE.search(text):

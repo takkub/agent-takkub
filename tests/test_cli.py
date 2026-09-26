@@ -2261,6 +2261,38 @@ class TestTeamCommand:
         out = capsys.readouterr().out
         assert "auto" in out
 
+    def test_status_reports_the_roles_settings_actually_blocks(
+        self, fake_request: list[dict[str, Any]], capsys, tmp_path, monkeypatch
+    ) -> None:
+        """#735 regression: the `roles:` line is the PRESET roster and printed
+        ``{'frontend': True, 'backend': True, ...}`` while `takkub assign --role
+        frontend` was answering "role frontend ถูกปิดใน Settings ของโปรเจคนี้"
+        (#510). Status must answer the enforcement question — the preset line
+        stays, but a role Settings switched off can never read as assignable."""
+        from agent_takkub import pipeline_config
+
+        monkeypatch.setattr(pipeline_config, "_BASE_DIR", tmp_path)
+        cfg_file = pipeline_config.path("proj")
+        cfg_file.parent.mkdir(parents=True, exist_ok=True)
+        cfg_file.write_text(
+            json.dumps({"rolesEnabled": {"frontend": False, "reviewer": False}}),
+            encoding="utf-8",
+        )
+
+        rc = cli.main(["team", "status"])
+        out = capsys.readouterr().out
+        assert rc == 0
+        assert fake_request == []
+
+        assert "'frontend': True" in out  # the preset roster, unchanged
+        assert "role frontend ถูกปิดใน Settings" in out
+        assert "role reviewer ถูกปิดใน Settings" in out  # the active checker too
+
+        assignable = next(ln for ln in out.splitlines() if "assignable now:" in ln)
+        assert "frontend" not in assignable and "reviewer" not in assignable
+        assert "backend" in assignable  # roster role Settings left enabled
+        assert "disabled in Settings: frontend, reviewer" in out
+
     def test_set_round_trips_through_request(self, fake_request: list[dict[str, Any]]) -> None:
         cli.main(["team", "set", "solo-lead"])
         assert fake_request[-1] == {

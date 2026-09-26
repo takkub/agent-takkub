@@ -82,6 +82,19 @@ class TestOnTabSwitchedNoTabsLeft:
         fake_self.tabs.widget.assert_not_called()
 
 
+class TestLeadUnavailableNotice:
+    def test_lead_death_is_immediately_visible_in_status_bar(self) -> None:
+        fake_self = Mock()
+        fake_self._status = Mock()
+        fake_self._tray = None
+        MainWindow._on_lead_unavailable(fake_self, "demo", "exited unexpectedly")
+        fake_self._status.showMessage.assert_called_once()
+        message, timeout = fake_self._status.showMessage.call_args.args
+        assert "Lead for demo is unavailable" in message
+        assert "exited unexpectedly" in message
+        assert timeout == 15_000
+
+
 # ---------------------------------------------------------------------------
 # ⚠ Usage-overage chip (#161) — status_header._refresh_overage_chip
 # ---------------------------------------------------------------------------

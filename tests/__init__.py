@@ -29,10 +29,10 @@ def assert_task_structure(
     # Check budget block at the start
     expected_budget = task_scope.budget_block(expected_scope)
     if expected_budget:
-        # The budget block is prepended with \n\n after it
-        assert task.startswith(expected_budget), (
-            f"Task should start with budget block for scope '{expected_scope}', "
-            f"but starts with: {task[:80]}"
+        # #739: the budget block trails the task body under its own label
+        assert expected_budget in task, (
+            f"Task should carry the budget block for scope '{expected_scope}', "
+            f"but reads: {task[:80]}"
         )
 
     # Check for CODEX notice
@@ -60,11 +60,8 @@ def extract_task_body(task: str) -> str:
 
     text = task or ""
 
-    # Remove budget blocks from the start
-    for block in task_scope.BUDGET_BLOCKS.values():
-        if text.startswith(block):
-            text = text[len(block) :].lstrip("\r\n")
-            break
+    # Remove the budget block (trailing since #739; leading on older text)
+    text = task_scope.strip_budget(text)
 
     # Remove CODEX notice if present
     if _CODEX_TASK_NOTICE in text:

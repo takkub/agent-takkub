@@ -180,3 +180,22 @@ class TestUncertainDeliveryNotice:
             orch._warn_lead_delivery_uncertain("gemini", "P")
 
         assert _written_strings(lead.session)
+
+    def test_stuck_in_composer_bypasses_progress_suppression_and_warns(
+        self, orch: Orchestrator
+    ) -> None:
+        """#729: when brief is stuck in composer, recent output (such as echo from paste)
+        must not suppress the delivery-uncertain warning."""
+        lead = _pane(_live_session())
+        codex = _pane(_live_session())
+        codex.state = "working"
+        codex.session.seconds_since_output.return_value = 0.5  # recent output!
+        orch._panes_by_project["P"] = {"lead": lead, "codex": codex}
+
+        with patch("agent_takkub.lead_inbox._log_event") as mock_log:
+            orch._warn_lead_delivery_uncertain("codex", "P", stuck_in_composer=True)
+
+        assert _written_strings(lead.session)
+        assert not any(
+            c.args and c.args[0] == "delivery_uncertain_suppressed" for c in mock_log.mock_calls
+        )

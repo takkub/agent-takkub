@@ -643,7 +643,36 @@ def _parse_v2_project_registry(text: str) -> dict | object:
         _log.warning("could not read V2 project registry (%r) — falling back to projects.json", exc)
         return _PARSE_FAILED
     if isinstance(registry, dict) and isinstance(registry.get("data"), dict):
-        return registry["data"]
+        # A previous parser collision could cache the raw legacy envelope as
+        # the registry's domain data, then each save wrapped it once more.
+        # Unwrap a bounded chain and recover projects from every level: newer
+        # outer values win, while projects present only in inner levels survive.
+        envelope_keys = {"data", "schema", "migrated_from", "migrated_at"}
+        layers: list[dict] = []
+        layer = registry["data"]
+        for _ in range(8):
+            if not isinstance(layer, dict):
+                break
+            layers.append(layer)
+            nested = layer.get("data")
+            if not isinstance(nested, dict):
+                break
+            layer = nested
+
+        result: dict = {}
+        projects: dict = {}
+        for current in reversed(layers):
+            result.update(
+                {key: value for key, value in current.items() if key not in envelope_keys}
+            )
+        for current in layers:
+            current_projects = current.get("projects")
+            if isinstance(current_projects, dict):
+                for name, project in current_projects.items():
+                    projects.setdefault(name, project)
+        if projects or any("projects" in current for current in layers):
+            result["projects"] = projects
+        return result
     if registry is not None:
         _log.warning(
             "V2 project registry has no usable 'data' object — falling back to projects.json"
@@ -709,6 +738,10 @@ def save_projects_json(data: dict) -> bool:
     if isinstance(data, UnreadableProjects):
         _log.error("refusing to save projects: the project store could not be read (see above)")
         return False
+    envelope_keys = {"data", "schema", "migrated_from", "migrated_at"}
+    if isinstance(data, dict) and envelope_keys.intersection(data):
+        _log.error("refusing to save projects: data contains V2 registry envelope keys")
+        return False
     registry_path = _v2_project_registry_path()
     if registry_path.exists():
         try:
@@ -719,9 +752,15 @@ def save_projects_json(data: dict) -> bool:
         if not isinstance(registry, dict):
             registry = {"schema": 1}
         registry["data"] = data
-        return _write_json_atomic(registry_path, registry)
-    PROJECTS_JSON.parent.mkdir(parents=True, exist_ok=True)
-    return _write_json_atomic(PROJECTS_JSON, data)
+        target = registry_path
+        ok = _write_json_atomic(registry_path, registry)
+    else:
+        PROJECTS_JSON.parent.mkdir(parents=True, exist_ok=True)
+        target = PROJECTS_JSON
+        ok = _write_json_atomic(PROJECTS_JSON, data)
+    if ok:
+        cached_read.invalidate(target)  # #727: next load_projects() sees this write
+    return ok
 
 
 def active_project() -> tuple[str | None, dict]:

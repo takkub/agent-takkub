@@ -118,7 +118,10 @@ def test_build_generic_spawn_plan_applies_account_env_without_mutating_base():
     )
     assert isinstance(plan, SpawnPlan)
     assert plan.provider_id == "codex"
-    assert plan.argv == ("/usr/bin/codex", "--full-auto")
+    from agent_takkub.provider_spec import PROVIDER_REGISTRY
+
+    trust_argv = PROVIDER_REGISTRY["codex"].trust_argv("/work")
+    assert plan.argv == ("/usr/bin/codex", "--full-auto", *trust_argv)
     assert plan.env == {"PATH": "/bin", "CODEX_HOME": "/home/u/codex-b"}
     assert base_env == {"PATH": "/bin"}  # never mutated
 
@@ -133,7 +136,10 @@ def test_cli_provider_adapter_build_plan_matches_pure_builder():
         autonomy_argv=["--full-auto"],
         resume_argv=["--resume", "uuid-1"],
     )
-    assert plan.argv == ("/usr/bin/codex", "--full-auto", "--resume", "uuid-1")
+    from agent_takkub.provider_spec import PROVIDER_REGISTRY
+
+    trust_argv = PROVIDER_REGISTRY["codex"].trust_argv("/work")
+    assert plan.argv == ("/usr/bin/codex", "--full-auto", *trust_argv, "--resume", "uuid-1")
     assert plan.env["CODEX_HOME"] == "/home/u/codex-b"
 
 

@@ -61,6 +61,27 @@ def picker_question_on_screen(session, provider: str | None) -> bool:
     return any(all(marker.casefold() in folded for marker in group) for group in groups)
 
 
+def _codex_trust_argv(cwd: str) -> tuple[str, ...]:
+    """Codex session-scoped trust overrides for a resolved project cwd.
+
+    Codex's dotted `-c` key syntax uses TOML quoted path segments. Skip paths
+    containing a single quote rather than emitting a malformed override.
+    """
+    try:
+        path = os.path.realpath(cwd)
+    except (OSError, TypeError, ValueError):
+        return ()
+    if "'" in path:
+        return ()
+    paths = [path]
+    lowered = path.lower()
+    if lowered != path:
+        paths.append(lowered)
+    return tuple(
+        arg for item in paths for arg in ("-c", f"projects.'{item}'.trust_level=\"trusted\"")
+    )
+
+
 @dataclass(frozen=True)
 class ReadyRule:
     """One ordered (marker, verdict) entry — first substring match wins.
@@ -101,6 +122,7 @@ class ProviderSpec:
     # ─── 2. Spawn argv builder ───
     autonomy_flags: dict[str, list[str]] = field(default_factory=dict)
     extra_static_args: list[str] = field(default_factory=list)
+    trust_argv: Callable[[str], tuple[str, ...]] | None = None
 
     # ─── 3. CLI argument mapping flags ───
     mcp_config_flag: str | None = None
@@ -117,6 +139,7 @@ class ProviderSpec:
     # ─── 4. Ready / busy / blocker markers ───
     ready_hard_blockers: tuple[str, ...] = field(default_factory=tuple)
     ready_rules: tuple[ReadyRule, ...] = field(default_factory=tuple)
+    busy_markers: tuple[str, ...] = field(default_factory=tuple)
     ready_wait_ms: int = 45_000
     # #587 C2: lower-case substrings that, anywhere in the ready region,
     # prove the composer is genuinely idle EVEN THOUGH a `ready_hard_blockers`
@@ -888,6 +911,24 @@ codex_spec = ProviderSpec(
         ReadyRule("? for help", True),
         ReadyRule("ask codex", True),
     ),
+    # #738: both markers are real codex 0.15x screen captures, not guesses.
+    #   "working ("           — the turn's own status line, "• Working (1s • esc
+    #                          to interrupt)", from a live 0.157.1 pane
+    #                          (2026-09-26). It renders ~8 rows ABOVE the last
+    #                          painted row, so it is only visible to
+    #                          `shows_busy_marker`'s taller window
+    #                          (_BUSY_MARKER_TAIL_ROWS) — under the old
+    #                          `_ready_region` scan this marker could never fire
+    #                          and a working codex pane read idle.
+    #   "tab to queue message" — codex's composer status row while a turn runs
+    #                          with a draft in the box, from the real footers in
+    #                          runtime/events.log (2026-09-24 13:44:02 codex,
+    #                          14:50:57 lead). It sits INSIDE the ready window,
+    #                          so this one is caught by any scan width; it is the
+    #                          signal that survives a narrow terminal.
+    # Kept lowercase (the region is lowercased before matching).
+    busy_markers=("working (", "tab to queue message"),
+    trust_argv=_codex_trust_argv,
     # #271: 90s was set before codex grew the `code_mode`/`codex_apps`
     # feature — measured cold-boot on real hardware now runs 90-150s EVERY
     # spawn (4/4 trials, 2026-08-16), so the old window routinely expired
@@ -1145,6 +1186,20 @@ gemini_spec = ProviderSpec(
         # was silently lost, later reported as `delivery-uncertain`). See
         # account_pending_markers below for the correct handling of this text.
     ),
+    # "thinking..." / "thinking ("  -- kept: the legacy `gemini` CLI's own
+    #   thinking line ("Thinking... (esc to cancel, 12s)"), unverified live here
+    #   because this machine resolves `gemini` to the agy binary below.
+    # "generating..."  -- #738, real agy capture (own PtySession, 110x36,
+    #   2026-09-26, agy via find_agy_executable): while a turn runs, agy paints
+    #       row21  ⣻  Generating...
+    #       row25  esc to cancel                            Gemini 3.8 Flash · high
+    #   so "generating..." is the word agy actually uses, and the two
+    #   "thinking" markers never fire for it -- the busy probe reported False on
+    #   6/6 genuinely-working agy frames. row21 sits ABOVE the 6-row ready
+    #   window, so it is only reachable via `_BUSY_MARKER_TAIL_ROWS`; the
+    #   trailing ellipsis is matched rather than the bare word so ordinary prose
+    #   about "generating" cannot fake a busy pane.
+    busy_markers=("thinking...", "thinking (", "generating..."),
     ready_wait_ms=90_000,  # lead_inbox.py:431-435 (agy cold-boot allowance)
     context_strategy="agents_md_file",
     cheatsheet_filename="AGENTS.md",
@@ -1334,6 +1389,16 @@ opencode_spec = ProviderSpec(
     # GAP (#103, #582): no auto-compact window flag (like claude's --autocompact).
     autocompact_flag=None,
     ready_hard_blockers=("esc interrupt",),  # opencode shows "esc interrupt" without "to"
+    # #738: same string, second consumer. Real opencode 1.18.32 capture (own
+    # PtySession, 110x36, 2026-09-26) of a live turn — the composer footer row
+    # swaps from the context line to the spinner + interrupt hint and back:
+    #     working: row34 "  ■■⬝⬝⬝⬝⬝⬝  esc interrupt    tab agents  ctrl+p commands"
+    #     idle:    row34 "  ~\cap2    12.9K (6%)  ctrl+p commands"
+    # so "esc interrupt" is busy-only for opencode and is already the ready
+    # hard blocker; registering it here too makes `shows_busy_marker("opencode")`
+    # answer for itself instead of silently reporting False on a working pane
+    # (#729's guard only escaped this because the blocker also fired).
+    busy_markers=("esc interrupt",),
     ready_rules=(
         # Idle composer markers across OpenCode versions and terminal layouts:
         # - Full TUI idle footer: "tab agents  ctrl+p commands" / "tab agents"
@@ -2046,6 +2111,16 @@ def busy_queue_confirm_markers_for(provider: str) -> tuple[str, ...]:
     generic phrase."""
     spec = PROVIDER_REGISTRY.get(provider)
     return spec.busy_queue_confirm_markers if spec is not None else ()
+
+
+def busy_markers_for(provider: str | None) -> tuple[str, ...]:
+    """Lower-case substrings that unambiguously prove `provider`'s CLI is actively
+    executing a turn or running a tool/command (#729).
+    """
+    if not provider:
+        return ()
+    spec = PROVIDER_REGISTRY.get(provider.strip().lower())
+    return spec.busy_markers if spec is not None else ()
 
 
 # ── ready-marker calibration status (#257) ──────────────────────────────────

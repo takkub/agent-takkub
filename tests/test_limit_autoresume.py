@@ -1186,6 +1186,44 @@ class TestReroutePaneToProvider:
         o._pipeline_runs = {}
         return o
 
+    def test_dead_quota_replacement_lead_tries_next_provider(self):
+        o = self._orch_with_respawn_hooks()
+        ps = o._ps("proj::lead")
+        ps.provider_override = "codex"
+        ps.quota_reroute_from = "claude"
+        ps.rate_limited_until = time.time() + 300
+        o._lead_quota_recovery = {"proj": ("claude", "C:/work", "handover", ps.rate_limited_until)}
+        o._lead_quota_recovery_spawned_at = {"proj": time.time() - 5}
+        o._reroute_pane_to_provider = MagicMock()
+        with patch("agent_takkub.provider_config.pick_substitute_provider", return_value="gemini"):
+            assert o._handle_lead_quota_replacement_exit("proj", "lead") is True
+        o._reroute_pane_to_provider.assert_called_once_with(
+            "proj", "lead", ps, "gemini", "codex", ps.rate_limited_until
+        )
+
+    def test_dead_quota_replacement_lead_parks_until_original_reset_without_candidate(self):
+        o = self._orch_with_respawn_hooks()
+        ps = o._ps("proj::lead")
+        ps.provider_override = "codex"
+        ps.quota_reroute_from = "claude"
+        ps.rate_limited_until = time.time() + 300
+        o._lead_quota_recovery = {"proj": ("claude", "C:/work", "handover", ps.rate_limited_until)}
+        o._lead_quota_recovery_spawned_at = {"proj": time.time() - 5}
+        o._reroute_pane_to_provider = MagicMock()
+        with patch("agent_takkub.provider_config.pick_substitute_provider", return_value=None):
+            assert o._handle_lead_quota_replacement_exit("proj", "lead") is True
+        o._reroute_pane_to_provider.assert_not_called()
+
+    def test_dead_quota_replacement_after_reset_uses_bounded_crash_respawn(self):
+        o = self._orch_with_respawn_hooks()
+        ps = o._ps("proj::lead")
+        ps.provider_override = "codex"
+        ps.quota_reroute_from = "claude"
+        o._lead_quota_recovery = {"proj": ("claude", "C:/work", "handover", time.time() - 1)}
+        o._lead_quota_recovery_spawned_at = {"proj": time.time() - 5}
+        with patch("agent_takkub.provider_config.pick_substitute_provider", return_value=None):
+            assert o._handle_lead_quota_replacement_exit("proj", "lead") is False
+
     def test_closes_and_respawns_with_provider_override_and_progress_note(self) -> None:
         o = self._orch_with_respawn_hooks()
         ps = o._ps("proj::backend")
@@ -1237,6 +1275,7 @@ class TestReroutePaneToProvider:
         backend.state = "working"
         backend.model.provider_name = "gemini"
         o._panes_by_project["proj"] = {"lead": lead, "backend": backend}
+        o._live_non_scaffolding_children = MagicMock(return_value=["pytest.exe", "node.exe"])
         with patch(
             "agent_takkub.limit_autoresume.QTimer.singleShot",
             side_effect=lambda _ms, callback: callback(),
@@ -1251,6 +1290,7 @@ class TestReroutePaneToProvider:
         assert "lead.log" in brief
         assert "backend: working (gemini)" in brief
         assert "queued durably" in brief
+        assert "pytest.exe, node.exe" in brief
 
     def test_lead_reroute_forces_the_protected_close(self) -> None:
         """#699 (prod 2026-09-22, 300+ rounds in 25 min): `close()` ignores

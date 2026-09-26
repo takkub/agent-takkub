@@ -243,6 +243,27 @@ def _dead_pane():
 
 
 class TestEmitRateLimitReset:
+    def test_dead_lead_after_reroute_respawns_on_original_provider(self) -> None:
+        """#737: popped PaneState must not make the reset timer skip a dead Lead."""
+        o = _bare_emit_orch()
+        o._lead_quota_recovery = {
+            "proj": ("claude", "C:/work/api", "takeover context", time.time() - 1)
+        }
+        o._project_panes("proj")["lead"] = _dead_pane()
+        o.spawn = MagicMock(return_value=(True, "spawn queued"))
+        o._send_when_ready = MagicMock()
+        with (
+            patch("agent_takkub.orchestrator.QTimer.singleShot"),
+            patch("agent_takkub.orchestrator._log_event") as log,
+        ):
+            o._emit_rate_limit_reset("proj", "lead")
+        o.spawn.assert_called_once_with(
+            "lead", cwd="C:/work/api", project="proj", _from_auto_respawn=True
+        )
+        assert o._ps("proj::lead").provider_override == "claude"
+        o._send_when_ready.assert_called_once_with("lead", "takeover context", project="proj")
+        assert "rate_limit_reset_skipped" not in [c.args[0] for c in log.call_args_list]
+
     def test_pane_gone_skips_lead_notice(self) -> None:
         """Timer fires after pane closed → Lead must NOT receive the message."""
         o = _bare_emit_orch()

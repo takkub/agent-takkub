@@ -273,6 +273,7 @@ class MainWindow(
         self.orch.agentDone.connect(self._notify_agent_done)
         self.orch.crossTabDone.connect(self._on_cross_tab_done)
         self.orch.leadNotified.connect(self._on_lead_notified)
+        self.orch.leadUnavailable.connect(self._on_lead_unavailable)
         self.orch.sessionCapNotice.connect(self._on_session_cap_notice)
         self.orch.idleReminderNotice.connect(self._on_idle_reminder_notice)
         # #715: question cards for the Lead composer (polls the active Lead).
@@ -1165,6 +1166,15 @@ class MainWindow(
         tab = self._tab_for_project(project_ns)
         if tab is not None:
             tab.mark_lead_unread()
+
+    def _on_lead_unavailable(self, project_ns: str, reason: str) -> None:
+        """Surface a dead Lead immediately even when no other Lead can read it."""
+        body = f"Lead for {project_ns} is unavailable; {reason}"
+        self._status.showMessage(f"⚠ {body}", 15_000)
+        if self._tray and QSystemTrayIcon.isSystemTrayAvailable():
+            self._tray.showMessage(
+                "Lead unavailable", body, QSystemTrayIcon.MessageIcon.Warning, 8_000
+            )
 
     def _on_session_cap_notice(
         self,

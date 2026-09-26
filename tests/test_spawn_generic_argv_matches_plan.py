@@ -64,7 +64,7 @@ def _make_codex_pane() -> MagicMock:
     return pane
 
 
-def _spawn_codex_and_capture_argv(qapp, monkeypatch, tmp_path) -> list[str]:
+def _spawn_codex_and_capture_argv(qapp, monkeypatch, tmp_path) -> tuple[list[str], str]:
     from agent_takkub import shared_dev_tools as sdt
     from agent_takkub.provider_config import CODEX
 
@@ -113,14 +113,16 @@ def _spawn_codex_and_capture_argv(qapp, monkeypatch, tmp_path) -> list[str]:
 
     assert ok is True, msg
     assert pty_spawn_calls, "PtySession.spawn was not called"
-    return pty_spawn_calls[0]["argv"]
+    return pty_spawn_calls[0]["argv"], pty_spawn_calls[0]["cwd"]
 
 
 def test_assemble_generic_argv_reproduces_live_branch_argv(qapp, monkeypatch, tmp_path):
-    real_argv = _spawn_codex_and_capture_argv(qapp, monkeypatch, tmp_path)
+    real_argv, spawn_cwd = _spawn_codex_and_capture_argv(qapp, monkeypatch, tmp_path)
 
     reassembled = assemble_generic_argv(
         "codex",
+        provider_id="codex",
+        cwd=spawn_cwd,
         autonomy_argv=[
             "--dangerously-bypass-approvals-and-sandbox",
             "--disable",

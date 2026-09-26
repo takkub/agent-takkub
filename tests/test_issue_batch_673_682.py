@@ -141,6 +141,7 @@ class TestIssueNewBodyFile:
             cwd=None,
             cockpit_bug=True,
             issues_dir=None,
+            force=False,
         )
         base.update(kw)
         return argparse.Namespace(**base)
@@ -184,6 +185,11 @@ class TestIssueNewBodyFile:
         parser = cli_mod.build_parser()
         args = parser.parse_args(["issue", "new", "t", "--body-file", "b.md"])
         assert args.body_file == "b.md"
+
+    def test_parser_accepts_force_flag(self) -> None:
+        parser = cli_mod.build_parser()
+        args = parser.parse_args(["issue", "new", "t", "--body", "## อาการ", "--force"])
+        assert args.force is True
 
 
 # ── #674: relink must not report ok when it relinked nothing ────────────────

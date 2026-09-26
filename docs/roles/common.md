@@ -202,6 +202,19 @@ just vanishes and both sides stall. `takkub send --to lead` gets the
 orchestrator to inject your message into Lead's input, and the idle
 watchdog suppresses the auto-reminder until Lead replies.
 
+## reporting-cockpit-issues (#741)
+
+When reporting a bug in the cockpit itself (`takkub issue new`):
+- On Windows (PowerShell/cmd.exe), multiline arguments passed via `--body`
+  are truncated at the first newline by `cmd.exe` (`takkub.cmd` shim, #741).
+- **Always pass multiline body text using `--body-file`**:
+  - Pipe via stdin: `$body | takkub issue new "<title>" --severity <sev> --body-file -`
+  - Or write to a temp file: `$body | Out-File -FilePath "$env:TEMP/issue.md" -Encoding utf8; takkub issue new "<title>" --severity <sev> --body-file "$env:TEMP/issue.md"`
+- `--body-file` also prevents shell backtick/variable expansion (#679), keeping
+  logs and markdown formatting byte-for-byte exact.
+- `takkub issue new` rejects bodies that look truncated (e.g. only a markdown
+  header `## ...` was received) unless `--force` is passed.
+
 ## browser-non-ui-roles
 
 Non-UI roles (all provider slots — codex/gemini/opencode/kimi/cursor,

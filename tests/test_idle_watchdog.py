@@ -7,7 +7,7 @@ driving `_check_idle_teammates()` manually with a mocked clock.
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 from PyQt6.QtCore import QCoreApplication
@@ -1896,3 +1896,66 @@ class TestDoneTypedAsText:
         assert find_typed_done_line(narrated, 3) == "takkub done"
         assert find_typed_done_line(["nothing here"], 0) is None
         assert find_typed_done_line([], 0) is None
+
+        # #729: unsubmitted brief in composer prompt must never match
+        unsubmitted = ["› takkub done 'completed'"]
+        assert find_typed_done_line(unsubmitted, 0) is None
+        multiline = ["› Please follow instructions:", "When finished run `takkub done`"]
+        assert find_typed_done_line(multiline, 1) is None
+
+        # #729 / #435: gemini / claude / codex typing takkub done as text in normal output (not in composer) MUST be caught
+        gemini_narrated = [
+            "I have finished all tasks.",
+            'takkub done "all work complete"',
+            "? for shortcuts",
+        ]
+        assert find_typed_done_line(gemini_narrated, 2) == 'takkub done "all work complete"'
+
+        claude_narrated = [
+            "❯ please run tests",
+            "Tests ran and passed.",
+            'Now call takkub done "tests pass"',
+            "────────────────────────────────────────",
+            "❯ ",
+            "────────────────────────────────────────",
+        ]
+        assert find_typed_done_line(claude_narrated, 4) == 'Now call takkub done "tests pass"'
+
+        codex_narrated = [
+            "› please run tests",
+            "Tests ran and passed.",
+            'takkub done "done"',
+            "› ",
+            "gpt-5 · default",
+        ]
+        assert find_typed_done_line(codex_narrated, 3) == 'takkub done "done"'
+
+    def test_idle_reminder_skips_pty_when_composer_has_pending_input(
+        self, orch: Orchestrator
+    ) -> None:
+        # #729: idle_reminder must not type into pane if composer has pending input
+        pane = _make_pane(state="working", at_ready_prompt=True)
+        pane.session.shows_pending_input.return_value = True
+        pane.session.shows_busy_marker.return_value = False
+        pane.session.is_at_ready_prompt.return_value = True
+
+        with patch("agent_takkub.orchestrator._log_event") as mock_log:
+            orch._inject_idle_reminder("proj", "qa", pane, 1, escalate=True)
+            assert not pane.session.write.called
+            assert any(
+                call.args[0] == "idle_reminder_pty_skipped" for call in mock_log.call_args_list
+            )
+
+    def test_idle_reminder_skips_pty_when_pane_is_busy(self, orch: Orchestrator) -> None:
+        # #729: idle_reminder must not type into pane if pane is busy
+        pane = _make_pane(state="working", at_ready_prompt=True)
+        pane.session.shows_pending_input.return_value = False
+        pane.session.shows_busy_marker.return_value = True
+        pane.session.is_at_ready_prompt.return_value = True
+
+        with patch("agent_takkub.orchestrator._log_event") as mock_log:
+            orch._inject_idle_reminder("proj", "codex", pane, 1, escalate=True)
+            assert not pane.session.write.called
+            assert any(
+                call.args[0] == "idle_reminder_pty_skipped" for call in mock_log.call_args_list
+            )

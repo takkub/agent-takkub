@@ -185,7 +185,7 @@ class _FakeOrch:
         # degrades to when this method is absent.
         return Orchestrator._real_progress_ts(self, role, project_ns, pane, ps, now)  # type: ignore[arg-type]
 
-    def _idle_no_progress_real_activity(self, role, project_ns, pane, now) -> str:
+    def _idle_no_progress_real_activity(self, role, project_ns, pane, now, *args, **kwargs) -> str:
         # #599: delegate to the real method — it only calls
         # self._live_non_scaffolding_children (stubbed above, [] by
         # default) and the pure _cwd_has_recent_file_activity helper
@@ -193,7 +193,7 @@ class _FakeOrch:
         # EXISTING test in this module sees "" (no suppression) unless it
         # explicitly sets `live_children` or a real `cwd`.
         return Orchestrator._idle_no_progress_real_activity(  # type: ignore[arg-type]
-            self, role, project_ns, pane, now
+            self, role, project_ns, pane, now, *args, **kwargs
         )
 
 
@@ -1626,3 +1626,70 @@ class TestStreamTokenCounterProgress:
         deferred = [e for e in logged if e["event"] == "stuck_recover_deferred_real_activity"]
         assert len(deferred) == 1
         assert deferred[0]["reason"] == "cwd file activity"
+
+    def test_escalate_kill_suppressed_when_silent_for_s_is_zero(self) -> None:
+        """#731: fresh PTY output arriving in current tick (silent_for_s == 0)
+        proves the pane is actively working and must never be killed at the
+        40-minute mark."""
+        import agent_takkub.orchestrator as orch_mod
+
+        logged: list[dict] = []
+        orig = orch_mod._log_event
+        orch_mod._log_event = lambda event, **kw: logged.append({"event": event, **kw})
+        try:
+            t0 = 1_000_000.0
+            fake, pane, ps = self._pane(t0)
+            pane._last_output_ts = t0  # silent_for_s == 0
+            ps.last_send_ts = t0 - IDLE_NO_PROGRESS_ESCALATE_S - 1
+            _check(fake, t0)
+        finally:
+            orch_mod._log_event = orig
+
+        assert fake.close_calls == [], "fresh terminal output must suppress the kill"
+        deferred = [e for e in logged if e["event"] == "stuck_recover_deferred_real_activity"]
+        assert len(deferred) == 1
+        assert deferred[0]["reason"] == "recent output (silent_for_s=0)"
+
+    def test_escalate_kill_suppressed_when_busy_marker_shown(self) -> None:
+        """#731: active provider busy marker proves the pane is working."""
+        import agent_takkub.orchestrator as orch_mod
+
+        logged: list[dict] = []
+        orig = orch_mod._log_event
+        orch_mod._log_event = lambda event, **kw: logged.append({"event": event, **kw})
+        try:
+            t0 = 1_000_000.0
+            fake, pane, ps = self._pane(t0)
+            pane.session.shows_busy_marker.return_value = True
+            ps.last_send_ts = t0 - IDLE_NO_PROGRESS_ESCALATE_S - 1
+            _check(fake, t0)
+        finally:
+            orch_mod._log_event = orig
+
+        assert fake.close_calls == [], "provider busy marker must suppress the kill"
+        deferred = [e for e in logged if e["event"] == "stuck_recover_deferred_real_activity"]
+        assert len(deferred) == 1
+        assert "busy marker" in deferred[0]["reason"]
+
+    def test_escalate_kill_suppressed_for_deep_scope_task(self) -> None:
+        """#731: a deep-scope task exceeding 40 minutes must escalate to Lead
+        rather than killing the pane and dropping deep context."""
+        import agent_takkub.orchestrator as orch_mod
+
+        logged: list[dict] = []
+        orig = orch_mod._log_event
+        orch_mod._log_event = lambda event, **kw: logged.append({"event": event, **kw})
+        try:
+            t0 = 1_000_000.0
+            fake, _pane, ps = self._pane(t0)
+            ps.last_assigned_scope = "deep"
+            ps.last_send_ts = t0 - IDLE_NO_PROGRESS_ESCALATE_S - 1
+            _check(fake, t0)
+        finally:
+            orch_mod._log_event = orig
+
+        assert fake.close_calls == [], "deep-scope task must not be auto-killed"
+        deferred = [e for e in logged if e["event"] == "stuck_recover_deferred_deep_scope"]
+        assert len(deferred) == 1
+        deep_notices = [c for c in fake.notify_calls if c[2] == "backend" and "deep" in c[1]]
+        assert len(deep_notices) == 1

@@ -18,7 +18,7 @@ from unittest.mock import MagicMock
 
 from agent_takkub.agent_pane import AgentPane
 from agent_takkub.roles import LEAD, USER_DRIVEN_ROLES
-from agent_takkub.terminal_widget import TerminalWidget
+from agent_takkub.terminal_widget import TerminalWidget, split_wheel_reports
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -47,6 +47,47 @@ class TestTerminalWidgetLock:
         tw = self._make(locked=True)
         # Must early-return before touching config/disk — no emit, no raise.
         tw._on_image_pasted("ZmFrZQ==", "image/png")
+        tw.inputBytes.emit.assert_not_called()
+
+    def test_locked_forwards_sgr_wheel_reports(self) -> None:
+        tw = self._make(locked=True)
+        tw.lockedInput = MagicMock()
+        # Wheel up (64), wheel down (65)
+        tw._on_input_data("\x1b[<64;10;20M")
+        tw.inputBytes.emit.assert_called_once_with(b"\x1b[<64;10;20M")
+        tw.lockedInput.emit.assert_not_called()
+
+        tw.inputBytes.emit.reset_mock()
+        tw._on_input_data("\x1b[<65;15;30M")
+        tw.inputBytes.emit.assert_called_once_with(b"\x1b[<65;15;30M")
+        tw.lockedInput.emit.assert_not_called()
+
+    def test_locked_drops_sgr_click_and_emits_locked_input(self) -> None:
+        tw = self._make(locked=True)
+        tw.lockedInput = MagicMock()
+        tw._on_input_data("\x1b[<0;10;20M")
+        tw.inputBytes.emit.assert_not_called()
+        tw.lockedInput.emit.assert_called_once_with("\x1b[<0;10;20M")
+
+    def test_locked_mixed_chunk_splits_wheel_and_locked_input(self) -> None:
+        tw = self._make(locked=True)
+        tw.lockedInput = MagicMock()
+        tw._on_input_data("echo\x1b[<64;10;20M")
+        tw.inputBytes.emit.assert_called_once_with(b"\x1b[<64;10;20M")
+        tw.lockedInput.emit.assert_called_once_with("echo")
+
+    def test_wheel_input_data_forwards_arrow_escapes(self) -> None:
+        tw = self._make(locked=True)
+        tw._on_wheel_input_data("\x1b[A")
+        tw.inputBytes.emit.assert_called_once_with(b"\x1b[A")
+
+        tw.inputBytes.emit.reset_mock()
+        tw._on_wheel_input_data("\x1bOB")
+        tw.inputBytes.emit.assert_called_once_with(b"\x1bOB")
+
+    def test_wheel_input_data_rejects_non_escapes(self) -> None:
+        tw = self._make(locked=True)
+        tw._on_wheel_input_data("plain text")
         tw.inputBytes.emit.assert_not_called()
 
     def test_set_input_locked_toggles_flag(self) -> None:
@@ -102,3 +143,89 @@ class TestAgentPaneLock:
         assert "shell" in USER_DRIVEN_ROLES
         for r in ("frontend", "backend", "qa", "reviewer", "critic", "codex", "gemini"):
             assert r not in USER_DRIVEN_ROLES
+
+
+# ─────────────────────────────────────────────────────────────────────
+# split_wheel_reports — mouse report filter (#728)
+# ─────────────────────────────────────────────────────────────────────
+class TestSplitWheelReports:
+    def test_plain_text(self) -> None:
+        assert split_wheel_reports("hello world") == ("", "hello world")
+        assert split_wheel_reports("") == ("", "")
+        assert split_wheel_reports("ls -la\r\n") == ("", "ls -la\r\n")
+
+    def test_sgr_wheel_buttons(self) -> None:
+        # Wheel up (64), down (65), left (66), right (67)
+        assert split_wheel_reports("\x1b[<64;10;20M") == ("\x1b[<64;10;20M", "")
+        assert split_wheel_reports("\x1b[<65;10;20M") == ("\x1b[<65;10;20M", "")
+        assert split_wheel_reports("\x1b[<66;10;20M") == ("\x1b[<66;10;20M", "")
+        assert split_wheel_reports("\x1b[<67;10;20M") == ("\x1b[<67;10;20M", "")
+
+    def test_sgr_wheel_with_modifiers(self) -> None:
+        # Shift (+4): 64 + 4 = 68
+        assert split_wheel_reports("\x1b[<68;10;20M") == ("\x1b[<68;10;20M", "")
+        # Alt (+8): 64 + 8 = 72
+        assert split_wheel_reports("\x1b[<72;10;20M") == ("\x1b[<72;10;20M", "")
+        # Ctrl (+16): 64 + 16 = 80
+        assert split_wheel_reports("\x1b[<80;10;20M") == ("\x1b[<80;10;20M", "")
+        # Ctrl+Alt+Shift (+28): 65 + 28 = 93
+        assert split_wheel_reports("\x1b[<93;10;20M") == ("\x1b[<93;10;20M", "")
+
+    def test_sgr_non_wheel(self) -> None:
+        # Button 1 press (0), button 2 press (1), button 3 press (2)
+        assert split_wheel_reports("\x1b[<0;10;20M") == ("", "\x1b[<0;10;20M")
+        assert split_wheel_reports("\x1b[<1;10;20M") == ("", "\x1b[<1;10;20M")
+        assert split_wheel_reports("\x1b[<2;10;20M") == ("", "\x1b[<2;10;20M")
+        # Release (0m)
+        assert split_wheel_reports("\x1b[<0;10;20m") == ("", "\x1b[<0;10;20m")
+        # Motion with button 0 (32)
+        assert split_wheel_reports("\x1b[<32;10;20M") == ("", "\x1b[<32;10;20M")
+
+    def test_x10_wheel(self) -> None:
+        # X10 cb character: ord(char) - 32. 64 + 32 = 96 ('`'), 65 + 32 = 97 ('a')
+        assert split_wheel_reports("\x1b[M`!!") == ("\x1b[M`!!", "")
+        assert split_wheel_reports("\x1b[Ma!!") == ("\x1b[Ma!!", "")
+        # Shift modifier (+4): 64 + 4 + 32 = 100 ('d')
+        assert split_wheel_reports("\x1b[Md!!") == ("\x1b[Md!!", "")
+
+    def test_x10_non_wheel(self) -> None:
+        # Button 1 press: 0 + 32 = 32 (' ')
+        assert split_wheel_reports("\x1b[M !!") == ("", "\x1b[M !!")
+        # Button 2 press: 1 + 32 = 33 ('!')
+        assert split_wheel_reports("\x1b[M!!!") == ("", "\x1b[M!!!")
+        # Button release: 3 + 32 = 35 ('#')
+        assert split_wheel_reports("\x1b[M#!!") == ("", "\x1b[M#!!")
+
+    def test_multiple_wheel_reports(self) -> None:
+        data = "\x1b[<64;10;20M\x1b[<64;10;20M\x1b[<65;10;20M"
+        assert split_wheel_reports(data) == (data, "")
+
+    def test_mixed_chunk(self) -> None:
+        data = "hello\x1b[<64;10;20Mworld\x1b[<0;10;20M!"
+        wheel, remaining = split_wheel_reports(data)
+        assert wheel == "\x1b[<64;10;20M"
+        assert remaining == "helloworld\x1b[<0;10;20M!"
+
+
+# ─────────────────────────────────────────────────────────────────────
+# AgentPane — locked input to composer filter (#728)
+# ─────────────────────────────────────────────────────────────────────
+class TestMoveLockedInputToComposer:
+    def test_printable_text_inserted_into_composer(self) -> None:
+        pane = AgentPane.__new__(AgentPane)
+        pane.composer = MagicMock()
+        cursor = MagicMock()
+        pane.composer.editor.textCursor.return_value = cursor
+
+        pane._move_locked_input_to_composer("hello")
+        pane.composer.editor.setFocus.assert_called_once()
+        pane.composer.editor.insertPlainText.assert_called_once_with("hello")
+
+    def test_mouse_reports_and_escapes_ignored(self) -> None:
+        pane = AgentPane.__new__(AgentPane)
+        pane.composer = MagicMock()
+
+        for escape_seq in ("\x1b[<0;10;20M", "\x1b[<64;10;20M", "\x1b[M`!!", "\x1b[A"):
+            pane._move_locked_input_to_composer(escape_seq)
+            pane.composer.editor.setFocus.assert_not_called()
+            pane.composer.editor.insertPlainText.assert_not_called()

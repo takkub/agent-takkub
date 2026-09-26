@@ -60,6 +60,7 @@ def _spawn_codex_and_capture_argv(
     tmp_path,
     platform: str,
     *,
+    role: str = "codex",
     allowed_mcps: list[str] | None = None,
 ):
     from agent_takkub import pane_tools_policy as ptp
@@ -67,8 +68,8 @@ def _spawn_codex_and_capture_argv(
     from agent_takkub.provider_config import CODEX
 
     orch = _make_orchestrator(qapp, monkeypatch)
-    pane = _make_codex_pane("codex")
-    orch._panes_by_project[TEST_PROJECT] = {"codex": pane}
+    pane = _make_codex_pane(role)
+    orch._panes_by_project[TEST_PROJECT] = {role: pane}
 
     # Isolate from the real dev machine's runtime/shared-mcp.json +
     # ~/.takkub/pane-tools.json (#100): without this, MCP injection would
@@ -107,7 +108,7 @@ def _spawn_codex_and_capture_argv(
         mock_pty_cls.return_value = mock_pty
         pane.attach_session = MagicMock()
 
-        ok, msg = orch.spawn("codex", project=TEST_PROJECT)
+        ok, msg = orch.spawn(role, project=TEST_PROJECT)
 
     assert ok is True, msg
     assert pty_spawn_calls, "PtySession.spawn was not called"
@@ -115,6 +116,17 @@ def _spawn_codex_and_capture_argv(
 
 
 class TestCodexArgvNetworkAccess:
+    def test_lead_spawn_uses_provider_trust_argv(self, qapp, monkeypatch, tmp_path):
+        argv = _spawn_codex_and_capture_argv(qapp, monkeypatch, tmp_path, "win32", role="lead")
+        assert argv[:4] == [
+            "codex",
+            "--dangerously-bypass-approvals-and-sandbox",
+            "--disable",
+            "apps",
+        ]
+        assert argv[4] == "-c"
+        assert 'trust_level="trusted"' in argv[5]
+
     def test_macos_codex_argv_opens_workspace_write_network(self, qapp, monkeypatch, tmp_path):
         argv = _spawn_codex_and_capture_argv(qapp, monkeypatch, tmp_path, "darwin")
 
@@ -139,9 +151,20 @@ class TestCodexArgvNetworkAccess:
         # which is codex_spec's own ready blocker — measured ready 388s -> 0s
         # with it off. Part of autonomy_flags, so it lands right after the
         # sandbox flag.
-        assert argv[2:] == [
+        assert argv[:4] == [
+            "codex",
+            "--dangerously-bypass-approvals-and-sandbox",
             "--disable",
             "apps",
+        ]
+        trust_args = argv[4:8]
+        assert len(trust_args) == 4
+        assert trust_args[0] == trust_args[2] == "-c"
+        assert trust_args[1].startswith("projects.'")
+        assert trust_args[1].endswith('\'.trust_level="trusted"')
+        assert trust_args[3].startswith("projects.'")
+        assert trust_args[3].endswith('\'.trust_level="trusted"')
+        assert argv[8:] == [
             "-c",
             "model_reasoning_effort=high",
             "-c",
@@ -212,11 +235,18 @@ class TestCodexArgvMcpInjection:
         # must still block MCPs inherited from Codex's own configuration.
         argv = _spawn_codex_and_capture_argv(qapp, monkeypatch, tmp_path, "win32")
 
-        assert argv == [
+        assert argv[:4] == [
             "codex",
             "--dangerously-bypass-approvals-and-sandbox",
             "--disable",
             "apps",
+        ]
+        assert argv[4:8][0] == argv[4:8][2] == "-c"
+        assert all(
+            value.startswith("projects.'") and value.endswith('\'.trust_level="trusted"')
+            for value in (argv[4:8][1], argv[4:8][3])
+        )
+        assert argv[8:] == [
             "-c",
             "model_reasoning_effort=high",
             "-c",

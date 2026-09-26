@@ -256,24 +256,42 @@ def budget_block(scope: str) -> str:
     return BUDGET_BLOCKS.get(norm, BUDGET_BLOCKS["normal"])
 
 
-def strip_budget(task_text: str) -> str:
-    """Return *task_text* without a leading system-injected budget block (#585).
+# #739: label of the budget section, which now TRAILS the task body. The block
+# used to be the task's first line — every normal-scope task then opened with
+# the same "test for real, no new test files" sentence, and a resumed pane read
+# a new implementation task as a rerun of the test-only task it had just done.
+BUDGET_TRAILER_HEADER = "------ ขอบเขตการทดสอบ (scope) ------"
 
-    The budget block is scaffolding the orchestrator prepends, not task content,
+
+def strip_budget(task_text: str) -> str:
+    """Return *task_text* without its system-injected budget block (#585).
+
+    The budget block is scaffolding the orchestrator adds, not task content,
     so any length/threshold decision about the task itself must measure the body
     (see `orchestrator_text._task_handoff_pointer`: a ~300-char budget block used
     to push every short task over TASK_HANDOFF_THRESHOLD, turning a direct paste
     into a read-this-file pointer — an extra hop and extra tokens per assign).
+
+    #739: the labelled trailer `inject_budget` now writes is removed wherever it
+    sits (delivery hints are appended after it); a leading block — task text
+    persisted before the move — is still stripped too.
     """
     text = task_text or ""
     for block in BUDGET_BLOCKS.values():
         if text.startswith(block):
             return text[len(block) :].lstrip(chr(13) + chr(10))
+        trailer = f"\n\n{BUDGET_TRAILER_HEADER}\n{block}"
+        if trailer in text:
+            head, _, tail = text.partition(trailer)
+            return head + tail
     return text
 
 
 def inject_budget(task_text: str, scope: str) -> str:
-    """Prepend budget_block(scope) as the first line of task_text if not already present."""
+    """Append budget_block(scope) after task_text's body if not already present.
+
+    #739: after, not before — Lead's own task must be the first thing a pane
+    reads; the budget is a trailing scope note under `BUDGET_TRAILER_HEADER`."""
     block = budget_block(scope)
     text = task_text or ""
     # Check if this exact block or any scope budget marker is already present
@@ -286,7 +304,7 @@ def inject_budget(task_text: str, scope: str) -> str:
         return text
     if not text.strip():
         return block
-    return f"{block}\n\n{text}"
+    return f"{text}\n\n{BUDGET_TRAILER_HEADER}\n{block}"
 
 
 # ── Section-aware signal region (#602) ───────────────────────────────────────

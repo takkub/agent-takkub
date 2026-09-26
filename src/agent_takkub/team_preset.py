@@ -308,6 +308,16 @@ def current(project: str | None = None) -> dict:
     return _resolve(effective_id, project, raw)
 
 
+def snapshot(project: str | None = None) -> tuple[dict, str | None, str]:
+    """``(current(project), active_override(project), current_preset_id(project))``
+    from ONE file read instead of three — for the status-bar chip, which
+    repaints on the Qt main thread (#732)."""
+    raw = _load_raw(project)
+    override = raw.get("override") if raw.get("override") in PRESET_IDS else None
+    standing = raw.get("preset") if raw.get("preset") in PRESET_IDS else _DEFAULT_PRESET
+    return _resolve(override or standing, project, raw), override, standing
+
+
 def resolve(preset_id: str, project: str | None = None) -> dict:
     """The config `preset_id` WOULD produce for `project`, ignoring any
     active per-task override — unlike `current()`. UI surfaces that are
@@ -759,6 +769,70 @@ def pipeline_hop_summary_lines(
                 parts.append(f"{base_label} ({provider})")
         lines.append(f"hop {hop_idx}: " + " · ".join(parts))
     return lines
+
+
+def status_roles(project: str | None = None, cfg: dict | None = None) -> dict[str, dict]:
+    """Per-role "can I actually assign this?" view — preset × Settings (#735).
+
+    ``cfg["roles"]`` alone is what `takkub team status` used to print, and it
+    answered a question nobody asked: it reports the PRESET's roster, which
+    knows nothing about the per-project Settings toggles every enforcement
+    point consults (`pipeline_config.is_role_enabled`, #510). A real
+    contradiction shipped from that: status said
+    ``{'frontend': True, 'backend': True, ...}`` while `takkub assign --role
+    frontend` was answering "role frontend ถูกปิดใน Settings ของโปรเจคนี้"
+    and `takkub list` listed the same roles as disabled — Lead picked a role
+    off the status output and lost the round.
+
+    Each entry answers the enforcement question directly, reusing the same two
+    choke points the assign path uses so this view can never disagree with it:
+
+    * ``preset`` — the role's switch in the preset roster (`cfg["roles"]`;
+      the active ``checker`` counts as on). Advisory only under ``auto``,
+      which is exactly how :func:`can_spawn` treats it.
+    * ``settings`` — ``pipeline_config.is_role_enabled(role, project)``.
+    * ``assignable`` — BOTH gates pass, i.e. what ``takkub assign --role <r>``
+      would accept right now.
+    * ``reason`` — why not, phrased for a human reading a terminal.
+
+    Covers the whole `takkub assign --role X` surface — the preset roster, the
+    active ``checker`` (absent from ``cfg["roles"]``, yet the role Lead assigns
+    most) and every other name the assign path itself validates against
+    (`pipeline_config.valid_roles()`: reviewer-mode aliases, provider panes,
+    `shell`) — so a role `assign` would accept can never be missing from the
+    answer here. Read-only.
+    """
+    from .pipeline_config import disabled_roles, is_role_enabled, valid_roles
+
+    effective_cfg = cfg if cfg is not None else current(project)
+    off_in_settings = set(disabled_roles(project))
+    roster: dict[str, bool] = {r: False for r in valid_roles()}
+    roster.update(effective_cfg.get("roles") or {})
+    checker = effective_cfg.get("checker")
+    if checker:
+        roster.setdefault(str(checker), True)
+    out: dict[str, dict] = {}
+    for role, on in roster.items():
+        settings_on = is_role_enabled(role, project)
+        preset_ok, preset_reason = _can_spawn_from_cfg(role, effective_cfg, project)
+        assignable = bool(preset_ok and settings_on)
+        if assignable:
+            reason = ""
+        elif not settings_on:
+            reason = (
+                f"role {role} ถูกปิดใน Settings ของโปรเจคนี้ — เปิดที่ Providers & Roles หรือใช้ role อื่น"
+            )
+        else:
+            reason = preset_reason
+        out[role] = {
+            "preset": bool(on),
+            "settings": settings_on,
+            "assignable": assignable,
+            "checker": role == checker,
+            "reason": reason,
+            "disabled_in_settings": role in off_in_settings,
+        }
+    return out
 
 
 def stale_legacy_role_configs(project: str | None = None) -> list[dict[str, str]]:

@@ -726,6 +726,49 @@ _READY_TAIL_ROWS = 6
 # the taller window.
 _BOOT_MARKER_TAIL_ROWS = 20
 
+# #738: the BUSY probe gets a third, also-taller window, for the same structural
+# reason as the boot window but a different measured one. A provider's "I am
+# executing" status line is NOT bottom chrome — it is painted ABOVE the
+# composer, and codex's composer is airy (a blank row between the spinner, the
+# user turn, the composer and the status footer), so the 6-row READY window only
+# ever holds ~3 real content rows. Measured on a live codex 0.157.1 pane
+# (36 rows x 110 cols, own PtySession, 2026-09-26) mid-turn:
+#
+#     row 22  • Working (1s • esc to interrupt)      <- the only busy proof
+#     row 24                    ⚠ 5h limit: 41% left · resets at 22:15 · /status
+#     row 26  › Ask Codex to do anything
+#     row 28    GPT-6-Sol high · … · Fast off
+#     row 29    ? for shortcuts                        ⚠ 2 warnings · f2 to view
+#
+# row 22 is 8 rows above the last painted row, so `shows_busy_marker("codex")`
+# scanned `_ready_region` and read False on a genuinely working pane — which is
+# why #729's idle-reminder guard let its reminder through and typed it into that
+# pane's composer (issue #738). The same gap is what makes `_ready_region`'s
+# docstring wording ("bottom N NON-BLANK rows") wrong in practice: the window is
+# N PHYSICAL rows, and blank padding between composer rows eats it.
+#
+# Widening the READY scan is still not the fix (that window is deliberately
+# tight — #70/#20). Busy is the safe direction to err in: a false-busy only
+# costs one skipped reminder, while a false-idle types text into a working
+# pane's composer. Busy markers are also worded as provider chrome with their
+# own punctuation (`working (`, not `working`), so conversation prose quoting a
+# marker needs that punctuation too.
+_BUSY_MARKER_TAIL_ROWS = 20
+
+
+def _busy_marker_region(lines: list[str]) -> str:
+    """Lowercased bottom `_BUSY_MARKER_TAIL_ROWS` physical screen rows — the
+    window `shows_busy_marker` scans. Taller than `_ready_region` on purpose; see
+    `_BUSY_MARKER_TAIL_ROWS`'s note for the live codex capture that forces it."""
+    end = len(lines)
+    while end > 0 and not lines[end - 1].strip():
+        end -= 1
+    if end <= 0:
+        return ""
+    start = max(0, end - _BUSY_MARKER_TAIL_ROWS)
+    return "\n".join(lines[start:end]).lower()
+
+
 # Provider BOOT chrome: the CLI has not finished starting up, so there is no
 # composer on screen yet to receive anything.
 _BOOT_PHASE_MARKERS: tuple[str, ...] = (
@@ -977,21 +1020,134 @@ NO_PASTE_PLACEHOLDER_GAPS: dict[str, str] = {
 
 # Leading chars of the content to look for as a fallback presence signal when a
 # short paste rendered inline (no placeholder).
-_INPUT_FRAGMENT_LEN = 24
+_INPUT_FRAGMENT_LEN: int = 24
+_EMPTY_PROMPT_PLACEHOLDERS: tuple[str, ...] = (
+    "ask codex to do anything",
+    # #738: claude 2.1.283's empty-composer HINT, captured live 2026-09-26 as
+    # `❯ Try "edit <filepath> to..."` (the glyph carries a zero-width space, so
+    # match only the stable leading words). Required by the divider fallback in
+    # `_input_has_content`: without it an idle claude composer reads as a
+    # non-empty prompt and the pane would never be judged idle again.
+    'try "edit <',
+    "? for shortcuts",
+    "? for help",
+    "type your message or",
+    "type your message",
+    "ask anything...",
+)
+_PROMPT_LINE_PREFIX_RE = re.compile(r"^[›❯]\s*(.*)$")
+_DIVIDER_LINE_RE = re.compile(r"^[─\-═]{4,}\s*$")
+_STATUS_CHROME_KEYWORDS: tuple[str, ...] = (
+    "gpt-",
+    "fast off",
+    "fast on",
+    "bypass permissions",
+    "shift+tab to cycle",
+    "? for shortcuts",
+    "? for help",
+    "% left",
+    "esc to interrupt",
+    "esc to cancel",
+    "← for agents",
+    "tab to queue message",
+)
 
 
 def _input_has_content(region: str, fragment: str) -> bool:
     """True when the bottom input region shows pasted/typed content.
 
-    Two signals: one of the known multi-line paste placeholders, or — for
-    short inline content with no placeholder, or a provider not in
-    ``_PASTED_PLACEHOLDERS`` (see ``NO_PASTE_PLACEHOLDER_GAPS``) — a leading
-    fragment of the expected text. The region is already lowercased by
-    ``_ready_region``."""
+    Three signals:
+    1. Known multi-line paste placeholders (_PASTED_PLACEHOLDERS).
+    2. Leading fragment of expected text (when fragment passed).
+    3. Prompt glyph (›, ❯) followed by unsubmitted text in the active composer (#729).
+       Scoped specifically to the composer line (below the lowest divider, or the last
+       prompt line immediately preceding the status footer). Never matches prompt lines
+       from earlier history turns or '>' markdown quotes.
+    #738 widened that scope twice, both from live captures, never from guessed
+    wording: a WRAPPED draft is read as one composer (an indented continuation
+    row is part of the draft, a column-0 one is not), and when the block below
+    the last divider holds no prompt glyph at all the block ABOVE it is retried
+    so claude's `DIVIDER / ❯ / DIVIDER / footer` composer is reachable.
+    The region is already lowercased by ``_ready_region``."""
     if any(marker in region for marker in _PASTED_PLACEHOLDERS):
         return True
     frag = fragment.strip().lower()[:_INPUT_FRAGMENT_LEN]
-    return bool(frag) and frag in region
+    if bool(frag) and frag in region:
+        return True
+
+    # #738: raw rows, not pre-stripped ones — the WRAPPED-draft rule below has to
+    # see a row's left indent to tell a composer continuation from history.
+    raw = [ln for ln in region.splitlines() if ln.strip()]
+    if not raw:
+        return False
+
+    div_indices = [i for i, ln in enumerate(raw) if _DIVIDER_LINE_RE.match(ln.strip())]
+    if div_indices:
+        candidate_lines = raw[div_indices[-1] + 1 :]
+    else:
+        candidate_lines = raw
+
+    prompt_indices = [
+        i for i, ln in enumerate(candidate_lines) if _PROMPT_LINE_PREFIX_RE.match(ln.strip())
+    ]
+    if not prompt_indices and div_indices:
+        # #738: claude's composer is a bordered sandwich -- DIVIDER / ❯ <text> /
+        # DIVIDER / footer -- so the rows below the last divider are the footer
+        # chrome alone and the composer is unreachable from there. A live
+        # claude 2.1.283 capture (own PtySession, 110x36, 2026-09-26) shows
+        # both shapes, and they differ ONLY above that closing divider:
+        #   idle  row9 ────  row10 ❯ Try "edit <filepath> to..."  row11 ────
+        #   draft row9 ────  row10 ❯ Count slowly and deliberately from 1
+        #                      row11   to 400 in your reply ... and take
+        #                      row12   your time. Do not use any tools.
+        #                      row13 ────  row14   ⏵⏵ bypass permissions on
+        # So when the block below the last divider holds no prompt glyph, retry
+        # on the block ABOVE it (bounded by the divider before that). This stays
+        # a fallback: codex has no closing divider and keeps the original path.
+        # The idle shape is held False by claude's hint placeholder in
+        # `_EMPTY_PROMPT_PLACEHOLDERS` (same live capture) — without that entry
+        # every idle claude pane would read as "has pending input" and silently
+        # stop receiving nudges, which is why the two edits belong together.
+        upper_start = div_indices[-2] + 1 if len(div_indices) >= 2 else 0
+        candidate_lines = raw[upper_start : div_indices[-1]]
+        prompt_indices = [
+            i for i, ln in enumerate(candidate_lines) if _PROMPT_LINE_PREFIX_RE.match(ln.strip())
+        ]
+    if not prompt_indices:
+        return False
+
+    composer_idx = prompt_indices[-1]
+    prompt_line = candidate_lines[composer_idx].strip()
+
+    # #738: a draft longer than one row WRAPS, and the wrap continuation is not
+    # status chrome — the first cut of this function bailed on the first
+    # non-chrome row after the prompt line and so reported a two-row codex
+    # reminder as "nothing pending" (live capture, codex 0.157.1, 468/468
+    # samples). Continuation is positional: a row is still inside the composer
+    # while it is INDENTED (both codex and claude wrap their composer by two
+    # columns), so accept an indented non-chrome row as part of the draft and
+    # keep rejecting a column-0 non-chrome row, which is the history-echo case
+    # #729 was defending against.
+    for fl in candidate_lines[composer_idx + 1 :]:
+        fl_stripped = fl.strip()
+        if _DIVIDER_LINE_RE.match(fl_stripped):
+            continue
+        if any(kw in fl_stripped for kw in _STATUS_CHROME_KEYWORDS):
+            continue
+        if fl != fl.lstrip():
+            continue
+        # Column-0, non-chrome text after the prompt line means it's history output.
+        return False
+
+    m = _PROMPT_LINE_PREFIX_RE.match(prompt_line)
+    if not m:
+        return False
+    rest = m.group(1).strip()
+    if not rest:
+        return False
+    if any(p in rest for p in _EMPTY_PROMPT_PLACEHOLDERS):
+        return False
+    return True
 
 
 # Canonical (screen_text, fragment, expected) cases for pasted_placeholder_selftest()
@@ -1605,6 +1761,10 @@ _DONE_RESULT_RE = re.compile(r"^\s*(?:ok|err|error)\s*:", re.IGNORECASE)
 _TYPED_DONE_TAIL_ROWS = 14
 
 
+def _is_divider(s: str) -> bool:
+    return bool(_DIVIDER_LINE_RE.match(s.strip()))
+
+
 def find_typed_done_line(lines: list[str], cursor_row: int) -> str | None:
     """Pure helper behind `PtySession.has_typed_done_text` (unit-testable)."""
     if not lines:
@@ -1616,6 +1776,25 @@ def find_typed_done_line(lines: list[str], cursor_row: int) -> str | None:
         line = window[idx]
         if not _TYPED_DONE_RE.search(line):
             continue
+        # Never match a line starting with an interactive prompt glyph or shell prompt
+        if line.strip().startswith(("›", "❯", "> ", "$ ", "# ")):
+            continue
+        # Never match a line that is part of a task brief ([ROLE: ...])
+        if re.search(r"\[role:\s*\w+", line, re.IGNORECASE):
+            continue
+        # If this line is part of an unsubmitted multiline prompt draft at the composer
+        # (immediately preceded by a prompt glyph with no subsequent prompt line after it) (#729):
+        has_earlier_prompt = any(window[k].strip().startswith(("›", "❯")) for k in range(idx))
+        has_later_prompt = any(
+            window[k].strip().startswith(("›", "❯")) for k in range(idx + 1, len(window))
+        )
+        if has_earlier_prompt and not has_later_prompt:
+            earlier_p_idx = max(k for k in range(idx) if window[k].strip().startswith(("›", "❯")))
+            draft_lines = window[earlier_p_idx : idx + 1]
+            if any(re.search(r"\[role:\s*\w+", dl, re.IGNORECASE) for dl in draft_lines):
+                continue
+            if all(not _is_divider(window[k]) for k in range(earlier_p_idx + 1, idx)):
+                continue
         # A `$ takkub done ...`/`> takkub done` shell prompt line followed by
         # the CLI's answer means it DID run — only an unanswered mention counts.
         answered = any(_DONE_RESULT_RE.match(later) for later in window[idx + 1 :])
@@ -2666,7 +2845,9 @@ class PtySession(QObject):
         if self.is_at_ready_prompt():
             return False
         text = "\n".join(self.display_lines()).lower()
-        if "trust this folder" in text and _ENTER_CONFIRM_RE.search(text):
+        if "trust this folder" in text and (
+            _ENTER_CONFIRM_RE.search(text) or "trust and continue" in text or "1. trust" in text
+        ):
             return True
         if "bypass permissions mode" in text and _ENTER_CONFIRM_RE.search(text):
             return True
@@ -2845,6 +3026,27 @@ class PtySession(QObject):
 
         markers = busy_queue_confirm_markers_for(provider)
         return bool(markers) and any(m in text for m in markers)
+
+    def shows_busy_marker(self, provider: str | None = None) -> bool:
+        """True when the screen shows proof this provider's CLI is actively executing (#729).
+
+        Matches `provider`'s `busy_markers` from ProviderSpec — or Claude's busy
+        spinner line — against `_busy_marker_region`, NOT `_ready_region`: a
+        provider's own "I am working" status line renders ABOVE its composer, so
+        it routinely sits outside the 6-row ready window (#738, live codex
+        0.157.1 capture in `_BUSY_MARKER_TAIL_ROWS`). The markers themselves stay
+        provider data (`ProviderSpec.busy_markers`); only the window is widened,
+        so a new provider needs no change here.
+        """
+        from .provider_spec import busy_markers_for
+
+        region = _busy_marker_region(self.display_lines())
+        if (provider or "").casefold() == "claude":
+            return _has_busy_spinner_line(region)
+        markers = busy_markers_for(provider)
+        if not markers:
+            return False
+        return any(m.casefold() in region for m in markers)
 
     def is_at_update_splash(self) -> bool:
         """True when a codex 'update available!' startup splash is blocking the prompt.
@@ -3245,7 +3447,11 @@ class PtySession(QObject):
         """#435: the line if the pane printed ``takkub done`` as plain TEXT
         (a model narrating the command instead of executing it — gemini qa
         pane, 2026-08-29) near the cursor with no command result after it;
-        else None. See `find_typed_done_line`."""
+        else None. See `find_typed_done_line`.
+        Never matches if the pane has unsubmitted pending input in its composer (#729).
+        """
+        if self.shows_pending_input():
+            return None
         with self._screen_lock:
             lines = self._display_lines_locked()
             cursor_row = self.screen.cursor.y

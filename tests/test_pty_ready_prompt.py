@@ -308,6 +308,84 @@ class TestShowsPendingInput:
         )
         assert s.shows_pending_input() is False
 
+    def test_codex_unsubmitted_brief_in_prompt_shows_pending_input(self) -> None:
+        # #729: brief typed/pasted into composer prompt › without placeholder
+        s_pending = _feed_screen(
+            "────────────────────────────────────────",
+            "› ทดสอบของจริงว่าสิ่งที่แก้ทำงานถูก",
+            "gpt-5 · default",
+        )
+        assert s_pending.shows_pending_input() is True
+
+        s_empty = _feed_screen(
+            "────────────────────────────────────────",
+            "› ",
+            "gpt-5 · default",
+        )
+        assert s_empty.shows_pending_input() is False
+
+        s_placeholder = _feed_screen(
+            "────────────────────────────────────────",
+            "› ask codex to do anything",
+            "gpt-5 · default",
+        )
+        assert s_placeholder.shows_pending_input() is False
+
+        # #729: history line with › followed by assistant output is NOT pending input
+        s_history = _feed_screen(
+            "› please check git status",
+            "On branch main, working tree clean.",
+            "gpt-5 · default",
+        )
+        assert s_history.shows_pending_input() is False
+
+        # #729: markdown blockquote > in output is NOT pending input
+        s_quote = _feed_screen(
+            "Here is the quote from docs:",
+            "> important requirement",
+            "bypass permissions",
+        )
+        assert s_quote.shows_pending_input() is False
+
+    def test_shows_busy_marker(self) -> None:
+        # #729: shows_busy_marker reflects provider-specific working indicators
+        # Codex
+        s_codex_busy = _feed_screen("• Working (34s • esc to interrupt)", "gpt-5")
+        assert s_codex_busy.shows_busy_marker("codex") is True
+
+        s_codex_idle = _feed_screen("› ", "gpt-5 · default")
+        assert s_codex_idle.shows_busy_marker("codex") is False
+
+        # Codex output containing "working tree clean" must NOT read as busy
+        s_codex_output = _feed_screen(
+            "On branch main",
+            "nothing to commit, working tree clean",
+            "› ",
+            "gpt-5 · default",
+        )
+        assert s_codex_output.shows_busy_marker("codex") is False
+
+        # Gemini
+        s_gemini_busy = _feed_screen("Thinking... (esc to cancel, 12s)", "? for shortcuts")
+        assert s_gemini_busy.shows_busy_marker("gemini") is True
+
+        # Claude: idle ready prompt with esc to interrupt in footer MUST NOT be busy (#587 C2)
+        s_claude_idle = _feed_screen(
+            "────────────────────────────────────────",
+            "❯ ",
+            "────────────────────────────────────────",
+            "⏵⏵ bypass permissions on (shift+tab to cycle) · esc to interrupt · ← for agents",
+        )
+        assert s_claude_idle.shows_busy_marker("claude") is False
+
+        # Claude: busy spinner line is busy
+        s_claude_busy = _feed_screen(
+            "✻ Thinking… (esc to interrupt)",
+            "────────────────────────────────────────",
+            "❯ ",
+        )
+        assert s_claude_busy.shows_busy_marker("claude") is True
+
 
 def test_gemini_thinking_with_update_footer_is_not_ready() -> None:
     # The update footer must not flip a *thinking* gemini to ready -- the
@@ -1312,4 +1390,16 @@ class TestTrustPromptSelectsNo:
     def test_bypass_permissions_dialog_cursor_on_yes_not_flagged(self) -> None:
         s = self._session(self._BYPASS_PERMISSIONS_YES_SELECTED)
         assert s.is_at_trust_prompt()
+        assert not s.trust_prompt_selects_no()
+
+    def test_codex_v0157_trust_folder_modal_detected(self) -> None:
+        # #730: Codex 0.157.1 trust prompt has "Trust this folder?" and "1. Trust and continue"
+        # without "Enter to confirm".
+        lines = [
+            "Trust this folder?",
+            "1. Trust and continue",
+            "2. Quit",
+        ]
+        s = self._session(lines)
+        assert s.is_at_trust_prompt() is True
         assert not s.trust_prompt_selects_no()

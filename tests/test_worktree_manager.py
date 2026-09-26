@@ -27,6 +27,7 @@ from agent_takkub.worktree_manager import (
     sanitize_ref_component,
     snapshot_porcelain_paths,
     summarize_diffstat,
+    worktree_created_ts,
     worktree_dest,
     worktree_root,
 )
@@ -3261,7 +3262,8 @@ class TestPreTrustPaneCwd:
         """#571 regression: newly-created worktrees (spawned seconds earlier)
         must not be removed by `clean` even if not yet registered in live-pane
         registry. A 5-minute grace period prevents race conditions where a pane
-        is spawned but not yet in the live-pane registry."""
+        is spawned but not yet in the live-pane registry. The age comes from the
+        epoch `branch_name()` just minted (#734) — not from the directory mtime."""
         import time
 
         # Use FakeRunner to simulate git operations without a real repo
@@ -3276,8 +3278,11 @@ class TestPreTrustPaneCwd:
         root.mkdir()
         (root / ".git").mkdir()
 
-        # Create a recently-created worktree directory and git directory
-        wt_path = self.tmp_path / "worktrees" / "wt" / "test-backend-1234567890"
+        # A worktree spawned right now — branch name carries the epoch, exactly
+        # as create() mints it.
+        fresh_ts = int(time.time())
+        branch = branch_name("test-backend", fresh_ts)
+        wt_path = self.tmp_path / "worktrees" / branch.replace("/", os.sep)
         wt_path.mkdir(parents=True, exist_ok=True)
         (wt_path / ".git").mkdir(exist_ok=True)
 
@@ -3286,7 +3291,7 @@ class TestPreTrustPaneCwd:
             return [
                 {
                     "path": str(wt_path),
-                    "branch": "wt/test-backend-1234567890",
+                    "branch": branch,
                     "dirty": False,
                     "ahead": 0,
                 }
@@ -3301,16 +3306,130 @@ class TestPreTrustPaneCwd:
         # At least one KEEP line should mention the newly created worktree
         assert len(kept_lines) > 0, f"Expected KEEP line for new worktree, got: {lines}"
 
-        # Now simulate time passing (5+ minutes) and verify it's no longer protected
-        # by manually updating the mtime of the worktree directory
-        old_time = time.time() - 400  # 6+ minutes ago
-        try:
-            os.utime(wt_path, (old_time, old_time))
-        except (OSError, ValueError):
-            pass  # Skip if we can't touch the directory
+        # Now simulate time passing (5+ minutes) by re-minting the branch as it
+        # was 6+ minutes ago. The directory mtime stays *fresh* on purpose —
+        # the cockpit plants/deletes AGENTS.md in there, so a fresh mtime no
+        # longer means "just created" (#734).
+        old_ts = fresh_ts - 400
+        old_branch = branch_name("test-backend", old_ts)
+        old_wt_path = self.tmp_path / "worktrees" / old_branch.replace("/", os.sep)
+        old_wt_path.mkdir(parents=True, exist_ok=True)
+        (old_wt_path / ".git").mkdir(exist_ok=True)
+        monkeypatch.setattr(
+            mgr,
+            "list_isolated",
+            lambda git_root: [
+                {"path": str(old_wt_path), "branch": old_branch, "dirty": False, "ahead": 0}
+            ],
+        )
 
         # Now clean should not protect it (it's old, not newly created)
         lines = mgr.clean_isolated(root, live_paths=set())
         old_kept_lines = [line for line in lines if "KEEP" in line and "สร้างใหม่" in line]
         # Should not have the "newly created" KEEP line anymore for old worktrees
         assert len(old_kept_lines) == 0, f"Old worktree should not be protected, got: {lines}"
+
+    def test_clean_isolated_ignores_a_fresh_directory_mtime_on_an_old_worktree(self, monkeypatch):
+        """#734 regression: a worktree created 76 minutes ago whose directory
+        mtime is seconds old (the cockpit just removed the AGENTS.md it planted)
+        must still be sweepable — the old mtime-based grace kept reporting it as
+        "worktree สร้างใหม่" and nothing was ever cleaned."""
+        import time
+
+        runner = FakeRunner(
+            [
+                (["worktree", "list"], _ok(json.dumps([]))),
+                (["rev-parse", "--show-toplevel"], _ok(str(self.tmp_path / "repo") + "\n")),
+            ]
+        )
+        mgr = WorktreeManager(runner=runner)
+        root = self.tmp_path / "repo"
+        root.mkdir()
+        (root / ".git").mkdir()
+
+        old_ts = int(time.time()) - 76 * 60
+        branch = branch_name("codex", old_ts)
+        wt_path = self.tmp_path / "worktrees" / branch.replace("/", os.sep)
+        wt_path.mkdir(parents=True, exist_ok=True)
+        (wt_path / ".git").mkdir(exist_ok=True)
+        os.utime(wt_path, None)  # touched right now — the #734 trap
+
+        monkeypatch.setattr(
+            mgr,
+            "list_isolated",
+            lambda git_root: [{"path": str(wt_path), "branch": branch, "dirty": False, "ahead": 0}],
+        )
+
+        lines = mgr.clean_isolated(root, live_paths=set())
+        assert not [ln for ln in lines if "KEEP" in ln and "สร้างใหม่" in ln], lines
+
+    def test_clean_isolated_keeps_a_worktree_whose_age_cannot_be_established(self, monkeypatch):
+        """A checkout that is still on disk but carries no epoch in its branch
+        name and no git admin dir cannot be aged — keep it rather than guess
+        (an undeletable leftover beats a live pane losing its worktree)."""
+        runner = FakeRunner(
+            [
+                (["worktree", "list"], _ok(json.dumps([]))),
+                (["rev-parse", "--show-toplevel"], _ok(str(self.tmp_path / "repo") + "\n")),
+            ]
+        )
+        mgr = WorktreeManager(runner=runner)
+        root = self.tmp_path / "repo"
+        root.mkdir()
+        (root / ".git").mkdir()
+
+        wt_path = self.tmp_path / "worktrees" / "handmade"
+        wt_path.mkdir(parents=True, exist_ok=True)
+        (wt_path / ".git").mkdir(exist_ok=True)
+
+        monkeypatch.setattr(
+            mgr,
+            "list_isolated",
+            lambda git_root: [
+                {"path": str(wt_path), "branch": "wt/handmade", "dirty": False, "ahead": 0}
+            ],
+        )
+
+        lines = mgr.clean_isolated(root, live_paths=set())
+        assert [ln for ln in lines if ln.startswith("KEEP")], lines
+
+
+class TestWorktreeCreatedTs:
+    """#734: creation time must come from a value that never changes."""
+
+    def test_branch_epoch_wins_over_everything(self, tmp_path):
+        wt = tmp_path / "wt"
+        (wt / ".git").mkdir(parents=True)
+        ts = 1_790_399_293
+        assert worktree_created_ts(f"wt/codex-{ts}", wt) == float(ts)
+
+    def test_ms_scale_from_the_collision_retry_is_normalized(self, tmp_path):
+        wt = tmp_path / "wt"
+        (wt / ".git").mkdir(parents=True)
+        assert worktree_created_ts("wt/frontend-1790399293000", wt) == 1_790_399_293.0
+
+    def test_falls_back_to_the_git_admin_dir_when_the_branch_has_no_epoch(self, tmp_path):
+        wt = tmp_path / "wt"
+        admin = tmp_path / "repo" / ".git" / "worktrees" / "wt"
+        admin.mkdir(parents=True)
+        wt.mkdir(parents=True)
+        (wt / ".git").write_text(f"gitdir: {admin}\n", encoding="utf-8")
+        created = worktree_created_ts("wt/handmade", wt)
+        assert created is not None
+        assert abs(created - admin.stat().st_ctime) < 5
+
+    def test_a_short_number_is_not_an_epoch(self, tmp_path):
+        wt = tmp_path / "wt"
+        (wt / ".git").mkdir(parents=True)
+        assert worktree_created_ts("wt/frontend-9", wt) is None
+
+    def test_returns_none_when_there_is_nothing_to_read(self, tmp_path):
+        wt = tmp_path / "wt"
+        wt.mkdir()
+        assert worktree_created_ts("", wt) is None
+
+    def test_a_bogus_future_stamp_is_rejected(self, tmp_path):
+        wt = tmp_path / "wt"
+        (wt / ".git").mkdir(parents=True)
+        absurd = 4_000_000_000
+        assert worktree_created_ts(f"wt/codex-{absurd}", wt) is None

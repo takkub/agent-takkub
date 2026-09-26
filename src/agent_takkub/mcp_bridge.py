@@ -64,6 +64,7 @@ to that provider's own injection surface:
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -71,6 +72,8 @@ import pathlib
 import re
 import shutil
 import subprocess
+import threading
+import tomllib
 from pathlib import Path
 
 from ._win_console import SUBPROCESS_NO_WINDOW
@@ -161,71 +164,154 @@ class McpResolutionError(RuntimeError):
 
 _codex_mcp_names_cache: dict[tuple, list[str]] = {}
 
+# Single-flight for the `mcp list` / `--version` subprocesses: a spawn that
+# lands while `prewarm_codex_mcp_resolution`'s background thread is already
+# resolving the same key waits for that result instead of paying a second
+# subprocess on the Qt main thread (#732).
+_codex_resolve_lock = threading.Lock()
+
+# Top-level config.toml tables codex itself rewrites during normal use —
+# `[projects.'<dir>'] trust_level` every time a pane opens a new worktree,
+# `[tui]`/`[notice]` NUX counters on every launch — and that have no say in
+# which MCP servers `mcp list` reports. #732: keying the names cache on the
+# file's raw mtime meant every one of those rewrites invalidated it, so the
+# (1-6s) `codex mcp list` subprocess re-ran on the Qt main thread for nearly
+# every codex spawn. `projects` only matters when a project-local
+# `.codex/config.toml` exists (trust gates whether codex loads it), which
+# `_codex_config_fingerprint` handles by keying on the whole file then.
+_CODEX_MCP_IRRELEVANT_TOP_KEYS = frozenset({"projects", "tui", "notice"})
+
+# (path, mtime_ns, size) -> digest, so an unchanged file is only stat'd, not
+# re-read and re-parsed, on every spawn.
+_codex_file_digest_cache: dict[tuple[str, int, int, bool], str | None] = {}
+
 
 def invalidate_codex_mcp_names_cache() -> None:
     """Clear cached codex resolved MCP server names."""
     _codex_mcp_names_cache.clear()
+    _codex_file_digest_cache.clear()
 
 
-def _get_codex_config_mtime(env: dict[str, str], cwd: str) -> tuple[float | None, float | None]:
-    global_cfg = env.get("CODEX_HOME")
-    if global_cfg:
-        g_path = Path(global_cfg) / "config.toml"
+def _codex_file_digest(path: Path, *, mcp_only: bool) -> str | None:
+    """Digest of the parts of a codex config.toml that can change `mcp list`.
+
+    *mcp_only* drops `_CODEX_MCP_IRRELEVANT_TOP_KEYS` before hashing; an
+    unparseable file falls back to hashing its raw bytes (conservative: any
+    edit invalidates). `None` when the file doesn't exist/can't be read.
+    """
+    try:
+        st = path.stat()
+    except OSError:
+        return None
+    memo_key = (str(path), st.st_mtime_ns, st.st_size, mcp_only)
+    if memo_key in _codex_file_digest_cache:
+        return _codex_file_digest_cache[memo_key]
+    try:
+        raw = path.read_bytes()
+    except OSError:
+        return None
+    payload = raw
+    if mcp_only:
+        try:
+            data = tomllib.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, tomllib.TOMLDecodeError):
+            data = None
+        if isinstance(data, dict):
+            relevant = {k: v for k, v in data.items() if k not in _CODEX_MCP_IRRELEVANT_TOP_KEYS}
+            payload = json.dumps(relevant, sort_keys=True, default=str).encode("utf-8")
+    digest = hashlib.sha256(payload).hexdigest()
+    _codex_file_digest_cache[memo_key] = digest
+    return digest
+
+
+def _codex_config_fingerprint(env: dict[str, str], cwd: str) -> tuple:
+    """Cache-key component for everything config-side that feeds `mcp list`.
+
+    Global config (`$CODEX_HOME/config.toml`, else `~/.codex/config.toml`)
+    contributes only its MCP-relevant content. Project-local
+    `.codex/config.toml` files from *cwd* up to the filesystem root
+    contribute their full content — and, when any exist, the global file is
+    keyed in full too, since its `[projects]` trust entries decide whether
+    codex loads them. Deliberately NOT keyed on *cwd* itself: two worktrees
+    with no local codex config resolve identically, so a fan-out of codex
+    panes across worktrees shares one resolve (#732).
+    """
+    home = env.get("CODEX_HOME")
+    g_path = (Path(home) if home else Path.home() / ".codex") / "config.toml"
+    locals_: list[tuple[str, str]] = []
+    try:
+        start = Path(cwd).resolve()
+    except OSError:
+        start = Path(cwd)
+    # Codex looks for project `.codex/config.toml` layers from cwd up to the
+    # project root (first ancestor with `.git`); outside a repo, cwd only.
+    # Walking past the root would pick up e.g. `~/.codex/config.toml` for any
+    # cwd under $HOME when CODEX_HOME is isolated elsewhere, and re-key on
+    # every unrelated write to it.
+    chain: list[Path] = [start]
+    for d in (start, *start.parents):
+        if d != start:
+            chain.append(d)
+        if (d / ".git").exists():
+            break
     else:
-        g_path = Path.home() / ".codex" / "config.toml"
-    try:
-        g_mtime = g_path.stat().st_mtime
-    except OSError:
-        g_mtime = None
+        chain = [start]
+    for d in chain:
+        l_path = d / ".codex" / "config.toml"
+        if l_path == g_path:
+            continue
+        digest = _codex_file_digest(l_path, mcp_only=False)
+        if digest is not None:
+            locals_.append((str(l_path), digest))
+    global_digest = _codex_file_digest(g_path, mcp_only=not locals_)
+    return (str(g_path), global_digest, tuple(locals_))
 
-    l_path = Path(cwd) / ".codex" / "config.toml"
-    try:
-        l_mtime = l_path.stat().st_mtime
-    except OSError:
-        l_mtime = None
 
-    return (g_mtime, l_mtime)
+def _codex_bin_key(provider_bin: str) -> tuple[str, float | None]:
+    resolved = shutil.which(provider_bin) or provider_bin
+    try:
+        return (provider_bin, os.stat(resolved).st_mtime)
+    except OSError:
+        return (provider_bin, None)
 
 
 def _codex_resolved_mcp_names(provider_bin: str, cwd: str, env: dict[str, str]) -> list[str]:
     """Ask Codex for config-defined MCP names without loading plugin MCPs.
 
-    Cached per binary and config mtime so repeated spawns do not run subprocess.run
-    on the Qt main thread.
+    Cached per binary (path + mtime) and MCP-relevant config content — see
+    `_codex_config_fingerprint` — so repeated spawns do not run
+    subprocess.run on the Qt main thread (#732).
     """
-    resolved = shutil.which(provider_bin) or provider_bin
-    try:
-        bin_mtime = os.stat(resolved).st_mtime
-    except OSError:
-        bin_mtime = None
-    g_mtime, l_mtime = _get_codex_config_mtime(env, cwd)
-    cache_key = (provider_bin, bin_mtime, g_mtime, l_mtime, cwd)
+    cache_key = (*_codex_bin_key(provider_bin), _codex_config_fingerprint(env, cwd))
     if cache_key in _codex_mcp_names_cache:
         return list(_codex_mcp_names_cache[cache_key])
 
-    try:
-        result = subprocess.run(
-            [provider_bin, "-c", "features.plugins=false", "mcp", "list", "--json"],
-            cwd=cwd,
-            env=env,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=5,
-            check=True,
-            creationflags=SUBPROCESS_NO_WINDOW,
-        )
-        servers = json.loads(result.stdout)
-    except (OSError, subprocess.SubprocessError, json.JSONDecodeError) as exc:
-        raise McpResolutionError("could not resolve inherited Codex MCP servers") from exc
-    if not isinstance(servers, list):
-        raise McpResolutionError("Codex MCP list returned a non-list payload")
-    names = [server.get("name") for server in servers if isinstance(server, dict)]
-    if not all(isinstance(name, str) and _TOML_BARE_KEY_RE.fullmatch(name) for name in names):
-        raise McpResolutionError("Codex MCP list contained an unsupported server name")
-    _codex_mcp_names_cache[cache_key] = list(names)
-    return names
+    with _codex_resolve_lock:
+        if cache_key in _codex_mcp_names_cache:
+            return list(_codex_mcp_names_cache[cache_key])
+        try:
+            result = subprocess.run(
+                [provider_bin, "-c", "features.plugins=false", "mcp", "list", "--json"],
+                cwd=cwd,
+                env=env,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=5,
+                check=True,
+                creationflags=SUBPROCESS_NO_WINDOW,
+            )
+            servers = json.loads(result.stdout)
+        except (OSError, subprocess.SubprocessError, json.JSONDecodeError) as exc:
+            raise McpResolutionError("could not resolve inherited Codex MCP servers") from exc
+        if not isinstance(servers, list):
+            raise McpResolutionError("Codex MCP list returned a non-list payload")
+        names = [server.get("name") for server in servers if isinstance(server, dict)]
+        if not all(isinstance(name, str) and _TOML_BARE_KEY_RE.fullmatch(name) for name in names):
+            raise McpResolutionError("Codex MCP list contained an unsupported server name")
+        _codex_mcp_names_cache[cache_key] = list(names)
+        return names
 
 
 def _codex_cli_version(
@@ -289,15 +375,87 @@ def _codex_cli_version_cached(
     """Cached wrapper around `_codex_cli_version` — see `_version_cache`'s
     comment for the invalidation strategy. This is what `_codex_mcp_argv`
     actually calls."""
-    resolved = shutil.which(provider_bin) or provider_bin
-    try:
-        mtime = os.stat(resolved).st_mtime
-    except OSError:
-        mtime = None
-    key = (provider_bin, mtime)
+    key = _codex_bin_key(provider_bin)
     if key not in _version_cache:
-        _version_cache[key] = _codex_cli_version(provider_bin, cwd, env)
+        with _codex_resolve_lock:
+            if key not in _version_cache:
+                _version_cache[key] = _codex_cli_version(provider_bin, cwd, env)
     return _version_cache[key]
+
+
+def _codex_needs_name_resolve(version: tuple[int, int, int] | None) -> bool:
+    return (
+        version is None
+        or version < _CODEX_RESOLVE_SAFE_MIN_VERSION
+        or version > _CODEX_RESOLVE_SAFE_MAX_VERSION
+    )
+
+
+def prewarm_codex_mcp_resolution(
+    provider_bin: str, cwd: str, env: dict[str, str]
+) -> threading.Thread | None:
+    """Fill the version + MCP-name caches on a daemon thread (#732).
+
+    Both probes are subprocesses (`codex --version`, `codex mcp list`) that
+    `_codex_mcp_argv` otherwise runs synchronously inside a spawn on the Qt
+    main thread — measured 1-6s each on codex-cli 0.157.1. Warming them at
+    cockpit boot means the first codex spawn is a cache hit. Best-effort:
+    any failure is swallowed (the spawn path re-runs the probe and keeps its
+    fail-closed `McpResolutionError` contract). Honors the same
+    `TAKKUB_SKIP_MCP_WARM` switch as the other MCP warmers so the test suite
+    never launches a real codex.
+    """
+    if os.environ.get("TAKKUB_SKIP_MCP_WARM", "").strip() not in ("", "0"):
+        return None
+
+    def _run() -> None:
+        try:
+            version = _codex_cli_version_cached(provider_bin, cwd, env)
+            if _codex_needs_name_resolve(version):
+                _codex_resolved_mcp_names(provider_bin, cwd, env)
+        except Exception as exc:  # warm-up is best-effort
+            _log.debug("prewarm_codex_mcp_resolution failed: %r", exc)
+
+    t = threading.Thread(target=_run, name="warm-codex-mcp", daemon=True)
+    t.start()
+    return t
+
+
+def prewarm_codex_mcp_resolution_for_boot() -> threading.Thread | None:
+    """Cockpit-boot entry point for `prewarm_codex_mcp_resolution`.
+
+    Resolves the codex binary, the active project's cwd and the pane's
+    `CODEX_HOME` the same way a spawn does (`spec.custom_discovery_fn`,
+    `pane_env.inject_provider_home_env`) — but all inside the daemon thread,
+    since binary discovery itself can shell out. A codex that isn't
+    installed is a silent no-op.
+    """
+    if os.environ.get("TAKKUB_SKIP_MCP_WARM", "").strip() not in ("", "0"):
+        return None
+
+    def _run() -> None:
+        try:
+            from .config import active_project, default_cwd_for_role
+            from .pane_env import inject_provider_home_env
+            from .provider_spec import PROVIDER_REGISTRY
+
+            spec = PROVIDER_REGISTRY.get("codex")
+            provider_bin = spec.custom_discovery_fn() if spec and spec.custom_discovery_fn else None
+            if not provider_bin:
+                return
+            project, _ = active_project()
+            cwd = default_cwd_for_role("codex", project=project) or os.getcwd()
+            env = dict(os.environ)
+            inject_provider_home_env(env, "codex", project or "")
+            worker = prewarm_codex_mcp_resolution(provider_bin, cwd, env)
+            if worker is not None:
+                worker.join()
+        except Exception as exc:  # warm-up is best-effort
+            _log.debug("prewarm_codex_mcp_resolution_for_boot failed: %r", exc)
+
+    t = threading.Thread(target=_run, name="warm-codex-mcp-boot", daemon=True)
+    t.start()
+    return t
 
 
 def _toml_literal(value: object) -> str:
@@ -412,11 +570,7 @@ def _codex_mcp_argv(
         _cwd = cwd or os.getcwd()
         _env = env or os.environ.copy()
         version = _codex_cli_version_cached(_bin, _cwd, _env)
-        if (
-            version is None
-            or version < _CODEX_RESOLVE_SAFE_MIN_VERSION
-            or version > _CODEX_RESOLVE_SAFE_MAX_VERSION
-        ):
+        if _codex_needs_name_resolve(version):
             names = _codex_resolved_mcp_names(_bin, _cwd, _env)
             for name in names:
                 if name not in servers:

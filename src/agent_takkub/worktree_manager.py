@@ -310,6 +310,85 @@ def branch_name(role: str, ts: int) -> str:
     return f"{_BRANCH_PREFIX}/{sanitize_ref_component(role)}-{ts}"
 
 
+#: #734: trailing epoch stamp :func:`branch_name` mints into every isolated
+#: branch (``wt/<role>-<epoch>``). 9-16 digits covers both scales this module
+#: ever produces: :func:`branch_name` (epoch seconds, 10 digits) and the #494
+#: collision-retry :func:`_retry_ts` (epoch ms x 1000 + salt, 16 digits).
+_WT_EPOCH_SUFFIX_RE = re.compile(r"-(\d{9,16})$")
+
+#: Anything a stat reports as "in the future" is a clock-skew / bad-parse
+#: artifact, not a creation time — such a value is discarded rather than
+#: rendered as a negative age.
+_FUTURE_TS_SLACK_S = 300
+
+
+def worktree_created_ts(branch: str, worktree_path: Path) -> float | None:
+    """When this worktree was created, from a value that never changes (#734).
+
+    ``clean_isolated``'s #571 "protect a just-spawned worktree" grace used to
+    read the worktree DIRECTORY's mtime. A directory's mtime moves forward
+    every time an entry is added or removed at its top level — and the
+    cockpit itself does that (planting ``AGENTS.md`` on assign, deleting it on
+    pane close). Measured on a real repo: ``wt/codex-1790399293`` was created
+    12:08:13 and its directory mtime had already moved to 12:15:02, so
+    ``clean`` at 12:16 reported an 8-minute-old worktree as "created 14s ago"
+    and refused to sweep it. Creation time must come from something immutable,
+    so this reads, in order:
+
+    1. the epoch stamp in the branch name — the value ``create()`` was handed
+       at spawn time, needs no filesystem access, and is exact everywhere;
+    2. the creation time of the worktree's own admin directory under the main
+       repo's ``.git/worktrees/<name>``, located through the ``.git`` pointer
+       file git writes into every linked worktree. On Windows ``st_ctime`` IS
+       the creation time and never changes; on POSIX it is inode-change time,
+       which is why this is a fallback and not the primary source;
+    3. ``None`` — meaning "age unknown".
+
+    Never falls back to a directory mtime: that value is exactly the one
+    #734 proved to be wrong. ``None`` makes the caller keep the worktree
+    (see ``clean_isolated``), which is the safe direction — an undeletable
+    leftover beats a live pane's worktree vanishing.
+    """
+    if branch:
+        m = _WT_EPOCH_SUFFIX_RE.search(branch.strip())
+        if m:
+            raw = int(m.group(1))
+            # Normalize either minted scale down to epoch seconds.
+            while raw > 100_000_000_000:
+                raw //= 1000
+            if 1_000_000_000 <= raw <= time.time() + _FUTURE_TS_SLACK_S:
+                return float(raw)
+    admin = _worktree_admin_dir(worktree_path)
+    if admin is not None:
+        try:
+            created = admin.stat().st_ctime
+        except OSError:
+            created = 0.0
+        if created and created <= time.time() + _FUTURE_TS_SLACK_S:
+            return float(created)
+    return None
+
+
+def _worktree_admin_dir(worktree_path: Path) -> Path | None:
+    """The ``.git/worktrees/<name>`` admin dir of a linked worktree, if any.
+
+    ``git worktree add`` writes a ``.git`` FILE into the new checkout whose
+    only content is ``gitdir: <admin dir>``; the admin dir is created with it
+    and is what actually makes the checkout a worktree.
+    """
+    pointer = worktree_path / ".git"
+    try:
+        if not pointer.is_file():
+            return None
+        raw = pointer.read_text(encoding="utf-8", errors="replace").strip()
+    except OSError:
+        return None
+    if not raw.lower().startswith("gitdir:"):
+        return None
+    admin = Path(raw.split(":", 1)[1].strip())
+    return admin if admin.is_dir() else None
+
+
 def _retry_ts() -> int:
     """Higher-resolution, salted ``ts`` for a `create()` retry after a
     branch/dest name collision (#494): epoch milliseconds plus a random 0-999
@@ -2197,19 +2276,30 @@ class WorktreeManager:
                 continue
             # #571: protect newly-created worktrees (within last 5 min) from removal
             # — pane spawned seconds earlier may not be registered in live-pane registry yet
-            try:
-                worktree_path = Path(row["path"]).resolve()
-                mtime = worktree_path.stat().st_mtime if worktree_path.exists() else 0
-                elapsed = time.time() - mtime
-                if elapsed < 300:  # 5 minutes
-                    out.append(
-                        f"KEEP  {row['branch']} — worktree สร้างใหม่ ({int(elapsed)}s ที่แล้ว) "
-                        "— pane อาจยังไม่ register ใน live registry ให้รอสักครู่"
-                    )
-                    continue
-            except (OSError, ValueError):
-                # If we can't stat the worktree, skip this check and continue
-                pass
+            # #734: the age comes from an immutable creation time (branch-epoch,
+            # else the worktree's git admin dir) — the worktree DIRECTORY's mtime
+            # moves whenever the cockpit adds/removes a top-level file there (it
+            # plants AGENTS.md on assign and deletes it on close), which made an
+            # 8-minute-old worktree report as "created 14s ago" and escape the
+            # sweep. An unknown age on a checkout that IS still on disk keeps the
+            # worktree rather than guessing; a path that is already gone has
+            # nothing to protect and continues to the sweep.
+            worktree_path = Path(row["path"])
+            created = worktree_created_ts(row["branch"], worktree_path)
+            if created is None and worktree_path.exists():
+                out.append(
+                    f"KEEP  {row['branch']} — เช็คเวลาสร้าง worktree ไม่ได้ "
+                    "(ไม่มี epoch ในชื่อ branch และหา git admin dir ไม่เจอ) — "
+                    "ลบเองด้วย `git worktree remove` เมื่อแน่ใจว่าไม่มี pane ใช้"
+                )
+                continue
+            elapsed = time.time() - created if created is not None else None
+            if elapsed is not None and elapsed < 300:  # 5 minutes
+                out.append(
+                    f"KEEP  {row['branch']} — worktree สร้างใหม่ ({int(elapsed)}s ที่แล้ว) "
+                    "— pane อาจยังไม่ register ใน live registry ให้รอสักครู่"
+                )
+                continue
             cherry_picked = False
             keep_reason = ""
             discard_stat = ""

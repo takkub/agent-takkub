@@ -728,6 +728,35 @@ class TestSettledOutputSinceWriteSignal:
         )
         assert "delivery-uncertain" in lead_written
 
+    def test_stuck_in_composer_settles_uncertain_and_warns_even_with_post_write_output(
+        self, orch: Orchestrator, monkeypatch
+    ) -> None:
+        """#729: even if output was produced after write (e.g. Enter echo/redraw),
+        a task still sitting in the composer must NOT be marked accepted — it settles
+        as uncertain (stuck in composer) and warns Lead."""
+        reviewer = _pane(_live_session())
+        reviewer.session.is_at_ready_prompt.return_value = True
+        reviewer.session.shows_pending_input.return_value = True  # brief stuck!
+        reviewer.session.shows_busy_marker.return_value = False
+        reviewer.session.seconds_since_output.return_value = 0.1
+        # Produced output after write
+        reviewer.session.last_output_monotonic.return_value = 9999.0
+        lead = _pane(_live_session())
+        orch._panes_by_project["P"] = {"lead": lead, "reviewer": reviewer}
+        monkeypatch.setattr(orch_mod.QTimer, "singleShot", staticmethod(lambda _ms, fn: fn()))
+
+        with (
+            patch("agent_takkub.orchestrator._log_event"),
+            patch("agent_takkub.lead_inbox._log_event") as mock_log,
+        ):
+            orch._send_when_ready("reviewer", "run smoke", max_wait_ms=1000, project="P")
+
+        delivery = next(iter(orch._delivery_manager._deliveries.values()))
+        assert delivery.state.value == "uncertain"
+        assert any(
+            c.args and c.args[0] == "task_deliver_stuck_in_composer" for c in mock_log.mock_calls
+        )
+
 
 class TestSpawnFailureNotSilent:
     """#26 root cause: when spawn can't register the pane (main_window routing
