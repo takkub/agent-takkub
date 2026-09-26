@@ -4,6 +4,16 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 
 ## [vNEXT]
 
+## [v2.1.41] - 2026-09-26
+
+### Fixed (แก้)
+
+- **Quota false positive (#743):** จำกัดการตรวจ quota ตาม provider และข้อความแบนเนอร์จริง ไม่ตีความข้อความที่ agent ยกมาอ้างว่าเป็นการชน quota; ล้างสถานะ stall เมื่อยืนยันแล้วว่าไม่ชน quota
+- **Native subagent guard (#744):** ใช้ role ของ subagent ที่ลงทะเบียนใน task ledger เมื่อ hook ส่ง `agent_id` มา แทน role ของ Lead ที่สืบทอดทาง environment
+- **Turbo qa-gate (#745):** ส่ง flags ให้ Turbo โดยตรงสำหรับ script ปกติ และใช้ environment สำหรับ script ที่มีคำสั่งต่อเนื่อง ป้องกัน flags หลุดไปถึง Vitest/Jest
+- **Queued follow-up (#746):** ไม่รับ `done` หรือปิด pane ขณะที่ข้อความ follow-up ยังรอทำงานในคิว พร้อมแจ้ง Lead ให้ทราบ
+- **CI ข้ามระบบ:** ปรับเทส pane ที่จงใจทดสอบโหมดคง pane ให้ระบุโหมดนั้น และให้เทส Codex trust path รองรับ path ตัวพิมพ์เล็กบน Linux
+
 ## [v2.1.40] - 2026-09-25
 
 ### Fixed (แก้)
