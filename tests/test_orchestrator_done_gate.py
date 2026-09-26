@@ -77,6 +77,34 @@ def _written_str(mock_session: MagicMock) -> str:
 # ──────────────────────────────────────────────────────────────────────
 
 
+def test_codex_queued_followup_blocks_done_until_queue_runs(orch, monkeypatch, tmp_path):
+    pane = _make_working_pane(str(tmp_path))
+    pane.model.provider_name = "codex"
+    pane.session.shows_busy_queue_confirm.return_value = True
+    pane.set_state.side_effect = lambda state, **kw: setattr(pane, "state", state)
+    orch._panes_by_project.setdefault(TEST_PROJECT, {})["backend"] = pane
+    ps = orch._ps(_exit_key(TEST_PROJECT, "backend"))
+    ps.last_assigned_task = "backup"
+    ps.task_delivered = True
+    callbacks = []
+    monkeypatch.setattr(
+        "agent_takkub.orchestrator.QTimer.singleShot", lambda ms, cb: callbacks.append((ms, cb))
+    )
+    with patch.object(orch, "_notify_lead") as notify:
+        ok, msg = orch.done("backend", note="backup finished", project=TEST_PROJECT)
+        assert not ok and "queued follow-up" in msg
+        assert pane.state == "working"
+        assert not callbacks
+        ok, _ = orch.done("backend", note="backup finished", project=TEST_PROJECT)
+        assert not ok
+        assert notify.call_count == 1
+
+        pane.session.shows_busy_queue_confirm.return_value = False
+        ok, msg = orch.done("backend", note="follow-up finished", project=TEST_PROJECT)
+        assert ok, msg
+        assert pane.state == "done"
+
+
 @pytest.mark.parametrize("provider", ["claude", "codex", "gemini", "opencode", "kimi", "cursor"])
 def test_followup_survives_done_and_stale_close(orch, monkeypatch, tmp_path, provider):
     # This case exercises the kept-pane queue handoff. The default close-on-done

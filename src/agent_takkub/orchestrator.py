@@ -7937,6 +7937,45 @@ class Orchestrator(
         if pane is None:
             return False, f"unknown role: {from_role}"
 
+        # #746: a provider can accept a message into its busy-turn follow-up queue
+        # before that message has executed. Retiring this turn and closing the
+        # pane would discard it even though `takkub messages` says delivered.
+        # Refuse done while the CLI still shows the queue. Once the CLI starts
+        # the queued turn, the marker disappears and its later done succeeds.
+        session = getattr(pane, "session", None)
+        provider = getattr(getattr(pane, "model", None), "provider_name", "")
+        queue_check = getattr(session, "shows_busy_queue_confirm", None)
+        from .provider_spec import busy_queue_confirm_markers_for
+
+        if (
+            not force
+            and isinstance(provider, str)
+            and busy_queue_confirm_markers_for(provider)
+            and callable(queue_check)
+        ):
+            try:
+                has_queued_followup = bool(queue_check(provider))
+            except Exception:
+                has_queued_followup = False
+            if has_queued_followup:
+                ps = self._ps(f"{project_ns}::{from_role}")
+                if not getattr(ps, "queued_followup_warning_sent", False):
+                    ps.queued_followup_warning_sent = True
+                    self._notify_lead(
+                        project_ns,
+                        f"⚠️ [{from_role} follow-up queued] pane ยังมีข้อความที่รอประมวลผล "
+                        f"จึงยังไม่รับ done และยังไม่ปิด pane — รอให้ข้อความคิวทำงานแล้ว "
+                        f"รายงาน done อีกครั้ง (`takkub messages --role {from_role}`)",
+                        from_role=from_role,
+                        note="queued_followup_pending",
+                        kind="queued-followup-pending",
+                    )
+                _log_event("done_rejected_queued_followup", role=from_role, project=project_ns)
+                return (
+                    False,
+                    "queued follow-up has not run yet; finish it, then call takkub done again",
+                )
+
         # #621: capture task_id before any teardown below pops _pane_state —
         # the language-nudge one-shot-per-task flag near the end needs it.
         _lang_task_id = getattr(self._pane_state.get(f"{project_ns}::{from_role}"), "task_id", None)
