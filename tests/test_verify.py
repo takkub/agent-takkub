@@ -107,13 +107,16 @@ def test_node_verify_script_wins_and_runs_alone(tmp_path: Path) -> None:
     # underlying jest/vitest summary. #608: `--continue` so one workspace
     # failing doesn't fail-fast-kill every other workspace's task.
     assert checks[0].cmd[1:] == [
+        "exec",
+        "turbo",
         "run",
-        "verify",
-        "--",
+        "typecheck",
+        "test",
         "--output-logs=full",
         "--force",
         "--continue",
     ]
+    assert checks[0].env == {"TURBO_FORCE": "true"}
     assert "pnpm" in Path(checks[0].cmd[0]).name
 
 
@@ -124,7 +127,8 @@ def test_node_test_script_turbo_forces_full_output_no_cache(tmp_path: Path) -> N
     (tmp_path / "package-lock.json").write_text("{}")
     checks = detect_stack(tmp_path)
     test_check = next(c for c in checks if c.name == "test")
-    assert test_check.cmd[-4:] == ["--", "--output-logs=full", "--force", "--continue"]
+    assert test_check.cmd[-4:] == ["test", "--output-logs=full", "--force", "--continue"]
+    assert "--" not in test_check.cmd
 
 
 def test_node_test_script_non_turbo_untouched(tmp_path: Path) -> None:
@@ -157,7 +161,24 @@ def test_node_test_script_turbo_chained_command_forces_full_output(tmp_path: Pat
     (tmp_path / "package-lock.json").write_text("{}")
     checks = detect_stack(tmp_path)
     test_check = next(c for c in checks if c.name == "test")
-    assert test_check.cmd[-4:] == ["--", "--output-logs=full", "--force", "--continue"]
+    assert test_check.cmd[1:] == ["run", "test"]
+    assert test_check.env == {"TURBO_FORCE": "true"}
+
+
+def test_node_test_script_turbo_preserves_package_lifecycle(tmp_path: Path) -> None:
+    _pkg(tmp_path, {"pretest": "node setup.js", "test": "turbo run test"})
+    (tmp_path / "package-lock.json").write_text("{}")
+    test_check = next(c for c in detect_stack(tmp_path) if c.name == "test")
+    assert test_check.cmd[1:] == ["run", "test"]
+    assert test_check.env == {"TURBO_FORCE": "true"}
+
+
+def test_node_test_script_turbo_preserves_explicit_pass_through(tmp_path: Path) -> None:
+    _pkg(tmp_path, {"test": "turbo run test -- --verbose"})
+    (tmp_path / "package-lock.json").write_text("{}")
+    test_check = next(c for c in detect_stack(tmp_path) if c.name == "test")
+    assert test_check.cmd[1:] == ["run", "test"]
+    assert test_check.env == {"TURBO_FORCE": "true"}
 
 
 def test_node_test_script_npx_turbo_forces_full_output(tmp_path: Path) -> None:
@@ -167,7 +188,7 @@ def test_node_test_script_npx_turbo_forces_full_output(tmp_path: Path) -> None:
     (tmp_path / "package-lock.json").write_text("{}")
     checks = detect_stack(tmp_path)
     test_check = next(c for c in checks if c.name == "test")
-    assert test_check.cmd[-4:] == ["--", "--output-logs=full", "--force", "--continue"]
+    assert test_check.cmd[-4:] == ["test", "--output-logs=full", "--force", "--continue"]
 
 
 def test_node_test_script_pnpm_exec_turbo_forces_full_output(tmp_path: Path) -> None:
@@ -176,7 +197,7 @@ def test_node_test_script_pnpm_exec_turbo_forces_full_output(tmp_path: Path) -> 
     (tmp_path / "pnpm-lock.yaml").write_text("")
     checks = detect_stack(tmp_path)
     test_check = next(c for c in checks if c.name == "test")
-    assert test_check.cmd[-4:] == ["--", "--output-logs=full", "--force", "--continue"]
+    assert test_check.cmd[-4:] == ["test", "--output-logs=full", "--force", "--continue"]
 
 
 def test_node_test_script_pnpm_turbo_direct_forces_full_output(tmp_path: Path) -> None:
@@ -186,7 +207,7 @@ def test_node_test_script_pnpm_turbo_direct_forces_full_output(tmp_path: Path) -
     (tmp_path / "pnpm-lock.yaml").write_text("")
     checks = detect_stack(tmp_path)
     test_check = next(c for c in checks if c.name == "test")
-    assert test_check.cmd[-4:] == ["--", "--output-logs=full", "--force", "--continue"]
+    assert test_check.cmd[-4:] == ["test", "--output-logs=full", "--force", "--continue"]
 
 
 # ---------------------------------------------------------------------------
@@ -211,12 +232,13 @@ def test_limit_concurrency_true_adds_turbo_concurrency_flag(tmp_path: Path) -> N
     checks = detect_stack(tmp_path, limit_concurrency=True)
     test_check = next(c for c in checks if c.name == "test")
     assert test_check.cmd[-5:] == [
-        "--",
+        "test",
         "--output-logs=full",
         "--force",
         "--continue",
         "--concurrency=1",
     ]
+    assert test_check.env == {"TURBO_FORCE": "true", "TURBO_CONCURRENCY": "1"}
 
 
 def test_limit_concurrency_true_caps_direct_vitest(tmp_path: Path) -> None:

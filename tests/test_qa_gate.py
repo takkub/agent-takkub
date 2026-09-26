@@ -571,14 +571,17 @@ class TestNodeProjectGate:
         # #608: `--continue` so one workspace failing doesn't fail-fast-kill
         # every other workspace's task.
         assert len(ran) == 1 and ran[0][1:] == [
+            "exec",
+            "turbo",
             "run",
-            "verify",
-            "--",
+            "typecheck",
+            "test",
             "--output-logs=full",
             "--force",
             "--continue",
         ]
         assert "pnpm" in str(ran[0][0])
+        assert recorder[0][1].get("TURBO_FORCE") == "true"
         assert report.ok
 
     def test_targeted_still_typechecks_whole_project(self, node_repo, monkeypatch) -> None:

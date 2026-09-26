@@ -235,6 +235,7 @@ def create_assignment(
     provider: str,
     status: str = "working",
     scope: str = "normal",
+    mode: str = "pane",
 ) -> tuple[str, pathlib.Path | None]:
     """Record a fresh assignment: per-task detail `.md` + an upserted `INDEX.md` row.
 
@@ -283,6 +284,7 @@ def create_assignment(
             f"provider: {provider}\n"
             f"status: {status}\n"
             f"scope: {scope}\n"
+            f"mode: {mode}\n"
             f"assign_ts: {now.strftime('%H:%M:%S')}\n"
             f"---\n\n{task}\n",
         )
@@ -297,6 +299,7 @@ def create_assignment(
         "summary": summary,
         "status": status,
         "scope": scope,
+        "mode": mode,
         "assign_hhmmss": now.strftime("%H:%M:%S"),
         "done_hhmmss": None,
         "detail_rel": detail_rel if detail_written else None,
@@ -320,6 +323,7 @@ def create_assignment(
         "feature": feature_text,
         "row_index": len(feat["rows"]) - 1,
         "scope": scope,
+        "mode": mode,
     }
 
     try:
@@ -427,6 +431,16 @@ def get_open_scope(project: str, role: str) -> str | None:
     if row is not None:
         return row.get("scope")
     return None
+
+
+def open_subagent_roles(project: str) -> tuple[str, ...]:
+    """Roles with a registered, unfinished native-subagent capsule (#744)."""
+    state = _load_state(project)
+    return tuple(
+        role
+        for role, ptr in state.get("open", {}).items()
+        if isinstance(ptr, dict) and ptr.get("mode") == "subagent"
+    )
 
 
 def _resolve_open_row(

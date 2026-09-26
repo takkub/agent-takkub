@@ -1867,14 +1867,16 @@ def _non_python_gate(
             step = _run_step_contended(
                 check.name,
                 check.cmd,
-                env,
+                {**env, **(check.env or {})},
                 check.cwd or root,
                 log_dir,
                 lock_base=lock_base,
                 exclude=lock_exclude,
             )
         else:
-            step = _run_step(check.name, check.cmd, env, check.cwd or root, log_dir)
+            step = _run_step(
+                check.name, check.cmd, {**env, **(check.env or {})}, check.cwd or root, log_dir
+            )
 
         # #607: a worker-pool timeout signature alongside a real passed-tests
         # summary is machine load, not a regression — retry serial once.
@@ -1903,7 +1905,13 @@ def _non_python_gate(
                     f"summary — retrying {check.name} serial once (machine-load signal, "
                     "not a real regression)."
                 )
-                retry_step = _run_step(check.name, retry_cmd, env, check.cwd or root, log_dir)
+                retry_step = _run_step(
+                    check.name,
+                    retry_cmd,
+                    {**env, **(check.env or {})},
+                    check.cwd or root,
+                    log_dir,
+                )
                 # Report both rounds regardless of outcome (#607 H3: never
                 # discard the original failure's evidence) — the retry's own
                 # ok/returncode still decides pass/fail, so a retry that

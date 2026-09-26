@@ -519,8 +519,8 @@ class ProviderSpec:
     # promo banner false-positived on the bare word "usage limit" while only
     # talking about limits hypothetically — see GENERIC_QUOTA_MARKERS below).
     # Checked by PtySession.rate_limit_reset_at()/quota_stall_marker() via
-    # quota_markers_for(), which ORs this in with GENERIC_QUOTA_MARKERS for
-    # every provider. Empty here means no provider-specific wording has been
+    # quota_markers_for(), which adds the legacy Claude marker table only for
+    # Claude. Empty here means no provider-specific wording has been
     # confirmed yet — never guess a marker from a provider's docs alone (a
     # wrong guess either matches ordinary conversation text or never fires).
     quota_markers: tuple[str, ...] = field(default_factory=tuple)
@@ -1086,6 +1086,7 @@ codex_spec = ProviderSpec(
         "you've hit your rate limit",
         "usage limit reached",
         "you have reached your usage limit",
+        "hit your usage limit",
     ),
     # #308 mitigation task's own reference table ("codex: 'running command'")
     # — codex's shell-tool call renders this in its ratatui status area.
@@ -2017,12 +2018,9 @@ def post_boot_settle_s_for(provider: str) -> float:
 
 
 # ── quota/usage-limit detection (#301) ──────────────────────────────────────
-# Cross-provider REACHED-STATE baseline, field-verified against real claude
-# usage-limit banners (see pty_session.py's pre-#301 "Claude usage-limit
-# detection" module note — this is the same table, moved here so a
-# non-claude provider can OR its own confirmed wording into the same
-# baseline via quota_markers_for(), mirroring GENERIC_AUTH_ERROR_MARKERS
-# above). Never a bare topic word ("usage limit", "rate limit") — a v2.1.198
+# Legacy Claude REACHED-STATE baseline, field-verified against real Claude
+# usage-limit banners. Other providers use only their own captured wording
+# (#743). Never a bare topic word ("usage limit", "rate limit") — a v2.1.198
 # Fable-5 promo notice false-positived on the bare phrase because it merely
 # *talked about* limits hypothetically ("if you hit your limit"); a real
 # banner declares the limit HIT or names the reset.
@@ -2038,13 +2036,15 @@ GENERIC_QUOTA_MARKERS: tuple[str, ...] = (
 
 
 def quota_markers_for(provider: str) -> tuple[str, ...]:
-    """Quota/usage-limit REACHED markers for `provider`: its own confirmed
-    list (``ProviderSpec.quota_markers``) plus the generic cross-provider
-    baseline, deduped — same shape as ``auth_error_markers_for``. Unknown
-    provider name → generic markers only."""
+    """Quota markers for this provider only.
+
+    The historical generic table contains Claude banner wording. Applying it
+    to another provider lets quoted Claude/Codex output stall that pane (#743).
+    Unknown providers have no trusted banner wording yet.
+    """
     spec = PROVIDER_REGISTRY.get(provider)
     own = spec.quota_markers if spec is not None else ()
-    return tuple(dict.fromkeys((*own, *GENERIC_QUOTA_MARKERS)))
+    return tuple(dict.fromkeys((*own, *(GENERIC_QUOTA_MARKERS if provider == "claude" else ()))))
 
 
 def tool_stuck_auto_esc_for(provider: str) -> bool:

@@ -974,7 +974,7 @@ class AutoResumeMixin:
             return
         self.limitUsageConfirmed.emit(project, role, verdict == "confirmed")
 
-    def _on_limit_usage_denied(self, project: str, role: str, utilization: float) -> None:
+    def _on_limit_usage_denied(self, project: str, role: str, utilization: float | None) -> None:
         """Qt-thread slot for `limitUsageDenied` (#704): the provider's own
         telemetry says it is NOT exhausted, so the banner match was quoted
         text (a cockpit notice, a log the pane printed, a teammate's banner
@@ -1002,11 +1002,16 @@ class AutoResumeMixin:
             marker=marker,
             utilization=utilization,
         )
+        probe_note = (
+            f"probe ยืนยันใช้ไป {utilization:.0f}%"
+            if utilization is not None
+            else "ยืนยันแบนเนอร์โควตาไม่ได้"
+        )
         self._notify_lead(
             project,
             f"ℹ️ [system] {role} ({ps.quota_provider or 'claude'}) ไม่ได้ชนโควตา — "
-            f"ข้อความ usage-limit ที่เห็นบนจอเป็นข้อความที่ถูก quote (probe ยืนยันใช้ไป "
-            f"{utilization:.0f}%) ยกเลิกสถานะ stalled:quota แล้ว",
+            f"ข้อความ usage-limit ที่เห็นบนจออาจเป็นข้อความที่ถูก quote ({probe_note}) "
+            "ยกเลิกสถานะ stalled:quota แล้ว",
             from_role=role,
             note="rate_limit_false_positive",
             kind="quota-false-positive",
@@ -1027,7 +1032,8 @@ class AutoResumeMixin:
 
         if not confirmed:
             _log_event("pane_limit_confirm_failed", role=role, project=project)
-            return  # signal (b) disagreed — stay on the notify-only path
+            self._on_limit_usage_denied(project, role, None)
+            return
 
         self._reroute_or_park(project, role, ps)
 

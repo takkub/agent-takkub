@@ -79,6 +79,9 @@ def _written_str(mock_session: MagicMock) -> str:
 
 @pytest.mark.parametrize("provider", ["claude", "codex", "gemini", "opencode", "kimi", "cursor"])
 def test_followup_survives_done_and_stale_close(orch, monkeypatch, tmp_path, provider):
+    # This case exercises the kept-pane queue handoff. The default close-on-done
+    # path has its own coverage and intentionally replaces a finished pane.
+    monkeypatch.setattr("agent_takkub.orchestrator.CLOSE_ON_DONE", False)
     key = _exit_key(TEST_PROJECT, "backend")
     pane = _make_working_pane(str(tmp_path))
     pane.set_state.side_effect = lambda state, **kw: setattr(pane, "state", state)

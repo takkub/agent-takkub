@@ -1585,6 +1585,35 @@ def _strip_cockpit_notice_lines(lines) -> str:
     return "\n".join(kept)
 
 
+_QUOTA_BANNER_STARTS = (
+    "usage limit reached",
+    "rate limit reached",
+    "limit reached",
+    "individual quota reached",
+    "you've hit your usage limit",
+    "you've hit your rate limit",
+    "you've hit your session limit",
+    "you've hit your weekly limit",
+    "you've reached your usage limit",
+    "you have reached your usage limit",
+    "your limit will reset",
+    "out of usage",
+)
+
+
+def _quota_banner_text(lines) -> str:
+    """Keep banner-shaped screen lines, not an agent's quoted discussion (#743)."""
+    clean = _strip_cockpit_notice_lines(lines).splitlines()
+    banner = []
+    for line in clean:
+        candidate = line.strip().lstrip("⚠! ").strip()
+        if candidate.startswith(_QUOTA_BANNER_STARTS):
+            banner.append(candidate)
+        elif banner and candidate.startswith(("resets ", "reset at ", "continuing automatically")):
+            banner.append(candidate)
+    return "\n".join(banner)
+
+
 def _resolve_quota_markers(provider: str) -> tuple[str, ...]:
     """Markers to check for `provider`'s quota/usage-limit state (#301):
     the `TAKKUB_RATE_LIMIT_MARKERS` env override if set (same override
@@ -3180,7 +3209,7 @@ class PtySession(QObject):
         "individual quota reached" (duration-style reset) and codex's
         provisional reached-state phrasing are checked the same way.
         """
-        text = _strip_cockpit_notice_lines(self.display_lines())
+        text = _quota_banner_text(self.display_lines())
         return _parse_rate_limit_reset(text, time.time(), _resolve_quota_markers(provider))
 
     def quota_stall_marker(self, provider: str = "claude") -> str | None:
@@ -3188,7 +3217,7 @@ class PtySession(QObject):
         `provider`, or None (#301). Companion to `rate_limit_reset_at()` —
         same detection, exposes WHICH phrase matched so a caller can quote it
         in the Lead-facing notice instead of a bare "quota hit"."""
-        text = _strip_cockpit_notice_lines(self.display_lines())
+        text = _quota_banner_text(self.display_lines())
         for marker in _resolve_quota_markers(provider):
             if marker in text:
                 return marker

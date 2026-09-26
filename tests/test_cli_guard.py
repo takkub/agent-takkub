@@ -21,6 +21,41 @@ import pytest
 from agent_takkub import cli
 
 
+def test_native_subagent_uses_registered_capsule_role_for_edit(monkeypatch, tmp_path) -> None:
+    """#744: a native child inherits TAKKUB_ROLE=lead but is not Lead."""
+    from agent_takkub import task_ledger
+    from agent_takkub.core.capabilities.permission_engine import PermissionEngine
+    from agent_takkub.pane_guard import Verdict
+
+    monkeypatch.setattr(task_ledger, "open_subagent_roles", lambda project: ("frontend",))
+    calls = []
+    monkeypatch.setattr(
+        PermissionEngine,
+        "evaluate_lead_edit",
+        lambda *args, **kwargs: calls.append(True) or Verdict(False, rule="lead_direct_edit"),
+    )
+    payload = {
+        "hook_event_name": "PreToolUse",
+        "tool_name": "Edit",
+        "tool_input": {"file_path": str(tmp_path / "app.py"), "new_string": "x\n" * 20},
+        "agent_id": "agent-123",
+        "agent_type": "frontend",
+    }
+    _run(monkeypatch, payload, TAKKUB_ROLE="lead", TAKKUB_PROJECT="subtest")
+    assert cli.cmd_guard(None).get("exit_code") is None
+    assert calls == []
+
+    payload["agent_type"] = "general-purpose"
+    _run(monkeypatch, payload, TAKKUB_ROLE="lead", TAKKUB_PROJECT="subtest")
+    assert cli.cmd_guard(None).get("exit_code") is None
+    assert calls == []
+
+    payload.pop("agent_id")
+    _run(monkeypatch, payload, TAKKUB_ROLE="lead", TAKKUB_PROJECT="subtest")
+    assert cli.cmd_guard(None).get("exit_code") == 2
+    assert calls == [True]
+
+
 def _run(monkeypatch: pytest.MonkeyPatch, payload: dict | str, **env) -> None:
     stdin_text = json.dumps(payload) if isinstance(payload, dict) else payload
     monkeypatch.setattr(cli.sys, "stdin", io.StringIO(stdin_text))

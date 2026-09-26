@@ -251,6 +251,7 @@ class TestReapDonePanes:
 
 class TestCwdSwitchOnReuse:
     def test_idle_pane_in_old_worktree_is_closed_and_respawned(self, orch, monkeypatch, tmp_path):
+        monkeypatch.setattr(orch_mod, "CLOSE_ON_DONE", False)
         old = tmp_path / "wt-old"
         new = tmp_path / "wt-new"
         old.mkdir()
@@ -281,7 +282,8 @@ class TestCwdSwitchOnReuse:
         send.assert_not_called()
         assert any("wt-new" in c.args[1] for c in notify.call_args_list)
 
-    def test_same_cwd_idle_pane_is_simply_reused(self, orch, tmp_path):
+    def test_same_cwd_idle_pane_is_simply_reused(self, orch, monkeypatch, tmp_path):
+        monkeypatch.setattr(orch_mod, "CLOSE_ON_DONE", False)
         pane = _pane("done", str(tmp_path), at_prompt=True)
         orch._panes_by_project.setdefault(TEST_PROJECT, {})["frontend"] = pane
         with (

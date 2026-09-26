@@ -4911,6 +4911,21 @@ def cmd_guard(_: argparse.Namespace) -> dict:
         role = _from_role()
         if not role:
             return {"ok": True, "msg": ""}  # manual / non-cockpit invocation
+        # Claude's native Agent tool inherits the Lead pane's environment.
+        # Hook input, unlike TAKKUB_ROLE, identifies calls made inside a
+        # subagent. Only a registered unfinished capsule may take its role.
+        if role == "lead" and payload.get("agent_id"):
+            try:
+                from . import task_ledger as _subagent_ledger
+
+                candidates = _subagent_ledger.open_subagent_roles(_from_project())
+                agent_type = str(payload.get("agent_type") or "")
+                if agent_type in candidates:
+                    role = agent_type
+                elif agent_type in ("general-purpose", "general") and len(candidates) == 1:
+                    role = candidates[0]
+            except Exception:
+                pass  # keep inherited Lead restrictions if identity is unclear
         tool_input = payload.get("tool_input")
         command = tool_input.get("command", "") if isinstance(tool_input, dict) else ""
 

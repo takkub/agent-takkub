@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import glob
 import json
+import os
 import re
+import shlex
 import shutil
 import subprocess
 import time
@@ -21,6 +23,7 @@ class Check:
     # Set for per-workspace-package typechecks in a monorepo without a root
     # tsconfig (#368) so `tsc` resolves that package's own node_modules.
     cwd: Path | None = None
+    env: dict[str, str] | None = None
 
 
 @dataclass
@@ -300,52 +303,53 @@ def _direct_runner_concurrency_args(cwd: Path, pkg: dict, script_value: str) -> 
     return []
 
 
-def _turbo_force_args(
-    cwd: Path, pkg: dict, script_value: str, *, limit_concurrency: bool = False
-) -> list[str]:
-    """A `verify`/`test` script that delegates to turbo can cache-hit and
-    replay only a bare `PASS 58.7s` status line — no underlying jest/vitest
-    `Tests: N passed` summary, leaving qa-gate's own log with no evidence a
-    real run happened (#600). Force a genuine run with full output whenever
-    the script actually goes through turbo, so the gate's log is always
-    proof, never a cache stub.
+def _node_script_command(
+    cwd: Path,
+    pkg: dict,
+    pm: str,
+    script: str,
+    script_value: str,
+    *,
+    limit_concurrency: bool = False,
+) -> tuple[list[str], dict[str, str] | None]:
+    """Run Turbo flags as Turbo arguments, never forward them to test scripts.
 
-    Decided from the SCRIPT TEXT only (#600 follow-up): a repo can have
-    `turbo.json`/turbo in devDependencies for OTHER scripts while `verify`/
-    `test` calls vitest/jest directly — common in a monorepo sub-package.
-    Flagging on turbo's mere presence sent `-- --output-logs=full --force`
-    into vitest/jest, which reject it as an unknown option and turn a
-    healthy script into a red qa-gate. Only a command that actually IS (or
-    chains through) `turbo ...` counts — including package-manager
-    wrappers like `npx turbo` / `pnpm exec turbo` (#605 L3).
-
-    `--continue` is always added once turbo is detected (#608): turbo's
-    default fail-fast kills every OTHER workspace's task the moment one
-    fails, including an in-flight integration test whose `finally { cleanup
-    }` never runs — leaving the test DB with stale rows for the next run.
-    `--continue` lets every workspace finish (and clean up after itself);
-    the gate still reports FAIL overall when any of them did.
-
-    `limit_concurrency` (#607) adds `--concurrency=1`: on Windows, turbo's
-    default per-workspace parallelism was hitting a vitest/jest worker-pool
-    timeout (`[vitest-pool] Timeout waiting for worker to respond`) purely
-    from CPU contention, with 7,386 tests passing cleanly when run one
-    workspace at a time. Caller (qa_gate.py) decides when to set this — also
-    true when another qa-gate pane is already running on this machine, not
-    only on Windows.
+    A simple Turbo script can be invoked directly. For a chained script we
+    retain its package-manager lifecycle and force a real run through Turbo's
+    documented environment variable. Appending flags to `npm run test --`
+    sends them through to Vitest/Jest in some workspaces (#745).
     """
     segments = [s.strip() for s in re.split(r"&&|\|\||;", script_value) if s.strip()]
     uses_turbo = any(_segment_uses_turbo(seg) for seg in segments)
     if uses_turbo:
-        args = ["--output-logs=full", "--force", "--continue"]
+        turbo_env = {"TURBO_FORCE": "true"}
         if limit_concurrency:
-            args.append("--concurrency=1")
-        return ["--", *args]
+            turbo_env["TURBO_CONCURRENCY"] = "1"
+        scripts = pkg.get("scripts") or {}
+        has_lifecycle = isinstance(scripts, dict) and any(
+            name in scripts for name in (f"pre{script}", f"post{script}")
+        )
+        if len(segments) == 1 and not has_lifecycle:
+            try:
+                words = shlex.split(script_value)
+            except ValueError:
+                words = []
+            turbo_idx = next((i for i, word in enumerate(words) if word == "turbo"), None)
+            if (
+                turbo_idx is not None
+                and words[turbo_idx + 1 : turbo_idx + 2] == ["run"]
+                and "--" not in words
+            ):
+                flags = ["--output-logs=full", "--force", "--continue"]
+                if limit_concurrency:
+                    flags.append("--concurrency=1")
+                return pm_exec(pm, "turbo", *words[turbo_idx + 1 :], *flags), turbo_env
+        return pm_run(pm, script), turbo_env
     if limit_concurrency:
         extra = _direct_runner_concurrency_args(cwd, pkg, script_value)
         if extra:
-            return ["--", *extra]
-    return []
+            return [*pm_run(pm, script), "--", *extra], None
+    return pm_run(pm, script), None
 
 
 def node_checks(cwd: Path, *, limit_concurrency: bool = False) -> list[Check]:
@@ -369,10 +373,10 @@ def node_checks(cwd: Path, *, limit_concurrency: bool = False) -> list[Check]:
     checks: list[Check] = []
 
     if "verify" in scripts:
-        verify_cmd = pm_run(pm, "verify") + _turbo_force_args(
-            cwd, pkg, str(scripts["verify"]), limit_concurrency=limit_concurrency
+        verify_cmd, verify_env = _node_script_command(
+            cwd, pkg, pm, "verify", str(scripts["verify"]), limit_concurrency=limit_concurrency
         )
-        checks.append(Check(name="verify", cmd=verify_cmd, stack="node"))
+        checks.append(Check(name="verify", cmd=verify_cmd, stack="node", env=verify_env))
     else:
         if "typecheck" in scripts:
             checks.append(Check(name="typecheck", cmd=pm_run(pm, "typecheck"), stack="node"))
@@ -395,10 +399,10 @@ def node_checks(cwd: Path, *, limit_concurrency: bool = False) -> list[Check]:
                     )
                 )
         if "test" in scripts:
-            test_cmd = pm_run(pm, "test") + _turbo_force_args(
-                cwd, pkg, str(scripts["test"]), limit_concurrency=limit_concurrency
+            test_cmd, test_env = _node_script_command(
+                cwd, pkg, pm, "test", str(scripts["test"]), limit_concurrency=limit_concurrency
             )
-            checks.append(Check(name="test", cmd=test_cmd, stack="node"))
+            checks.append(Check(name="test", cmd=test_cmd, stack="node", env=test_env))
 
     eslintrc_patterns = [
         ".eslintrc",
@@ -433,6 +437,7 @@ def run_checks(checks: list[Check], cwd: Path, timeout: int = 600) -> VerifyResu
                 shell=False,
                 timeout=timeout,
                 creationflags=SUBPROCESS_NO_WINDOW,
+                env={**os.environ, **(check.env or {})},
             )
             exit_code = proc.returncode
             stdout = proc.stdout.decode("utf-8", errors="replace")

@@ -47,6 +47,8 @@ def test_subagent_assign_creates_capsule_without_pane(orch: Orchestrator, tmp_pa
     text = capsule.read_text(encoding="utf-8")
     assert "--mode subagent" in text
     assert "subagent-done --role reviewer" in text
+    assert "subagent_type='reviewer'" in message
+    assert task_ledger.open_subagent_roles("subtest") == ("reviewer",)
 
 
 def test_subagent_assign_capsule_includes_language_directive(

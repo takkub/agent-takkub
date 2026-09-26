@@ -48,14 +48,18 @@ class TestQuotaMarkersFor:
         assert "rate limit" not in markers
         assert "usage limit" not in markers
 
-    def test_unconfirmed_providers_fall_back_to_generic_only(self) -> None:
+    def test_unconfirmed_providers_do_not_accept_another_providers_banner(self) -> None:
         for provider in ("opencode", "kimi", "cursor"):
             markers = quota_markers_for(provider)
-            assert "limit reached" in markers  # generic baseline still applies
-            assert "individual quota reached" not in markers  # gemini-only
+            assert markers == ()
+            assert (
+                _parse_rate_limit_reset("you've hit your usage limit", 1_700_000_000.0, markers)
+                is None
+            )
 
-    def test_unknown_provider_gets_generic_only(self) -> None:
+    def test_unknown_provider_has_no_unverified_markers(self) -> None:
         assert quota_markers_for("nonexistent-provider") == quota_markers_for("kimi")
+        assert "hit your usage limit" in quota_markers_for("codex")
 
 
 # ── layer 2: duration parsing + PtySession wrappers ─────────────────────────
@@ -135,6 +139,17 @@ class TestPtySessionQuotaWrappers:
         s = PtySession(cols=80, rows=24)
         s._feed_and_log(b"? for shortcuts")
         assert s.quota_stall_marker("gemini") is None
+
+    def test_quoted_codex_limit_in_normal_output_is_not_a_banner(self) -> None:
+        s = PtySession(cols=100, rows=24)
+        s._feed_and_log(b"- Codex reported: hit your usage limit, then resumed")
+        assert s.rate_limit_reset_at("codex") is None
+        assert s.quota_stall_marker("codex") is None
+
+    def test_codex_banner_line_still_detected(self) -> None:
+        s = PtySession(cols=100, rows=24)
+        s._feed_and_log(b"You've hit your usage limit. Resets in 1h24m.")
+        assert s.rate_limit_reset_at("codex") is not None
 
     def test_current_model_label_gemini(self) -> None:
         s = PtySession(cols=80, rows=24)

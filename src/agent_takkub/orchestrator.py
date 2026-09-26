@@ -2512,6 +2512,7 @@ class Orchestrator(
                 feature,
                 parent_provider,
                 scope=scope,
+                mode="subagent",
             )
             if warning:
                 self._notify_lead(
@@ -2539,7 +2540,7 @@ class Orchestrator(
         forward = str(capsule_path).replace(os.sep, "/")
         return True, (
             f"subagent registered for {role_name} (provider={parent_provider}, no pane). "
-            f"Dispatch one native subagent with task capsule: {forward}; completion command is inside. "
+            f"Dispatch one native subagent with subagent_type={role_name!r} and task capsule: {forward}; completion command is inside. "
             "This mode is same-provider only and is not a cross-model check."
         )
 

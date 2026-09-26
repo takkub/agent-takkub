@@ -99,7 +99,7 @@ def _spawn_codex_and_capture_argv(
             "agent_takkub.codex_helper.find_codex_executable",
             return_value="codex",
         ),
-        patch("agent_takkub.codex_agents_md.ensure_agents_md"),
+        patch("agent_takkub.codex_agents_md.ensure_agents_md", return_value=(True, "planted")),
         patch("agent_takkub.orchestrator.inject_user_profile_env"),
         patch("agent_takkub.mcp_bridge._codex_resolved_mcp_names", return_value=[]),
     ):

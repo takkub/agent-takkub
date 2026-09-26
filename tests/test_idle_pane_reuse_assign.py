@@ -63,8 +63,9 @@ def orch(qapp: QCoreApplication, tmp_env: pathlib.Path) -> Orchestrator:
 
 class TestAliveDonePaneReusedByAssign:
     def test_assign_pastes_into_alive_done_pane_instead_of_fresh_spawn(
-        self, orch: Orchestrator, tmp_env: pathlib.Path
+        self, orch: Orchestrator, tmp_env: pathlib.Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        monkeypatch.setattr(orch_mod, "CLOSE_ON_DONE", False)
         role = "backend"
         cwd = str(tmp_env / "workdir")
         pathlib.Path(cwd).mkdir(parents=True, exist_ok=True)

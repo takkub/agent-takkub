@@ -433,7 +433,7 @@ class TestOnLimitUsageConfirmed:
         o = _bare_orch()
         o._on_limit_usage_confirmed("proj", "backend", True)  # no PaneState registered — no crash
 
-    def test_not_confirmed_stays_notify_only(self) -> None:
+    def test_not_confirmed_clears_quota_stall(self) -> None:
         o = _bare_orch()
         ps = o._ps("proj::backend")
         ps.last_assigned_task = "do the thing"
@@ -443,6 +443,8 @@ class TestOnLimitUsageConfirmed:
             o._on_limit_usage_confirmed("proj", "backend", False)
         park.assert_not_called()
         assert ps.limit_confirm_pending is False
+        assert ps.rate_limited_until == 0.0
+        assert ps.quota_false_positive_armed is True
 
     def test_task_finished_meanwhile_skips_park(self) -> None:
         o = _bare_orch()

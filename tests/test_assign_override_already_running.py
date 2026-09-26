@@ -238,6 +238,7 @@ class TestIdleProviderSwitch:
         monkeypatch: pytest.MonkeyPatch,
         state: str,
     ) -> None:
+        monkeypatch.setattr(orch_mod, "CLOSE_ON_DONE", False)
         role = "backend"
         cwd = str(tmp_env / "workdir")
         pathlib.Path(cwd).mkdir(parents=True, exist_ok=True)
