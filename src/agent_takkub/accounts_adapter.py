@@ -107,17 +107,21 @@ def _claude_email(config_dir: Path) -> str:
 
 
 def _claude_plan_from_usage_cache(config_dir: Path) -> tuple[str | None, str]:
-    """Last-known plan from `limit_status`'s shared usage-state file for this
-    home (`takkub-usage-state.json` — the same cache the usage meter shows).
-    Used only when the credential itself carries no readable tier (e.g. a
-    Windows claude storing its token outside `.credentials.json`). The note
-    carries the fetch date so a stale value is never presented as live."""
-    state = _read_json(config_dir / "takkub-usage-state.json")
-    data = (state or {}).get("data") or {}
-    plan = data.get("plan")
-    if not plan or plan == "Unknown":
+    """Last-known plan from the machine-wide shared usage record of this
+    home's ACCOUNT (`usage_shared` — the same cache the usage meter shows).
+    The record's plan is the server-side one, so it is preferred over the
+    local credentials' (stale-prone) tier. The note carries the fetch date so
+    a stale value is never presented as live."""
+    from . import limit_status
+
+    plan = limit_status.shared_plan(config_dir)
+    state = limit_status.load_shared_state(config_dir)
+    data = state["data"]
+    if not plan and data is not None and data.plan != "Unknown":
+        plan = data.plan
+    if not plan:
         return None, ""
-    fetched = str(data.get("fetched_at") or "")[:10]
+    fetched = data.fetched_at.date().isoformat() if data and data.fetched_at else ""
     note = "จาก usage cache ล่าสุดของบัญชีนี้" + (f" ({fetched})" if fetched else "")
     return str(plan), note
 
@@ -160,6 +164,11 @@ def claude_login_status(config_dir: Path, *, is_default: bool = False) -> LoginS
             pass
 
     plan_note = ""
+    from . import limit_status as _ls
+
+    server_plan = _ls.shared_plan(config_dir)
+    if server_plan:  # one plan per account: server truth beats a stale local blob
+        plan = server_plan
     if plan is None:
         plan, plan_note = _claude_plan_from_usage_cache(config_dir)
 

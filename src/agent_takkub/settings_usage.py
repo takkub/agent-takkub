@@ -29,6 +29,7 @@ from datetime import UTC, datetime
 from PyQt6.QtCore import QPointF, Qt
 from PyQt6.QtGui import QColor, QPainter, QPen
 from PyQt6.QtWidgets import (
+    QCheckBox,
     QComboBox,
     QGridLayout,
     QHBoxLayout,
@@ -38,7 +39,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from . import cockpit_theme
+from . import cockpit_theme, usage_shared
 from .settings_knowledge_design import _CallableThread
 from .token_meter import format_tokens
 
@@ -158,6 +159,17 @@ class UsageSettingsMixin:
         self._usage_refresh_btn.clicked.connect(self._on_usage_refresh_clicked)
         header_row.addWidget(self._usage_refresh_btn)
         lay.addLayout(header_row)
+
+        # Per-instance switch (dev and prod each keep their own): OFF = this
+        # cockpit never fetches quota; the meter still reads the shared cache.
+        self._usage_autofetch_check = QCheckBox("ดึงข้อมูลโควตาอัตโนมัติ", view)
+        self._usage_autofetch_check.setChecked(usage_shared.auto_fetch_enabled())
+        self._usage_autofetch_check.setToolTip(
+            "ปิด = cockpit ตัวนี้ไม่เรียก API/CLI ดึงโควตาเลย (แสดงจากแคชร่วมที่ cockpit อื่นดึงไว้) "
+            "· ตั้งแยกต่อ instance (dev/prod)"
+        )
+        self._usage_autofetch_check.toggled.connect(usage_shared.set_auto_fetch_enabled)
+        lay.addWidget(self._usage_autofetch_check)
 
         self._usage_status_label = QLabel(
             "ตัวเลขด้านล่างมาจากรอบก่อนหน้า — กด Refresh เพื่อ import ล่าสุด (อาจใช้เวลาสักครู่ "

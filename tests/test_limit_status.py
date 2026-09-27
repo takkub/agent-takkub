@@ -9,7 +9,7 @@ from unittest.mock import patch
 
 import pytest
 
-from agent_takkub import limit_status
+from agent_takkub import limit_status, usage_shared
 from agent_takkub.limit_status import LimitStore, UsageData
 
 
@@ -202,13 +202,14 @@ def _fake_usage() -> UsageData:
 def _age_shared_state(config_dir: Path, by_s: float) -> None:
     """Rewind the shared state file's timestamps so a subsequent _do_fetch
     behaves like a poll tick arriving that much later."""
-    path = limit_status._state_path(config_dir)
-    raw = json.loads(path.read_text(encoding="utf-8"))
-    if raw.get("fetched_at"):
-        raw["fetched_at"] -= by_s
-    if raw.get("backoff_until"):
-        raw["backoff_until"] -= by_s
-    path.write_text(json.dumps(raw), encoding="utf-8")
+
+    def mut(rec):
+        if rec["fetched_at"]:
+            rec["fetched_at"] -= by_s
+        if rec["backoff_until"]:
+            rec["backoff_until"] -= by_s
+
+    usage_shared.update_record("claude", limit_status._identity(config_dir), mut)
 
 
 class TestLimitStore:
@@ -523,7 +524,7 @@ class TestSharedState:
 
     def test_missing_file_is_empty_state(self, tmp_path: Path) -> None:
         state = limit_status.load_shared_state(tmp_path / "nowhere")
-        assert state == {"backoff_until": 0.0, "fetched_at": 0.0, "data": None}
+        assert (state["backoff_until"], state["fetched_at"], state["data"]) == (0.0, 0.0, None)
 
     def test_second_store_honours_persisted_backoff(self, tmp_path: Path) -> None:
         """A 429 recorded by one store (process) must stop a FRESH store from

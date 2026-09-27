@@ -18,9 +18,9 @@ from datetime import UTC, datetime
 
 from PyQt6.QtCore import QPoint, QPointF, QRect, QSize, Qt
 from PyQt6.QtGui import QBrush, QColor, QPainter, QPolygonF
-from PyQt6.QtWidgets import QFrame, QHBoxLayout, QLabel, QVBoxLayout, QWidget
+from PyQt6.QtWidgets import QCheckBox, QFrame, QHBoxLayout, QLabel, QVBoxLayout, QWidget
 
-from . import cockpit_theme
+from . import cockpit_theme, usage_shared
 from .auto_resume import CONFIRM_UTILIZATION_PCT as _AUTO_CONTINUE_HINT_PCT
 from .provider_usage import ProviderUsage
 
@@ -78,6 +78,8 @@ def _parse_window_resets_at(resets_at: str | None) -> datetime | None:
 
 
 _STATUS_SORT_ORDER = {"active": 0, "stale": 1, "loading": 2, "error": 3, "unsupported": 4}
+# Data older than 2x the (10 min) Claude poll interval is shown as stale, with its age.
+_STALE_AGE_S = 1200.0
 _DETAIL_POPUP_WIDTH = 380
 _DETAIL_POPUP_SCREEN_MARGIN = 8
 
@@ -267,7 +269,9 @@ def _provider_body_entries(
             entries.append(("text", "ไม่มีข้อมูลให้ดู", cockpit_theme.TEXT_FAINT))
 
     age = fmt_age(u.fetched_at, now)
-    stale_enough = u.fetched_at is not None and (now - _aware(u.fetched_at)).total_seconds() > 900
+    stale_enough = (
+        u.fetched_at is not None and (now - _aware(u.fetched_at)).total_seconds() > _STALE_AGE_S
+    )
     if age and (stale or stale_enough):
         entries.append(("text", f"ข้อมูลเมื่อ {age}", cockpit_theme.TEXT_FAINT))
     # Some channels cannot refresh themselves at all — gemini reads a cache
@@ -422,6 +426,41 @@ def _build_provider_card(u: ProviderUsage, now: datetime) -> QWidget:
     return card
 
 
+def autofetch_status_line(usages: list[ProviderUsage], now: datetime, enabled: bool) -> str:
+    """'อัปเดตล่าสุด X · ดึงอัตโนมัติปิดอยู่' footer text (empty when nothing to say)."""
+    stamps = [_aware(u.fetched_at) for u in usages if u.fetched_at is not None]
+    parts = []
+    if stamps:
+        parts.append(f"อัปเดตล่าสุด {fmt_age(max(stamps), now)}")
+    if not enabled:
+        parts.append("ดึงอัตโนมัติปิดอยู่")
+    return " · ".join(parts)
+
+
+def _build_autofetch_footer(usages: list[ProviderUsage], now: datetime, parent: QWidget) -> QWidget:
+    """Switch for THIS instance's quota polling + freshness of what is shown."""
+    box = QWidget(parent)
+    lay = QVBoxLayout(box)
+    lay.setContentsMargins(2, 2, 2, 0)
+    lay.setSpacing(2)
+    enabled = usage_shared.auto_fetch_enabled()
+    check = QCheckBox("ดึงข้อมูลโควตาอัตโนมัติ", box)
+    check.setChecked(enabled)
+    check.setStyleSheet(f"color:{cockpit_theme.TEXT_PRIMARY}; font-size:11px;")
+    status = QLabel(autofetch_status_line(usages, now, enabled), box)
+    status.setWordWrap(True)
+    status.setStyleSheet(f"color:{cockpit_theme.TEXT_FAINT}; font-size:10px;")
+
+    def _toggled(on: bool) -> None:
+        usage_shared.set_auto_fetch_enabled(on)
+        status.setText(autofetch_status_line(usages, datetime.now(tz=UTC), on))
+
+    check.toggled.connect(_toggled)
+    lay.addWidget(check)
+    lay.addWidget(status)
+    return box
+
+
 class _ProviderDetailPopup(QWidget):
     """Frameless auto-dismissing popup listing every tracked provider.
 
@@ -449,6 +488,7 @@ class _ProviderDetailPopup(QWidget):
             usages, key=lambda u: (_STATUS_SORT_ORDER.get(u.status, 5), -(u.utilization or -1))
         ):
             inner.addWidget(_build_provider_card(u, now))
+        inner.addWidget(_build_autofetch_footer(usages, now, frame))
         outer.addWidget(frame)
         self.adjustSize()
 
@@ -566,6 +606,8 @@ class UsageMeter(QWidget):
 
     def _quick_tooltip(self, now: datetime) -> str:
         lines = ["คลิกเพื่อดูรายละเอียดแต่ละ provider"]
+        if not usage_shared.auto_fetch_enabled():
+            lines.append("ดึงอัตโนมัติปิดอยู่ — แสดงข้อมูลจากแคชร่วม")
         for u in self._usages:
             if u.status == "unsupported":
                 continue
