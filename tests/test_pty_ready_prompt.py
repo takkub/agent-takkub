@@ -347,6 +347,40 @@ class TestShowsPendingInput:
         )
         assert s_quote.shows_pending_input() is False
 
+    def _tall_codex_draft(self, brief_tail: str = "  takkub done — report when finished"):
+        # #748: airy codex composer — a long pasted brief pushes the `›` glyph
+        # row more than 6 physical rows above the bottom of the screen.
+        body = [f"  brief line {i}" for i in range(9)] + [brief_tail]
+        return _feed_screen(
+            "› [ROLE: reviewer] review the commission page",
+            *body,
+            "",
+            "  gpt-6-sol high · Fast off",
+            "  ? for shortcuts",
+        )
+
+    def test_tall_codex_composer_draft_is_pending_748(self) -> None:
+        s = self._tall_codex_draft()
+        assert s.shows_pending_input() is True
+
+    def test_tall_composer_done_text_inside_draft_not_detected_748(self) -> None:
+        s = self._tall_codex_draft("  run `takkub done` when finished")
+        assert s.has_typed_done_text() is None
+
+    def test_submitted_turn_with_empty_composer_not_pending_748(self) -> None:
+        s = _feed_screen(
+            "› [ROLE: reviewer] review the commission page",
+            *[f"  brief line {i}" for i in range(9)],
+            "",
+            "• Working (3s • esc to interrupt)",
+            "",
+            "› Ask Codex to do anything",
+            "",
+            "  gpt-6-sol high · Fast off",
+            "  ? for shortcuts",
+        )
+        assert s.shows_pending_input() is False
+
     def test_shows_busy_marker(self) -> None:
         # #729: shows_busy_marker reflects provider-specific working indicators
         # Codex
