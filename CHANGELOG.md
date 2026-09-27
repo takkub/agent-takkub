@@ -4,6 +4,19 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 
 ## [vNEXT]
 
+## [v2.1.42] - 2026-09-27
+
+### Added (เพิ่ม)
+
+- **สวิตช์ "ดึงข้อมูลโควตาอัตโนมัติ":** ตั้งแยกต่อ instance (dev/prod) ใน Settings → Usage และใน popup ของ usage meter · ปิด = cockpit ตัวนั้นไม่ดึงโควตาทุก provider (แสดงจากแคชร่วม พร้อมบอกอายุข้อมูล) · เปิด/ปิดมีผลทันที
+
+### Fixed (แก้)
+
+- **usage meter dev/prod ตีกัน:** แคชโควตาย้ายไปที่เดียวทั้งเครื่อง (`%LOCALAPPDATA%\agent-takkub\usage-cache` · mac `~/Library/Caches` · linux XDG) แยกตามบัญชี (Claude accountUuid / Codex account_id) แทนแยกตาม config dir — หลาย instance ยิง API จริง ~1 ครั้ง/รอบ/บัญชี และเคารพ 429 backoff ร่วมกัน
+- **multi-account แสดงมั่ว:** plan ของ Claude มาจากเซิร์ฟเวอร์ (บัญชีเดียว = plan เดียวทุก instance) · Claude แสดง 1 การ์ดต่อบัญชี label เป็น email เหมือนกันทุก instance · Codex รวมการ์ดตาม account_id · ข้อมูลเก่าเกิน 20 นาทีแสดงป้ายพร้อมอายุ · บันทึกสาเหตุ fetch ล้มเหลวลงแคช
+- **Codex task ค้างใน composer แต่ถูกนับว่าส่งแล้ว (#748):** ตรวจ composer สูง (brief ยาว) ได้ · re-probe composer ทุกครั้งก่อนยอมรับ delivery · ข้อความใน composer ไม่ถูกนับเป็น `takkub done` · /compact และ nudge ไม่พิมพ์ทับ draft
+- **tab ของ qa/critic (#747):** แสดง `QA · e2e` / `Critic · ui` ตาม role ที่สั่ง แทน `Reviewer · …`
+
 ## [v2.1.41] - 2026-09-26
 
 ### Fixed (แก้)
