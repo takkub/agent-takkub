@@ -138,9 +138,9 @@ class TestAssignTsCapture:
         captured = {}
         orig = Orchestrator._scan_done_evidence.__func__
 
-        def spy(cls, project_ns, from_role, assign_ts, note=""):
+        def spy(cls, project_ns, from_role, assign_ts, note="", failed=False):
             captured["assign_ts"] = assign_ts
-            return orig(cls, project_ns, from_role, assign_ts, note)
+            return orig(cls, project_ns, from_role, assign_ts, note, failed)
 
         monkeypatch.setattr(Orchestrator, "_scan_done_evidence", classmethod(spy))
 
@@ -369,7 +369,7 @@ class TestEvidenceScanFiltering:
         shots = _shot_dir(tmp_path, "proj")
         _touch_old_enough(shots / "after.png", assign_ts, age=10)
 
-        result = Orchestrator._scan_done_evidence("proj", "qa", assign_ts)
+        result = Orchestrator._scan_done_evidence("proj", "qa", assign_ts, "see after.png")
 
         assert "📸 evidence:" in result
         assert "after.png" in result
@@ -489,11 +489,55 @@ class TestPerRoleSubdirAttribution:
         shots = _shot_dir(tmp_path, "proj")
         _touch_old_enough(shots / "qa-shot.png", assign_ts, age=10)
 
-        result = Orchestrator._scan_done_evidence("proj", "qa", assign_ts)
+        result = Orchestrator._scan_done_evidence("proj", "qa", assign_ts, "shot: qa-shot.png")
 
         assert "📸 evidence:" in result
         assert "qa-shot.png" in result
         assert "(shared dir)" in result
+
+    def test_uncited_shared_file_goes_to_separate_line(self, orch, tmp_path):
+        """#753: an uncited shared-dir image is not `📸 evidence` — it lands on
+        a distinct 🗂 line, and the missing-citation warning still fires."""
+        assign_ts = time.time() - 60
+        shots = _shot_dir(tmp_path, "proj")
+        _touch_old_enough(shots / "other-pane.png", assign_ts, age=10)
+
+        result = Orchestrator._scan_done_evidence("proj", "qa", assign_ts, "all good")
+
+        assert "📸 evidence:" not in result
+        assert "⚠ no evidence cited" in result
+        assert "🗂 ภาพในโฟลเดอร์รวม" in result
+        assert "other-pane.png" in result
+
+    def test_failed_report_drops_uncited_shared_files(self, orch, tmp_path):
+        """#753: a FAILED report never carries another pane's shared-dir shots."""
+        assign_ts = time.time() - 60
+        shots = _shot_dir(tmp_path, "proj")
+        _touch_old_enough(shots / "other-pane.png", assign_ts, age=10)
+
+        result = Orchestrator._scan_done_evidence(
+            "proj", "qa", assign_ts, "login failed", failed=True
+        )
+
+        assert "other-pane.png" not in result
+        assert "🗂" not in result
+        assert "📸 evidence:" not in result
+
+    def test_cited_and_uncited_split(self, orch, tmp_path):
+        """#753: cited file -> 📸 evidence (shared dir); the rest -> 🗂 line."""
+        assign_ts = time.time() - 60
+        shots = _shot_dir(tmp_path, "proj")
+        _touch_old_enough(shots / "mine.png", assign_ts, age=10)
+        _touch_old_enough(shots / "theirs.png", assign_ts, age=12)
+
+        result = Orchestrator._scan_done_evidence(
+            "proj", "qa", assign_ts, "checked C:/x/screenshots/mine.png"
+        )
+
+        evidence, other = result.split("\n")
+        assert evidence.startswith("📸 evidence:") and "mine.png" in evidence
+        assert "theirs.png" not in evidence
+        assert other.startswith("🗂") and "theirs.png" in other
 
     def test_role_subdir_scan_scoped_to_own_role_only(self, orch, tmp_path):
         """The #109 repro fixed: with both panes using their own subdir,
@@ -526,7 +570,7 @@ class TestPerRoleSubdirAttribution:
         qa_dir.mkdir(parents=True, exist_ok=True)
         _touch_old_enough(qa_dir / "qa-only.png", assign_ts, age=10)
 
-        result = Orchestrator._scan_done_evidence("proj", "critic", assign_ts)
+        result = Orchestrator._scan_done_evidence("proj", "critic", assign_ts, "qa-only.png")
 
         assert "qa-only.png" in result
         assert "(shared dir)" in result
@@ -665,10 +709,10 @@ class TestDoneNoticeAppendFormat:
         captured: list[str] = []
         monkeypatch.setattr(orch, "_notify_lead", lambda ns, notice, **kw: captured.append(notice))
 
-        orch.done("qa", note="all green", project=proj)
+        orch.done("qa", note="all green login.png", project=proj)
 
         assert captured
-        assert captured[0].startswith("[qa done] all green")
+        assert captured[0].startswith("[qa done] all green login.png")
         assert "📸 evidence:" in captured[0]
         assert "login.png" in captured[0]
 
@@ -764,7 +808,7 @@ class TestDoneNoticeAppendFormat:
         captured: list[str] = []
         monkeypatch.setattr(orch, "_notify_lead", lambda ns, notice, **kw: captured.append(notice))
 
-        orch.done("qa", note="all good, ship it", project=proj)
+        orch.done("qa", note="all good, ship it smoke.png", project=proj)
 
         assert captured
         assert "📸 evidence:" in captured[0]
@@ -788,7 +832,7 @@ class TestDoneNoticeAppendFormat:
         captured: list[str] = []
         monkeypatch.setattr(orch, "_notify_lead", lambda ns, notice, **kw: captured.append(notice))
 
-        orch.done("qa", note="login smoke failed: 500", project=proj, failed=True)
+        orch.done("qa", note="login smoke failed: 500 fail-shot.png", project=proj, failed=True)
 
         assert captured
         assert "FAILED" in captured[0]
@@ -816,7 +860,7 @@ class TestDoneNoticeAppendFormat:
         orch._shard_groups = {f"{proj}::qa": group}
         monkeypatch.setattr(orch, "_inject_shard_fanout_handoff", lambda *a, **kw: None)
 
-        orch.done("qa#1", note="shard 1 done", project=proj)
+        orch.done("qa#1", note="shard 1 done shard1.png", project=proj)
 
         assert "📸 evidence:" in group.done["qa#1"]
         assert "shard1.png" in group.done["qa#1"]
@@ -846,7 +890,7 @@ class TestSuspectCaptureFlagging:
         mt = assign_ts + 10
         os.utime(path, (mt, mt))
 
-        result = Orchestrator._scan_done_evidence("proj", "qa", assign_ts)
+        result = Orchestrator._scan_done_evidence("proj", "qa", assign_ts, "big.png")
 
         assert re.search(r"big\.png \(50\.0KB(?: · #[0-9a-f]{8})?\)", result), result
         assert "⚠" not in result
@@ -863,7 +907,7 @@ class TestSuspectCaptureFlagging:
         mt = assign_ts + 10
         os.utime(path, (mt, mt))
 
-        result = Orchestrator._scan_done_evidence("proj", "qa", assign_ts)
+        result = Orchestrator._scan_done_evidence("proj", "qa", assign_ts, "tiny.png")
 
         assert "📸 evidence:" in result
         assert "tiny.png" in result

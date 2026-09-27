@@ -726,3 +726,27 @@ class TestConnectionCap:
         assert len(srv._open_connections) == _MAX_CONNECTIONS, (
             "cap size must not grow beyond _MAX_CONNECTIONS"
         )
+
+
+class TestCloseReviewerDoesNotHitQaPane:
+    """#751: `close --role reviewer` with the reviewer pane already gone must not
+    fall through the reviewer->qa->critic chain and kill the live qa pane."""
+
+    def test_close_reviewer_leaves_qa_pane_alone(self) -> None:
+        from agent_takkub.orchestrator import Orchestrator
+
+        orch = MagicMock()
+        qa_pane = MagicMock()
+        qa_pane.session = MagicMock()
+        panes = {"qa": qa_pane}
+        orch._resolve_project = MagicMock(return_value="proj")
+        orch._project_panes = MagicMock(return_value=panes)
+        orch._cancel_queued_resource_task = MagicMock(return_value=(False, "nope"))
+        # the buggy chain resolution: reviewer -> qa
+        orch.resolve_pane_role = MagicMock(side_effect=lambda r, _p=None: "qa")
+
+        ok, msg = Orchestrator.close(orch, "reviewer", project="proj")
+
+        assert ok is True and "no-op" in msg
+        qa_pane.mark_expected_exit.assert_not_called()
+        assert "qa" in panes
