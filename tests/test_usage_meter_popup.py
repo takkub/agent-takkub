@@ -40,3 +40,22 @@ def test_popup_clamps_when_larger_than_available_height() -> None:
         QRect(0, 0, 1920, 720),
     )
     assert position.y() == 8
+
+
+def test_claude_list_windows_render_without_crash() -> None:
+    """#749/#750: shared-cache claude rows carry `raw_data["windows"]` as a list."""
+    from datetime import UTC, datetime, timedelta
+
+    from agent_takkub.provider_usage import ProviderUsage
+    from agent_takkub.usage_meter import _claude_windows
+
+    now = datetime.now(tz=UTC)
+    w = [
+        {
+            "name": "five_hour",
+            "utilization": 42.0,
+            "resets_at": (now + timedelta(hours=2)).isoformat(),
+        }
+    ]
+    u = ProviderUsage(provider="claude", status="active", windows=w, raw_data={"windows": w})
+    assert _claude_windows(u, now)["five_hour"]["utilization"] == 42.0

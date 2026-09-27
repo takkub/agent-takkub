@@ -76,6 +76,22 @@ def _parse_window_resets_at(resets_at: str | None) -> datetime | None:
         return None
 
 
+def _claude_windows(u: ProviderUsage, now: datetime) -> dict:
+    """#749/#750: `raw_data["windows"]` is a {name: {utilization, eta}} dict from
+    LimitStore but a [{name, utilization, resets_at}] list from the shared-cache rows."""
+    raw = (u.raw_data or {}).get("windows") or {}
+    if isinstance(raw, dict):
+        return raw
+    return {
+        w["name"]: {
+            "utilization": w.get("utilization"),
+            "eta": fmt_eta(_parse_window_resets_at(w.get("resets_at")), now),
+        }
+        for w in raw
+        if isinstance(w, dict) and w.get("name")
+    }
+
+
 _STATUS_SORT_ORDER = {"active": 0, "stale": 1, "loading": 2, "error": 3, "unsupported": 4}
 # Data older than 2x the (10 min) Claude poll interval is shown as stale, with its age.
 _STALE_AGE_S = 1200.0
@@ -186,7 +202,7 @@ def _provider_body_entries(
 
     entries: list[tuple[str, str, str] | tuple[str, str, float, str, bool]] = []
     stale = u.status == "stale"
-    claude_windows = (u.raw_data or {}).get("windows") if u.provider == "claude" else None
+    claude_windows = _claude_windows(u, now) if u.provider == "claude" else None
     if claude_windows:
         for key, wlabel in (("five_hour", "5h"), ("seven_day", "7d")):
             w = claude_windows.get(key)
@@ -538,8 +554,7 @@ class UsageMeter(QWidget):
             five_hour_pct: float | None = None
             five_hour_eta = ""
             if leading.provider == "claude":
-                windows = (leading.raw_data or {}).get("windows") or {}
-                five_hour = windows.get("five_hour") or {}
+                five_hour = _claude_windows(leading, now).get("five_hour") or {}
                 five_hour_pct = five_hour.get("utilization")
                 five_hour_eta = five_hour.get("eta") or ""
             if five_hour_pct is not None:
