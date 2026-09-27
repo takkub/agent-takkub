@@ -755,6 +755,26 @@ _BOOT_MARKER_TAIL_ROWS = 20
 # marker needs that punctuation too.
 _BUSY_MARKER_TAIL_ROWS = 20
 
+# #748: a pasted multi-line brief makes the composer TALL and codex pads it with
+# blank rows, so the composer's `›` glyph row can sit above the 6-row READY window
+# — `shows_pending_input` then read False while the whole brief was still an
+# unsubmitted draft (delivery marked accepted, reminders typed onto it,
+# `takkub done` inside the brief mistaken for agent output). The draft probe gets
+# its own taller window; it runs the glyph rule only (no fragment match), because a
+# fragment hit in this much history would also match the echoed user turn of a
+# delivery that DID submit.
+_DRAFT_PROBE_TAIL_ROWS = 30
+
+
+def _draft_probe_region(lines: list[str]) -> str:
+    """Lowercased bottom `_DRAFT_PROBE_TAIL_ROWS` physical rows (see #748 note)."""
+    end = len(lines)
+    while end > 0 and not lines[end - 1].strip():
+        end -= 1
+    if end <= 0:
+        return ""
+    return "\n".join(lines[max(0, end - _DRAFT_PROBE_TAIL_ROWS) : end]).lower()
+
 
 def _busy_marker_region(lines: list[str]) -> str:
     """Lowercased bottom `_BUSY_MARKER_TAIL_ROWS` physical screen rows — the
@@ -1053,7 +1073,7 @@ _STATUS_CHROME_KEYWORDS: tuple[str, ...] = (
 )
 
 
-def _input_has_content(region: str, fragment: str) -> bool:
+def _input_has_content(region: str, fragment: str, *, glyph_only: bool = False) -> bool:
     """True when the bottom input region shows pasted/typed content.
 
     Three signals:
@@ -1069,11 +1089,12 @@ def _input_has_content(region: str, fragment: str) -> bool:
     the last divider holds no prompt glyph at all the block ABOVE it is retried
     so claude's `DIVIDER / ❯ / DIVIDER / footer` composer is reachable.
     The region is already lowercased by ``_ready_region``."""
-    if any(marker in region for marker in _PASTED_PLACEHOLDERS):
-        return True
-    frag = fragment.strip().lower()[:_INPUT_FRAGMENT_LEN]
-    if bool(frag) and frag in region:
-        return True
+    if not glyph_only:
+        if any(marker in region for marker in _PASTED_PLACEHOLDERS):
+            return True
+        frag = fragment.strip().lower()[:_INPUT_FRAGMENT_LEN]
+        if bool(frag) and frag in region:
+            return True
 
     # #738: raw rows, not pre-stripped ones — the WRAPPED-draft rule below has to
     # see a row's left indent to tell a composer continuation from history.
@@ -1792,6 +1813,24 @@ _TYPED_DONE_TAIL_ROWS = 14
 
 def _is_divider(s: str) -> bool:
     return bool(_DIVIDER_LINE_RE.match(s.strip()))
+
+
+def _composer_draft_top(lines: list[str]) -> int | None:
+    """Row index of the composer's `›`/`❯` glyph row when it holds an unsubmitted
+    draft (#748), else None. Same rule as `_input_has_content` (last glyph row in
+    the draft-probe window; rows after it must be chrome/divider/indented), but
+    returns the position so the caller can hide the draft rows."""
+    end = len(lines)
+    while end > 0 and not lines[end - 1].strip():
+        end -= 1
+    start = max(0, end - _DRAFT_PROBE_TAIL_ROWS)
+    glyph = [i for i in range(start, end) if _PROMPT_LINE_PREFIX_RE.match(lines[i].strip())]
+    if not glyph:
+        return None
+    top = glyph[-1]
+    if not _input_has_content("\n".join(lines[start:end]).lower(), "", glyph_only=True):
+        return None
+    return top
 
 
 def find_typed_done_line(lines: list[str], cursor_row: int) -> str | None:
@@ -3020,7 +3059,11 @@ class PtySession(QObject):
         Scoped to the same bottom footer/input region as is_at_ready_prompt() so
         conversation-body text quoting the content can't poison the verdict. (#79)
         """
-        return _input_has_content(_ready_region(self.display_lines()), fragment)
+        lines = self.display_lines()
+        if _input_has_content(_ready_region(lines), fragment):
+            return True
+        # #748: tall composer — glyph row above the 6-row window.
+        return _input_has_content(_draft_probe_region(lines), "", glyph_only=True)
 
     def shows_busy_queue_marker(self, provider: str) -> bool:
         """True when `provider`'s TUI is currently prompting the user to press
@@ -3484,6 +3527,14 @@ class PtySession(QObject):
         with self._screen_lock:
             lines = self._display_lines_locked()
             cursor_row = self.screen.cursor.y
+        # #748: text still inside the composer draft is not agent output — belt
+        # to the pending-input probe above (which can miss an exotic composer).
+        draft_top = _composer_draft_top(lines)
+        if draft_top is not None:
+            lines = lines[:draft_top]
+            cursor_row = min(cursor_row, draft_top - 1)
+            if cursor_row < 0:
+                return None
         return find_typed_done_line(lines, cursor_row)
 
     def has_unparsed_tool_call(self) -> str | None:

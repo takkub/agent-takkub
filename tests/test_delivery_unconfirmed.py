@@ -15,6 +15,7 @@ import pytest
 from PyQt6.QtCore import QCoreApplication, QObject
 
 from agent_takkub import orchestrator as orch_mod
+from agent_takkub.lead_inbox import SubmitSettleOutcome
 from agent_takkub.orchestrator import Orchestrator
 
 
@@ -756,6 +757,45 @@ class TestSettledOutputSinceWriteSignal:
         assert any(
             c.args and c.args[0] == "task_deliver_stuck_in_composer" for c in mock_log.mock_calls
         )
+
+    def test_default_settle_with_pending_composer_never_accepted_748(
+        self, orch: Orchestrator, monkeypatch
+    ) -> None:
+        """#748: a verify exit that settles with the default outcome (no stuck
+        flag) while the brief is still a draft must not become `accepted`; a
+        distinct failure event fires."""
+        reviewer = _pane(_live_session())
+        reviewer.session.is_at_ready_prompt.return_value = True
+        reviewer.session.shows_pending_input.return_value = True
+        reviewer.session.shows_busy_marker.return_value = False
+        reviewer.session.last_output_monotonic.side_effect = [1.0, 9999.0, 9999.0, 9999.0]
+        # A verify exit that settles with the all-default outcome (stuck flag unset).
+        orch._delayed_enter_verified = lambda *_a, **kw: kw["on_settled"](SubmitSettleOutcome())
+        lead = _pane(_live_session())
+        orch._panes_by_project["P"] = {"lead": lead, "reviewer": reviewer}
+        monkeypatch.setattr(orch_mod.QTimer, "singleShot", staticmethod(lambda _ms, fn: fn()))
+        with (
+            patch("agent_takkub.orchestrator._log_event"),
+            patch("agent_takkub.lead_inbox._log_event") as mock_log,
+        ):
+            orch._send_when_ready("reviewer", "run smoke", max_wait_ms=1000, project="P")
+        delivery = next(iter(orch._delivery_manager._deliveries.values()))
+        assert delivery.state.value == "uncertain"
+        assert any(
+            c.args and c.args[0] == "task_delivery_failed_composer_pending"
+            for c in mock_log.mock_calls
+        )
+
+    def test_session_has_draft_guard_748(self) -> None:
+        from unittest.mock import MagicMock
+
+        sess = MagicMock()
+        sess.shows_pending_input.return_value = True
+        assert orch_mod._session_has_draft(sess) is True
+        sess.shows_pending_input.return_value = False
+        assert orch_mod._session_has_draft(sess) is False
+        sess.shows_pending_input.side_effect = RuntimeError
+        assert orch_mod._session_has_draft(sess) is False
 
 
 class TestSpawnFailureNotSilent:

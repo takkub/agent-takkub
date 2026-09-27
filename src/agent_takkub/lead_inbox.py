@@ -1715,17 +1715,36 @@ class LeadInboxMixin:
                     return
                 # #721/#729: if the task is still sitting in the composer unsubmitted,
                 # it must never be marked accepted.
-                _stuck_in_composer = False
-                if _outcome is not None:
-                    _stuck_in_composer = bool(getattr(_outcome, "stuck_in_composer", False))
-                elif payload is not None:
+                # #748 default-deny: the verify chain's verdict is not enough —
+                # several of its exits (`_settled()` with the default outcome,
+                # a probe that flipped on the last tick) never flag stuck while
+                # the brief is still a draft. Always re-probe the composer here;
+                # only a visible busy marker or a confirmed queue entry
+                # overrides pending content.
+                _stuck_in_composer = bool(
+                    _outcome is not None and getattr(_outcome, "stuck_in_composer", False)
+                )
+                if not _stuck_in_composer and payload is not None:
                     try:
                         if hasattr(_task_sess, "shows_pending_input"):
                             content_fragment = payload[:120] if isinstance(payload, str) else ""
                             _res_p = _task_sess.shows_pending_input(content_fragment)
-                            _stuck_in_composer = isinstance(_res_p, bool) and _res_p
+                            _pending_now = isinstance(_res_p, bool) and _res_p
+                        else:
+                            _pending_now = False
                     except Exception:
-                        _stuck_in_composer = False
+                        _pending_now = False
+                    if _pending_now:
+                        _busy_now = False
+                        try:
+                            _res_b0 = _task_sess.shows_busy_marker(_provider_deliver)
+                            _busy_now = isinstance(_res_b0, bool) and _res_b0
+                        except Exception:
+                            _busy_now = False
+                        _queued_ok = bool(
+                            _outcome is not None and getattr(_outcome, "queue_submit_used", False)
+                        )
+                        _stuck_in_composer = not (_busy_now or _queued_ok)
 
                 if _stuck_in_composer:
                     accepted = False
@@ -1860,6 +1879,12 @@ class LeadInboxMixin:
                     # #721/#729: the pasted task is still sitting as an unsubmitted draft
                     # in the composer. Surface to Lead immediately with the specific cause.
                     manager.mark_uncertain(delivery.delivery_id)
+                    _log_event(
+                        "task_delivery_failed_composer_pending",
+                        project=project_ns,
+                        role=role_name,
+                        delivery_id=delivery.delivery_id,
+                    )
                     _log_event(
                         "task_deliver_stuck_in_composer",
                         project=project_ns,

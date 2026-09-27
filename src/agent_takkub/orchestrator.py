@@ -1489,6 +1489,16 @@ def _pane_quota_stalled(orch: object, project: str, role: str, now: float) -> bo
     return ps is not None and ps.rate_limited_until > now
 
 
+def _session_has_draft(sess) -> bool:
+    """#748: True when the pane's composer holds unsubmitted input. Any
+    cockpit-originated text written while this is True lands on top of the draft."""
+    try:
+        r = sess.shows_pending_input()
+        return isinstance(r, bool) and r
+    except Exception:
+        return False
+
+
 class Orchestrator(
     PipelineMixin, LeadInboxMixin, LeadWaitMixin, SpawnEngineMixin, AutoResumeMixin, QObject
 ):
@@ -14022,6 +14032,8 @@ class Orchestrator(
                                 new_bytes=total - ps.proactive_compact_baseline_bytes,
                             )
                         continue
+                    if _session_has_draft(sess):  # #748: never type onto a draft
+                        continue
                     sess.write("/compact")
                     _delayed_enter(pane, sess, 150)
                     ps.proactive_compact_sent_ts = now
@@ -14906,8 +14918,9 @@ class Orchestrator(
                                 "ทำงานต่อได้เลย (ถ้าคำสั่งนั้นยังไม่เสร็จจริง ให้สั่งใหม่)"
                             )
                             try:
-                                session.write(nudge)
-                                _delayed_enter(pane, session, 150)
+                                if not _session_has_draft(session):  # #748
+                                    session.write(nudge)
+                                    _delayed_enter(pane, session, 150)
                             except Exception:
                                 pass
                             self._notify_lead(
