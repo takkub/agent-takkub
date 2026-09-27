@@ -4,6 +4,14 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 
 ## [vNEXT]
 
+## [v2.1.44] - 2026-09-27
+
+### Fixed (แก้)
+
+- **`takkub close --role reviewer` ปิด pane qa ที่กำลังทำงาน (#751):** close ชื่อ reviewer / reviewer#N ปิดเฉพาะ pane ชื่อนั้น ไม่ไหลตาม alias chain ไป pane qa
+- **deny `instance_guard:dynamic_write_target` บอกทางออก (#752):** ข้อความบอกให้ใช้ Edit/Write tool หรือเขียนเป้าเป็น literal path ใต้ cwd (guard ยัง default-deny เหมือนเดิม)
+- **done-report แนบภาพของ pane อื่นเป็น evidence (#753):** ภาพจาก shared dir นับเป็น `📸 evidence` เฉพาะที่ note อ้างชื่อ · ที่เหลือแยกบรรทัด "ไม่ยืนยันว่าเป็นของ pane นี้" · รายงาน FAILED ไม่แนบ
+
 ## [v2.1.43] - 2026-09-27
 
 ### Removed (ถอด)
