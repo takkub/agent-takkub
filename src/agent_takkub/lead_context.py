@@ -478,7 +478,7 @@ def _build_lead_context_text(
 
 ### กฎเดียวกันสำหรับทุก provider — ไม่มี provider ใดเป็นข้อยกเว้น
 
-กฎนี้ใช้กับ Lead ที่รันผ่าน **Claude, Codex, Gemini/agy, OpenCode, Kimi, Cursor, provider ที่เพิ่มในอนาคต และ provider substitution ทุกกรณี** การเปลี่ยน provider ห้ามทำให้ขอบเขตงานของ Lead เปลี่ยนไป
+กฎนี้ใช้กับ Lead ที่รันผ่าน **Claude, Codex, Gemini/agy, OpenCode, Cursor, provider ที่เพิ่มในอนาคต และ provider substitution ทุกกรณี** การเปลี่ยน provider ห้ามทำให้ขอบเขตงานของ Lead เปลี่ยนไป
 
 **ค่าเริ่มต้นคือ delegate:** งาน implementation, bug fix, refactor, test, source code, provider behavior, API/schema, dependency, infra/deploy, security หรือ investigation/review ที่ต้องใช้ specialist context ต้องใช้ `takkub assign` แม้งานจะมีไฟล์เดียวหรือดูง่าย และกฎนี้ใช้กับ source code ของ cockpit `agent-takkub` ด้วย
 
@@ -546,7 +546,7 @@ Lead ทำเองได้เฉพาะงานเล็กเมื่อ
 - native child ต้องจบด้วย `takkub subagent-done --role <role> "<summary>"` ตามคำสั่งใน capsule เพื่อให้ inbox/wait/ledger เห็นผล
 - `--mode subagent` ใช้ provider เดียวกับ Lead เสมอ จึงห้ามอ้างว่าเป็น cross-model/cross-provider check
 - scan/audit/search/triage ชิ้นเล็กเหมาะกับ `--mode subagent` ของ Lead; implementation ที่ user ต้องเห็นหรือ cross-check ต่างโมเดลใช้ pane
-- **fan-out งาน implement ให้ specialist (#641): `takkub assign --role frontend --shards N "<task>"` = เปิด pane เดียว แล้ว pane นั้นยิง native subagent N ตัวเอง** (claude Agent / codex spawn_agent / agy run_subagent / opencode task) — **`frontend#1..#K` แยก pane ถูกปฏิเสธที่ระบบแล้ว** (assign/spawn error ทันที — จ่ายค่า boot+MCP+RAM ซ้ำ K รอบ) · ระบบ fallback เป็น N pane ให้เองเฉพาะ reviewer e2e/ui (browser profile ต่อ shard), `--plan`, และ provider ที่ไม่มี subagent (kimi/cursor) · ต้องการ pane แยกจริงใส่ `--fanout pane` · Lead ห้ามรัน subagent N ตัวเองแทน specialist (Lead จะติดรอ)
+- **fan-out งาน implement ให้ specialist (#641): `takkub assign --role frontend --shards N "<task>"` = เปิด pane เดียว แล้ว pane นั้นยิง native subagent N ตัวเอง** (claude Agent / codex spawn_agent / agy run_subagent / opencode task) — **`frontend#1..#K` แยก pane ถูกปฏิเสธที่ระบบแล้ว** (assign/spawn error ทันที — จ่ายค่า boot+MCP+RAM ซ้ำ K รอบ) · ระบบ fallback เป็น N pane ให้เองเฉพาะ reviewer e2e/ui (browser profile ต่อ shard), `--plan`, และ provider ที่ไม่มี subagent (cursor) · ต้องการ pane แยกจริงใส่ `--fanout pane` · Lead ห้ามรัน subagent N ตัวเองแทน specialist (Lead จะติดรอ)
 - If you need to communicate with another agent, use the shell command `takkub send --to <role> "<message>"`.
 
 ละเมิดข้อใดข้อหนึ่ง → หยุดทันที สรุปงานแล้ว delegate ผ่าน `takkub assign`

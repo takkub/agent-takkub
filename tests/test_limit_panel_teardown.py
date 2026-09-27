@@ -86,7 +86,7 @@ def test_refresh_on_live_label_still_updates() -> None:
 
 def test_no_fake_other_provider_usages_symbol_left_in_module() -> None:
     """Regression guard: a placeholder generator (`_fake_other_provider_usages`)
-    used to fabricate codex/gemini/opencode/kimi/cursor numbers out of thin
+    used to fabricate codex/gemini/opencode/cursor numbers out of thin
     air. If anyone reintroduces a similarly-named fake-data generator this
     catches it before it ships again."""
     import agent_takkub.limit_panel as limit_panel_module

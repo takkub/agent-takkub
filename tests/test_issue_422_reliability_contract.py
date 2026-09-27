@@ -133,7 +133,7 @@ class TestCapabilityMatrix:
 
     def test_claude_native_skills_others_partial(self) -> None:
         assert capability_state("claude", "skills") == "supported"
-        for other in ("codex", "gemini", "opencode", "kimi", "cursor"):
+        for other in ("codex", "gemini", "opencode", "cursor"):
             assert capability_state(other, "skills") == "partial", other
 
     def test_resume_follows_the_flag_the_engine_actually_checks(self) -> None:
@@ -177,8 +177,6 @@ class TestCapabilityMatrix:
             assert capability_state(provider, "lead_questions") == "supported"
         assert capability_state("codex", "lead_questions") == "unsupported"
         assert "Plan-mode-only" in (PROVIDER_REGISTRY["codex"].lead_question_gap or "")
-        assert capability_state("kimi", "lead_questions") == "unsupported"
-        assert "not been live-tested" in (PROVIDER_REGISTRY["kimi"].lead_question_gap or "")
 
         from agent_takkub.doctor import check_provider_capabilities
 

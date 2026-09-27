@@ -356,7 +356,7 @@ class TestProviderRing:
         monkeypatch.setattr(provider_config, "_provider_available", lambda p: True)
         assert provider_config.pick_substitute_provider({"codex"}, after="codex") == "gemini"
         assert provider_config.pick_substitute_provider({"claude"}, after="claude") == "codex"
-        assert provider_config.pick_substitute_provider({"gemini"}, after="gemini") == "kimi"
+        assert provider_config.pick_substitute_provider({"gemini"}, after="gemini") == "opencode"
 
     def test_wraps_around_the_ring(self, monkeypatch):
         monkeypatch.setattr(provider_config, "_provider_available", lambda p: True)
@@ -377,7 +377,7 @@ class TestProviderRing:
 
         monkeypatch.setattr(provider_config, "_provider_available", lambda p: True)
         provider_state.set_quota_reset_at("gemini", time.time() + 3600)
-        assert provider_config.pick_substitute_provider({"codex"}, after="codex") == "kimi"
+        assert provider_config.pick_substitute_provider({"codex"}, after="codex") == "opencode"
 
     def test_mid_task_reroute_uses_the_ring_too(self, orch, monkeypatch):
         monkeypatch.setattr(provider_config, "_provider_available", lambda p: True)

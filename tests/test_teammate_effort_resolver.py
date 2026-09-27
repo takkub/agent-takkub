@@ -122,7 +122,7 @@ def test_no_override_falls_through_to_existing_precedence() -> None:
 
 def test_override_still_gated_by_unsupported_provider() -> None:
     # A per-assign --effort on a provider with no effort_flag at all
-    # (opencode/kimi/cursor) must resolve empty just like every other
+    # (opencode/cursor) must resolve empty just like every other
     # precedence layer — cli_server/orchestrator already reject this before
     # spawn via assign_effort_override_error, but the resolver stays
     # defense-in-depth.

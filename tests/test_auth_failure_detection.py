@@ -339,28 +339,6 @@ class TestGeminiColdBootNotSignedIn:
         assert reason is None
 
 
-class TestKimiNotLoggedIn:
-    """#257: a fresh kimi pane spawned with no credentials shows "Model: not
-    set, send /login to login" instead of ever reaching the idle footer —
-    unlike gemini's transient boot banner, this is a genuine dead end (no
-    model selected, nothing will ever run), so it belongs at the instant-fail
-    tier as kimi's own confirmed `auth_error_markers` entry."""
-
-    def test_send_login_to_login_is_an_instant_marker_for_kimi(self) -> None:
-        lines = ["", "Model: not set, send /login to login", ""]
-        assert _auth_failure_reason(lines, "kimi", seconds_since_output=0.0) == (
-            "send /login to login"
-        )
-
-    def test_send_login_to_login_is_not_a_generic_marker(self) -> None:
-        # Confirmed only for kimi's own exact wording — must not leak into
-        # every other provider's baseline the way the #256 follow-up
-        # explicitly avoided doing for "not signed in".
-        assert "send /login to login" not in GENERIC_AUTH_ERROR_MARKERS
-        lines = ["", "Model: not set, send /login to login", ""]
-        assert _auth_failure_reason(lines, "claude", seconds_since_output=0.0) is None
-
-
 class TestIsHardBlockedFor:
     """`PtySession.is_hard_blocked_for` (#263) — same hard-blocker matching
     `_classify_ready_for_provider` already runs for `ready_marker_selftest`,
@@ -409,11 +387,6 @@ class TestReadyMarkerCalibrationStatus:
     future spawn-time caller warn Lead instead of staying silent. Wiring an
     actual spawn-time warning is out of scope here (spawn_engine.py /
     lead_inbox.py); only the data-layer signal is added by this change."""
-
-    def test_kimi_is_now_calibrated(self) -> None:
-        # The #257 fix: kimi_spec.ready_rules went from () to a real entry.
-        assert is_ready_marker_calibrated("kimi") is True
-        assert "kimi" not in uncalibrated_providers()
 
     def test_cursor_is_still_uncalibrated(self) -> None:
         # cursor_spec.ready_rules is still () — no TUI has been observed yet

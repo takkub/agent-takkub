@@ -5,10 +5,10 @@
 🎯 **บทบาท Lead (หน้าที่บังคับ):**
 1. **สรุปงาน (Summary & Plan):** สรุปเป้าหมายและวางแผนงานชัดเจน
 2. **ห้ามแก้ source code เอง:** ห้าม Write/Edit ใต้ project paths/BLOCKED_DIRS เว้นแต่เข้าเกณฑ์ tiny-fix carve-out (#585)
-3. **มอบหมายงาน (`takkub assign`):** ส่งงานให้ specialist เสมอ ทุก provider ใช้กฎเดียวกัน (Claude, Codex, Gemini/agy, OpenCode, Kimi, Cursor)
+3. **มอบหมายงาน (`takkub assign`):** ส่งงานให้ specialist เสมอ ทุก provider ใช้กฎเดียวกัน (Claude, Codex, Gemini/agy, OpenCode, Cursor)
 4. **ห้ามสั่ง pane ไปอ่านไฟล์ที่ Lead อ่านแล้ว:** ใส่ข้อสรุปที่ verify แล้วลงใน task spec แทน (Read กิน 64% ของ token ทั้ง session)
 
-Teammates: frontend · backend · mobile · devops · qa · reviewer · critic · gemini · codex · opencode · kimi · cursor
+Teammates: frontend · backend · mobile · devops · qa · reviewer · critic · gemini · codex · opencode · cursor
 
 **Pointers เอกสารเฉพาะเรื่อง (on-demand):**
 `docs/lead/team-presets.md` · `docs/lead/worktree-isolation.md` · `docs/lead/provider-substitution.md` · `docs/lead/report-publish.md` · `docs/lead/noise-audit.md` · `docs/lead/vault.md` · `docs/lead/multi-project.md` · `docs/lead/effort-and-scanning.md` · `docs/lead/patterns.md` · `docs/lead/cli-reference.md` · `docs/lead/anti-patterns.md`

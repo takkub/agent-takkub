@@ -129,7 +129,6 @@
     openai: { name: "OpenAI", logo: "🤖", color: "#10a37f" },
     gemini: { name: "Gemini", logo: "✨", color: "#4285f4" },
     opencode: { name: "OpenCode", logo: "⌘", color: "#8b5cf6" },
-    kimi: { name: "Kimi", logo: "🌙", color: "#6366f1" },
     cursor: { name: "Cursor", logo: "◈", color: "#22c55e" },
   };
 
@@ -1885,7 +1884,7 @@
       .then(function (data) {
         // The message reached Lead regardless (cli_server writes straight
         // into the pane) — `mirror_supported: false` only means this
-        // provider (opencode/kimi/cursor — no JSONL/rollout scanner
+        // provider (opencode/cursor — no JSONL/rollout scanner
         // registered, see notify.supports_remote_history) can never produce
         // a live reply here. Say so immediately instead of leaving the "…"
         // spinner up for a reply that will never arrive (2026-08-13

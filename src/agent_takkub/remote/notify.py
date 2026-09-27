@@ -604,7 +604,7 @@ def resolve_lead_jsonl(orch, project_ns: str, provider: str | None = None) -> Pa
 
 # #192 (remote-blank-output): "no transcript resolved" used to reach the PWA
 # as an undifferentiated None — the phone showed the same silent blank chat
-# whether the provider has no scanner at all (opencode/kimi/cursor, #103),
+# whether the provider has no scanner at all (opencode/cursor, #103),
 # the Lead pane hasn't stamped a session_uuid yet, or a claude/codex/gemini
 # session_uuid drifted from its actual transcript file (manual desktop
 # `/resume`). All three are diagnosable in-process right now — this mirrors

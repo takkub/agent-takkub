@@ -49,7 +49,7 @@ class TestQuotaMarkersFor:
         assert "usage limit" not in markers
 
     def test_unconfirmed_providers_do_not_accept_another_providers_banner(self) -> None:
-        for provider in ("opencode", "kimi", "cursor"):
+        for provider in ("opencode", "cursor"):
             markers = quota_markers_for(provider)
             assert markers == ()
             assert (
@@ -58,7 +58,7 @@ class TestQuotaMarkersFor:
             )
 
     def test_unknown_provider_has_no_unverified_markers(self) -> None:
-        assert quota_markers_for("nonexistent-provider") == quota_markers_for("kimi")
+        assert quota_markers_for("nonexistent-provider") == quota_markers_for("cursor")
         assert "hit your usage limit" in quota_markers_for("codex")
 
 
@@ -198,7 +198,7 @@ class TestDisplayStateQuotaPriority:
     def test_quota_stalled_wins_over_login_required(self) -> None:
         pane = MagicMock()
         pane.session.auth_failure_reason.return_value = "send /login to login"
-        pane.model.provider_name = "kimi"
+        pane.model.provider_name = "cursor"
         result = Orchestrator._derive_display_state(
             None, pane, "working", False, quota_stalled=True
         )

@@ -30,7 +30,6 @@ from agent_takkub.provider_spec import (
     codex_spec,
     cursor_spec,
     gemini_spec,
-    kimi_spec,
     opencode_spec,
 )
 from agent_takkub.roles import LEAD
@@ -81,7 +80,6 @@ def test_provider_spec_tools_flag_mapping():
     assert codex_spec.tools_flag is None
     assert gemini_spec.tools_flag is None
     assert opencode_spec.tools_flag is None
-    assert kimi_spec.tools_flag is None
     assert cursor_spec.tools_flag is None
 
 

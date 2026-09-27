@@ -712,6 +712,11 @@ class CliServer(QObject):
                 if not role:
                     self._reply(sock, ok=False, msg="missing arg: 'role'")
                     return
+                from .removed_providers import is_removed_provider, removed_provider_message
+
+                if is_removed_provider(role):  # #725
+                    self._reply(sock, ok=False, msg=removed_provider_message(role))
+                    return
                 # #510: same "reply synchronously, don't just let the deferred
                 # orch.assign()/spawn() reject it" reasoning as the cwd/
                 # worktree-collision pre-checks below — a disabled role's

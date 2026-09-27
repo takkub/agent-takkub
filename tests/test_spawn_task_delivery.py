@@ -545,7 +545,7 @@ def test_no_distill_pending_flag_omits_nudge(orch: Orchestrator, tmp_path: Path)
 
 def test_only_claude_has_confirmed_file_backed_system_prompt_capability() -> None:
     assert PROVIDER_REGISTRY["claude"].system_prompt_flag == "--append-system-prompt-file"
-    for provider in ("codex", "gemini", "opencode", "kimi", "cursor"):
+    for provider in ("codex", "gemini", "opencode", "cursor"):
         assert PROVIDER_REGISTRY[provider].system_prompt_flag is None
 
 

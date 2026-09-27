@@ -2,7 +2,7 @@
 
 Before #690 the project-memory pointer (#33/#687) and the role learned-notes
 block were rendered inline inside `spawn_engine`'s claude-only appendix, so a
-teammate on codex/gemini-agy/opencode/kimi/cursor never saw either — while
+teammate on codex/gemini-agy/opencode/cursor never saw either — while
 `orchestrator.done()` kept *writing* its failures into role memory that no
 non-claude pane was ever pointed back at.
 

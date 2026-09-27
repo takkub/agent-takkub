@@ -30,7 +30,6 @@ def test_gemini_effort_levels() -> None:
 def test_providers_without_effort_flag_have_no_levels() -> None:
     for spec in (
         provider_spec.opencode_spec,
-        provider_spec.kimi_spec,
         provider_spec.cursor_spec,
     ):
         assert spec.effort_flag is None

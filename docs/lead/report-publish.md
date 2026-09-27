@@ -12,7 +12,7 @@
 
 # Report builder — `takkub report build` (#626)
 
-ตัวออกรายงาน HTML **ส่วนกลาง ใช้ได้ทุก provider** (claude/codex/gemini-agy/opencode/kimi/cursor) ทั้ง Windows ConPTY และ macOS — ไม่ใช่ Claude skill ที่ provider อื่นมองไม่เห็น template/CSS/lightbox + mobile-check ออกมาจากชุดเดียวกัน (`assets/report/` → ship ใน wheel เป็น `_assets/report/`)
+ตัวออกรายงาน HTML **ส่วนกลาง ใช้ได้ทุก provider** (claude/codex/gemini-agy/opencode/cursor) ทั้ง Windows ConPTY และ macOS — ไม่ใช่ Claude skill ที่ provider อื่นมองไม่เห็น template/CSS/lightbox + mobile-check ออกมาจากชุดเดียวกัน (`assets/report/` → ship ใน wheel เป็น `_assets/report/`)
 
 ## Command
 
@@ -56,7 +56,7 @@ report-content/
 
 ### 1. customer — คู่มือ/ประกาศให้ลูกค้า
 - เขียนแบบ user manual: ฟีเจอร์ทำอะไร, ขั้นตอนกดทีละข้อ, ภาพหน้าจอฝั่ง user, tips, ตัวอย่างผลลัพธ์
-- **ห้ามมี (lint เตือนก่อน publish นอกเหนือจากนี้ให้ตรวจเอง):** รายละเอียดเทคนิค/โค้ด/`commit`/`.ts`/`/api/`/`endpoint`/`error`/`บั๊ก`/`migration`/`qa-gate`/`database`/`response`, ตัวเลขการเงินภายใน, ชื่อ role ทีม dev/provider (`codex`/`claude`/`gemini`/`opencode`/`kimi`/`cursor`/`anthropic`)
+- **ห้ามมี (lint เตือนก่อน publish นอกเหนือจากนี้ให้ตรวจเอง):** รายละเอียดเทคนิค/โค้ด/`commit`/`.ts`/`/api/`/`endpoint`/`error`/`บั๊ก`/`migration`/`qa-gate`/`database`/`response`, ตัวเลขการเงินภายใน, ชื่อ role ทีม dev/provider (`codex`/`claude`/`gemini`/`opencode`/`cursor`/`anthropic`)
 - ตัวอย่างอ้างอิง: `guide/example-user-manual.html` (คู่มือระบบโบนัสและกิจกรรม)
 
 ### 2. dev — รายงานเทคนิค

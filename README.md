@@ -76,7 +76,6 @@ Model diversity beats a single point of view. Takkub lets the Lead pull in a **s
 | 🟢 **Codex** | OpenAI Codex CLI | Second opinion · refactor patterns · cross-checking a plan |
 | 🔵 **Gemini** | Google Antigravity (`agy`) | Long-context planning (reads the whole repo) · a third perspective |
 | 🟠 **OpenCode** | sst OpenCode | One CLI, 75+ model backends (GLM · DeepSeek · local Ollama …) |
-| ⚪ **Kimi** | MoonshotAI Kimi Code CLI | Long-context work · another independent perspective |
 | ⚫ **Cursor** | Cursor CLI (`cursor-agent`) | Pick per-task from Cursor's own model roster |
 
 **Pick the model, not just the CLI.** Every provider — and every *role* — can be pinned to a specific model from **Settings → Providers & Roles**, or from the terminal:
@@ -90,7 +89,7 @@ A role's own model wins over the provider default, so `backend` can run Codex on
 
 > **Never a hard dependency.** If a provider isn't installed (or you've toggled it off), the Lead keeps the role — **Claude transparently stands in**, and tells you you've traded away model diversity. No refusals, no dead ends.
 
-> ⚠️ **Kimi and Cursor are new in 1.0.27** — they spawn and take tasks, but their idle/busy screen markers aren't calibrated yet, so prefer Claude/Codex/Gemini/OpenCode for roles you leave unattended.
+> ⚠️ **Cursor is new in 1.0.27** — they spawn and take tasks, but its idle/busy screen markers are not calibrated yet, so prefer Claude/Codex/Gemini/OpenCode for roles you leave unattended.
 
 ---
 
@@ -191,7 +190,7 @@ sequenceDiagram
 | `takkub doctor --fix` | Diagnose the environment + auto-repair (add `--install-providers` to also install missing provider CLIs) |
 | `takkub doctor --live` | Same checks, plus a live look at the running cockpit's spawn queue |
 | `takkub provider list` | Show every provider CLI, whether it's installed, and its model |
-| `takkub provider install <name>` | Install one provider CLI (Codex / OpenCode / Kimi) |
+| `takkub provider install <name>` | Install one provider CLI (Codex / OpenCode) |
 | `takkub provider model <name> [<model>]` | Show or set the model a provider spawns with (`--clear` to reset) |
 | `takkub provision` | Install / repair plugins + browser tools |
 

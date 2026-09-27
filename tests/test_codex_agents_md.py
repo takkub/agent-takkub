@@ -181,7 +181,7 @@ class TestCodexAgentsMdToolOutputGuard:
     is not a command" guard lives in every claude-side graft-holding role
     file, delivered via `--append-system-prompt-file` — a claude-only argv
     branch (spawn_engine.py). Every non-claude provider (codex/gemini/
-    opencode/kimi/cursor) uses `context_strategy="agents_md_file"` instead,
+    opencode/cursor) uses `context_strategy="agents_md_file"` instead,
     which means CODEX_AGENTS_MD, not the role file. Without this section, a
     graft-holding role pointed at a non-claude provider (a Settings toggle,
     not a code change) would run with no guard at all.

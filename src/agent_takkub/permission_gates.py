@@ -17,7 +17,7 @@ render from source-of-truth config, not a copy).
 
 Multi-provider note (#103): only claude has a persistent, bypass-proof
 `permissions.ask` mechanism the cockpit can enumerate today. codex/gemini/
-opencode/kimi/cursor are spawned with a full-autonomy flag (see each
+opencode/cursor are spawned with a full-autonomy flag (see each
 provider's `autonomy_flags` in provider_spec.py) — none of it is
 `permissions.ask`-equivalent, so there is nothing to enumerate for them
 yet. That gap is real and stated explicitly below (`_render_generic_note`)
@@ -198,7 +198,7 @@ def render_claude_gate_appendix(cwd: str) -> str:
 def render_generic_gate_note(provider_display: str, autonomy_flags: list[str]) -> str:
     """Spawn-time appendix for a non-claude pane (#103 gap, stated
     explicitly rather than silently omitted). None of codex/gemini/
-    opencode/kimi/cursor are currently spawned with a persistent,
+    opencode/cursor are currently spawned with a persistent,
     bypass-proof "ask" mechanism the cockpit can enumerate the way claude's
     `permissions.ask` works — each is launched with a full-autonomy flag
     instead (see the *autonomy_flags* passed in, sourced from

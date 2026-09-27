@@ -40,7 +40,7 @@ class TestProviderSpecMarkers:
         assert tool_running_markers_for("not-a-real-provider") == ()
 
     def test_every_registered_provider_returns_a_tuple(self) -> None:
-        for name in ("claude", "codex", "gemini", "opencode", "kimi", "cursor"):
+        for name in ("claude", "codex", "gemini", "opencode", "cursor"):
             assert isinstance(tool_running_markers_for(name), tuple)
 
 

@@ -21,11 +21,6 @@ class TestKnownProviders:
         pane_env.inject_provider_no_autoupdate_env(env, "gemini")
         assert env == {"AGY_CLI_DISABLE_AUTO_UPDATE": "true"}
 
-    def test_kimi_sets_both_aliases(self) -> None:
-        env: dict[str, str] = {}
-        pane_env.inject_provider_no_autoupdate_env(env, "kimi")
-        assert env == {"KIMI_CLI_NO_AUTO_UPDATE": "1", "KIMI_CODE_NO_AUTO_UPDATE": "1"}
-
     def test_setdefault_never_overrides_existing_value(self) -> None:
         env = {"DISABLE_AUTOUPDATER": "0"}
         pane_env.inject_provider_no_autoupdate_env(env, "claude")

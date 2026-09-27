@@ -185,7 +185,7 @@ def test_solo_lead_blocks_providers_and_critic_but_not_lead_or_shell():
     team_preset.set_current("solo-lead", "proj")
     assert team_preset.can_spawn("lead", "proj")[0] is True
     assert team_preset.can_spawn("shell", "proj")[0] is True
-    for role in ("codex", "gemini", "opencode", "kimi", "cursor", "critic", "codex#2"):
+    for role in ("codex", "gemini", "opencode", "cursor", "critic", "codex#2"):
         ok, msg = team_preset.can_spawn(role, "proj")
         assert ok is False, role
         assert "team preset" in msg
@@ -195,14 +195,14 @@ def test_pair_blocks_providers_and_critic_but_keeps_checker():
     team_preset.set_current("pair", "proj")
     assert team_preset.can_spawn("reviewer", "proj")[0] is True
     assert team_preset.can_spawn("shell", "proj")[0] is True
-    for role in ("codex", "gemini", "opencode", "kimi", "cursor", "critic"):
+    for role in ("codex", "gemini", "opencode", "cursor", "critic"):
         assert team_preset.can_spawn(role, "proj")[0] is False, role
 
 
 def test_full_and_auto_still_allow_providers():
     for preset_id in ("full", "auto"):
         team_preset.set_current(preset_id, "proj")
-        for role in ("codex", "gemini", "opencode", "kimi", "cursor", "critic"):
+        for role in ("codex", "gemini", "opencode", "cursor", "critic"):
             assert team_preset.can_spawn(role, "proj")[0] is True, (preset_id, role)
 
 

@@ -2,7 +2,7 @@
 
 Claude Code's native auto-memory writes to
 ``<CLAUDE_CONFIG_DIR>/projects/<dir>/memory/`` — a location that is
-(a) claude-only (codex/gemini-agy/opencode/kimi/cursor have no such
+(a) claude-only (codex/gemini-agy/opencode/cursor have no such
 mechanism) and (b) not redirectable independently of the whole config dir.
 Switching the Lead away from claude therefore silently lost every learned
 lesson, with no warning (#687).

@@ -8,7 +8,7 @@ the shell route.
 Two enforcement layers have to stay in sync, and this pins both:
 
 * `pane_guard.py` — a real `PreToolUse` block, but **claude panes only**
-  (Claude Code hooks don't exist for codex / gemini-agy / opencode / kimi /
+  (Claude Code hooks don't exist for codex / gemini-agy / opencode /
   cursor). Covered by `tests/test_pane_guard.py`.
 * the role files here — the only enforcement a non-claude pane ever sees
   (#103 multi-provider), so the prose is load-bearing, not decoration.

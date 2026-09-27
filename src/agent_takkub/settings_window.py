@@ -351,7 +351,7 @@ _VIEW_HEADERS: dict[int, tuple[str, str]] = {
 
 
 # Roles offered a per-role CLI override in "Providers & Roles". Excludes
-# codex/gemini/opencode/kimi/cursor (provider_config.FORCED_ROLES — CLI IS
+# codex/gemini/opencode/cursor (provider_config.FORCED_ROLES — CLI IS
 # the role's identity) and shell (not a pipeline-eligible role — see
 # pipeline_config.valid_roles()'s own note). `lead` is prepended separately
 # below: it isn't a
@@ -411,15 +411,14 @@ _MODEL_DEFAULT_LABEL = "(default)"
 # or fails (`_fill_model_combo` merges this with `provider_model_catalog`'s
 # cached discovery — see #493). Every model combo stays EDITABLE regardless,
 # because a free-typed id always works even for a provider this cockpit can't
-# discover for at all (kimi/cursor/opencode — #103 gap, see
+# discover for at all (cursor/opencode — #103 gap, see
 # `provider_model_refresh.NO_MODEL_DISCOVERY_GAPS`); re-verify this snapshot
 # by hand next time it goes stale (`agy models`, `codex` — read
 # `~/.codex/models_cache.json`'s "slug" fields, no CLI subcommand lists them
 # — `opencode models --refresh`).
 # claude/codex/gemini/opencode entries below were confirmed live against the
-# CLIs installed on this box; kimi has no model-listing command or cache to
-# check against (accepts free-text `-m`) and cursor's CLI wasn't installed
-# here at all — both left as the prior snapshot, unverified.
+# CLIs installed on this box; cursor's CLI wasn't installed here at all —
+# left as the prior snapshot, unverified.
 _MODELS_BY_PROVIDER: dict[str, tuple[str, ...]] = {
     "claude": (
         "opus",
@@ -463,9 +462,6 @@ _MODELS_BY_PROVIDER: dict[str, tuple[str, ...]] = {
         "claude-opus-4-6-thinking",
         "gpt-oss-120b-medium",
     ),
-    # Unverified — kimi CLI (v1.49.0) exposes no `models` subcommand or model
-    # cache; kept as the prior snapshot.
-    "kimi": ("k3", "k2.7", "k2.6", "k2.5"),
     # Unverified — cursor's CLI isn't installed on this box; kept as the
     # prior snapshot.
     "cursor": (
@@ -504,7 +500,7 @@ def _resolved_default_model_text(
     means): the provider-level default (`provider_models.json`, the
     "MODEL CONNECTIONS" card), else — claude only — the role's code-level
     tier default (`orchestrator_text._teammate_tier`), else "" when this
-    cockpit has no id to predict (opencode/kimi/cursor — the bare CLI's own
+    cockpit has no id to predict (opencode/cursor — the bare CLI's own
     default applies). `role=None` is the provider-level combo itself, which
     has no role tier to fall back to. `provider_default_override` lets a
     live (unsaved) edit to the provider-level combo preview through instead
@@ -696,7 +692,7 @@ def _hop_role_label(role: str) -> str:
 # test_secondary_positions_are_pipeline_palette_selectable, narrowing this
 # would regress that fix) plus all 3 Reviewer dispatch modes (reviewer/qa/
 # critic, qa/critic relabeled via `_hop_role_label`). Provider panes
-# (codex/gemini/opencode/kimi/cursor) and `shell` are reachable only through
+# (codex/gemini/opencode/cursor) and `shell` are reachable only through
 # the sectioned "+ add role" dropdown (`_hop_add_role_sections`) — a second
 # opinion shouldn't be one accidental palette click away, same reasoning
 # `_build_secondary_brains_panel` already applies elsewhere on this page.
@@ -2144,7 +2140,7 @@ class SettingsWindow(
 
         banner = QLabel(
             "provider ที่ปิดหรือยังไม่ติดตั้ง -> provider ถัดไปที่เปิดอยู่รับตำแหน่งแทนอัตโนมัติ "
-            "(role เดิม, engine เปลี่ยน — วนตามลำดับ claude → codex → gemini → kimi → opencode → cursor)",
+            "(role เดิม, engine เปลี่ยน — วนตามลำดับ claude → codex → gemini → opencode → cursor)",
             view,
         )
         banner.setObjectName("infoBanner")
@@ -2805,7 +2801,7 @@ class SettingsWindow(
         outer.addWidget(extra_group)
 
     def _build_secondary_brains_panel(self, parent: QWidget) -> QWidget:
-        """#512 item 3 — codex/gemini/opencode/kimi/cursor as a compact chip
+        """#512 item 3 — codex/gemini/opencode/cursor as a compact chip
         row: optional second opinions, not team POSITIONS, so no toggle
         lives here (that's still the MODEL CONNECTIONS panel below, unchanged
         — this is a read-only glance, not a second control for the same

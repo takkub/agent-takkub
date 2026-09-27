@@ -1020,7 +1020,7 @@ _PASTED_PLACEHOLDERS: tuple[str, ...] = (
     "[pasted content",  # codex
 )
 
-# gemini/opencode/kimi/cursor have no confirmed placeholder wording captured
+# gemini/opencode/cursor have no confirmed placeholder wording captured
 # yet — left OUT of _PASTED_PLACEHOLDERS rather than guessed (a wrong string
 # either matches nothing, same as today, or worse, false-positives on
 # unrelated screen text). shows_pending_input() still works for these
@@ -1034,7 +1034,6 @@ _PASTED_PLACEHOLDERS: tuple[str, ...] = (
 NO_PASTE_PLACEHOLDER_GAPS: dict[str, str] = {
     "gemini": "no live-captured bracketed-paste placeholder wording yet",
     "opencode": "no live-captured bracketed-paste placeholder wording yet",
-    "kimi": "no live-captured bracketed-paste placeholder wording yet",
     "cursor": "no live-captured bracketed-paste placeholder wording yet",
 }
 
@@ -1364,14 +1363,6 @@ _READY_SELFTEST_CASES: tuple[tuple[str, bool, str], ...] = (
     # include 'esc to interrupt' too, so the case is self-contained there
     # without needing codex's 'fast off' rule at all.
     ("(esc to interrupt) building...\nsomeone mentions fast off", False, "claude"),
-    # kimi idle footer (#257), captured via direct ConPTY capture against a
-    # signed-in kimi-cli 1.49.x session on Windows, 2026-08-16 — see
-    # kimi_spec.ready_rules's comment for the full captured line.
-    (
-        "main  @: mention files | ctrl-x: toggle mode | shift-tab: plan mode | ctrl+o: editor",
-        True,
-        "kimi",
-    ),
     # #276 round 3 (2026-09-02, codex-cli 0.152.0): the composer's own footer
     # reworded from "? for help" to "? for shortcuts" — a live 3-pane
     # incident (reviewer/codex/critic, saas_admin_amb) proved the tight
@@ -3026,7 +3017,7 @@ class PtySession(QObject):
         No other provider renders this footer shape (only claude's Ink TUI
         has a "background tasks" segment on its idle status line as of
         2026-08), so this always returns False for codex/gemini/opencode/
-        kimi/cursor — not a gap, just nothing to detect there yet (#103)."""
+        cursor — not a gap, just nothing to detect there yet (#103)."""
         return _has_background_work_marker(_ready_region(self.display_lines()))
 
     def is_at_ready_prompt_cached(self) -> bool:
@@ -3487,7 +3478,7 @@ class PtySession(QObject):
         in-app modal chrome, not a subprocess prompt, and its numbered-menu
         rendering has no ``[y/N]`` bracket for that detector's regex to catch
         (#236). Confirmed only for Claude Code's own wording — codex/gemini-
-        agy/opencode/kimi/cursor may render tool-approval prompts differently
+        agy/opencode/cursor may render tool-approval prompts differently
         (or not gate on one at all); this is a known per-provider gap, not
         assumed coverage (#103).
 

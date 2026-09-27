@@ -59,7 +59,6 @@ NO_MODEL_DISCOVERY_GAPS: dict[str, str] = {
         "latest release) but resolving an alias to a concrete id requires a real, "
         "billed generation — not run automatically just to check freshness"
     ),
-    "kimi": "no models-list subcommand (confirmed via `kimi --help`, 2026-08-20)",
     "cursor": (
         "`agent models` is documented to exist (cursor.com CLI reference) but cursor "
         "is not installed on any machine this feature was built against — output "

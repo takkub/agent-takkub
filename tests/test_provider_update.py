@@ -18,6 +18,21 @@ import agent_takkub.provider_update as pu
 from agent_takkub.provider_spec import PROVIDER_REGISTRY
 
 
+def _register_uv_provider(monkeypatch: pytest.MonkeyPatch) -> str:
+    """A synthetic uv-installed provider — no real registry entry installs via
+    uv any more (kimi was the only one, #725), but the generic uv upgrade path
+    in provider_update still has to work for the next one."""
+    import dataclasses
+
+    spec = dataclasses.replace(
+        PROVIDER_REGISTRY["cursor"],
+        name="uvfake",
+        install_command=["uv", "tool", "install", "--python", "3.13", "uvfake-cli"],
+    )
+    monkeypatch.setitem(PROVIDER_REGISTRY, "uvfake", spec)
+    return "uvfake"
+
+
 class TestEligibilityGap:
     def test_not_installed_when_discover_fails(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(pu, "_discover", lambda spec: None)
@@ -52,12 +67,12 @@ class TestEligibilityGap:
     def test_eligible_providers_filters_registry(self, monkeypatch: pytest.MonkeyPatch) -> None:
         import agent_takkub.provider_state as provider_state
 
-        monkeypatch.setattr(provider_state, "is_disabled", lambda name: name == "kimi")
+        monkeypatch.setattr(provider_state, "is_disabled", lambda name: name == "opencode")
         monkeypatch.setattr(
             pu, "_discover", lambda spec: None if spec.name == "cursor" else "/bin/x"
         )
         result = pu.eligible_providers()
-        assert "kimi" not in result
+        assert "opencode" not in result
         assert "cursor" not in result
         assert "claude" in result
         assert set(result) <= set(PROVIDER_REGISTRY)
@@ -68,9 +83,9 @@ class TestGenericUpdateArgv:
         spec = PROVIDER_REGISTRY["codex"]
         assert pu._generic_update_argv(spec) == spec.install_command
 
-    def test_uv_becomes_tool_upgrade(self) -> None:
-        spec = PROVIDER_REGISTRY["kimi"]
-        assert pu._generic_update_argv(spec) == ["uv", "tool", "upgrade", "kimi-cli"]
+    def test_uv_becomes_tool_upgrade(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        spec = PROVIDER_REGISTRY[_register_uv_provider(monkeypatch)]
+        assert pu._generic_update_argv(spec) == ["uv", "tool", "upgrade", "uvfake-cli"]
 
     def test_no_install_command_returns_none(self) -> None:
         spec = PROVIDER_REGISTRY["cursor"]
@@ -190,14 +205,15 @@ class TestUpdateGeneric:
         assert "timed out" in outcome.detail
 
     def test_uv_tool_upgrade_argv(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        self._patch_installed(monkeypatch, "kimi", "/bin/kimi")
+        name = _register_uv_provider(monkeypatch)
+        self._patch_installed(monkeypatch, name, "/bin/uvfake")
         monkeypatch.setattr(pu.shutil, "which", lambda prog: f"/usr/bin/{prog}")
         fake = subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr="")
         with patch.object(pu, "_run", return_value=fake) as mock_run:
-            outcome = pu.update_provider("kimi")
+            outcome = pu.update_provider(name)
         assert outcome.status == pu.STATUS_UPDATED
         argv = mock_run.call_args[0][0]
-        assert argv == ["/usr/bin/uv", "tool", "upgrade", "kimi-cli"]
+        assert argv == ["/usr/bin/uv", "tool", "upgrade", "uvfake-cli"]
 
     def test_package_manager_missing_on_path(self, monkeypatch: pytest.MonkeyPatch) -> None:
         self._patch_installed(monkeypatch, "codex", "/bin/codex")
@@ -341,15 +357,16 @@ class TestNpmSerialisation:
         assert sorted(seen) == ["@openai/codex", "opencode-ai"]
 
     def test_uv_provider_does_not_take_the_npm_lock(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        name = _register_uv_provider(monkeypatch)
         self._patch_installed(monkeypatch)
         held = pu._NPM_LOCK.acquire(timeout=1)
         assert held
         try:
             fake = subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr="")
             with patch.object(pu, "_run", return_value=fake) as mock_run:
-                outcome = pu.update_provider("kimi")
+                outcome = pu.update_provider(name)
             assert outcome.status == pu.STATUS_UPDATED
-            assert mock_run.call_args[0][0][1:] == ["tool", "upgrade", "kimi-cli"]
+            assert mock_run.call_args[0][0][1:] == ["tool", "upgrade", "uvfake-cli"]
         finally:
             pu._NPM_LOCK.release()
 

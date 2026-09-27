@@ -240,9 +240,7 @@ class TestCmdTask:
         assert result["exit_code"] == 1
 
 
-@pytest.mark.parametrize(
-    "provider", ["claude", "codex", "gemini-agy", "opencode", "kimi", "cursor"]
-)
+@pytest.mark.parametrize("provider", ["claude", "codex", "gemini-agy", "opencode", "cursor"])
 @pytest.mark.parametrize("delivered", [False, True])
 def test_recovery_close_does_not_report_abandoned_task_or_finalize_worktree(
     orch: Orchestrator, provider: str, delivered: bool
@@ -279,9 +277,7 @@ def test_recovery_close_does_not_report_abandoned_task_or_finalize_worktree(
         )
 
 
-@pytest.mark.parametrize(
-    "provider", ["claude", "codex", "gemini-agy", "opencode", "kimi", "cursor"]
-)
+@pytest.mark.parametrize("provider", ["claude", "codex", "gemini-agy", "opencode", "cursor"])
 def test_auth_handoff_uses_real_close_and_delivery_in_same_worktree(
     orch: Orchestrator, provider: str, tmp_path: pathlib.Path
 ) -> None:

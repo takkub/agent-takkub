@@ -71,7 +71,7 @@ class TestProviderCoverage:
     def test_claude_declares_the_flag(self) -> None:
         assert PROVIDER_REGISTRY["claude"].autocompact_flag == "--autocompact"
 
-    @pytest.mark.parametrize("provider", ["codex", "gemini", "opencode", "kimi", "cursor"])
+    @pytest.mark.parametrize("provider", ["codex", "gemini", "opencode", "cursor"])
     def test_other_providers_record_the_gap_rather_than_assuming_it_works(
         self, provider: str
     ) -> None:

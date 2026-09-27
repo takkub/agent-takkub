@@ -9,7 +9,7 @@ existing source of truth for "what version is old enough to warn about".
 Every other provider is deliberately left UNREGISTERED: doctor.py's own
 `check_provider_auth()` docstring says most providers' state is "otherwise a
 black box the cockpit deliberately never reads", and the project memory note
-on provider rollout explicitly flags opencode/kimi/cursor markers as
+on provider rollout explicitly flags opencode/cursor markers as
 "uncalibrated until login" — a guessed min/max there would be a false-
 confidence OK or FAIL, worse than no verdict at all.
 """

@@ -17,10 +17,10 @@ Two places carry this content and both are pinned here:
 
 * `.claude/agents/*.md` (16 files) — read natively by a **claude** pane,
   including the 5 "claude standing in for <provider>" slot files
-  (codex.md/gemini.md/opencode.md/kimi.md/cursor.md).
+  (codex.md/gemini.md/opencode.md.md/cursor.md).
 * `codex_agents_md.CODEX_AGENTS_MD` — the single shared cheatsheet
   planted as `AGENTS.md` for a **real** non-claude provider (codex,
-  gemini-agy, opencode, kimi, cursor all share `context_strategy=
+  gemini-agy, opencode, cursor all share `context_strategy=
   "agents_md_file"`, see `provider_spec.py`) — this is the only file a
   real non-claude CLI ever reads, so it must carry the same convention
   even though it isn't a `.claude/agents/*.md` role file itself.

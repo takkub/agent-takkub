@@ -155,18 +155,18 @@ class TestSystemNoticeRevalidatedAtFlush:
         _system_marker_role recognised before this fix."""
         lead = _pane(session=_live_session())
         lead.session.is_at_ready_prompt.return_value = False
-        orch._panes_by_project[PROJECT] = {"lead": lead, "kimi": _pane("working")}
+        orch._panes_by_project[PROJECT] = {"lead": lead, "cursor": _pane("working")}
         with (
             patch("agent_takkub.lead_inbox.QTimer.singleShot"),
             patch("agent_takkub.lead_inbox._log_event"),
         ):
             orch._notify_lead(
                 PROJECT,
-                "⏳ [delivery-busy-wait] kimi pane ยังไม่ถึง ready prompt แต่มี output ล่าสุดเมื่อ 3s ที่แล้ว",
+                "⏳ [delivery-busy-wait] cursor pane ยังไม่ถึง ready prompt แต่มี output ล่าสุดเมื่อ 3s ที่แล้ว",
             )
             assert not lead.session.write.called
 
-            del orch._panes_by_project[PROJECT]["kimi"]
+            del orch._panes_by_project[PROJECT]["cursor"]
             lead.session.is_at_ready_prompt.return_value = True
             orch._pump_lead_notify(PROJECT)
 

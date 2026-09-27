@@ -1,4 +1,4 @@
-"""#690: non-claude teammates (codex / gemini-agy / opencode — and kimi/cursor,
+"""#690: non-claude teammates (codex / gemini-agy / opencode — and cursor,
 which share the same `agents_md_file` branch) must see the project memory
 (#33/#687) and their role learned notes, as claude teammates always have.
 

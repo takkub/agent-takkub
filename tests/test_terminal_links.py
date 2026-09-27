@@ -259,7 +259,7 @@ class TestOscColorReplies:
 
         assert PROVIDER_REGISTRY["claude"].handles_osc_color_reply is True
         assert PROVIDER_REGISTRY["gemini"].handles_osc_color_reply is True
-        for provider in ("codex", "opencode", "kimi", "cursor"):
+        for provider in ("codex", "opencode", "cursor"):
             assert PROVIDER_REGISTRY[provider].handles_osc_color_reply is False
 
     def test_late_xterm_reply_is_recognized_for_dropping(self):

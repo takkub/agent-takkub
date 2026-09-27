@@ -641,8 +641,8 @@ class TestPollWaitInterruptForWatchedRole:
     itself. But `[delivery-unconfirmed]` / `[spawn-stuck]` /
     `[delivery-boot-stall]` / `[spawn-failed]` notices never call
     done()/failed() — nothing else ever resolved a watched role for THAT
-    notice class, so `wait --role kimi` sat blind for the full --timeout
-    even though a `[delivery-unconfirmed] kimi ...` notice had been
+    notice class, so `wait --role cursor` sat blind for the full --timeout
+    even though a `[delivery-unconfirmed] cursor ...` notice had been
     sitting in the inbox since minute 1.5, explaining exactly why.
 
     A deeper, previously undiscovered half of the same bug is covered here
@@ -658,13 +658,13 @@ class TestPollWaitInterruptForWatchedRole:
     """
 
     def test_delivery_unconfirmed_for_a_watched_role_interrupts(self, orch: Orchestrator) -> None:
-        _register_working(orch, "kimi")
-        begin = orch.begin_wait(PROJECT, ["kimi"], 1800.0)
+        _register_working(orch, "cursor")
+        begin = orch.begin_wait(PROJECT, ["cursor"], 1800.0)
         orch._lead_digest_queue = {
             PROJECT: collections.deque(
                 [
                     (
-                        "⚠️ [delivery-unconfirmed] kimi pane ไม่ถึง ready prompt ใน เวลาที่กำหนด",
+                        "⚠️ [delivery-unconfirmed] cursor pane ไม่ถึง ready prompt ใน เวลาที่กำหนด",
                         None,
                         time.time(),
                     )
@@ -675,8 +675,8 @@ class TestPollWaitInterruptForWatchedRole:
         result = orch.poll_wait(PROJECT, begin["wait_id"])
 
         assert result["interrupt"] is not None
-        assert result["interrupt"]["role"] == "kimi"
-        assert "kimi" in result["pending"]
+        assert result["interrupt"]["role"] == "cursor"
+        assert "cursor" in result["pending"]
         assert PROJECT not in orch._active_waits
 
     def test_spawn_stuck_for_a_watched_role_interrupts(self, orch: Orchestrator) -> None:

@@ -34,7 +34,7 @@ from .provider_spec import PROVIDER_REGISTRY
 logger = logging.getLogger(__name__)
 
 # Mirrors provider_model_refresh's own `_DISCOVERY` keys — the only
-# providers with a real, verified model-list mechanism this wave. kimi/
+# providers with a real, verified model-list mechanism this wave.
 # cursor/opencode stay on the hand-maintained snapshot only (see
 # provider_model_refresh.NO_MODEL_DISCOVERY_GAPS / #103 — tracked there, not
 # duplicated here).
@@ -63,7 +63,7 @@ def merge_catalog(snapshot: tuple[str, ...], discovered: list[str] | None) -> tu
     `None`/empty *discovered* leaves *snapshot* untouched: that's both the
     "discovery hasn't run yet / failed" case here and, from
     `settings_window._fill_model_combo`'s call site, the permanent case for
-    kimi/cursor/opencode (`cached_ids` always returns None for a provider
+    cursor/opencode (`cached_ids` always returns None for a provider
     with no discovery mechanism)."""
     if not discovered:
         return snapshot

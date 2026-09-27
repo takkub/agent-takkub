@@ -32,7 +32,7 @@ def test_provider_usage_rejects_invalid_status():
 
 
 def test_usage_to_dict_never_fabricates_zero_for_missing_fields():
-    data = pu.ProviderUsage(provider="kimi", status="unsupported", error="no channel")
+    data = pu.ProviderUsage(provider="cursor", status="unsupported", error="no channel")
     out = pu.usage_to_dict(data)
     assert out["utilization"] is None
     assert out["plan"] is None
@@ -1230,13 +1230,7 @@ class TestOpencodeAdapter:
         assert captured["env"] is None
 
 
-# ── kimi / cursor (statically unsupported) ────────────────────────────────
-
-
-def test_kimi_is_always_unsupported():
-    result = pu.fetch_kimi_usage()
-    assert result.status == "unsupported"
-    assert result.utilization is None
+# ── cursor (statically unsupported) ───────────────────────────────────────
 
 
 class TestCursorAdapter:

@@ -922,7 +922,7 @@ def test_liveness_dead_non_claude_provider_uses_softer_wording(
     orch: Orchestrator, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A provider with no structural fallback (codex/gemini-agy/opencode/
-    kimi/cursor) landing here only proves the marker table is blind to it —
+    cursor) landing here only proves the marker table is blind to it —
     the wording must not assert a hang, just point at the transcript."""
     monkeypatch.setattr(
         "agent_takkub.provider_config.effective_provider_for", lambda *a, **k: "codex"

@@ -264,7 +264,7 @@ HARVEST_HINT_SEC = int(os.environ.get("TAKKUB_HARVEST_HINT_SEC", "600"))
 # guesses that one. 0 = disabled.
 #
 # Claude-only for now: `/compact` is a Claude Code CLI slash command with no
-# confirmed equivalent on codex/gemini/opencode/kimi/cursor — a known
+# confirmed equivalent on codex/gemini/opencode/cursor — a known
 # multi-provider gap, tracked under #103 rather than silently assumed to work
 # everywhere. See _check_proactive_compact's provider gate.
 #
@@ -504,7 +504,7 @@ BUSY_WAIT_CEILING_SEC = int(os.environ.get("TAKKUB_BUSY_WAIT_CEILING_SEC", "1800
 # it as a wedged spawn rather than a slow-but-healthy cold boot — the exact
 # "codex pane spawns, never produces output" symptom from #248. Chosen
 # comfortably above every provider's own ready_wait_ms cold-boot allowance
-# (claude 45s, codex/gemini/opencode/kimi/cursor 90s) would otherwise need,
+# (claude 45s, codex/gemini/opencode/cursor 90s) would otherwise need,
 # but far below BUSY_WAIT_CEILING_SEC above, since a pane that has rendered
 # NOTHING at all (not even a boot banner) is a much stronger "something is
 # wedged" signal than one that's merely slow to reach its ready prompt.
@@ -704,7 +704,7 @@ STALE_MARKER_TAIL_ROWS = 4
 # streak entirely rather than requiring the (fragile) text markers to also
 # agree. Slack only needs to cover the hook's own dispatch latency plus one
 # redraw, not a whole polling interval. Providers with no Stop hook
-# (codex/gemini-agy/opencode/kimi/cursor) never stamp `last_turn_end_ts`, so
+# (codex/gemini-agy/opencode/cursor) never stamp `last_turn_end_ts`, so
 # this exemption never fires for them — they still rely solely on the
 # text-marker table below.
 STALE_MARKER_TURN_END_SLACK_S = 10.0
@@ -731,7 +731,7 @@ STALE_MARKER_TRANSCRIPT_SLACK_S = 30.0
 # exactly what it should. A transcript file touched more recently than this
 # (via token_meter.resolve_pane_session — the same per-provider resolver the
 # token badge already relies on, so it already covers claude/codex/gemini/
-# opencode/kimi/cursor) counts as independent proof of life; so does any
+# opencode/cursor) counts as independent proof of life; so does any
 # live non-scaffolding child process (`_live_non_scaffolding_children`, #288's
 # same evidence). Sized well above STALE_MARKER_QUIET_S (a provider CLI can
 # legitimately batch its own transcript writes) but well below
@@ -1439,7 +1439,7 @@ def resolve_auto_assign_mode(
       - `task` is under `AUTO_SUBAGENT_MAX_TASK_CHARS`
       - the role's EFFECTIVE provider is claude — a native subagent only
         ever runs the Lead's own provider (claude); every other provider
-        (codex/gemini/opencode/kimi/cursor) has no subagent equivalent yet
+        (codex/gemini/opencode/cursor) has no subagent equivalent yet
         (#103 gap). Auto-selection must never silently downgrade a
         codex/gemini-routed role's engine by running it through a claude
         subagent instead of its own pane — it falls back to pane and says
@@ -2741,6 +2741,10 @@ class Orchestrator(
         of *task* so the Lead sees it in the same message; ignored for every
         other role (spawning a teammate doesn't change the project's size)."""
         base_role = role_name.split("#", 1)[0].strip().lower()
+        from .removed_providers import is_removed_provider, removed_provider_message
+
+        if is_removed_provider(base_role):  # #725
+            return False, removed_provider_message(base_role)
         shard_suffix = ("#" + role_name.split("#", 1)[1]) if "#" in role_name else ""
         resolved_pane_name = None  # #597: track if role was resolved/converted
         if base_role == "reviewer":
@@ -6192,7 +6196,7 @@ class Orchestrator(
 
         #272: `children` always includes the provider's own CLI-launcher
         scaffolding (npm .cmd shim → cmd.exe/conhost.exe/node.exe on Windows,
-        codex's code-mode sandbox host, kimi's python interpreter, ...) —
+        codex's code-mode sandbox host's python interpreter, ...) —
         that was every single close, 100% false-positive rate, so this now
         subtracts each provider's confirmed `scaffolding_process_names` (via
         `provider_spec.scaffolding_process_names_for`) before deciding
@@ -10933,7 +10937,7 @@ class Orchestrator(
         still alive (most likely to act on it), else the generic
         `designer` role. Provider-agnostic (checks pane liveness only, not
         which CLI backs it) so every provider (claude/codex/gemini-agy/
-        opencode/kimi/cursor) qualifies the same way. `None` means no live
+        opencode/cursor) qualifies the same way. `None` means no live
         candidate — caller falls back to Lead-only, same as before #371."""
         project_panes = self._project_panes(project_ns)
         for role in dict.fromkeys(r for r in (created_by_role, "designer") if r):
@@ -11055,7 +11059,7 @@ class Orchestrator(
         command was invoked (`--force` included) — see
         `WorktreeManager.clean_isolated`. "Live" = a session process that is
         still alive, regardless of provider (claude/codex/gemini/opencode/
-        kimi/cursor — PaneState.worktree is set the same way for all of
+        cursor — PaneState.worktree is set the same way for all of
         them). Scoped to *project* only, matching the rest of the socket
         protocol's per-project isolation.
         """
@@ -13474,7 +13478,7 @@ class Orchestrator(
           * the provider's own transcript/session file, resolved the same
             way the token-meter badge already does
             (`token_meter.resolve_pane_session` — covers claude/codex/
-            gemini(-agy)/opencode/kimi/cursor, every provider this cockpit
+            gemini(-agy)/opencode/cursor, every provider this cockpit
             supports), touched more recently than WATCHDOG_LIVENESS_FRESH_S
           * any live, non-scaffolding child process under the pane
             (`_live_non_scaffolding_children`, the same #288 evidence the
@@ -13657,7 +13661,7 @@ class Orchestrator(
             # #343) before ever reaching here, so a claude pane that still
             # lands here really has exhausted every recognition path — "อาจ
             # ค้างจริง" is warranted. Every other provider (codex/gemini-agy/
-            # opencode/kimi/cursor) has no such fallback — landing here only
+            # opencode/cursor) has no such fallback — landing here only
             # proves the marker table can't see it, not that it is stuck, so
             # the wording says so and points at the transcript instead of
             # asserting a hang.
@@ -13751,7 +13755,7 @@ class Orchestrator(
 
         Claude-only: gated on `effective_provider_for(...) == CLAUDE`. Other
         providers are skipped without an alternative action — `/compact` has
-        no confirmed equivalent slash command on codex/gemini/opencode/kimi/
+        no confirmed equivalent slash command on codex/gemini/opencode/
         cursor (tracked as a known gap under #103, not silently assumed to
         work). A pane whose provider changes mid-episode (rare — provider is
         fixed at spawn) is simply re-evaluated fresh next tick.

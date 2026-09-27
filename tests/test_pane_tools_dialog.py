@@ -187,7 +187,7 @@ def test_parse_install_form_rejects_missing_command():
 def test_matrix_roles_covers_expected_builtin_roles():
     # tester/analyst/designer/docs/security became real roles.py entries
     # 2026-09-09 (same doc-file/registry gap bug #162 fixed for opencode/
-    # kimi/cursor) — they're claude-backed like frontend/backend, so they DO
+    # cursor) — they're claude-backed like frontend/backend, so they DO
     # load --mcp-config and belong in the matrix. shell/codex/gemini stay an
     # intentional exclusion (see _MATRIX_EXCLUDED_ROLES's own note — their
     # panes never load --mcp-config).

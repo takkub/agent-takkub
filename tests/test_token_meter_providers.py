@@ -1,7 +1,6 @@
 """#103 (2026-08-31): provider-neutral token meter — token_meter.resolve_pane_session
 / read_pane_usage dispatch, plus the per-provider parsers they call into
-(codex_helper.read_codex_token_usage, opencode_helper.read_opencode_token_usage,
-kimi_helper.read_kimi_token_usage). Field names are verified against real
+(codex_helper.read_codex_token_usage, opencode_helper.read_opencode_token_usage). Field names are verified against real
 sessions on this machine — see docs/audit/2026-08-31-token-meter-providers.md.
 
 Claude's own read_last_usage/find_session_by_uuid contract is untouched by
@@ -15,7 +14,6 @@ import pathlib
 import sqlite3
 
 from agent_takkub.codex_helper import read_codex_token_usage, resolve_newest_codex_session_for_cwd
-from agent_takkub.kimi_helper import read_kimi_token_usage
 from agent_takkub.opencode_helper import read_opencode_token_usage
 from agent_takkub.token_meter import read_pane_usage, resolve_pane_session
 
@@ -313,70 +311,6 @@ class TestReadOpencodeTokenUsage:
         assert read_opencode_token_usage(tmp_path / "nope.db", "s") is None
 
 
-# ── kimi ──────────────────────────────────────────────────────────────────
-
-
-def _kimi_status_line(**payload) -> str:
-    return json.dumps({"timestamp": 1.0, "message": {"type": "StatusUpdate", "payload": payload}})
-
-
-class TestReadKimiTokenUsage:
-    def test_reads_context_tokens_and_max(self, tmp_path: pathlib.Path) -> None:
-        session_dir = tmp_path / "sess"
-        session_dir.mkdir()
-        (session_dir / "wire.jsonl").write_text(
-            _kimi_status_line(
-                context_tokens=12000,
-                max_context_tokens=128000,
-                token_usage={
-                    "input_other": 11000,
-                    "output": 300,
-                    "input_cache_read": 900,
-                    "input_cache_creation": 100,
-                },
-            )
-            + "\n",
-            encoding="utf-8",
-        )
-        u = read_kimi_token_usage(session_dir)
-        assert u is not None
-        assert u["status"] == "ok"
-        assert u["prompt"] == 12000  # context_tokens wins over summing token_usage
-        assert u["limit"] == 128000
-        assert u["output"] == 300
-
-    def test_none_fields_carry_forward_from_earlier_lines(self, tmp_path: pathlib.Path) -> None:
-        """StatusUpdate's own contract: 'None fields indicate no change from
-        the previous status' — a later line that only touches plan_mode must
-        not erase the context_tokens/max_context_tokens an earlier line set."""
-        session_dir = tmp_path / "sess"
-        session_dir.mkdir()
-        lines = [
-            _kimi_status_line(context_tokens=5000, max_context_tokens=64000, token_usage=None),
-            _kimi_status_line(context_tokens=None, max_context_tokens=None, plan_mode=True),
-        ]
-        (session_dir / "wire.jsonl").write_text("\n".join(lines) + "\n", encoding="utf-8")
-        u = read_kimi_token_usage(session_dir)
-        assert u is not None
-        assert u["prompt"] == 5000
-        assert u["limit"] == 64000
-
-    def test_no_status_update_yet_is_no_data(self, tmp_path: pathlib.Path) -> None:
-        session_dir = tmp_path / "sess"
-        session_dir.mkdir()
-        (session_dir / "wire.jsonl").write_text(
-            json.dumps({"timestamp": 1.0, "message": {"type": "TurnBegin", "payload": {}}}) + "\n",
-            encoding="utf-8",
-        )
-        u = read_kimi_token_usage(session_dir)
-        assert u == {"status": "no_data", "model": None, "reason": "no StatusUpdate logged yet"}
-
-    def test_missing_wire_file_returns_none(self, tmp_path: pathlib.Path) -> None:
-        session_dir = tmp_path / "sess"
-        session_dir.mkdir()
-        assert read_kimi_token_usage(session_dir) is None
-
-
 # ── token_meter dispatcher ───────────────────────────────────────────────
 
 
@@ -416,7 +350,7 @@ class TestReadPaneUsageDispatch:
         assert "schema has not been captured" in u["reason"]
 
     def test_none_cand_returns_none_for_every_provider(self) -> None:
-        for provider in ("claude", "codex", "gemini", "opencode", "kimi", "cursor", "unknown"):
+        for provider in ("claude", "codex", "gemini", "opencode", "cursor", "unknown"):
             assert read_pane_usage(provider, None) is None
 
     def test_unknown_provider_returns_none(self, tmp_path: pathlib.Path) -> None:

@@ -296,7 +296,7 @@ class TestRefreshGemini:
 
 
 class TestOtherProvidersAreGaps:
-    @pytest.mark.parametrize("name", ["claude", "kimi", "cursor", "opencode"])
+    @pytest.mark.parametrize("name", ["claude", "cursor", "opencode"])
     def test_reports_gap_without_touching_subprocess(
         self, name: str, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -308,7 +308,7 @@ class TestOtherProvidersAreGaps:
         assert not called
 
     def test_every_gap_provider_has_a_documented_reason(self) -> None:
-        for name in ("claude", "kimi", "cursor", "opencode"):
+        for name in ("claude", "cursor", "opencode"):
             assert name in pmr.NO_MODEL_DISCOVERY_GAPS
 
     def test_a_provider_is_never_both_supported_and_a_documented_gap(self) -> None:
@@ -378,12 +378,12 @@ class TestRolePinsAreRefreshedToo:
         from agent_takkub import role_models
 
         role_models.set_model("backend", "gemini", "gemini-3.5-flash-medium")
-        role_models.set_model("qa", "kimi", "gemini-3.5-flash-medium")  # same id, other CLI
+        role_models.set_model("qa", "cursor", "gemini-3.5-flash-medium")  # same id, other CLI
         monkeypatch.setattr(
             pmr, "_discover_gemini_models", lambda binary: ["gemini-3.7-flash-medium"]
         )
         pmr.refresh_provider_model("gemini", "/bin/agy")
-        assert role_models.model_for("qa", "kimi") == "gemini-3.5-flash-medium"
+        assert role_models.model_for("qa", "cursor") == "gemini-3.5-flash-medium"
 
     def test_several_stale_pins_all_bump_and_all_appear_in_the_detail(
         self, monkeypatch: pytest.MonkeyPatch

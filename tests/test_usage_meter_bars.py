@@ -114,7 +114,7 @@ def test_stale_flag_reaches_the_bar():
 def test_unsupported_loading_error_never_render_a_bar():
     now = datetime.now(tz=UTC)
     for status in ("unsupported", "loading", "error"):
-        usage = ProviderUsage(provider="kimi", status=status)
+        usage = ProviderUsage(provider="cursor", status=status)
         entries = _provider_body_entries(usage, now)
         assert _bars(entries) == []
 

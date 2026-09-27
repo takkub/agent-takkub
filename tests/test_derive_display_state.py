@@ -403,7 +403,7 @@ class TestRealTranscriptFixtures:
     """Real captured screen text per provider — mirrors the evidence in
     docs/audit/2026-08-16-263-264-266-notify-truth.md and reuses the same
     strings already confirmed in test_auth_failure_detection.py's
-    TestGeminiColdBootNotSignedIn / TestKimiNotLoggedIn fixtures."""
+    TestGeminiColdBootNotSignedIn fixtures."""
 
     def test_gemini_stuck_verifying_account_past_grace_is_provider_account_blocked(
         self,
@@ -483,14 +483,6 @@ class TestRealTranscriptFixtures:
         # through to the next tier (waiting-delivery, from the queued
         # delivery-health notice — #263's original evidence shape).
         assert result == "waiting-delivery"
-
-    def test_kimi_stuck_needing_login_is_login_required(self) -> None:
-        session = _RealSignalSession(
-            ["", "Model: not set, send /login to login", ""], seconds_since_output=5.0
-        )
-        pane = _pane("active", session=session, provider="kimi")
-        result = Orchestrator._derive_display_state(None, pane, "active", False)
-        assert result == "login-required"
 
     def test_codex_mcp_cold_boot_is_booting(self) -> None:
         session = _RealSignalSession(
@@ -579,15 +571,15 @@ class TestListStatusDetailedWiring:
     def test_display_state_added_without_changing_state(self, orch: Orchestrator) -> None:
         project = "display-state-wiring"
         session = _StubSession(auth_reason="send /login to login")
-        pane = _pane("working", session=session, provider="kimi")
-        orch._panes_by_project[project] = {"kimi": pane}
+        pane = _pane("working", session=session, provider="cursor")
+        orch._panes_by_project[project] = {"cursor": pane}
         orch._lead_digest_queue[project] = collections.deque()
         orch._lead_notify_queue[project] = collections.deque()
 
         detailed = orch.list_status_detailed(project=project)
 
-        assert detailed["kimi"]["state"] == "working"
-        assert detailed["kimi"]["display_state"] == "login-required"
+        assert detailed["cursor"]["state"] == "working"
+        assert detailed["cursor"]["display_state"] == "login-required"
 
     def test_display_state_falls_back_cleanly_when_every_signal_check_errors(
         self, orch: Orchestrator

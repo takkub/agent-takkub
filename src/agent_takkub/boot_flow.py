@@ -133,7 +133,7 @@ def _probe_versions(name: str, spec, timeout_s: float) -> tuple[str | None, str 
     current = _current_version_generic(spec)
     cmd = spec.install_command
     if not cmd or cmd[0] != "npm":
-        # uv-managed providers (kimi) and no-mechanism providers
+        # uv-managed providers and no-mechanism providers
         # (gemini/cursor) have no latest-version probe this module has
         # verified — never guess (#574 task brief).
         return current, None, False
@@ -148,7 +148,7 @@ def check_provider_updates(
     latest-version probe (uv-managed, or genuinely no update mechanism at
     all) reports `latest=None` and status `up_to_date` — it is never
     flagged as needing an update it can't even check for, matching the
-    boot-flow mockup (gemini/kimi both show "ล่าสุดแล้ว" despite neither
+    boot-flow mockup (gemini both show "ล่าสุดแล้ว" despite neither
     having a version-check mechanism)."""
     from . import provider_update
     from .provider_spec import PROVIDER_REGISTRY

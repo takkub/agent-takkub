@@ -24,7 +24,7 @@ class TestDefaults:
         assert roles.LEAD.name == "lead"
 
     def test_default_teammates_registry(self) -> None:
-        assert len(roles.DEFAULT_TEAMMATES) == 18
+        assert len(roles.DEFAULT_TEAMMATES) == 17
         names = {r.name for r in roles.DEFAULT_TEAMMATES}
         assert names == {
             "frontend",
@@ -38,7 +38,6 @@ class TestDefaults:
             "critic",
             "shell",
             "opencode",
-            "kimi",
             "cursor",
             "tester",
             "analyst",
@@ -49,7 +48,7 @@ class TestDefaults:
 
     def test_secondary_positions_resolve_and_have_cockpit_theme_colors(self) -> None:
         # 2026-09-09 — same doc-file/registry gap bug #162 fixed for
-        # opencode/kimi/cursor: tester/analyst/designer/docs/security each
+        # opencode/cursor: tester/analyst/designer/docs/security each
         # shipped a `.claude/agents/<name>.md` doc but no Role() row.
         from agent_takkub import cockpit_theme
 
@@ -65,24 +64,23 @@ class TestDefaults:
         assert cols["backend"] == 1
         assert cols["codex"] == 1
         assert cols["opencode"] == 1
-        assert cols["kimi"] == 1
         assert cols["cursor"] == 1
         assert cols["gemini"] == 2
         assert cols["reviewer"] == 2
         assert cols["critic"] == 2
 
     def test_forced_provider_roles_resolve_and_have_distinct_colors(self) -> None:
-        # bug #162 — opencode/kimi/cursor shipped a `.claude/agents/<name>.md`
+        # bug #162 — opencode/cursor shipped a `.claude/agents/<name>.md`
         # doc + a provider_config.FORCED_ROLES entry ("the role's whole
         # point", same tier as codex/gemini) but had no Role() registration,
         # so by_name() silently returned None for them while codex/gemini
         # (which DID have entries) resolved fine.
-        for name in ("opencode", "kimi", "cursor"):
+        for name in ("opencode", "cursor"):
             role = roles.by_name(name)
             assert role is not None, f"{name} must resolve via by_name()"
             assert role.label.lower() == name
-        colors = {roles.by_name(n).color for n in ("opencode", "kimi", "cursor")}
-        assert len(colors) == 3
+        colors = {roles.by_name(n).color for n in ("opencode", "cursor")}
+        assert len(colors) == 2
 
     def test_critic_slot_below_reviewer(self) -> None:
         critic = roles.by_name("critic")

@@ -6,6 +6,8 @@ from __future__ import annotations
 import subprocess
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from agent_takkub import provider_install
 from agent_takkub.provider_install import install_provider, installable_providers
 
@@ -62,12 +64,28 @@ class TestInstallProvider:
         assert not ok
         assert "install `npm` first" in msg
 
-    def test_missing_non_npm_package_manager_names_program(self) -> None:
+    def test_missing_non_npm_package_manager_names_program(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import dataclasses
+
+        from agent_takkub.provider_spec import PROVIDER_REGISTRY
+
+        # No real provider installs via uv any more (#725) — synthetic one.
+        monkeypatch.setitem(
+            PROVIDER_REGISTRY,
+            "uvfake",
+            dataclasses.replace(
+                PROVIDER_REGISTRY["cursor"],
+                name="uvfake",
+                install_command=["uv", "tool", "install", "uvfake-cli"],
+            ),
+        )
         with (
             patch.object(provider_install, "_discover", return_value=None),
             patch.object(provider_install.shutil, "which", _which_missing),
         ):
-            ok, msg = install_provider("kimi")
+            ok, msg = install_provider("uvfake")
         assert not ok
         assert "install `uv` first" in msg
 

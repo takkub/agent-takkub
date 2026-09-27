@@ -2198,9 +2198,7 @@ class TestCodexRemoteHistory:
 
 
 class TestProviderNeutralLiveFallback:
-    @pytest.mark.parametrize(
-        "provider", ["claude", "codex", "gemini", "opencode", "kimi", "cursor"]
-    )
+    @pytest.mark.parametrize("provider", ["claude", "codex", "gemini", "opencode", "cursor"])
     def test_every_provider_emits_visible_reply_when_structured_event_is_missing(
         self, qapp, provider
     ):

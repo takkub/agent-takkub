@@ -259,7 +259,7 @@ class TestConcurrentProjectStreams:
 
     def test_all_builtin_provider_labels_are_native(self):
         js = _read("app.js")
-        for provider in ("claude", "openai", "gemini", "opencode", "kimi", "cursor"):
+        for provider in ("claude", "openai", "gemini", "opencode", "cursor"):
             assert f"{provider}: {{" in js
 
 

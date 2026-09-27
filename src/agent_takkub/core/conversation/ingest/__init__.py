@@ -1,24 +1,14 @@
 """Provider-transcript ingest registry (plan §5.3, epic #309 Phase 6).
 
-Registered: claude / codex / gemini / opencode / cursor / kimi — all 6
-providers, epic #309's last `core.conversation.ingest` gap now closed
-(`docs/v2/2.0.0-migration-plan.md` §1.1, investigated + built 2026-08-22).
+Registered: claude / codex / gemini / opencode / cursor — every provider in
+`provider_spec.PROVIDER_REGISTRY` (epic #309's `core.conversation.ingest`
+gap, `docs/v2/2.0.0-migration-plan.md` §1.1). A `kimi` adapter existed until
+the provider was removed (#725).
 
 cursor DOES have a `remote/notify.py::_HISTORY_SCANNERS` entry (that
 registry covers claude/codex/cursor/gemini/opencode), so the remote/mobile
 history path already worked for it — `cursor_adapter.py` closed the
 remaining gap (the V2 `core.conversation.ingest` adapter was missing).
-
-kimi has NEITHER a `_HISTORY_SCANNERS` entry nor `ProviderSpec.
-supports_remote_history` — that (#103) is a DIFFERENT, still-open gap in a
-different consumer (the mobile remote-mirror system) and is intentionally
-untouched here. What investigation found is that kimi CLI 1.49.0 DOES
-persist a real, locally-readable, per-work-dir session store (`~/.kimi/
-kimi.json` + `~/.kimi/sessions/<hash>/<id>/wire.jsonl`) — see
-`kimi_helper.py`'s module docstring for the full trail (verified against a
-real `~/.kimi` on this machine and against kimi-cli's own installed typed
-source, not a fixture) — so `kimi_adapter.py` is a real adapter, built the
-same WRAP shape as `cursor_adapter.py`, not a "stays unsupported" closure.
 """
 
 from __future__ import annotations
@@ -35,7 +25,6 @@ from . import (
     codex_adapter,
     cursor_adapter,
     gemini_adapter,
-    kimi_adapter,
     opencode_adapter,
 )
 from .cursor_store import get_cursor, set_cursor
@@ -46,7 +35,6 @@ _ADAPTERS: dict[str, ModuleType] = {
     "gemini": gemini_adapter,
     "opencode": opencode_adapter,
     "cursor": cursor_adapter,
-    "kimi": kimi_adapter,
 }
 
 

@@ -70,14 +70,16 @@ class TestCheckProviderUpdates:
         """#574 task brief: "ไม่รู้ = latest None + status ตามเดิม" — a
         provider with no known latest-version probe (uv-managed, or no
         mechanism at all) must never be flagged as needing an update it
-        can't even check for (matches the mockup: gemini/kimi both show
+        can't even check for (matches the mockup: gemini/cursor both show
         up-to-date despite neither having a version-check mechanism)."""
         from agent_takkub import provider_update
 
         fake_spec = SimpleNamespace(
-            name="kimi", display_name="Kimi", install_command=["uv", "tool", "install", "kimi-cli"]
+            name="uvfake",
+            display_name="UvFake",
+            install_command=["uv", "tool", "install", "uvfake-cli"],
         )
-        monkeypatch.setattr("agent_takkub.provider_spec.PROVIDER_REGISTRY", {"kimi": fake_spec})
+        monkeypatch.setattr("agent_takkub.provider_spec.PROVIDER_REGISTRY", {"uvfake": fake_spec})
         monkeypatch.setattr(provider_update, "eligibility_gap", lambda name: None)
         monkeypatch.setattr(boot_flow, "_current_version_generic", lambda spec: "1.50.0")
         items = boot_flow.check_provider_updates()

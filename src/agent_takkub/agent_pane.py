@@ -939,7 +939,7 @@ class AgentPane(QFrame):
         # model.session_uuid live as soon as the SessionStart hook reports
         # it — so the next tick follows the rollover automatically. Every
         # other provider's generic spawn branch never mints/passes a session
-        # id (codex/gemini/opencode/kimi/cursor all choose their own after
+        # id (codex/gemini/opencode/cursor all choose their own after
         # boot), so this is normally None for them — resolve_pane_session
         # falls back to a newest-for-cwd resolve bounded by this pane's own
         # spawn timestamp in that case (see its own docstring).

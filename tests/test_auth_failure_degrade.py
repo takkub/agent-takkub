@@ -182,9 +182,7 @@ class TestRecoverAuthFailedPaneDegradesImmediately:
         assert ps_after.no_content_recover_attempts == 1
         mock_resend.assert_called_once()
 
-    @pytest.mark.parametrize(
-        "provider", ["claude", "codex", "gemini-agy", "opencode", "kimi", "cursor"]
-    )
+    @pytest.mark.parametrize("provider", ["claude", "codex", "gemini-agy", "opencode", "cursor"])
     def test_warns_lead_with_provider_and_reason(self, orch: Orchestrator, provider: str) -> None:
         lead = _pane(_live_session())
         qa = _pane(_auth_failed_session(), provider=provider)
@@ -232,7 +230,7 @@ class TestRecoverAuthFailedPaneDegradesImmediately:
     def test_failed_respawn_reports_failure_without_success_notice(
         self, orch: Orchestrator
     ) -> None:
-        qa = _pane(_auth_failed_session(), provider="kimi")
+        qa = _pane(_auth_failed_session(), provider="cursor")
         orch._panes_by_project["P"] = {"lead": _pane(_live_session()), "qa": qa}
         with (
             patch.object(orch, "close"),
@@ -242,10 +240,10 @@ class TestRecoverAuthFailedPaneDegradesImmediately:
             patch("agent_takkub.lead_inbox._log_event"),
         ):
             orch._recover_auth_failed_pane(
-                "qa", "P", qa, "run tests", provider="kimi", reason="not signed in"
+                "qa", "P", qa, "run tests", provider="cursor", reason="not signed in"
             )
         resend.assert_not_called()
         notify.assert_called_once()
         assert notify.call_args.kwargs["kind"] == "spawn-failed"
-        assert "kimi login ไม่ผ่าน" in notify.call_args.args[1]
+        assert "cursor login ไม่ผ่าน" in notify.call_args.args[1]
         assert "งานส่งต่อให้แล้ว" not in notify.call_args.args[1]

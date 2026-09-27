@@ -42,9 +42,6 @@ from agent_takkub.core.models.spawn_plan import SpawnPlan
 _ACCOUNT_ENV_VAR: dict[str, str] = {
     "claude": "CLAUDE_CONFIG_DIR",
     "codex": "CODEX_HOME",
-    # kimi-cli's whole share dir (config+credentials+sessions) moves with
-    # this one var — proven 2026-09-07, see config._PROVIDER_HOME_SUBDIRS.
-    "kimi": "KIMI_SHARE_DIR",
 }
 
 

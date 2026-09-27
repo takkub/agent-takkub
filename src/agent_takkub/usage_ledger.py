@@ -60,9 +60,8 @@ TURN_FIELDS: tuple[str, ...] = ("input", "cache_creation", "cache_read", "output
 # verified against codex-cli 0.151.0) — model comes from the `turn_context`
 # event's own `model` field (also confirmed live), not a guess. opencode:
 # message.data.tokens + modelID confirmed against a real opencode.db
-# (opencode_helper.read_opencode_token_usage docstring). gemini/kimi/cursor:
-# no confirmed per-turn schema (kimi's is explicitly flagged "provisional,
-# never verified against a real line" in kimi_helper.py; cursor's schema has
+# (opencode_helper.read_opencode_token_usage docstring). gemini/cursor:
+# no confirmed per-turn schema (cursor's schema has
 # never been captured at all; gemini's transcript carries no usage field —
 # token_meter's own _GEMINI_UNSUPPORTED_REASON).
 TURN_COUNTABLE: dict[str, bool] = {
@@ -70,17 +69,12 @@ TURN_COUNTABLE: dict[str, bool] = {
     "codex": True,
     "opencode": True,
     "gemini": False,
-    "kimi": False,
     "cursor": False,
 }
 TURN_UNCOUNTABLE_REASON: dict[str, str] = {
     "gemini": (
         "agy/Antigravity transcript ไม่มี token/usage field เลย — ยืนยันแล้วใน "
         "token_meter._GEMINI_UNSUPPORTED_REASON"
-    ),
-    "kimi": (
-        "kimi wire.jsonl usage schema ยังไม่เคยเจอ StatusUpdate จริงมายืนยัน — "
-        "provisional ตาม kimi_helper.read_kimi_token_usage เอง ห้ามเดาต่อ"
     ),
     "cursor": (
         "cursor-agent ยังไม่เคยจับ transcript schema ได้เลย — token_meter._CURSOR_UNSUPPORTED_REASON"
@@ -89,19 +83,17 @@ TURN_UNCOUNTABLE_REASON: dict[str, str] = {
 
 # quota-% countability mirrors provider_usage.py's own contract: a provider
 # whose adapter never populates `utilization` (opencode: self-tallied
-# `spend` only) or has no channel at all (kimi/cursor) must never get a
+# `spend` only) or has no channel at all (cursor) must never get a
 # fabricated quota row here either.
 QUOTA_COUNTABLE: dict[str, bool] = {
     "claude": True,
     "codex": True,
     "gemini": True,
     "opencode": False,
-    "kimi": False,
     "cursor": False,
 }
 QUOTA_UNCOUNTABLE_REASON: dict[str, str] = {
     "opencode": "opencode ไม่มี quota API — มีแต่ self-tallied spend (provider_usage.fetch_opencode_usage)",
-    "kimi": "kimi ไม่มี usage/quota channel เลย (provider_usage.fetch_kimi_usage)",
     "cursor": "cursor CLI usage/quota channel ยังไม่ verified (provider_usage.fetch_cursor_usage)",
 }
 

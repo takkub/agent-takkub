@@ -60,7 +60,7 @@ def test_gemini_provider_spec_has_feedback_config() -> None:
 
 
 def test_other_providers_declare_feedback_prompt_gap() -> None:
-    for provider in ("claude", "codex", "opencode", "kimi", "cursor"):
+    for provider in ("claude", "codex", "opencode", "cursor"):
         spec = PROVIDER_REGISTRY[provider]
         assert spec.auto_skip_feedback is False
         assert auto_skip_feedback_for(provider) is False
@@ -71,7 +71,7 @@ def test_capability_matrix_feedback_prompt_skip() -> None:
     gemini_matrix = capability_matrix(PROVIDER_REGISTRY["gemini"])
     assert gemini_matrix["feedback_prompt_skip"] == "supported"
 
-    for provider in ("claude", "codex", "opencode", "kimi", "cursor"):
+    for provider in ("claude", "codex", "opencode", "cursor"):
         matrix = capability_matrix(PROVIDER_REGISTRY[provider])
         assert matrix["feedback_prompt_skip"] == "unsupported"
 
