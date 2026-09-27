@@ -3307,7 +3307,13 @@ def evaluate_instance_guard(
             return Verdict(
                 False,
                 rule="instance_guard:dynamic_write_target",
-                reason="ห้ามรัน Python heredoc ที่มีเป้าเขียนซึ่งตรวจสอบ path ไม่ได้อย่างปลอดภัย (#633/#736)",
+                reason=(
+                    "ห้ามรัน Python heredoc ที่มีเป้าเขียนซึ่งตรวจสอบ path ไม่ได้อย่างปลอดภัย (#633/#736) · "
+                    # #752: say what to do instead so the agent recovers in one turn.
+                    "ทางออก: แก้/สร้างไฟล์ด้วย Edit/Write tool · ถ้าต้องใช้ script "
+                    "ให้เขียนเป้าเป็น literal path ใต้ cwd (เช่น open('src/x.py', 'w')) "
+                    "ไม่ใช่ตัวแปร/f-string/path ที่คำนวณตอนรัน"
+                ),
             )
         for lit, target_cwd in write_targets:
             in_prot, prot_home = is_in_protected_data_home(
