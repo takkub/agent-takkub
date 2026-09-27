@@ -767,6 +767,11 @@ def cmd_assign(args: argparse.Namespace) -> dict:
     args.task = task_text
     base_role = (getattr(args, "role", "") or "").split("#", 1)[0].strip().lower()
 
+    from .removed_providers import is_removed_provider, removed_provider_message
+
+    if is_removed_provider(base_role):  # #725
+        return {"ok": False, "msg": removed_provider_message(base_role)}
+
     from . import decide
 
     requested_scope = (getattr(args, "scope", "auto") or "auto").strip().lower()
@@ -5194,11 +5199,11 @@ _PANE_TOOLS_PAST_TENSE = {"allow": "allowed", "deny": "denied"}
 # other registered provider has a *documented, pre-existing* MCP_ADAPTER gap
 # (see provider_spec.py's `mcp_adapter_variant` field for each): gemini/agy
 # stages MCPs into a global, per-machine plugin registry outside any
-# per-session policy (#103/#121); opencode/kimi/cursor auto-load their own
+# per-session policy (#103/#121); opencode/cursor auto-load their own
 # mcp config files and the cockpit does not drive their MCP set at all. A
 # role's `takkub mcp deny` fully takes effect for claude/codex panes; it is
 # recorded in the policy (so `takkub mcp list` reflects it) but has no way
-# to reach a gemini/opencode/kimi/cursor pane's actual MCP set.
+# to reach a gemini/opencode/cursor pane's actual MCP set.
 _MCP_POLICY_ENFORCED_PROVIDERS = ("claude", "codex")
 
 
@@ -5306,7 +5311,7 @@ def cmd_mcp(args: argparse.Namespace) -> dict:
         if sub == "deny" and args.role != "lead":
             msg += (
                 f" — enforced for {'/'.join(_MCP_POLICY_ENFORCED_PROVIDERS)} panes only; "
-                f"gemini/opencode/kimi/cursor don't consult this policy (#103/#121)"
+                f"gemini/opencode/cursor don't consult this policy (#103/#121)"
             )
         return {"ok": True, "msg": msg}
 
@@ -5541,7 +5546,7 @@ def build_parser() -> argparse.ArgumentParser:
         "at low for speed/cost; save high for design-sensitive or correctness-"
         "critical work. 4 providers accept an effort knob today (claude --effort, "
         "codex -c model_reasoning_effort=, gemini/agy --effort, all low/medium/"
-        "high; claude alone also takes xhigh/max) — opencode/kimi/cursor have "
+        "high; claude alone also takes xhigh/max) — opencode/cursor have "
         "no CLI knob yet (GAP tracked in #103) and silently ignore this flag "
         "rather than erroring. Only takes effect when spawning a new pane; an "
         "already-running pane keeps its current effort",
@@ -7037,7 +7042,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     spi.add_argument("name", help="provider name (e.g. codex, opencode)")
     spm = sprv_sub.add_parser("model", help="show or set a provider's spawn model")
-    spm.add_argument("name", help="provider name (e.g. claude, kimi, cursor)")
+    spm.add_argument("name", help="provider name (e.g. claude, cursor)")
     spm.add_argument("model", nargs="?", help="model id; omit to show the current value")
     spm.add_argument("--clear", action="store_true", help="clear the model and use CLI default")
     spp = sprv_sub.add_parser(

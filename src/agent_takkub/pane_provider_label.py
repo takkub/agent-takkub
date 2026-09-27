@@ -6,7 +6,7 @@ usage["model"] for claude/codex, or `PtySession.current_model_label("gemini")`
 for gemini) wins over what `spawn_engine.spawn()` resolved at launch time —
 a live report can drift from the spawn-time value (quota downgrade,
 mid-session `/model`), and surfacing that drift silently was the actual gap
-#591 exists to close. opencode/kimi/cursor never report a live model back to
+#591 exists to close. opencode/cursor never report a live model back to
 the cockpit (their CLIs don't expose one) — callers pass `live_model=None`
 for those and the tooltip says so explicitly.
 """
@@ -17,7 +17,7 @@ import re
 from dataclasses import dataclass
 
 # Providers this module will ever trust a `live_model` argument for. Every
-# other registered provider (opencode/kimi/cursor today) never reports one —
+# other registered provider (opencode/cursor today) never reports one —
 # the tooltip must say "CLI doesn't report a model", not silently read the
 # same as "no live sample has landed yet".
 LIVE_MODEL_PROVIDERS = frozenset({"claude", "codex", "gemini"})

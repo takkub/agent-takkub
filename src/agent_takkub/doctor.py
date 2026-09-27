@@ -1282,7 +1282,7 @@ def check_pane_mcp_handshake(role: str, project: str | None = None) -> list[Find
 
 # Claude-native teammates whose spawn goes through --append-system-prompt-file
 # (see spawn_engine's role_md_file assembly). Provider-alias roles
-# (codex/gemini/opencode/kimi/cursor) boot through a different mechanism
+# (codex/gemini/opencode/cursor) boot through a different mechanism
 # (agents_md_file bridge, no --append-system-prompt-file) and Lead's own
 # system-prompt assembly is a separate function (_render_lead_context) — both
 # are out of scope for this pass and tracked as a gap (issue #516 point 6),
@@ -2199,7 +2199,7 @@ def check_provider_auth() -> list[Finding]:
     """[providers/*-auth] — auth status for every INSTALLED non-claude
     provider in the registry (#248/#247 round 2). Before this, `takkub
     doctor` had zero auth signal for any provider except claude
-    (check_claude's credential-file check) — codex/gemini/opencode/kimi/
+    (check_claude's credential-file check) — codex/gemini/opencode/
     cursor only ever got a binary-presence check from check_providers()
     above.
 
@@ -3304,7 +3304,7 @@ def check_remote_mirror_live(resp: dict | None) -> list[Finding]:
                 f"provider={provider} has NO remote-history scanner registered "
                 "(ProviderSpec.supports_remote_history=False) — the phone will "
                 "never show a live reply for this Lead pane, by design, not a bug",
-                "known gap for opencode/kimi/cursor (issue #103) — desktop is "
+                "known gap for opencode/cursor (issue #103) — desktop is "
                 "the only place to read this Lead's replies until a scanner "
                 "ships for this provider",
             )
@@ -3365,8 +3365,7 @@ def check_provider_isolation() -> list[Finding]:
     sessions, config or logins with a dev checkout or with the user's own
     hand-run CLI. claude has done this since the C5 audit
     (``CLAUDE_CONFIG_DIR``); codex and opencode joined via
-    ``config.provider_home_env``; kimi joined 2026-09-07 (``KIMI_SHARE_DIR``,
-    proven by ConPTY probe + kimi-cli 1.50.0 source).
+    ``config.provider_home_env``.
 
     gemini/cursor expose no usable directory env var (probed — see
     ``config.PROVIDER_ISOLATION_GAPS`` for the per-provider evidence), so

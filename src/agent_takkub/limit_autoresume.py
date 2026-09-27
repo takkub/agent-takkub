@@ -416,7 +416,7 @@ class AutoResumeMixin:
         # even though `effective_provider_for("lead")` still says claude):
         # claude → the profile's limit_status window, codex/gemini → the
         # #663 `fetch_provider_usage` probe. A provider with no usable probe
-        # (opencode/kimi/cursor, or a fetch error) answers "unknown", which
+        # (opencode/cursor, or a fetch error) answers "unknown", which
         # keeps the pre-#704 behaviour: signal (a) alone after the #595
         # fallback timeout. Only an explicit "not exhausted" answer clears
         # the episode as a false positive (`_on_limit_usage_denied`).
@@ -542,7 +542,7 @@ class AutoResumeMixin:
         """The next available CLI this role's task can move to right now, or
         None when nothing qualifies.
 
-        Forced-identity roles (`codex`/`gemini`/`opencode`/`kimi`/`cursor` as
+        Forced-identity roles (`codex`/`gemini`/`opencode`/`cursor` as
         the role NAME — `provider_config.FORCED_ROLES`) never reroute: the
         role's whole identity IS that one CLI (see `provider_config`'s
         module docstring — "always X, the role's whole point"), so there is

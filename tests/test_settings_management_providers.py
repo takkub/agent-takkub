@@ -31,7 +31,7 @@ def redirect_stores(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
 class TestList:
     def test_list_includes_all_registry_providers(self) -> None:
         names = {p.name for p in providers_repo.list()}
-        assert names == {"claude", "codex", "gemini", "opencode", "kimi", "cursor"}
+        assert names == {"claude", "codex", "gemini", "opencode", "cursor"}
 
     def test_list_query_filters_by_name(self) -> None:
         # "cod" would match both codex and open"cod"e — use an unambiguous
@@ -121,7 +121,7 @@ class TestModelFlagSupported:
     def test_supported_for_all_registered_providers(self) -> None:
         # Every registered provider declares model_flag — codex's was verified
         # against the installed binary (`codex --help`: `-m, --model <MODEL>`).
-        for name in ("claude", "codex", "gemini", "opencode", "kimi", "cursor"):
+        for name in ("claude", "codex", "gemini", "opencode", "cursor"):
             assert providers_repo.get(name).model_flag_supported is True, name
 
 

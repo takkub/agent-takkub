@@ -36,7 +36,7 @@ execution are denied.
 
 Multi-provider (#103): Claude Code hooks are claude-only, so this is hard
 enforcement for claude panes and prompt-level only for codex / gemini-agy /
-opencode / kimi / cursor, whose role files carry the same rule in prose.
+opencode / cursor, whose role files carry the same rule in prose.
 `GUARD_RULE_TEXT` is the single source of that prose so the role files and
 this module can never drift (guarded by
 `tests/test_agent_role_files_have_browser_guard.py`).

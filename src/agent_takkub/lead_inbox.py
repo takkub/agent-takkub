@@ -1371,7 +1371,7 @@ class LeadInboxMixin:
             from .provider_spec import PROVIDER_REGISTRY
 
             # Registry-driven (#103): each spec owns its cold-boot allowance via
-            # `ready_wait_ms`, so a newly registered provider (opencode/kimi/
+            # `ready_wait_ms`, so a newly registered provider (opencode/
             # cursor …) gets its own window instead of silently inheriting
             # claude's 45 s and forcing a blind first paste. Was a hardcoded
             # codex/gemini pair.
@@ -2694,7 +2694,7 @@ class LeadInboxMixin:
         it survives exactly the reader-thread lag that makes the primary
         check unreliable under heavy load. Covers every provider
         `token_meter.resolve_pane_session` knows (claude/codex/gemini(-agy)/
-        opencode/kimi/cursor) via the same generic `effective_provider_for`
+        opencode/cursor) via the same generic `effective_provider_for`
         resolver the rest of the engine uses — never a claude-only signal.
         Best-effort end to end: any probe failure counts as "no evidence",
         never as proof of death.

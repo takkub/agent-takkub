@@ -86,7 +86,7 @@ wait
 | codex | `spawn_agent` + `wait_agent` | `multi_agent` stable เปิดอยู่แล้ว (0.154) |
 | gemini (agy) | `run_subagent` | ถ้า build ไม่มี → pane ทำทีละชิ้นเอง ไม่ค้าง |
 | opencode | `task` (`subagent_type="general"`) | `opencode agent list` มี general/explore |
-| kimi / cursor | — | fallback เป็น N pane อัตโนมัติ + note |
+| cursor | — | fallback เป็น N pane อัตโนมัติ + note |
 
 - **ประหยัดอะไร:** ค่า boot CLI + role prompt + MCP init + ~0.5 GB RAM + PTY ต่อ pane × (N-1) · **ไม่ประหยัด:** ค่าอ่านไฟล์/CLAUDE.md ของแต่ละ subagent (context แยกกันคนละก้อน ไม่ได้แชร์กับ pane แม่)
 - **fallback เป็น N pane เอง (มี note ใน assign ack):** reviewer `--mode e2e|ui` (= qa/critic/designer — browser profile ต่อ shard pane), `--plan`, provider ไม่มี subagent · `--mode subagent` ของ Lead ไม่เกี่ยว (คนละ feature)

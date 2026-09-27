@@ -497,7 +497,7 @@ def apply_default_model(env: dict[str, str], model: str) -> None:
     exactly the double-mechanism issue #318 asks not to reintroduce.
 
     Claude-only (``ANTHROPIC_DEFAULT_MODEL`` has no codex/gemini/opencode/
-    kimi/cursor counterpart — flagged to #103): callers must only invoke
+    cursor counterpart — flagged to #103): callers must only invoke
     this on the claude spawn path, never the generic provider branch.
     """
     model = (model or "").strip()
@@ -628,7 +628,7 @@ _PROFILE_HOME_VAR: dict[str, str] = {"codex": "CODEX_HOME"}
 
 def inject_provider_home_env(env: dict[str, str], provider: str, project: str = "") -> None:
     """Point a non-claude provider's state at DATA_HOME (user directive
-    2026-08-19) — the codex/opencode/kimi counterpart of
+    2026-08-19) — the codex/opencode counterpart of
     ``inject_user_profile_env``'s ``CLAUDE_CONFIG_DIR``.
 
     Scoped to the pane being spawned, never to the cockpit process: the
@@ -686,12 +686,6 @@ _PROVIDER_NO_AUTOUPDATE_ENV: dict[str, dict[str, str]] = {
     # Antigravity CLI docs, "Resolve self-updater locks and failures":
     # https://antigravity.google/docs/cli/troubleshooting
     "gemini": {"AGY_CLI_DISABLE_AUTO_UPDATE": "true"},
-    # kimi-cli FAQ: https://moonshotai.github.io/kimi-cli/en/faq.html
-    # ("export KIMI_CLI_NO_AUTO_UPDATE=1"). KIMI_CODE_NO_AUTO_UPDATE is set
-    # alongside it — same FAQ entry names it as the current kimi-code rebrand
-    # of the identical variable; setting both costs nothing and covers either
-    # binary generation without guessing which one is actually installed.
-    "kimi": {"KIMI_CLI_NO_AUTO_UPDATE": "1", "KIMI_CODE_NO_AUTO_UPDATE": "1"},
 }
 
 # Providers with NO documented env-var knob to disable self-update, kept

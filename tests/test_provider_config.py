@@ -378,13 +378,13 @@ class TestEffectiveProviderForQuotaSkip:
 
         redirect_config_path.write_text('{"reviewer": "codex"}', encoding="utf-8")
         monkeypatch.setattr(provider_config, "_provider_available", lambda p: True)
-        # PROVIDER_RING is (claude, codex, gemini, kimi, opencode, cursor)
+        # PROVIDER_RING is (claude, codex, gemini, opencode, cursor)
         # walked from just after codex — gemini is next; if gemini is also
-        # quota-hit the walk continues to kimi.
+        # quota-hit the walk continues to opencode.
         provider_state.set_quota_reset_at("codex", time.time() + 3600)
         provider_state.set_quota_reset_at("gemini", time.time() + 3600)
 
-        assert provider_config.effective_provider_for("reviewer") == "kimi"
+        assert provider_config.effective_provider_for("reviewer") == "opencode"
 
     def test_forced_identity_role_is_never_quota_rerouted(
         self, monkeypatch: pytest.MonkeyPatch
@@ -425,7 +425,7 @@ class TestEffectiveProviderForQuotaSkip:
         redirect_config_path.write_text('{"reviewer": "codex"}', encoding="utf-8")
         monkeypatch.setattr(provider_config, "_provider_available", lambda p: True)
         now = time.time()
-        for prov in ("claude", "codex", "gemini", "kimi", "opencode", "cursor"):
+        for prov in ("claude", "codex", "gemini", "opencode", "cursor"):
             provider_state.set_quota_reset_at(prov, now + 3600)
 
         assert provider_config.effective_provider_for("reviewer") == "codex"
@@ -857,7 +857,7 @@ class TestAssignEffortOverrideValidation:
     def test_provider_without_effort_flag_degrades_silently(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        # opencode/kimi/cursor have no CLI knob at all (#103 gap) — issue
+        # opencode/cursor have no CLI knob at all (#103 gap) — issue
         # #323's acceptance criteria requires this NOT be a hard error.
         monkeypatch.setattr(
             provider_config, "effective_provider_for", lambda *_a, **_kw: "opencode"
@@ -912,8 +912,6 @@ class TestAssignModelOverrideProviderMismatch:
             ("claude", "gpt-5"),
             ("codex", "claude-sonnet-4-5"),
             ("codex", "gemini-3.1-pro-high"),
-            ("kimi", "claude-opus-4"),
-            ("gemini", "k2.5"),
         ],
     )
     def test_wrong_provider_model_is_blocked(
@@ -933,8 +931,6 @@ class TestAssignModelOverrideProviderMismatch:
             ("codex", "gpt-5"),
             ("codex", "o3-mini"),
             ("gemini", "gemini-3.1-pro"),
-            ("kimi", "k2.5"),
-            ("kimi", "kimi-k2"),
         ],
     )
     def test_own_provider_model_is_never_blocked(

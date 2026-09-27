@@ -35,17 +35,17 @@ class TestProviderModelConfig:
         assert provider_models.model_for("codex") is None
 
         provider_models.set_model("codex", "  gpt-6-codex  ")
-        provider_models.set_model("kimi", "k2.5")
+        provider_models.set_model("opencode", "k2.5")
 
         assert provider_models.model_for("codex") == "gpt-6-codex"
         assert provider_models.all_models() == {
             "codex": "gpt-6-codex",
-            "kimi": "k2.5",
+            "opencode": "k2.5",
         }
 
         provider_models.clear_model("codex")
         assert provider_models.model_for("codex") is None
-        assert provider_models.all_models() == {"kimi": "k2.5"}
+        assert provider_models.all_models() == {"opencode": "k2.5"}
 
     def test_unknown_provider_is_rejected(self) -> None:
         with pytest.raises(ValueError, match="unknown provider"):
@@ -65,7 +65,7 @@ class TestProviderModelConfig:
                 {
                     "schema": 1,
                     "data": {
-                        "kimi": "  k2.5  ",
+                        "opencode": "  k2.5  ",
                         "retired-provider": "old",
                         "cursor": "  ",
                         "codex": 123,
@@ -75,7 +75,7 @@ class TestProviderModelConfig:
             encoding="utf-8",
         )
 
-        assert provider_models.all_models() == {"kimi": "k2.5"}
+        assert provider_models.all_models() == {"opencode": "k2.5"}
 
     def test_write_uses_atomic_tmp_replace(self, isolated_models, monkeypatch) -> None:
         # write_data -> write_json_atomic (core.migration.registry_copy_step)
@@ -142,7 +142,6 @@ def _capture_generic_argv(
         "codex": "codex",
         "cursor": "cursor-agent",
         "gemini": "agy",
-        "kimi": "kimi",
         "opencode": "opencode",
     }[provider]
     monkeypatch.setattr(sdt, "SHARED_MCP_FILE", tmp_path / "shared-mcp.json")
@@ -187,12 +186,6 @@ class TestGenericProviderSpawnModels:
 
         assert argv == ["cursor-agent", "--force", "--model", "composer-2"]
 
-    def test_kimi_without_config_has_no_model_flag(self, qapp, monkeypatch, tmp_path) -> None:
-        argv = _capture_generic_argv(qapp, monkeypatch, tmp_path, "kimi")
-
-        assert argv == ["kimi", "--yolo"]
-        assert "--model" not in argv
-
     def test_assign_override_wins_over_role_and_provider_models(
         self, qapp, monkeypatch, tmp_path
     ) -> None:
@@ -226,10 +219,9 @@ class TestProviderEffortSpecs:
         assert codex_spec.effort_config_key == "model_reasoning_effort"
 
     def test_unsupported_providers_remain_explicit(self) -> None:
-        from agent_takkub.provider_spec import cursor_spec, kimi_spec, opencode_spec
+        from agent_takkub.provider_spec import cursor_spec, opencode_spec
 
         assert opencode_spec.effort_flag is None
-        assert kimi_spec.effort_flag is None
         assert cursor_spec.effort_flag is None
 
     def test_gemini_gains_effort_flag(self) -> None:
@@ -652,31 +644,31 @@ class TestRunningPaneEffortOverride:
 class TestProviderModelCli:
     @staticmethod
     def _args(model=None, *, clear=False) -> SimpleNamespace:
-        return SimpleNamespace(provider_cmd="model", name="kimi", model=model, clear=clear)
+        return SimpleNamespace(provider_cmd="model", name="opencode", model=model, clear=clear)
 
     def test_model_get_set_clear(self, capsys) -> None:
         from agent_takkub import cli
 
         result = cli.cmd_provider(self._args("  k2.5  "))
-        assert result == {"ok": True, "msg": "kimi model: k2.5"}
-        assert provider_models.model_for("kimi") == "k2.5"
+        assert result == {"ok": True, "msg": "opencode model: k2.5"}
+        assert provider_models.model_for("opencode") == "k2.5"
 
         result = cli.cmd_provider(self._args())
-        assert result == {"ok": True, "msg": "kimi model: k2.5"}
+        assert result == {"ok": True, "msg": "opencode model: k2.5"}
 
         result = cli.cmd_provider(self._args(clear=True))
-        assert result == {"ok": True, "msg": "kimi model cleared (provider default)"}
-        assert provider_models.model_for("kimi") is None
-        assert "kimi model: k2.5" in capsys.readouterr().out
+        assert result == {"ok": True, "msg": "opencode model cleared (provider default)"}
+        assert provider_models.model_for("opencode") is None
+        assert "opencode model: k2.5" in capsys.readouterr().out
 
     def test_provider_list_appends_configured_model(self, capsys) -> None:
         from agent_takkub import cli
 
-        provider_models.set_model("kimi", "k2.5")
-        with patch("agent_takkub.provider_install._discover", return_value="kimi"):
+        provider_models.set_model("opencode", "k2.5")
+        with patch("agent_takkub.provider_install._discover", return_value="opencode"):
             result = cli.cmd_provider(SimpleNamespace(provider_cmd="list"))
 
         assert result["ok"] is True
         output = capsys.readouterr().out
-        assert "kimi" in output
+        assert "opencode" in output
         assert "· model: k2.5" in output

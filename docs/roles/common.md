@@ -2,7 +2,7 @@
 
 Shared by every non-Lead role file (`frontend`, `backend`, `mobile`,
 `devops`, `qa`, `reviewer`, `critic`, `codex`, `gemini`, `opencode`,
-`kimi`, `cursor` today — other specialist roles can point here too). Each
+`cursor` today — other specialist roles can point here too). Each
 role's core `.claude/agents/<role>.md` carries only a one-line pointer into
 whichever section below applies; this file is **not staged into any pane's
 boot context** — read a section only when the situation it covers actually
@@ -71,7 +71,7 @@ committed.
 
 The claude pane is blocked at the hook level (`takkub _guard` →
 `pane_guard.py`); panes on another provider (codex / gemini-agy / opencode /
-kimi / cursor) are held to this rule by this prose alone — do not work
+cursor) are held to this rule by this prose alone — do not work
 around it.
 
 ## process-safety (#169)
@@ -217,7 +217,7 @@ When reporting a bug in the cockpit itself (`takkub issue new`):
 
 ## browser-non-ui-roles
 
-Non-UI roles (all provider slots — codex/gemini/opencode/kimi/cursor,
+Non-UI roles (all provider slots — codex/gemini/opencode/cursor,
 backend, devops, etc.) never install or run a browser driver themselves —
 `playwright` / `puppeteer` / `selenium` / headless chrome through any
 channel:

@@ -854,7 +854,7 @@ class TestRoleModelEffortDefaultLabels:
     def test_provider_with_no_known_default_shows_cli_placeholder(self) -> None:
         dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_PROVIDERS_ROLES)
         provider_combo = dlg._role_provider_combos["backend"]
-        provider_combo.setCurrentIndex(provider_combo.findData("kimi"))
+        provider_combo.setCurrentIndex(provider_combo.findData("cursor"))
         model_combo = dlg._role_model_combos["backend"]
         assert model_combo.itemText(0) == "(default) → ค่าของ CLI"
         dlg.deleteLater()
@@ -2566,7 +2566,7 @@ class TestTeamPresetView:
         dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_PROVIDERS_ROLES)
         panel = dlg._build_secondary_brains_panel(dlg)
         texts = " ".join(w.text() for w in panel.findChildren(settings_window.QLabel) if w.text())
-        for provider in ("codex", "gemini", "opencode", "kimi", "cursor"):
+        for provider in ("codex", "gemini", "opencode", "cursor"):
             assert provider.capitalize() in texts
         assert "claude" not in texts.lower()
         panel.deleteLater()

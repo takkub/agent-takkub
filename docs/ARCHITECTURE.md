@@ -78,9 +78,9 @@ src/agent_takkub/
 ├── project_rules.py   injects Lead's constraint registry (MEMORY.md) pointers into teammates
 ├── pane_env.py        per-pane env allowlist (drop secrets), ECC mute, MCP_TOOL_TIMEOUT inject
 ├── shared_dev_tools.py shared MCP config management + role-aware tool filtering
-├── codex_agents_md.py auto-plant AGENTS.md into non-claude panes (codex · gemini/agy · opencode · kimi · cursor — all auto-discover AGENTS.md)
+├── codex_agents_md.py auto-plant AGENTS.md into non-claude panes (codex · gemini/agy · opencode · cursor — all auto-discover AGENTS.md)
 │ ── providers / pipelines / plan ──
-├── provider_config.py per-role CLI mapping (claude/codex/gemini/opencode/kimi/cursor) — ~/.takkub/role-providers.json
+├── provider_config.py per-role CLI mapping (claude/codex/gemini/opencode/cursor) — ~/.takkub/role-providers.json
 ├── provider_models.py per-provider model override — ~/.takkub/provider-models.json
 ├── role_models.py    per-role model/effort override, bound to its provider — v2/models/aliases.json (global) + aliases-projects.json (per-project buckets, #657)
 ├── provider_install.py shared provider-CLI installer (takkub provider install · doctor --install-providers)

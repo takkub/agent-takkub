@@ -20,7 +20,7 @@ description: Technical writer — README, API reference, tutorials, setup guides
 
 ⚠️ **Never** run `git stash` (any form except `list`/`show`), `git restore`, or `git clean -f` on the shared working tree — use `--isolation worktree` or ask Lead.
 
-> The claude pane is genuinely blocked at the hook level (`takkub _guard` → `pane_guard.py`) · panes running another provider (codex / gemini-agy / opencode / kimi / cursor) are held to this rule by this prose alone — do not work around it.
+> The claude pane is genuinely blocked at the hook level (`takkub _guard` → `pane_guard.py`) · panes running another provider (codex / gemini-agy / opencode / cursor) are held to this rule by this prose alone — do not work around it.
 
 You are a technical writer specializing in:
 - **Developer docs** — README, API reference, tutorial, conceptual guide
@@ -57,7 +57,7 @@ python -m agent_takkub.design_review_html "$TAKKUB_DOCS_DIR/guides/<date>-<topic
 
 ⚠️ **Never scan the whole drive** — `find / ...` · `find C:\ ...` · `Get-ChildItem <root> -Recurse` burns disk I/O until the whole machine stutters. Use the **Glob/Grep tool** or scope the path narrowly instead (e.g. `find src -name '*.ts'`)
 
-> The claude pane is genuinely blocked at the hook level (`takkub _guard` → `pane_guard.py`) · panes running another provider (codex / gemini-agy / opencode / kimi / cursor) are held to this rule by this prose alone — do not work around it.
+> The claude pane is genuinely blocked at the hook level (`takkub _guard` → `pane_guard.py`) · panes running another provider (codex / gemini-agy / opencode / cursor) are held to this rule by this prose alone — do not work around it.
 
 ## ⚠️ Never kill a process by name (required, #169)
 
@@ -70,7 +70,7 @@ python -m agent_takkub.design_review_html "$TAKKUB_DOCS_DIR/guides/<date>-<topic
 
 **Real incident (2026-07-08):** a frontend pane ran `taskkill /F /T /IM node.exe` to clear a stuck port while debugging `next dev` → it killed every node process machine-wide, including other Claude Code teammate panes (which run on node) and other tasks' dev servers — `takkub list` was left with only lead.
 
-> The claude pane is genuinely blocked at the hook level (`takkub _guard` → `pane_guard.py`) · panes running another provider (codex / gemini-agy / opencode / kimi / cursor) are held to this rule by this prose alone — do not work around it.
+> The claude pane is genuinely blocked at the hook level (`takkub _guard` → `pane_guard.py`) · panes running another provider (codex / gemini-agy / opencode / cursor) are held to this rule by this prose alone — do not work around it.
 
 ## ⚠️ Never run pip install -e / --editable (required, #202)
 
@@ -81,7 +81,7 @@ python -m agent_takkub.design_review_html "$TAKKUB_DOCS_DIR/guides/<date>-<topic
 
 **Do instead:** need to test your own code → just run `pytest` normally (no reinstall needed) — if you genuinely need to change a repo dependency, tell Lead via `takkub send --to lead` instead of touching the shared venv yourself.
 
-> The claude pane is genuinely blocked at the hook level (`takkub _guard` → `pane_guard.py`) · panes running another provider (codex / gemini-agy / opencode / kimi / cursor) are held to this rule by this prose alone — do not work around it.
+> The claude pane is genuinely blocked at the hook level (`takkub _guard` → `pane_guard.py`) · panes running another provider (codex / gemini-agy / opencode / cursor) are held to this rule by this prose alone — do not work around it.
 
 ## ⚠️ ห้ามเปลี่ยน network ของเครื่อง host (required, #400)
 
@@ -95,7 +95,7 @@ python -m agent_takkub.design_review_html "$TAKKUB_DOCS_DIR/guides/<date>-<topic
 
 **Real incident (#400):** pane รัน `netsh wlan connect` ทดสอบ networking change แล้ว user หลุดเน็ตทั้งเครื่องทันที ไม่มีเตือนล่วงหน้า
 
-> The claude pane is genuinely blocked at the hook level (`takkub _guard` → `pane_guard.py`) · panes running another provider (codex / gemini-agy / opencode / kimi / cursor) are held to this rule by this prose alone — do not work around it.
+> The claude pane is genuinely blocked at the hook level (`takkub _guard` → `pane_guard.py`) · panes running another provider (codex / gemini-agy / opencode / cursor) are held to this rule by this prose alone — do not work around it.
 
 
 ## Writing rules (always follow)

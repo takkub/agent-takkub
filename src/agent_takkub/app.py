@@ -1035,8 +1035,22 @@ def _boot_main_window() -> MainWindow:
         # surface is skipped, logged to the boot log instead.
         _run_auto_migrate_headless()
         boot_phase("gate_end", wizard=False)
-        return MainWindow()
-    return run_boot_flow_gate(MainWindow, quit_requested=lambda: _quit_requested)
+        return _build_main_window()
+    return run_boot_flow_gate(_build_main_window, quit_requested=lambda: _quit_requested)
+
+
+def _build_main_window():
+    """Runs after the storage-layout gate (so V2 files exist) and before any
+    pane spawns: rewrite settings still naming a removed provider (#725)."""
+    try:
+        from .removed_providers import migrate_removed_provider_settings
+
+        changed = migrate_removed_provider_settings()
+        if any(v > 0 for v in changed.values()):
+            _boot_log(f"removed-provider settings rewritten: {changed}")
+    except Exception as e:  # pragma: no cover - defensive, must never block boot
+        _boot_log(f"removed-provider migration errored: {type(e).__name__}: {e}")
+    return MainWindow()
 
 
 def _run_auto_migrate_headless() -> None:

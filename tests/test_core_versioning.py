@@ -86,7 +86,7 @@ def test_claude_meets_minimum_is_ok():
 
 def test_unregistered_provider_is_uncalibrated():
     matrix = compatibility.CompatibilityMatrix()
-    ev = matrix.evaluate("kimi", "1.0.0")
+    ev = matrix.evaluate("some-unregistered-cli", "1.0.0")
     assert ev.verdict == compatibility.CompatVerdict.UNCALIBRATED
     assert ev.rule is None
 

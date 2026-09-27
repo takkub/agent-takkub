@@ -889,7 +889,7 @@ class TestApiResumeLead:
         monkeypatch.setattr(_config, "get_open_tabs", lambda: ["proj"])
         monkeypatch.setattr(
             "agent_takkub.provider_config.effective_provider_for",
-            lambda role, project=None: "kimi",
+            lambda role, project=None: "cursor",
         )
         fake_orch = MagicMock()
         with pytest.raises(api.RemoteApiError) as exc:

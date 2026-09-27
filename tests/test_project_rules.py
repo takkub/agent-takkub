@@ -295,7 +295,7 @@ class TestProviderNeutralLeadDelegationPolicy:
     @staticmethod
     def _assert_strict_policy(content: str) -> None:
         assert "กฎเดียวกันสำหรับทุก provider" in content
-        assert "Claude, Codex, Gemini/agy, OpenCode, Kimi, Cursor" in content
+        assert "Claude, Codex, Gemini/agy, OpenCode, Cursor" in content
         assert "provider substitution ทุกกรณี" in content
         assert "source code ของ cockpit `agent-takkub`" in content
         assert "ถ้าไม่แน่ใจว่าเป็นงานเล็กหรือไม่" in content

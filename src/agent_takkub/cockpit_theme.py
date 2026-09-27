@@ -211,7 +211,6 @@ PROVIDER_CLAUDE = "#d97757"  # Anthropic clay — same brand hue as METER_CLAY
 PROVIDER_CODEX = "#10a37f"  # OpenAI teal
 PROVIDER_GEMINI = "#4285f4"  # Google blue
 PROVIDER_OPENCODE = "#f97316"  # sst orange
-PROVIDER_KIMI = "#6366f1"  # Moonshot indigo
 PROVIDER_CURSOR = "#38bdf8"  # Cursor sky-blue
 
 # ──────────────────────────────────────────────────────────────
@@ -316,7 +315,7 @@ AVATAR_TINTS: tuple[str, ...] = (
 # cockpit surface (grid + Settings). roles.py Role.color mirrors these exact
 # values for its built-in roles (guarded by tests/test_role_registry_sync.py);
 # call sites read `ROLE_COLORS.get(name, role.color)` so a custom role not in
-# this dict falls back to its own Role.color. codex/gemini/opencode/kimi/
+# this dict falls back to its own Role.color. codex/gemini/opencode/
 # cursor reuse the PROVIDER_* brand tokens; shell is a neutral slate.
 ROLE_COLORS: dict[str, str] = {
     "lead": "#E3B341",
@@ -335,7 +334,6 @@ ROLE_COLORS: dict[str, str] = {
     "security": "#E0574F",
     "docs": "#8FA3B8",
     "opencode": PROVIDER_OPENCODE,
-    "kimi": PROVIDER_KIMI,
     "cursor": PROVIDER_CURSOR,
     "tester": "#B5D33D",
 }

@@ -70,7 +70,7 @@ class TestRoleFileGitCommitGuard:
     def test_claude_hard_block_disclosed(self, role_file: Path) -> None:
         """#103: a non-claude pane only ever sees this prose — the role file
         has to say so, not leave it implied, so a codex/gemini/opencode/
-        kimi/cursor pane knows prose is the *only* thing stopping it (a
+        cursor pane knows prose is the *only* thing stopping it (a
         claude pane blocked by pane_guard doesn't need to know that to obey
         the rule, but it doesn't hurt either)."""
         content = role_file.read_text(encoding="utf-8")

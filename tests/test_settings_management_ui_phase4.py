@@ -46,7 +46,7 @@ def test_providers_page_lists_all_providers() -> None:
     page = ProvidersPage()
     page.refresh()
     names = {name for name, _ in page._load_rows()}
-    assert names == {"claude", "codex", "gemini", "opencode", "kimi", "cursor"}
+    assert names == {"claude", "codex", "gemini", "opencode", "cursor"}
 
 
 def test_providers_page_claude_toggle_is_editable() -> None:

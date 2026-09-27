@@ -1135,7 +1135,7 @@ def test_query_usage_never_crashes_with_empty_ledger():
 
 
 def test_format_usage_table_renders_uncountable_rows():
-    ul.account_dir("kimi", "default").mkdir(parents=True, exist_ok=True)
+    ul.account_dir("cursor", "default").mkdir(parents=True, exist_ok=True)
     result = ul.query_usage(days=7)
     text = ul.format_usage_table(result)
     assert "นับไม่ได้" in text

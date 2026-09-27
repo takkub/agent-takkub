@@ -387,7 +387,7 @@ def read_last_usage(jsonl: Path) -> dict | None:
 # Claude was the only provider with a compatible transcript when the rest of
 # this module was written (see the "None fields indicate no change" and
 # "single source of truth" comments scattered above); the dispatch below
-# extends the same badge/watchdog machinery to codex/gemini/opencode/kimi/
+# extends the same badge/watchdog machinery to codex/gemini/opencode/
 # cursor without touching claude's own `find_session_by_uuid`/`read_last_usage`
 # contract at all — every claude call site keeps working unchanged.
 #
@@ -465,11 +465,11 @@ def resolve_pane_session(
     The return value is opaque — callers (agent_pane.py) use it only for
     equality, to detect a session rollover (`/clear`, `/resume`, a fresh
     `/new`), never to interpret its shape: a `Path` for claude/codex/gemini/
-    kimi, a `(db_path, session_id)` tuple for opencode.
+    a `(db_path, session_id)` tuple for opencode.
 
     Every non-claude provider pane is spawned by spawn_engine.py's generic
     spec-driven branch, which — unlike claude's `--session-id` — never mints
-    or passes a session id at spawn (codex/gemini/opencode/kimi all choose
+    or passes a session id at spawn (codex/gemini/opencode all choose
     their own id internally, after boot). So `session_uuid` is normally None
     here for every provider except claude, and each branch below falls back
     to a newest-session-for-`cwd` resolve bounded by `not_before` (the pane's
@@ -504,11 +504,6 @@ def resolve_pane_session(
 
         return resolve_opencode_session(str(cwd), session_uuid, not_before)
 
-    if provider == "kimi":
-        from .kimi_helper import resolve_kimi_session_dir
-
-        return resolve_kimi_session_dir(str(cwd), session_uuid or None)
-
     if provider == "cursor":
         from .cursor_helper import resolve_cursor_jsonl_for_cwd
 
@@ -537,7 +532,7 @@ def provider_session_id_for_cwd(
     - opencode: the `session.id` from `opencode.db` (resumed via
       `opencode --session <id>`).
 
-    Returns None for providers that can't resume (kimi/cursor) or when no
+    Returns None for providers that can't resume (cursor) or when no
     session is resolvable yet. Best-effort: resolution errors degrade to None,
     never raise into the closing pane's signal path.
     """
@@ -620,12 +615,6 @@ def read_pane_usage(provider: str, cand: object) -> dict | None:
             and "schema drift" in usage.get("reason", "")
         ):
             _note_schema_drift("opencode", "message.data.tokens")
-        return usage
-
-    if provider == "kimi":
-        from .kimi_helper import read_kimi_token_usage
-
-        usage = read_kimi_token_usage(cand)
         return usage
 
     if provider == "cursor":

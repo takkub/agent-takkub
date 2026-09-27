@@ -283,8 +283,8 @@ def default_claude_config_dir() -> Path:
 #
 # Read by BOTH sides on purpose:
 #   * spawn  — `pane_env.inject_provider_home_env` exports these into the pane.
-#   * mirror — `codex_helper.codex_sessions_root` / `opencode_helper` /
-#     `kimi_helper.kimi_share_dir` resolve transcripts through the same
+#   * mirror — `codex_helper.codex_sessions_root` / `opencode_helper`
+#     resolve transcripts through the same
 #     function.
 # Splitting those two would point the Remote mirror at a directory no pane
 # writes to — silent-blank-phone, the exact class of bug this release fixes.
@@ -304,15 +304,6 @@ _PROVIDER_HOME_SUBDIRS: dict[str, dict[str, str]] = {
         "XDG_DATA_HOME": "opencode-home/data",
         "XDG_CONFIG_HOME": "opencode-home/config",
     },
-    # `KIMI_SHARE_DIR` moves kimi-cli's ENTIRE share dir (`~/.kimi`):
-    # config.toml, credentials, device_id, kimi.json, sessions/, logs/,
-    # mcp.json, plugins/, telemetry/ all route through one
-    # `share.py::get_share_dir()` in kimi-cli's own source (verified 1.50.0
-    # site-packages, 2026-09-07) and a live ConPTY probe wrote every one of
-    # those into the override dir with zero fresh files under the real
-    # `~/.kimi`. Subdir uses the #504 layout (`providers/<name>/default`);
-    # codex/opencode keep their pre-#504 paths until the boot-time migration.
-    "kimi": {"KIMI_SHARE_DIR": "providers/kimi/default"},
 }
 
 # Providers with NO isolation knob, kept explicit so the gap is visible
@@ -1058,7 +1049,6 @@ _NO_DEV_SERVER_ROLES: frozenset[str] = frozenset(
         "security",  # writes findings, never runs/builds the app
         "codex",  # claude-substitute: refactor/cross-check, no dev-server step
         "opencode",  # claude-substitute: same shape as codex
-        "kimi",  # claude-substitute: same shape as codex
         "cursor",  # claude-substitute: same shape as codex
     }
 )

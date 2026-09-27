@@ -170,7 +170,7 @@ class TestDesignReviseRouting:
     ) -> None:
         """Routing keys off pane liveness only — provider-agnostic (#371's
         multi-provider requirement). A fake pane standing in for any
-        provider (codex/gemini-agy/opencode/kimi/cursor) must qualify the
+        provider (codex/gemini-agy/opencode/cursor) must qualify the
         same way a claude pane would."""
         artifact_id = _publish(html_root, created_by_role="designer")
         pane = _make_pane(session=_make_alive_session())

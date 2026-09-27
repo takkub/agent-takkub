@@ -13,7 +13,7 @@ anything by parsing text.
 
 Provider-neutral by construction (#103): every field here is git state or
 cockpit-owned PaneState/session data — nothing read from a specific CLI's
-terminal output, so it works identically for a codex/gemini/opencode/kimi/
+terminal output, so it works identically for a codex/gemini/opencode/
 cursor pane as it does for claude.
 """
 

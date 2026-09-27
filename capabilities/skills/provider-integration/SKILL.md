@@ -1,6 +1,6 @@
 ---
 name: provider-integration
-description: The checklist every CLI provider (claude/codex/gemini-agy/opencode/kimi/cursor + any new one) must satisfy in agent-takkub — spawn, prod-state isolation under DATA_HOME, Remote mirror adapter, resume picker, and the upstream-schema-drift guard that keeps a provider from going silently blank. Read BEFORE adding a provider, wiring a ProviderSpec, touching pane_env/spawn_engine provider branches, editing any *_helper.py transcript resolver, or changing remote/notify.py's scanner registry. Trigger when the user says "เพิ่ม provider", "add a provider / CLI", "provider ใหม่", or reports that one provider works while another shows nothing (blank mobile chat, empty history, empty resume picker).
+description: The checklist every CLI provider (claude/codex/gemini-agy/opencode/cursor + any new one) must satisfy in agent-takkub — spawn, prod-state isolation under DATA_HOME, Remote mirror adapter, resume picker, and the upstream-schema-drift guard that keeps a provider from going silently blank. Read BEFORE adding a provider, wiring a ProviderSpec, touching pane_env/spawn_engine provider branches, editing any *_helper.py transcript resolver, or changing remote/notify.py's scanner registry. Trigger when the user says "เพิ่ม provider", "add a provider / CLI", "provider ใหม่", or reports that one provider works while another shows nothing (blank mobile chat, empty history, empty resume picker).
 ---
 
 # Adding / maintaining a provider

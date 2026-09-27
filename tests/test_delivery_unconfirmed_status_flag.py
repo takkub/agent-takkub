@@ -101,14 +101,14 @@ def test_delivery_busy_wait_does_not_set_the_flag(orch: Orchestrator) -> None:
     different claim from "may not have landed", so it must not set this
     flag (unlike #266's broader revalidation marker set, which
     deliberately DOES include busy-wait)."""
-    orch._panes_by_project[PROJECT] = {"kimi": _pane("working")}
+    orch._panes_by_project[PROJECT] = {"cursor": _pane("working")}
     orch._lead_notify_queue[PROJECT] = collections.deque(
-        [("⏳ [delivery-busy-wait] kimi pane ยังไม่ถึง ready prompt แต่มี output ล่าสุดเมื่อ 3s", None)]
+        [("⏳ [delivery-busy-wait] cursor pane ยังไม่ถึง ready prompt แต่มี output ล่าสุดเมื่อ 3s", None)]
     )
 
     detailed = orch.list_status_detailed(project=PROJECT)
 
-    assert detailed["kimi"]["delivery_unconfirmed"] is False
+    assert detailed["cursor"]["delivery_unconfirmed"] is False
 
 
 def test_flag_absent_for_non_working_pane(orch: Orchestrator) -> None:

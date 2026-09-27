@@ -105,7 +105,7 @@ def test_codex_queued_followup_blocks_done_until_queue_runs(orch, monkeypatch, t
         assert pane.state == "done"
 
 
-@pytest.mark.parametrize("provider", ["claude", "codex", "gemini", "opencode", "kimi", "cursor"])
+@pytest.mark.parametrize("provider", ["claude", "codex", "gemini", "opencode", "cursor"])
 def test_followup_survives_done_and_stale_close(orch, monkeypatch, tmp_path, provider):
     # This case exercises the kept-pane queue handoff. The default close-on-done
     # path has its own coverage and intentionally replaces a finished pane.

@@ -483,7 +483,6 @@ class TestRoleGuardCapability:
             "security",
             "codex",
             "opencode",
-            "kimi",
             "cursor",
         ],
     )

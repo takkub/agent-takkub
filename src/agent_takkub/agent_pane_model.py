@@ -216,7 +216,7 @@ class AgentPaneModel:
         instead; this method assumes every numeric key is present.
         """
         prompt = usage["prompt"]
-        # A provider-reported `limit` (codex's model_context_window, kimi's
+        # A provider-reported `limit` (codex's model_context_window's
         # max_context_tokens) is authoritative — trust it over the per-model
         # table, which only knows claude model ids and would otherwise cap a
         # 258k-context codex turn at the wrong 200k default. None (claude,

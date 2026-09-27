@@ -37,7 +37,6 @@ from ..widgets.management_page import ManagementPage
 _MODEL_LIST_HINTS = {
     "gemini": "ดู model ที่ใช้ได้ด้วยคำสั่ง `agy models`",
     "opencode": "ดู model ที่ใช้ได้ด้วยคำสั่ง `opencode models`",
-    "kimi": "ดู model ที่ใช้ได้ด้วยคำสั่ง `kimi --help`",
     "cursor": "ดู model ที่ใช้ได้ด้วยคำสั่ง `agent models`",
     "claude": "ดู model ที่ใช้ได้จากเอกสาร Anthropic (เช่น opus/sonnet/haiku)",
 }

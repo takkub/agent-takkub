@@ -226,7 +226,7 @@ class ProviderSpec:
     # for Ink-based TUIs (claude, gemini/agy), which treat a bare ESC as a
     # harmless no-op immediately followed by CR. codex's ratatui UI treats ESC
     # as interrupt/clear-composer, so it — and every provider whose TUI toolkit
-    # hasn't been confirmed (opencode/bubbletea, kimi, cursor) — stays at the
+    # hasn't been confirmed (opencode/bubbletea, cursor) — stays at the
     # safe default None: terminal.html then does NOT intercept the keystroke,
     # so xterm.js sends its native '\r' (pre-#149 behavior, same as plain Enter).
     multiline_newline_seq: str | None = None
@@ -236,7 +236,7 @@ class ProviderSpec:
     # same toolkit-family reasoning as multiline_newline_seq above). codex's
     # crossterm/ratatui parser types the reply into the composer as literal
     # "]10;rgb:…\" text (seen live 2026-09-17, even with an immediate reply),
-    # so it — and every unconfirmed TUI (opencode/bubbletea, kimi, cursor) —
+    # so it — and every unconfirmed TUI (opencode/bubbletea, cursor) —
     # stays at the safe default False: no reply is sent and the CLI falls
     # back to its default theme.
     handles_osc_color_reply: bool = False
@@ -394,7 +394,7 @@ class ProviderSpec:
     # No other provider has a confirmed account-verification-gate screen as
     # of this round (checked: claude/codex/opencode/cursor have no
     # auth_error_markers/auth_transient_markers entries either — nothing to
-    # migrate; kimi's auth_error_markers "send /login to login" is a genuine
+    # migrate; a provider's auth_error_markers (e.g. "send /login to login") is a genuine
     # instant login failure, not an account-pending gate, so it stays where
     # it is) — empty here until a real screen is observed for that provider,
     # never guessed from docs alone.
@@ -572,17 +572,6 @@ def _discover_opencode() -> str | None:
     from .opencode_helper import find_opencode_executable
 
     return find_opencode_executable()
-
-
-def _discover_kimi() -> str | None:
-    """Plain PATH lookup for Kimi CLI's cross-platform installer shims."""
-    import shutil
-
-    for name in ("kimi", "kimi.cmd", "kimi.exe"):
-        found = shutil.which(name)
-        if found:
-            return found
-    return None
 
 
 def _discover_cursor() -> str | None:
@@ -1361,7 +1350,7 @@ gemini_spec = ProviderSpec(
 # First provider added through the generic spec-driven spawn branch (#103
 # Phase 1) — no hand-written branch of its own. opencode is sst's open-source
 # multi-provider TUI (https://opencode.ai): one integration exposes 75+ model
-# backends (Anthropic, OpenAI, z.ai GLM, Kimi, local Ollama, ...) selected via
+# backends (Anthropic, OpenAI, z.ai GLM, local Ollama, ...) selected via
 # `-m provider/model` or the user's opencode config. Requires a one-time
 # `opencode auth login` (or /connect in the TUI) per backend.
 opencode_spec = ProviderSpec(
@@ -1491,153 +1480,9 @@ opencode_spec = ProviderSpec(
 )
 
 
-# ── kimi ────────────────────────────────────────────────────────────────────
-# Kimi CLI (MoonshotAI/kimi-cli) uses the same generic spec-driven spawn
-# branch as opencode (#103 Phase 1) and has no hand-written branch of its own.
-kimi_spec = ProviderSpec(
-    name="kimi",
-    display_name="Kimi",
-    binary_names=["kimi", "kimi.cmd", "kimi.exe"],
-    install_instructions=(
-        "kimi binary not on PATH. Install with `uv tool install kimi-cli` "
-        "(alternative: `pip install kimi-cli`). On Windows, install Git Bash "
-        "first; if bash.exe is in a custom location, set `KIMI_CLI_GIT_BASH_PATH` "
-        "to its full path. Then launch `kimi` and run `/login` in the TUI."
-    ),  # env var name per kimi-cli changelog 1.42.0 (2026-05-11): "locates
-    # bash.exe via the KIMI_CLI_GIT_BASH_PATH env override → where.exe git".
-    # Pin the interpreter: kimi-cli supports Python 3.12-3.14 and uv would
-    # otherwise pick whatever default it finds, which can be outside that range.
-    install_command=["uv", "tool", "install", "--python", "3.13", "kimi-cli"],
-    post_install_note="launch `kimi` and run `/login` once in the TUI to sign in",
-    custom_discovery_fn=_discover_kimi,
-    # `--yolo` skips approval for tool calls, file writes, and shell execution.
-    # Kimi documents it as mutually exclusive with `--auto`, so only the
-    # confirmed full-autonomy flag belongs in this argv.
-    autonomy_flags={"default": ["--yolo"]},
-    # GAP (kimi 1.49.0 --help, checked 2026-07-24): --prompt is a user string
-    # and --agent-file is a whole agent specification, not an append-system-
-    # prompt file. Keep the task pointer flow.
-    system_prompt_flag=None,
-    # GAP (#103, #581): no tool allowlist flag (like claude's --tools).
-    tools_flag=None,
-    # GAP (#103, #582): no auto-compact window flag (like claude's --autocompact).
-    autocompact_flag=None,
-    ready_hard_blockers=(),  # global blockers (esc to interrupt/cancel, press
-    # enter to continue) still apply via the cross-provider dedup table below.
-    # ⚠ BUSY marker STILL NOT calibrated (#257): the idle footer below was
-    # captured against a logged-in, IDLE Kimi TUI only — nobody has yet sent
-    # it a real task and watched what the footer/status line reads while
-    # Kimi is actively generating. Do not guess it from the idle text; the
-    # only busy signal until then is the cross-provider `ready_hard_blockers`
-    # dedup table (esc to interrupt/cancel), which may not even apply if
-    # Kimi words its own interrupt hint differently — a working pane could
-    # misread as ready. Re-probe by assigning kimi a real task and capturing
-    # the footer mid-generation, then fill this in as a data-only change.
-    ready_rules=(
-        # Idle composer footer, captured via direct ConPTY capture against a
-        # signed-in kimi-cli 1.49.x session on Windows (#257, 2026-08-16):
-        #   main  @: mention files | ctrl-x: toggle mode | shift-tab: plan
-        #   mode | ctrl+o: editor
-        # "ctrl-x: toggle mode" is the distinctive half — no substring
-        # collision with any other provider's ready/busy markers in this
-        # file. Before this entry, ready_rules was empty, so
-        # is_at_ready_prompt() could never return True for a kimi pane and
-        # every assigned task sat undelivered until the 1800s busy-wait
-        # ceiling (proven empirically the same day — task text never
-        # appeared on screen even after a manual resend).
-        ReadyRule("ctrl-x: toggle mode", True),
-    ),
-    ready_wait_ms=90_000,  # cold-boot allowance, parity with codex/gemini
-    # AGENTS.md discovery CONFIRMED (kimi-cli changelog 1.29.0, 2026-04-01:
-    # "discovers and merges AGENTS.md files from the git project root down to
-    # the working directory"). Without planting it a kimi teammate never learns
-    # it must call `takkub done`, so the pane would just hang after finishing.
-    context_strategy="agents_md_file",
-    cheatsheet_filename="AGENTS.md",
-    inline_learned_notes=False,
-    use_file_guards=False,
-    mcp_adapter_variant="none",  # Kimi auto-loads user/project mcp.json files.
-    # Its --mcp-config/--mcp-config-file options add configs but expose no deny-all
-    # startup switch in kimi 1.49.0, so explicit-empty role isolation is a #103/#121 gap.
-    supports_browser_profiles=False,
-    paste_threshold=200,  # uniform defaults — retune only with pty evidence
-    enter_delay_base_ms=800,
-    enter_delay_per_kb_ms=150,
-    enter_delay_max_ms=3000,
-    input_swallow_recovery=True,
-    supports_mirror=False,
-    supports_resume=False,
-    supports_slash_commands=False,
-    supports_hooks=False,
-    model_flag="--model",  # Kimi CLI docs: `--model <id>` (for example `k2.5`)
-    # GAP (#103): kimi 1.49.0 only exposes boolean --thinking/--no-thinking,
-    # not low|medium|high. Do not collapse three role tiers into that toggle.
-    effort_flag=None,
-    produces_jsonl_transcript=False,
-    # #103 (2026-08-31): confirmed real `StatusUpdate` wire message
-    # (context_tokens/max_context_tokens/token_usage) against kimi-cli's own
-    # installed typed source (kimi_cli/wire/types.py, kosong/chat_provider) —
-    # see docs/audit/2026-08-31-token-meter-providers.md for the caveat that
-    # no LIVE line has been captured yet (this machine's kimi has no default
-    # model configured). token_meter.read_pane_usage dispatches to
-    # kimi_helper.read_kimi_token_usage, which fails soft to "no_data" rather
-    # than trusting the guess if the schema turns out wrong.
-    supports_token_meter=True,
-    # GAP (#103): same remote-mirror gap as opencode_spec's note above — no
-    # _HistoryScanner entry exists for kimi, so a kimi Lead pane never
-    # mirrors a reply to Remote Mobile even though delivery itself works.
-    supports_remote_history=False,
-    supports_lead_questions=False,
-    # #715 gap (2026-09-24): the installed 1.50 typed source confirms a
-    # QuestionRequest in sessions/*/*/wire.jsonl (multi_select + automatic
-    # Other), but this provider is disabled and not paid for on the test
-    # machine. It was explicitly deferred until a real picker can be tested;
-    # no parser/key builder is shipped on source inspection alone.
-    lead_question_gap=(
-        "not implemented — provider is disabled and has not been live-tested; "
-        "survey found QuestionRequest in wire.jsonl"
-    ),
-    prepend_bin_dir_to_path=False,
-    auto_trust=False,
-    early_exit_watch=False,
-    # CONFIRMED (#257, 2026-08-16): a fresh kimi pane spawned with no
-    # credentials shows "Model: not set, send /login to login" instead of
-    # ever reaching the idle footer above — kimi cannot do anything in this
-    # state (no model selected), so unlike gemini's transient boot banner
-    # this is a genuine instant failure, not a normal startup step. Narrowed
-    # to "send /login to login" (drop the "model: not set" half): the model
-    # name is settable per-role independent of login state, so a future
-    # "model not set" wording for a DIFFERENT reason must not silently
-    # convict the pane on login grounds. "send /login to login" is
-    # first-person CLI chrome no unrelated dev-output plausibly reproduces.
-    auth_error_markers=("send /login to login",),
-    # TODO(#103/#301): kimi's quota/rate-limit wording is unconfirmed — no
-    # authenticated session hit a limit during calibration. Leave empty
-    # (GENERIC_QUOTA_MARKERS only) rather than guess.
-    quota_markers=(),
-    # kimi-cli is installed via `uv tool install` and runs on a python
-    # interpreter (uv shims resolve to a python entry point), so a `python`
-    # child is expected scaffolding under a live kimi pane, not evidence of
-    # unfinished work (#272).
-    #
-    # #619: the CLI's own process (kimi.exe / kimi) is in this pane's tree at
-    # every close by construction (same self-reference as #286/takkub).
-    # ./kimi.cmd is a batch shim whose cmd.exe is already covered by the
-    # Windows-universal baseline; the concrete EXE entry below is what psutil
-    # reports for the real uv shim binary.
-    scaffolding_process_names=(
-        "python.exe",
-        "python",
-        "python3",
-        "kimi.exe",
-        "kimi",
-    ),
-)
-
-
 # ── cursor ──────────────────────────────────────────────────────────────────
 # Cursor CLI / cursor-agent uses the same generic spec-driven spawn branch as
-# opencode and Kimi (#103 Phase 1), with no hand-written spawn branch. Its
+# opencode (#103 Phase 1), with no hand-written spawn branch. Its
 # executable is the unusually generic name `agent`, so PATH discovery can
 # collide with unrelated programs; see _discover_cursor above.
 cursor_spec = ProviderSpec(
@@ -1803,7 +1648,7 @@ def capability_matrix(spec: ProviderSpec) -> dict[str, str]:
         from .config import PROVIDER_ISOLATION_GAPS
 
         # GAPS is the single authority on "no isolation knob upstream";
-        # everything else has one (claude/codex/opencode/kimi) — state of
+        # everything else has one (claude/codex/opencode) — state of
         # the knob, not whether this checkout currently applies it.
         m["provider_isolation"] = (
             "unsupported" if spec.name in PROVIDER_ISOLATION_GAPS else "supported"
@@ -1830,7 +1675,6 @@ PROVIDER_REGISTRY: dict[str, ProviderSpec] = {
     "codex": codex_spec,
     "gemini": gemini_spec,
     "opencode": opencode_spec,
-    "kimi": kimi_spec,
     "cursor": cursor_spec,
 }
 
@@ -1850,10 +1694,6 @@ _READY_RULES_BY_PROVIDER: tuple[tuple[str, ProviderSpec], ...] = (
     # substring with any rule above, so position carries no precedence weight —
     # last keeps the historical gemini→codex→claude table byte-identical.
     ("opencode", opencode_spec),
-    # Kimi (#257): now contributes "ctrl-x: toggle mode" (idle footer). No
-    # substring collision with any rule above, so its position here carries
-    # no precedence weight either.
-    ("kimi", kimi_spec),
     # Cursor intentionally contributes no rules until its TUI has been
     # observed; keep the entry explicit so calibration remains data-only.
     ("cursor", cursor_spec),
@@ -2127,8 +1967,7 @@ def busy_markers_for(provider: str | None) -> tuple[str, ...]:
 # A provider spawned with an empty `ready_rules` can NEVER satisfy
 # is_at_ready_prompt() (no rule can ever match ()), so task delivery silently
 # stalls until orchestrator's busy-wait ceiling (1800s default) — proven
-# empirically for kimi the same day this was written, before its
-# "ctrl-x: toggle mode" rule above was captured. This predicate is a pure
+# empirically for a provider whose rules were captured later. This predicate is a pure
 # data-layer query only: no spawn-time Lead warning is wired to it yet — that
 # requires touching spawn_engine.py/lead_inbox.py, both out of scope for this
 # change (see this task's file boundaries). Whoever wires that follow-up

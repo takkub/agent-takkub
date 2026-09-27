@@ -22,7 +22,6 @@ from agent_takkub import (
     codex_helper,
     cursor_helper,
     gemini_helper,
-    kimi_helper,
     opencode_helper,
 )
 from agent_takkub.core.conversation import ingest
@@ -31,7 +30,6 @@ from agent_takkub.core.conversation.ingest import (
     codex_adapter,
     cursor_adapter,
     gemini_adapter,
-    kimi_adapter,
 )
 from agent_takkub.core.conversation.ingest import opencode_adapter as opencode_ingest
 from agent_takkub.core.conversation.ingest.cursor_store import get_cursor, set_cursor
@@ -41,16 +39,16 @@ from agent_takkub.core.models.conversation import MessageRole
 # ── registry ─────────────────────────────────────────────────────────────
 
 
-def test_supported_providers_covers_all_6():
+def test_supported_providers_covers_all_5():
     # epic #309's core.conversation.ingest gap closed 2026-08-22 (plan §1.1):
-    # cursor + kimi both now have real adapters, alongside the original 4.
+    # cursor has a real adapter alongside the original 4 (kimi's was removed
+    # with the provider, #725).
     assert set(ingest.supported_providers()) == {
         "claude",
         "codex",
         "gemini",
         "opencode",
         "cursor",
-        "kimi",
     }
 
 
@@ -489,90 +487,6 @@ def test_cursor_resolve_source_none_when_no_transcript(monkeypatch):
     assert cursor_adapter.resolve_source("/fake/cwd", None) is None
 
 
-# ── kimi adapter (full WRAP of kimi_helper.py — no duplication) ─────────
-
-
-def _kimi_turn_begin(text: str, ts: float = 1.0) -> str:
-    return json.dumps(
-        {"timestamp": ts, "message": {"type": "TurnBegin", "payload": {"user_input": text}}}
-    )
-
-
-def _kimi_text_part(text: str, ts: float = 2.0) -> str:
-    return json.dumps(
-        {
-            "timestamp": ts,
-            "message": {"type": "TextPart", "payload": {"type": "text", "text": text}},
-        }
-    )
-
-
-def test_kimi_read_new_parses_user_and_assistant(tmp_path):
-    path = tmp_path / "wire.jsonl"
-    path.write_text(
-        json.dumps({"type": "metadata", "protocol_version": "1.10"})
-        + "\n"
-        + _kimi_turn_begin("hello")
-        + "\n"
-        + _kimi_text_part("hi")
-        + "\n"
-        + json.dumps({"timestamp": 3.0, "message": {"type": "TurnEnd", "payload": {}}})
-        + "\n"
-    )
-    batch = kimi_adapter.read_new(str(path), None)
-    assert [(m.role, m.text) for m in batch.messages] == [
-        (MessageRole.USER, "hello"),
-        (MessageRole.ASSISTANT, "hi"),
-    ]
-
-
-def test_kimi_read_new_is_idempotent_via_cursor(tmp_path):
-    path = tmp_path / "wire.jsonl"
-    path.write_text(_kimi_turn_begin("hello") + "\n")
-    first = kimi_adapter.read_new(str(path), None)
-    assert len(first.messages) == 1
-
-    with open(path, "a") as f:
-        f.write(_kimi_text_part("hi") + "\n")
-    second = kimi_adapter.read_new(str(path), first.next_cursor)
-    assert [(m.role, m.text) for m in second.messages] == [(MessageRole.ASSISTANT, "hi")]
-
-
-def test_kimi_read_new_never_surfaces_think_part(tmp_path):
-    """Hidden reasoning must never reach the conversation store — same rule
-    as the mobile mirror's "text only" non-negotiable."""
-    path = tmp_path / "wire.jsonl"
-    think = json.dumps(
-        {
-            "timestamp": 1.5,
-            "message": {
-                "type": "ThinkPart",
-                "payload": {"type": "think", "think": "secret reasoning", "encrypted": None},
-            },
-        }
-    )
-    path.write_text(_kimi_turn_begin("hello") + "\n" + think + "\n" + _kimi_text_part("hi") + "\n")
-    batch = kimi_adapter.read_new(str(path), None)
-    assert [m.text for m in batch.messages] == ["hello", "hi"]
-
-
-def test_kimi_read_new_missing_file_returns_empty(tmp_path):
-    batch = kimi_adapter.read_new(str(tmp_path / "missing.jsonl"), None)
-    assert batch.messages == []
-
-
-def test_kimi_resolve_source_uses_kimi_helper_resolver(tmp_path, monkeypatch):
-    session_dir = tmp_path / "session-1"
-    session_dir.mkdir()
-    monkeypatch.setattr(kimi_adapter, "resolve_kimi_session_dir", lambda cwd, sid: session_dir)
-    assert kimi_adapter.resolve_source("/fake/cwd", "session-1") == str(session_dir / "wire.jsonl")
-
-
-def test_kimi_resolve_source_none_when_no_session(monkeypatch):
-    monkeypatch.setattr(kimi_adapter, "resolve_kimi_session_dir", lambda cwd, sid: None)
-    assert kimi_adapter.resolve_source("/fake/cwd", None) is None
-
-
 # ── ingest_provider_transcript: cursor persists across calls ────────────
 
 
@@ -699,21 +613,4 @@ def test_cursor_adapter_reads_a_real_local_session_if_present():
     if not files:
         pytest.skip("cursor projects store has no transcript files")
     batch = cursor_adapter.read_new(str(files[0]), None)
-    assert isinstance(batch.messages, list)
-
-
-def test_kimi_adapter_reads_a_real_local_session_if_present():
-    """Verified live on this machine (2026-08-22, plan §1.1 investigation):
-    resolves a real prior teammate task's `TurnBegin` from `~/.kimi`. No
-    `TextPart` (assistant reply) has been observed here yet — see
-    `kimi_helper.py`'s module docstring for why — so this only pins that a
-    real user turn parses; it can't yet pin the assistant branch against a
-    live example."""
-    root = kimi_helper.kimi_share_dir() / "sessions"
-    if not root.is_dir():
-        pytest.skip("no local kimi sessions store on this machine")
-    files = list(root.rglob("wire.jsonl"))
-    if not files:
-        pytest.skip("kimi sessions store has no wire.jsonl files")
-    batch = kimi_adapter.read_new(str(files[0]), None)
     assert isinstance(batch.messages, list)

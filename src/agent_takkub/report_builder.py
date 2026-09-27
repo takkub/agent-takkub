@@ -9,7 +9,7 @@ Usage:
         title='My Report'
     )
 
-Reports support all providers (claude/codex/gemini-agy/opencode/kimi/cursor)
+Reports support all providers (claude/codex/gemini-agy/opencode/cursor)
 and work on both Windows ConPTY and macOS.
 """
 
@@ -56,7 +56,6 @@ CUSTOMER_FORBIDDEN = {
     "claude",
     "gemini",
     "opencode",
-    "kimi",
     "cursor",
     "anthropic",
 }

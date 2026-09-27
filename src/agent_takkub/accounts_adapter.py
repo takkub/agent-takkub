@@ -332,7 +332,7 @@ def _v2_registry_accounts(provider: str, known_names: set[str]) -> list[AccountI
 
 # Providers whose per-project account pick reaches the spawned pane end-to-end
 # (add → login → select → spawn env): claude via CLAUDE_CONFIG_DIR, codex via
-# CODEX_HOME (#505 stage 2, `pane_env.inject_provider_home_env`). opencode/kimi
+# CODEX_HOME (#505 stage 2, `pane_env.inject_provider_home_env`). opencode
 # have an isolation knob but no per-account selection wiring yet.
 ADDABLE_PROVIDERS: tuple[str, ...] = ("claude", "codex")
 

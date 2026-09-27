@@ -55,7 +55,7 @@ path for an operator-supplied `base_url` (e.g. a self-hosted proxy, or once
 21st.dev ships a stable public REST endpoint) — with `base_url=None` it
 reports "not configured" rather than guessing a URL, the same
 `NO_MODEL_DISCOVERY_GAPS` "document the gap instead of guessing" policy
-`provider_model_refresh.py` already uses for opencode/kimi/cursor.
+`provider_model_refresh.py` already uses for opencode/cursor.
 
 Figma's REST API (`https://api.figma.com`, `X-Figma-Token` header, `GET
 /v1/files/:key` + `/v1/files/:key/variables/local` + `/v1/files/:key/

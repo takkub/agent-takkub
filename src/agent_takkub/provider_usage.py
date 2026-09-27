@@ -1,7 +1,7 @@
 """Cross-provider usage/quota abstraction (#103 follow-up, Wave 2).
 
 One `ProviderUsage` shape for every CLI provider the cockpit can spawn
-(claude/codex/gemini/opencode/kimi/cursor), built on top of
+(claude/codex/gemini/opencode/cursor), built on top of
 `docs/audit/2026-08-13-provider-usage-survey.md` (empirical spike — which
 channel exists per provider, proven live or not) and
 `docs/design/2026-08-13-provider-usage-abstraction.md` (the data-shape/UX
@@ -66,7 +66,7 @@ _VALID_STATUSES = frozenset(
 # provider CLI can never hang a background poll thread forever.
 _FETCH_TIMEOUT_S = 10.0
 
-PROVIDER_NAMES: tuple[str, ...] = ("claude", "codex", "gemini", "opencode", "kimi", "cursor")
+PROVIDER_NAMES: tuple[str, ...] = ("claude", "codex", "gemini", "opencode", "cursor")
 
 
 @dataclass
@@ -1176,17 +1176,6 @@ def fetch_opencode_usage(timeout: float = _FETCH_TIMEOUT_S) -> ProviderUsage:
     )
 
 
-# ── kimi ──────────────────────────────────────────────────────────────────
-# Survey found no channel at all: no CLI subcommand (`kimi --help`'s full
-# list has nothing usage-shaped) and no local state file carries anything
-# beyond a plain OAuth token blob. Statically unsupported — nothing to
-# probe at runtime.
-
-
-def fetch_kimi_usage() -> ProviderUsage:
-    return _unsupported("kimi", "no usage/quota channel found in kimi CLI")
-
-
 # ── cursor ────────────────────────────────────────────────────────────────
 # Survey could not test this provider at all — `cursor-agent`/`agent` was
 # not installed on the spike machine. Distinguish "installed but no known
@@ -1210,7 +1199,6 @@ _FETCHERS: dict[str, Callable[[], ProviderUsage]] = {
     "codex": fetch_codex_usage,
     "gemini": fetch_gemini_usage,
     "opencode": fetch_opencode_usage,
-    "kimi": fetch_kimi_usage,
     "cursor": fetch_cursor_usage,
 }
 
@@ -1219,8 +1207,8 @@ _FETCHERS: dict[str, Callable[[], ProviderUsage]] = {
 # `_PROVIDER_HOME_SUBDIRS` / user_profile's CLAUDE_CONFIG_DIR) AND a fetcher
 # that can actually scope its probe to `fetch_provider_usage`'s `config_dir`
 # param. gemini/cursor have no knob (config.PROVIDER_ISOLATION_GAPS);
-# opencode/kimi have one but no scoped usage probe (opencode's fetcher is
-# store-wide, kimi's is `_unsupported`) — `config_dir` is silently ignored
+# opencode have one but no scoped usage probe (opencode's fetcher is
+# store-wide's is `_unsupported`) — `config_dir` is silently ignored
 # for all of them rather than guessed at.
 _CONFIG_DIR_AWARE_FETCHERS: dict[str, Callable[..., ProviderUsage]] = {
     "claude": fetch_claude_usage,
@@ -1639,7 +1627,7 @@ def _dispatch_fetch(provider: str, config_dir: Path | None) -> ProviderUsage:
 
 # Providers whose probe spawns a subprocess / makes a request and so go through
 # the machine-wide shared cache + this instance's auto-fetch switch. claude
-# does the same inside `limit_status.fetch_usage_shared`. kimi/cursor have no
+# does the same inside `limit_status.fetch_usage_shared`. cursor have no
 # usage channel (`unsupported`, decided by a local binary lookup) and never
 # fetch, so they need neither.
 _SHARED_CACHE_PROVIDERS = frozenset({"codex", "gemini", "opencode"})

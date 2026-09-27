@@ -768,24 +768,6 @@ class TestWarnIfLiveChildren:
         assert "docker.exe" in written
         assert "pwsh" not in written
 
-    def test_kimi_python_scaffolding_stays_silent(self, orch: Orchestrator, monkeypatch) -> None:
-        _register(orch, LEAD.name, _make_alive_session())
-        monkeypatch.setattr(
-            "agent_takkub.provider_config.effective_provider_for",
-            lambda role, project=None: "kimi",
-        )
-        child = MagicMock()
-        child.name.return_value = "python.exe"
-        fake_proc = MagicMock()
-        fake_proc.children.return_value = [child]
-        monkeypatch.setattr("psutil.Process", lambda pid: fake_proc)
-
-        with patch("agent_takkub.orchestrator.QTimer.singleShot"):
-            orch._warn_if_live_children(PROJECT, "kimi", _make_alive_session())
-
-        lead = orch._panes_by_project[PROJECT][LEAD.name]
-        lead.session.write.assert_not_called()
-
     def test_real_work_still_warns_past_scaffolding(self, orch: Orchestrator, monkeypatch) -> None:
         """#234 must not regress: real work (docker/pytest/build tooling)
         surviving the scaffolding filter still warns, and the count/detail

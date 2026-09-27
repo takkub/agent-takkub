@@ -75,8 +75,8 @@ class TestCacheRoundtrip:
 
 class TestRefreshCache:
     def test_unknown_provider_returns_none(self) -> None:
-        assert pmc.refresh_cache("kimi") is None
-        assert pmc.cached_ids("kimi") is None
+        assert pmc.refresh_cache("retired-provider") is None
+        assert pmc.cached_ids("retired-provider") is None
 
     def test_binary_not_found_returns_none_and_does_not_cache(
         self, monkeypatch: pytest.MonkeyPatch

@@ -46,17 +46,17 @@ def test_set_get_roundtrip() -> None:
 
 def test_model_not_returned_for_a_different_provider() -> None:
     # The core guard: role re-pointed at another CLI must not reuse the model.
-    role_models.set_model("backend", "kimi", "k2.5")
-    assert role_models.model_for("backend", "kimi") == "k2.5"
+    role_models.set_model("backend", "cursor", "k2.5")
+    assert role_models.model_for("backend", "cursor") == "k2.5"
     assert role_models.model_for("backend", "codex") is None
     assert role_models.model_for("backend", "claude") is None
 
 
 def test_substituted_role_does_not_inherit_model() -> None:
-    # kimi role with k2.5 that degrades to a claude substitute must spawn
+    # cursor role with k2.5 that degrades to a claude substitute must spawn
     # claude WITHOUT --model k2.5.
-    role_models.set_model("kimi", "kimi", "k2.5")
-    assert role_models.model_for("kimi", "claude") is None
+    role_models.set_model("cursor", "cursor", "k2.5")
+    assert role_models.model_for("cursor", "claude") is None
 
 
 def test_empty_provider_returns_none() -> None:
@@ -77,8 +77,8 @@ def test_clear_model() -> None:
 
 
 def test_set_strips_whitespace() -> None:
-    role_models.set_model("qa", "kimi", "  k3  ")
-    assert role_models.model_for("qa", "kimi") == "k3"
+    role_models.set_model("qa", "cursor", "  k3  ")
+    assert role_models.model_for("qa", "cursor") == "k3"
 
 
 def test_empty_role_name_rejected() -> None:

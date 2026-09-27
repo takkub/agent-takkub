@@ -16,7 +16,7 @@ What stays a pane fan-out (``frontend#1 … #N``), automatically:
 * ``--mode subagent`` (that is the LEAD's own native subagents — a different
   feature, untouched here);
 * providers with no native subagent tool (``ProviderSpec.native_subagent_hint``
-  empty — kimi/cursor today).
+  empty — cursor today).
 
 ``--fanout pane`` forces the old behaviour; ``--fanout subagent`` forces the
 new one and errors instead of silently falling back.

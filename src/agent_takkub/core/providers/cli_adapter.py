@@ -1,7 +1,7 @@
 """CliProviderAdapter — WRAP over spawn_engine.py's generic non-claude spawn
 branch (REUSE_VS_REWRITE_MATRIX.md §2: "generic non-claude branch (#103
 Phase 1) | WRAP -> NEW contract"), parametrized by any `PROVIDER_REGISTRY`
-entry (codex/gemini/opencode/kimi/cursor/...).
+entry (codex/gemini/opencode/cursor/...).
 
 Same scope decision as `claude_adapter.py`: `provider_id()`/`is_available()`
 call the real, already-pure functions the generic branch itself uses

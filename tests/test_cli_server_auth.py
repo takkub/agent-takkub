@@ -216,9 +216,7 @@ class TestLeadOnlyCommandsAcceptedWithCorrectToken:
 
 
 class TestDoneCommand:
-    @pytest.mark.parametrize(
-        "provider", ["claude", "codex", "gemini", "opencode", "kimi", "cursor"]
-    )
+    @pytest.mark.parametrize("provider", ["claude", "codex", "gemini", "opencode", "cursor"])
     def test_replacement_token_survives_old_session_close(self, server_and_sock, provider):
         from agent_takkub.spawn_engine import SpawnEngineMixin
 

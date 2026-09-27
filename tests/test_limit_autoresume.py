@@ -252,7 +252,7 @@ class TestMaybeAutoResumePark:
             o._maybe_auto_resume_park("proj", "backend", _pane_alive(), time.time())
         confirm.assert_not_called()
 
-    @pytest.mark.parametrize("provider", ["codex", "gemini", "opencode", "kimi", "cursor"])
+    @pytest.mark.parametrize("provider", ["codex", "gemini", "opencode", "cursor"])
     def test_any_non_claude_lead_confirms_before_rerouting(self, monkeypatch, provider) -> None:
         """#704: every provider goes through the confirm probe first (a
         quoted banner on the Lead screen must never reroute on sight); the
@@ -1104,7 +1104,7 @@ class TestPickRerouteProvider:
 
         monkeypatch.setattr(provider_config, "_provider_available", lambda p: True)
         o = _bare_orch()
-        for hit in ("claude", "codex", "gemini", "kimi"):
+        for hit in ("claude", "codex", "gemini"):
             ps = o._ps(f"proj::backend-{hit}")
             result = o._pick_reroute_provider("proj", f"backend-{hit}", ps, hit)
             assert result is not None

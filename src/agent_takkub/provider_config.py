@@ -18,7 +18,6 @@ Resolution rules:
 - `codex`  → always `codex` (the role's whole point)
 - `gemini` → always `gemini` (the role's whole point)
 - `opencode` → always `opencode` (the role's whole point)
-- `kimi`   → always `kimi` (the role's whole point)
 - `cursor` → always `cursor` (the role's whole point)
 - everything else → user config wins; default `claude`
 
@@ -46,7 +45,6 @@ CLAUDE = "claude"
 CODEX = "codex"
 GEMINI = "gemini"
 OPENCODE = "opencode"
-KIMI = "kimi"
 CURSOR = "cursor"
 # Dynamic — derived from the registry (issue #103 Phase 0) instead of a
 # hand-maintained frozenset, so a new PROVIDER_REGISTRY entry is
@@ -63,7 +61,6 @@ _FORCED_PROVIDER = {
     "codex": CODEX,
     "gemini": GEMINI,
     "opencode": OPENCODE,
-    "kimi": KIMI,
     "cursor": CURSOR,
 }
 
@@ -80,7 +77,7 @@ FORCED_ROLES = frozenset(_FORCED_PROVIDER)
 # `(claude, …)` walked from the head, which made claude the universal
 # fallback on any machine where it was merely present.) Candidates that
 # are disabled, not installed or still quota-hit are skipped.
-PROVIDER_RING: tuple[str, ...] = (CLAUDE, CODEX, GEMINI, KIMI, OPENCODE, CURSOR)
+PROVIDER_RING: tuple[str, ...] = (CLAUDE, CODEX, GEMINI, OPENCODE, CURSOR)
 
 
 def config_path(project: str | None = None) -> Path:
@@ -613,11 +610,6 @@ _MODEL_ID_PATTERNS: dict[str, tuple[re.Pattern[str], ...]] = {
         re.compile(r"^codex", re.IGNORECASE),
     ),
     GEMINI: (re.compile(r"^gemini[-_]", re.IGNORECASE),),
-    KIMI: (
-        re.compile(r"^k2([.\-_]|$)", re.IGNORECASE),
-        re.compile(r"^kimi[-_]", re.IGNORECASE),
-        re.compile(r"^moonshot", re.IGNORECASE),
-    ),
 }
 
 
@@ -657,6 +649,10 @@ def assign_provider_override_error(
     if not normalized:
         return None
     if normalized not in VALID_PROVIDERS:
+        from .removed_providers import is_removed_provider, removed_provider_message
+
+        if is_removed_provider(normalized):
+            return removed_provider_message(normalized)
         return (
             f"--provider '{normalized}' is not a known provider "
             f"(valid: {', '.join(sorted(VALID_PROVIDERS))})"
@@ -835,7 +831,7 @@ def assign_effort_override_error(
     ``--provider`` override on the same assign — same "what actually spawns"
     reasoning as :func:`assign_model_override_error`, issue #270).
 
-    A provider with no ``ProviderSpec.effort_flag`` at all (opencode/kimi/
+    A provider with no ``ProviderSpec.effort_flag`` at all (opencode/
     cursor today — #103 gap, no CLI knob to inject one) is NOT an error here:
     issue #323's own acceptance criteria requires it degrade silently,
     exactly like :func:`spawn_engine._append_provider_effort` already no-ops

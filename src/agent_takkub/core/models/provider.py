@@ -30,7 +30,7 @@ class ProviderFeature(StrEnum):
 
 @dataclass(frozen=True, slots=True)
 class ProviderDefinition:
-    """One CLI provider (claude/codex/gemini-agy/opencode/kimi/cursor/…)."""
+    """One CLI provider (claude/codex/gemini-agy/opencode/cursor/…)."""
 
     id: str
     name: str

@@ -20,7 +20,7 @@ from agent_takkub import plugin_installer
 # left unsupported. `gemini`/`agy` DO have a *bridge* for MCP-only plugin
 # content (see `mcp_bridge`'s `"plugin_import"` variant docstring) but no
 # general install/uninstall surface, so it stays listed here too.
-NO_BACKEND_PROVIDERS: frozenset[str] = frozenset({"codex", "gemini", "opencode", "kimi", "cursor"})
+NO_BACKEND_PROVIDERS: frozenset[str] = frozenset({"codex", "gemini", "opencode", "cursor"})
 
 
 class PluginBackendGapError(RuntimeError):

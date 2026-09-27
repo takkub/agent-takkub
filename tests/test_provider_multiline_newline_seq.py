@@ -20,7 +20,6 @@ def test_unconfirmed_providers_default_to_none() -> None:
     for spec in (
         provider_spec.codex_spec,
         provider_spec.opencode_spec,
-        provider_spec.kimi_spec,
         provider_spec.cursor_spec,
     ):
         assert spec.multiline_newline_seq is None

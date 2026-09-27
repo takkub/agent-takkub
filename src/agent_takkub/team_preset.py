@@ -30,7 +30,7 @@ through `assign`, but no longer appear in that default list). The checker
 slot still maps to a real role through the single :data:`CHECKER_ROLES`
 table below, so a future full fold (mode-aware reviewer, dropped ``qa``
 role) only touches this one table, not the preset model. Provider-panes
-(codex/gemini/opencode/kimi/cursor) and ``shell`` are NEVER part of a
+(codex/gemini/opencode/cursor) and ``shell`` are NEVER part of a
 preset's roster — still directly `assign`-able as always, untouched by
 preset switches.
 
@@ -75,7 +75,7 @@ EXTRA_POSITION_ROLES: tuple[str, ...] = ("tester", "analyst", "designer", "docs"
 
 #: Every "position" role a preset's roster ever shows/toggles. Custom
 #: project roles are appended dynamically (see `_position_roles`) — provider
-#: panes (codex/gemini/opencode/kimi/cursor) and `shell` are deliberately
+#: panes (codex/gemini/opencode/cursor) and `shell` are deliberately
 #: excluded, per the 2026-09-07 Lead scope addition.
 POSITION_ROLES: tuple[str, ...] = CORE_POSITION_ROLES + EXTRA_POSITION_ROLES
 
@@ -458,7 +458,7 @@ def _can_spawn_from_cfg(role: str, cfg: dict, project: str | None = None) -> tup
     if base not in _governed_roles(project):
         # solo-lead ("ทำเอง": Lead reads → edits → tests itself, 0 panes) and
         # pair (Lead + its checker only) tell Lead "ห้าม spawn teammate ใดๆ" /
-        # "ห้าม spawn role ทำงานอื่น" — providers (codex/gemini/opencode/kimi/
+        # "ห้าม spawn role ทำงานอื่น" — providers (codex/gemini/opencode/
         # cursor) and critic are teammates too, so they must not slip through
         # just because no preset roster lists them. `shell` is the user's own
         # terminal, not a teammate.
@@ -537,7 +537,7 @@ REVIEWER_MODE_ROLES: tuple[str, ...] = ("reviewer", "qa", "critic")
 #: Provider panes with no roster row of their own — never preset-governed
 #: (`can_spawn` always passes them through, see `_governed_roles`), shown as
 #: a read-only "second opinion" glance instead (`_build_secondary_brains_panel`).
-SECONDARY_BRAIN_ROLES: tuple[str, ...] = ("codex", "gemini", "opencode", "kimi", "cursor")
+SECONDARY_BRAIN_ROLES: tuple[str, ...] = ("codex", "gemini", "opencode", "cursor")
 
 #: Human labels for the reviewer-mode rows — qa/critic are #513's legacy
 #: dispatch names, not separate CLI concepts, so the Roles/Pipeline UI names

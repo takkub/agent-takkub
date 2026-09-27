@@ -51,7 +51,6 @@ def test_native_subagent_hint_per_provider():
     assert PROVIDER_REGISTRY["gemini"].native_subagent_hint
     assert PROVIDER_REGISTRY["opencode"].native_subagent_hint
     # Not verified → must fall back to pane fan-out, never guess.
-    assert PROVIDER_REGISTRY["kimi"].native_subagent_hint == ""
     assert PROVIDER_REGISTRY["cursor"].native_subagent_hint == ""
 
 
@@ -84,7 +83,7 @@ def test_auto_picks_subagent_for_other_supported_providers(provider, name):
     assert name in (note or "")
 
 
-@pytest.mark.parametrize("name", ["kimi", "cursor"])
+@pytest.mark.parametrize("name", ["cursor"])
 def test_auto_falls_back_to_pane_without_native_subagent(provider, name):
     provider(name)
     kind, note = sf.resolve_shard_fanout("backend", 3, project="p")
@@ -93,10 +92,10 @@ def test_auto_falls_back_to_pane_without_native_subagent(provider, name):
 
 
 def test_explicit_subagent_errors_without_native_subagent(provider):
-    provider("kimi")
+    provider("cursor")
     kind, note = sf.resolve_shard_fanout("backend", 3, fanout="subagent", project="p")
     assert kind == "error"
-    assert "kimi" in (note or "")
+    assert "cursor" in (note or "")
 
 
 @pytest.mark.parametrize(
@@ -139,7 +138,7 @@ def test_fanout_pane_forces_legacy_and_single_shard_is_noop(provider):
 
 
 def test_provider_override_wins_over_role_setting(provider):
-    provider("kimi")  # role would resolve to kimi …
+    provider("cursor")  # role would resolve to cursor …
     kind, note = sf.resolve_shard_fanout("backend", 3, provider="codex", project="p")
     assert kind == "subagent" and "codex" in (note or "")
 
@@ -178,7 +177,7 @@ def test_gate_allows_every_shape_a_fanout_cannot_serve(provider):
 
 
 def test_gate_allows_instance_when_provider_has_no_subagent(provider):
-    provider("kimi")
+    provider("cursor")
     assert sf.direct_instance_assign_error("frontend#2", project="p") is None
 
 
