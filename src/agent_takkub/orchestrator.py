@@ -6295,7 +6295,13 @@ class Orchestrator(
         other caller (direct/forced close with no prior deferral notice) keeps the
         warning — it may be the only signal Lead ever gets that work was killed.
         """
-        role_name = self.resolve_pane_role(role_name, project)
+        # #751: `reviewer` is a real pane name, not just an alias-chain head. Chain
+        # resolution (reviewer -> qa -> critic) falls through to a *sibling* pane
+        # when the reviewer pane is already gone (done() auto-close), so a stale
+        # `close --role reviewer` killed the live qa pane. Close targets the pane
+        # named exactly; only true aliases (qa/critic/...) still go through resolve.
+        if _split_shard((role_name or "").strip().lower())[0] != "reviewer":
+            role_name = self.resolve_pane_role(role_name, project)
         role_name = role_name.lower().strip()
         project_ns = self._resolve_project(project)
         # #630: internal close+respawn callers already carry this lifecycle
@@ -7093,7 +7099,12 @@ class Orchestrator(
 
     @classmethod
     def _scan_done_evidence(
-        cls, project_ns: str, from_role: str, assign_ts: float, note: str = ""
+        cls,
+        project_ns: str,
+        from_role: str,
+        assign_ts: float,
+        note: str = "",
+        failed: bool = False,
     ) -> str:
         """Scan the pane's artifacts dir for screenshots newer than `assign_ts`.
 
@@ -7158,16 +7169,28 @@ class Orchestrator(
             found = cls._find_evidence_files(artifacts_dir, assign_ts, now)
             shared = True
 
-        if found:
-            found.sort(key=lambda item: item[0], reverse=True)
-            newest = found[:_EVIDENCE_MAX_FILES]
+        # #753: a shared-dir file can't be pinned to this pane (another pane's
+        # capture may overlap the assign window). Only ones the note names are
+        # attached as evidence; the rest go on a separate, non-`📸 evidence`
+        # line (#635 parses that header) and are dropped for a FAILED report.
+        rest: list[tuple[float, pathlib.Path, int]] = []
+        if shared and found:
+            cited_names = {
+                pathlib.PurePosixPath(t.replace("\\", "/")).name
+                for t in screenshot_paths_in_note(note)
+            }
+            rest = [f for f in found if f[1].name not in cited_names]
+            found = [f for f in found if f[1].name in cited_names]
+
+        def _fmt(items: list[tuple[float, pathlib.Path, int]]) -> str:
+            items.sort(key=lambda item: item[0], reverse=True)
             # Issue #182: flag a file whose content is byte-identical to an
             # earlier one in this same batch — the first occurrence of a hash
             # is trusted at face value, every later one is tagged so Lead
             # doesn't mistake a repeated frame for N distinct captures.
             seen_hashes: dict[str, pathlib.Path] = {}
             entries = []
-            for _, p, size in newest:
+            for _, p, size in items[:_EVIDENCE_MAX_FILES]:
                 digest = cls._evidence_content_hash(p, size)
                 dup_of = None
                 if digest is not None:
@@ -7177,14 +7200,17 @@ class Orchestrator(
                     else:
                         seen_hashes[digest] = p
                 entries.append(cls._evidence_format_entry(p, size, dup_of=dup_of, digest=digest))
-            paths = ", ".join(entries)
-            suffix = " (shared dir)" if shared else ""
-            return f"📸 evidence: {paths}{suffix}"
-        if base_role not in _EVIDENCE_WARN_ROLES:
-            return ""
-        if note and _EVIDENCE_CITE_RE.search(note):
-            return ""
-        return "⚠ no evidence cited"
+            return ", ".join(entries)
+
+        suffix = " (shared dir)" if shared else ""
+        lines = []
+        if found:
+            lines.append(f"📸 evidence: {_fmt(found)}{suffix}")
+        elif base_role in _EVIDENCE_WARN_ROLES and not (note and _EVIDENCE_CITE_RE.search(note)):
+            lines.append("⚠ no evidence cited")
+        if rest and not failed:
+            lines.append(f"🗂 ภาพในโฟลเดอร์รวม (ไม่ยืนยันว่าเป็นของ pane นี้): {_fmt(rest)} (shared dir)")
+        return "\n".join(lines)
 
     def _evidence_dedup_gate(
         self,
@@ -8190,7 +8216,9 @@ class Orchestrator(
         # aggregate, the decision note) carries it — `done --fail` gets
         # evidence exactly the same way a clean done does.
         raw_note = note
-        evidence_line = self._scan_done_evidence(project_ns, from_role, had_assign_ts, raw_note)
+        evidence_line = self._scan_done_evidence(
+            project_ns, from_role, had_assign_ts, raw_note, failed=failed
+        )
         if evidence_line:
             note = f"{note}\n{evidence_line}" if note else evidence_line
 
