@@ -29,6 +29,7 @@ Design contract (never violate):
 
 from __future__ import annotations
 
+import base64
 import dataclasses
 import json
 import logging
@@ -46,7 +47,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from . import limit_status
+from . import config, limit_status, usage_shared
 from ._win_console import SUBPROCESS_NO_WINDOW
 
 _log = logging.getLogger(__name__)
@@ -199,13 +200,30 @@ def fetch_claude_usage(config_dir: Path | None = None) -> ProviderUsage:
         _log.exception("claude usage fetch failed")
         return _error("claude", "fetch failed")
     if data is None:
+        if not usage_shared.auto_fetch_enabled():
+            return _error("claude", _AUTOFETCH_OFF_NO_CACHE)
         return _error("claude", "not logged in, or no usage data available")
+    return _claude_usage_from_data(data)
+
+
+_AUTOFETCH_OFF_NO_CACHE = "ดึงอัตโนมัติปิดอยู่ และยังไม่มีข้อมูลในแคชร่วม"
+
+
+def _claude_usage_from_data(data: limit_status.UsageData) -> ProviderUsage:
     five_hour = next((w for w in data.windows if w.name == "five_hour"), None)
     age_s = (datetime.now(tz=UTC) - data.fetched_at).total_seconds() if data.fetched_at else None
     if data.status == "rate_limited" or age_s is None or age_s > _CLAUDE_STALE_THRESHOLD_S:
         status = STATUS_STALE
     else:
         status = STATUS_ACTIVE
+    windows = [
+        {
+            "name": w.name,
+            "utilization": w.utilization,
+            "resets_at": w.resets_at.isoformat(),
+        }
+        for w in data.windows
+    ]
     return ProviderUsage(
         provider="claude",
         status=status,
@@ -213,25 +231,8 @@ def fetch_claude_usage(config_dir: Path | None = None) -> ProviderUsage:
         utilization=five_hour.utilization if five_hour else None,
         resets_at=five_hour.resets_at if five_hour else None,
         fetched_at=data.fetched_at,
-        windows=[
-            {
-                "name": w.name,
-                "utilization": w.utilization,
-                "resets_at": w.resets_at.isoformat(),
-            }
-            for w in data.windows
-        ],
-        raw_data={
-            "windows": [
-                {
-                    "name": w.name,
-                    "utilization": w.utilization,
-                    "resets_at": w.resets_at.isoformat(),
-                }
-                for w in data.windows
-            ],
-            "extra_usage_enabled": data.extra_usage_enabled,
-        },
+        windows=windows,
+        raw_data={"windows": list(windows), "extra_usage_enabled": data.extra_usage_enabled},
     )
 
 
@@ -1231,14 +1232,33 @@ _CONFIG_DIR_AWARE_FETCHERS: dict[str, Callable[..., ProviderUsage]] = {
 class UsageAccountTarget:
     """One local account home that can be probed independently.
 
-    This intentionally contains only the user-facing label and the path.  It
-    never reads ``auth.json``: its existence is enough to know that Codex owns
-    the home, and the app-server is still the sole authority on whether that
-    credential is valid and what quota it carries.
+    Carries the user-facing label, the path and the account *identity*
+    (`usage_shared` key) so the same account is one card and one shared-cache
+    record no matter which cockpit instance / home reached it. Only the
+    account id field of ``auth.json`` is read, never a token: the app-server
+    stays the sole authority on validity and quota. ``read_only`` = the home
+    belongs to another cockpit instance's data dir — show the shared cache,
+    never probe it from here (a probe can rotate that home's tokens).
     """
 
     account: str
-    config_dir: Path
+    config_dir: Path | None
+    identity: str = ""
+    read_only: bool = False
+
+
+def _codex_email(home: Path) -> str | None:
+    """Email claim of the home's id_token (decoded, unverified, display only)."""
+    try:
+        raw = json.loads((home / "auth.json").read_text(encoding="utf-8"))
+        token = str((raw.get("tokens") or {}).get("id_token") or "")
+        payload = token.split(".")[1]
+        payload += "=" * (-len(payload) % 4)
+        claims = json.loads(base64.urlsafe_b64decode(payload.encode("ascii")))
+        email = claims.get("email")
+    except (OSError, ValueError, IndexError, AttributeError, TypeError):
+        return None
+    return email if isinstance(email, str) and email.strip() else None
 
 
 def codex_usage_targets() -> tuple[UsageAccountTarget, ...]:
@@ -1247,22 +1267,28 @@ def codex_usage_targets() -> tuple[UsageAccountTarget, ...]:
     Accounts created in Cockpit Settings are the preferred names.  Codex's
     normal ``~/.codex`` home and any sibling ``.codex-*`` home with an
     ``auth.json`` are included too, so a user who logged in before opening
-    Cockpit does not silently disappear from the quota meter.  Homes are
-    de-duplicated by resolved path; no credentials are parsed or copied.
+    Cockpit does not silently disappear from the quota meter.  A prod
+    cockpit's ``~/.agent-takkub/codex-home*`` homes are listed (read-only)
+    when this instance's data dir is a different one, so dev and prod show
+    the same accounts. Homes are de-duplicated by resolved path AND by
+    account identity; labels are the account's email when known so both
+    instances name an account identically.
     """
     from . import user_profile
     from .codex_helper import codex_home
 
     candidates: dict[str, UsageAccountTarget] = {}
 
-    def add(account: str, home: Path, *, replace: bool = False) -> None:
+    def add(account: str, home: Path, *, replace: bool = False, read_only: bool = False) -> None:
         try:
             resolved = home.expanduser().resolve()
         except OSError:
             resolved = home.expanduser()
         key = str(resolved)
         if replace or key not in candidates:
-            candidates[key] = UsageAccountTarget(account=account, config_dir=resolved)
+            candidates[key] = UsageAccountTarget(
+                account=account, config_dir=resolved, read_only=read_only
+            )
 
     # Registered names are meaningful to the person using Cockpit, so they
     # win over a generic discovered-directory label for the same home.
@@ -1299,7 +1325,205 @@ def codex_usage_targets() -> tuple[UsageAccountTarget, ...]:
         label = "local (~/.codex)" if home.name == ".codex" else f"local ({home.name})"
         add(label, home)
 
-    return tuple(candidates.values())
+    # The OTHER cockpit instance's isolated homes (prod's live under
+    # ~/.agent-takkub while a dev checkout's data dir is the repo).
+    try:
+        other_root = Path.home() / ".agent-takkub"
+        if other_root.is_dir() and other_root.resolve() != config.DATA_HOME.resolve():
+            for home in sorted(other_root.glob("codex-home*"), key=lambda path: path.name):
+                if home.is_dir() and (home / "auth.json").is_file():
+                    add(f"prod ({home.name})", home, read_only=True)
+    except OSError:
+        pass
+
+    # Same account behind several homes ⇒ one target. The first candidate
+    # (registered / active / local) is kept — it is the one this instance
+    # may probe — and its label becomes the account's email when known.
+    by_identity: dict[str, UsageAccountTarget] = {}
+    for target in candidates.values():
+        home = target.config_dir
+        ident = usage_shared.codex_identity(home) if home is not None else ""
+        kept = by_identity.get(ident)
+        if kept is not None and ident.startswith("acct:"):
+            if kept.read_only and not target.read_only:
+                by_identity[ident] = dataclasses.replace(
+                    target, identity=ident, account=_codex_email(home) or target.account
+                )
+            continue
+        by_identity[ident or str(home)] = dataclasses.replace(
+            target, identity=ident, account=_codex_email(home) or target.account
+        )
+    return tuple(by_identity.values())
+
+
+def _claude_creds_expiry(config_dir: Path) -> float:
+    """expiresAt of the dir's file credentials (0 when absent/unreadable) —
+    a newer one means that dir refreshed its token most recently."""
+    try:
+        raw = json.loads((config_dir / ".credentials.json").read_text(encoding="utf-8"))
+        return float(limit_status._normalize_credentials(raw).get("expires_at") or 0)
+    except (OSError, ValueError, AttributeError, TypeError):
+        return 0.0
+
+
+def _claude_account_label(config_dir: Path) -> str | None:
+    """Instance-independent label: the account's email from `.claude.json`."""
+    for path in (config_dir / ".claude.json", Path.home() / ".claude.json"):
+        try:
+            acct = json.loads(path.read_text(encoding="utf-8")).get("oauthAccount") or {}
+        except (OSError, ValueError, AttributeError):
+            continue
+        for field in ("emailAddress", "displayName"):
+            val = acct.get(field)
+            if isinstance(val, str) and val.strip():
+                return val.strip()
+        if path.parent == config_dir:
+            break
+    return None
+
+
+def claude_usage_targets() -> tuple[UsageAccountTarget, ...]:
+    """See `_discover_claude_usage_targets` (indirection so tests can isolate discovery)."""
+    return _discover_claude_usage_targets()
+
+
+def _discover_claude_usage_targets() -> tuple[UsageAccountTarget, ...]:
+    """One target per distinct Claude ACCOUNT (accountUuid), across this
+    instance's default + registered profiles and — read-only — the other
+    cockpit's default dir (dev ``~/.claude`` / prod ``~/.agent-takkub/
+    claude-config``), so dev and prod list the same accounts with the same
+    labels. Among this instance's own dirs for one account the one with the
+    newest credentials probes it; an account reachable only through the
+    other instance's dir is ``read_only`` (shared cache only — probing would
+    refresh, and so rotate, credentials this instance does not own)."""
+    from . import user_profile
+
+    own: list[Path] = [config.default_claude_config_dir()]
+    try:
+        for profile in user_profile.profiles_for_provider("claude"):
+            raw = str(profile.get("config_dir") or "").strip()
+            if raw:
+                own.append(Path(raw))
+    except Exception:
+        pass
+    foreign = [Path.home() / ".claude", Path.home() / ".agent-takkub" / "claude-config"]
+
+    def usable(d: Path) -> bool:
+        try:
+            return d.is_dir() and (
+                usage_shared.claude_identity(d).startswith("acct:")
+                or (d / ".credentials.json").is_file()
+            )
+        except OSError:
+            return False
+
+    groups: dict[str, list[tuple[Path, bool]]] = {}
+    seen: set[str] = set()
+    for read_only, dirs in ((False, own), (True, foreign)):
+        for d in dirs:
+            try:
+                key = str(d.resolve())
+            except OSError:
+                key = str(d)
+            if key in seen or not usable(d):
+                continue
+            seen.add(key)
+            groups.setdefault(usage_shared.claude_identity(d), []).append((d, read_only))
+
+    targets: list[UsageAccountTarget] = []
+    for ident, members in groups.items():
+        mine = [d for d, ro in members if not ro]
+        if mine:
+            probe = max(mine, key=_claude_creds_expiry)  # max() keeps the first on ties
+            label_dir, read_only = probe, False
+        else:
+            probe, read_only = None, True
+            label_dir = members[0][0]
+        short = ident.split(":", 1)[-1][:8]
+        label = _claude_account_label(label_dir) or short
+        targets.append(
+            UsageAccountTarget(account=label, config_dir=probe, identity=ident, read_only=read_only)
+        )
+    return tuple(targets)
+
+
+def _claude_cached_usage(identity: str) -> ProviderUsage | None:
+    """Claude row for an account straight from the shared record (no fetch)."""
+    rec = usage_shared.read_record("claude", identity)
+    data = limit_status._deserialize_usage(rec["payload"])
+    if data is None:
+        return None
+    if data.fetched_at is None and rec["fetched_at"]:
+        data.fetched_at = datetime.fromtimestamp(rec["fetched_at"], tz=UTC)
+    if rec["backoff_until"] > time.time():
+        data = dataclasses.replace(data, status="rate_limited")
+    return _claude_usage_from_data(data)
+
+
+def _usage_from_dict(raw: Any) -> ProviderUsage | None:
+    """Inverse of `usage_to_dict` for the shared cache (None on any mismatch)."""
+    if not isinstance(raw, dict):
+        return None
+
+    def _dt(value: Any) -> datetime | None:
+        return datetime.fromisoformat(value) if isinstance(value, str) and value else None
+
+    try:
+        return ProviderUsage(
+            provider=str(raw["provider"]),
+            status=str(raw["status"]),
+            plan=raw.get("plan"),
+            utilization=raw.get("utilization"),
+            resets_at=_dt(raw.get("resets_at")),
+            fetched_at=_dt(raw.get("fetched_at")),
+            raw_data=raw.get("raw_data"),
+            error=raw.get("error"),
+            detail=raw.get("detail"),
+            spend=raw.get("spend"),
+            windows=raw.get("windows"),
+            account=raw.get("account"),
+        )
+    except (KeyError, ValueError, TypeError):
+        return None
+
+
+def _shared_cached_provider_usage(provider: str, identity: str) -> ProviderUsage | None:
+    if provider == "claude":
+        return _claude_cached_usage(identity)
+    return _usage_from_dict(usage_shared.read_record(provider, identity)["payload"])
+
+
+def _shared_fetch(
+    provider: str, identity: str, fetch: Callable[[], ProviderUsage], max_age_s: float
+) -> ProviderUsage:
+    """Run *fetch* at most once per *max_age_s* per account across every
+    cockpit instance on the machine: reuse the shared record while it is
+    fresh or backed off, take the fetch lease, and — when THIS instance's
+    auto-fetch switch is OFF — never fetch at all (cache read only)."""
+    now = time.time()
+    rec = usage_shared.read_record(provider, identity)
+    cached = _usage_from_dict(rec["payload"])
+    if cached is not None and (
+        rec["backoff_until"] > now
+        or (now - rec["fetched_at"] <= max_age_s and cached.status in (STATUS_ACTIVE, STATUS_STALE))
+    ):
+        return cached
+    if not usage_shared.auto_fetch_enabled():
+        return cached or _error(provider, _AUTOFETCH_OFF_NO_CACHE)
+    lease = usage_shared.try_acquire_lease(provider, identity)
+    if lease is None:
+        return cached or ProviderUsage(provider=provider, status=STATUS_LOADING)
+    try:
+        data = fetch()
+    except BaseException:
+        usage_shared.release_lease(provider, identity, lease)
+        raise
+    if data.status in (STATUS_ACTIVE, STATUS_STALE):
+        usage_shared.record_fetch_ok(provider, identity, lease, usage_to_dict(data))
+    else:
+        # Keep the last good payload for other instances; note why this one failed.
+        usage_shared.record_failure(provider, identity, lease, data.error or data.status)
+    return data
 
 
 def _usage_fingerprint(usage: ProviderUsage) -> tuple:
@@ -1394,16 +1618,7 @@ def _merge_identical_account_rows(rows: list[ProviderUsage]) -> list[ProviderUsa
     return merged
 
 
-def fetch_provider_usage(provider: str, config_dir: Path | None = None) -> ProviderUsage:
-    """Single-provider fetch with a catch-all safety net. Blocking — run off
-    the Qt main thread (same contract as the individual `fetch_*` functions
-    above).
-
-    `config_dir` (epic #309 Phase 3b): scopes the probe to one account's
-    isolated config/home dir for the providers that support it
-    (`_CONFIG_DIR_AWARE_FETCHERS`) — ignored (provider-level fetch, same as
-    before) for every other provider.
-    """
+def _dispatch_fetch(provider: str, config_dir: Path | None) -> ProviderUsage:
     if config_dir is not None:
         aware_fetcher = _CONFIG_DIR_AWARE_FETCHERS.get(provider)
         if aware_fetcher is not None:
@@ -1420,6 +1635,53 @@ def fetch_provider_usage(provider: str, config_dir: Path | None = None) -> Provi
     except Exception:
         _log.exception("unexpected error fetching usage for %s", provider)
         return _error(provider, "unexpected error")
+
+
+# Providers whose probe spawns a subprocess / makes a request and so go through
+# the machine-wide shared cache + this instance's auto-fetch switch. claude
+# does the same inside `limit_status.fetch_usage_shared`. kimi/cursor have no
+# usage channel (`unsupported`, decided by a local binary lookup) and never
+# fetch, so they need neither.
+_SHARED_CACHE_PROVIDERS = frozenset({"codex", "gemini", "opencode"})
+_SHARED_MAX_AGE_S = 290.0
+
+
+def _shared_identity(provider: str, config_dir: Path | None) -> str:
+    if provider == "codex":
+        if config_dir is None:
+            from .codex_helper import codex_home
+
+            config_dir = codex_home()
+        return usage_shared.codex_identity(config_dir)
+    return "machine"  # gemini's OAuth token / opencode's local stats are machine-wide
+
+
+def fetch_provider_usage(
+    provider: str, config_dir: Path | None = None, *, max_age_s: float = _SHARED_MAX_AGE_S
+) -> ProviderUsage:
+    """Single-provider fetch with a catch-all safety net. Blocking — run off
+    the Qt main thread (same contract as the individual `fetch_*` functions
+    above).
+
+    `config_dir` (epic #309 Phase 3b): scopes the probe to one account's
+    isolated config/home dir for the providers that support it
+    (`_CONFIG_DIR_AWARE_FETCHERS`) — ignored (provider-level fetch, same as
+    before) for every other provider.
+
+    codex/gemini/opencode go through the machine-wide shared cache
+    (`_shared_fetch`): N cockpit instances collapse to ~1 real probe per
+    *max_age_s*, and this instance's auto-fetch switch OFF means cache-only.
+    """
+    if provider in _SHARED_CACHE_PROVIDERS:
+        try:
+            ident = _shared_identity(provider, config_dir)
+            return _shared_fetch(
+                provider, ident, lambda: _dispatch_fetch(provider, config_dir), max_age_s
+            )
+        except Exception:
+            _log.exception("unexpected error fetching usage for %s", provider)
+            return _error(provider, "unexpected error")
+    return _dispatch_fetch(provider, config_dir)
 
 
 class ProviderUsageStore:
@@ -1454,10 +1716,15 @@ class ProviderUsageStore:
 
     def start(self) -> None:
         self._running = True
+        usage_shared.add_wake_hook(self.wake)
         threading.Thread(target=self._loop, daemon=True, name="provider-usage-loop").start()
 
     def stop(self) -> None:
         self._running = False
+        self._wake.set()
+
+    def wake(self) -> None:
+        """Poll now (auto-fetch switch just flipped ON)."""
         self._wake.set()
 
     def get(self, provider: str, config_dir: Path | str | None = None) -> ProviderUsage | None:
@@ -1484,15 +1751,22 @@ class ProviderUsageStore:
 
         rows: list[ProviderUsage] = []
         for provider in PROVIDER_NAMES:
-            if provider != "codex":
+            if provider not in ("claude", "codex"):
                 usage = provider_cache.get(provider)
                 if usage is not None:
                     rows.append(usage)
                 continue
-            targets = codex_usage_targets()
+            if provider == "claude":
+                targets = claude_usage_targets()
+                if not targets:  # no discoverable account: keep the provider-level row
+                    usage = provider_cache.get("claude")
+                    if usage is not None:
+                        rows.append(usage)
+                    continue
+            else:
+                targets = codex_usage_targets()
             for target in targets:
-                key = (provider, str(target.config_dir))
-                usage = account_cache.get(key)
+                usage = account_cache.get(_account_key(provider, target))
                 if usage is None:
                     usage = ProviderUsage(provider=provider, status=STATUS_LOADING)
                 rows.append(dataclasses.replace(usage, account=target.account))
@@ -1584,29 +1858,62 @@ class ProviderUsageStore:
         and old UI surfaces still ask it for one snapshot.  The account cache
         is the authoritative multi-account data path used by UsageMeter.
         """
-        if provider != "codex":
+        if provider not in ("claude", "codex"):
             self._fetch_one(provider)
             return
-        targets = codex_usage_targets()
+        targets = claude_usage_targets() if provider == "claude" else codex_usage_targets()
         if not targets:
             self._fetch_one(provider)
             return
         for target in targets:
             if not self._running:
                 return
+            if target.config_dir is None or target.read_only:
+                # Another cockpit instance's account: show the shared cache,
+                # never probe (a probe could rotate credentials we don't own).
+                cached = _shared_cached_provider_usage(provider, target.identity)
+                if cached is not None:
+                    with self._lock:
+                        self._account_cache[_account_key(provider, target)] = cached
+                    self._emit(provider, cached)
+                continue
             self._fetch_one(provider, target.config_dir)
         # Preserve the original provider-level API using the Cockpit-active
-        # home when it is among the discovered targets.
+        # home / profile when it is among the discovered targets.
         try:
-            from .codex_helper import codex_home
+            if provider == "codex":
+                from .codex_helper import codex_home
 
-            active_home = str(codex_home().resolve())
+                active_home = codex_home().resolve()
+            else:
+                active_home = _resolve_claude_config_dir().resolve()
         except OSError:
-            active_home = ""
+            active_home = None
+        active_ident = (
+            usage_shared.claude_identity(active_home)
+            if provider == "claude" and active_home is not None
+            else None
+        )
         with self._lock:
-            active = self._account_cache.get((provider, active_home))
-            if active is not None:
-                self._cache[provider] = active
+            for target in targets:
+                same = (
+                    target.identity == active_ident
+                    if active_ident is not None
+                    else target.config_dir is not None
+                    and active_home is not None
+                    and target.config_dir.resolve() == active_home
+                )
+                active = self._account_cache.get(_account_key(provider, target)) if same else None
+                if active is not None:
+                    self._cache[provider] = active
+                    break
+
+
+def _account_key(provider: str, target: UsageAccountTarget) -> tuple[str, str]:
+    """Account-cache key: the probed dir, or the identity for read-only accounts."""
+    if target.config_dir is not None and not target.read_only:
+        return (provider, str(target.config_dir))
+    return (provider, target.identity)
 
 
 def _active_config_dir(provider: str) -> Path | None:
@@ -1658,7 +1965,7 @@ def _record_quota_ledger(provider: str, account: str, data: ProviderUsage) -> No
     catch-all policy as every adapter above: a ledger hiccup must never
     take down the usage poll.
     """
-    if data.status not in (STATUS_ACTIVE, STATUS_STALE):
+    if data.status not in (STATUS_ACTIVE, STATUS_STALE) or not usage_shared.auto_fetch_enabled():
         return
     try:
         from . import usage_ledger

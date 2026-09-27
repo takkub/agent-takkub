@@ -464,6 +464,18 @@ def _isolate_runtime(monkeypatch: pytest.MonkeyPatch, tmp_path):
     monkeypatch.setenv("TAKKUB_EVENTS_LOG_SYNC", "1")
     # #640: boot-time disk sweeps run in the background in production.
     monkeypatch.setenv("TAKKUB_BOOT_SWEEP_SYNC", "1")
+    # Machine-wide usage cache (usage_shared.cache_dir) resolves to the real per-user
+    # cache dir shared with live cockpits — never let a test read/write it.
+    monkeypatch.setenv("TAKKUB_USAGE_CACHE_DIR", str(tmp_path / "_isolated_usage_cache"))
+    # Claude account discovery reads the real ~/.claude*/ dirs; tests see none unless they
+    # call provider_usage._discover_claude_usage_targets() with their own fake home.
+    _pu = _maybe_module("agent_takkub.provider_usage", force=True)
+    if _pu is not None and hasattr(_pu, "claude_usage_targets"):
+        monkeypatch.setattr(_pu, "claude_usage_targets", lambda: ())
+    # Server-side plan lookup uses the real credentials + network; tests never do.
+    _ls = _maybe_module("agent_takkub.limit_status", force=True)
+    if _ls is not None and hasattr(_ls, "_with_server_plan"):
+        monkeypatch.setattr(_ls, "_with_server_plan", lambda _cd, data: data)
 
     # Distinct name (not "runtime") so we don't collide with test-local fixtures
     # that do `(tmp_path / "runtime").mkdir()` without exist_ok. Tests that set

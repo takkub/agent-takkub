@@ -94,6 +94,16 @@ class LimitPanelMixin:
         # method still render their existing provider-level Codex row.
         codex_accounts = account_reader() if callable(account_reader) else []
         codex_rows = [usage for usage in codex_accounts if usage.provider == "codex"]
+        # One Claude card per distinct account (accountUuid), the same set and
+        # labels on every cockpit instance. The active tab's account leads (the
+        # header chip reads the first claude row); a store that predates
+        # multi-account Claude rows keeps the single LimitStore-fed card.
+        claude_rows = [usage for usage in codex_accounts if usage.provider == "claude"]
+        if claude_rows:
+            active_label = _active_claude_account_label()
+            claude_rows.sort(key=lambda u: u.account != active_label)
+        else:
+            claude_rows = [claude_usage]
         others = [
             *(
                 codex_rows
@@ -106,7 +116,7 @@ class LimitPanelMixin:
             ],
         ]
         self._limit_label.set_usages(
-            [claude_usage, *others], primary_provider=self._active_lead_provider()
+            [*claude_rows, *others], primary_provider=self._active_lead_provider()
         )
 
     def _active_lead_provider(self) -> str:
@@ -135,6 +145,19 @@ class LimitPanelMixin:
             project = active_project()[0] or ""
             data = store.get(user_profile.config_dir_for(project))
         self._refresh_limit_label(data)
+
+
+def _active_claude_account_label() -> str | None:
+    """Label (email) of the account the visible tab's Claude profile is
+    signed into — orders the active account's card first."""
+    try:
+        from . import provider_usage, user_profile
+
+        return provider_usage._claude_account_label(
+            user_profile.config_dir_for(active_project()[0] or "")
+        )
+    except Exception:
+        return None
 
 
 def _claude_provider_usage(data) -> ProviderUsage:

@@ -21,6 +21,7 @@ from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Any
 
+from . import usage_shared
 from ._win_console import SUBPROCESS_NO_WINDOW
 
 _USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
@@ -405,19 +406,20 @@ def _resolve_config_dir(config_dir: Path | str | None) -> Path:
 # ── cross-process shared fetch state ─────────────────────────────────────────
 # The usage endpoint is aggressively rate-limited per account (observed
 # 2026-07-17: Retry-After up to ~60 min, re-armed by further attempts). One
-# machine often runs SEVERAL cockpit instances (prod + dev) that each polled
-# independently — every instance honoured only its own in-memory backoff, so
-# together they kept the server-side penalty armed forever and the chip froze
-# on stale data. The fix: persist {last good payload, fetched_at, backoff_until}
-# in a small JSON *inside the polled profile's config dir* — the one location
-# every process polling that account already shares (same precedent as
-# `takkub-claude-auth.json`). All wall-clock epochs (cross-process; monotonic
-# clocks don't compare between processes).
-_STATE_FILENAME = "takkub-usage-state.json"
+# machine often runs SEVERAL cockpit instances (prod + dev) polling the same
+# account. State (last good payload, fetched_at, backoff_until, fetch lease)
+# therefore lives in ONE machine-wide record keyed by ACCOUNT identity
+# (`usage_shared`), not inside each instance's own config dir — dev
+# (~/.claude) and prod (~/.agent-takkub/claude-config) share it. The old
+# per-config-dir `takkub-usage-state.json` is no longer read or written (left
+# on disk untouched). All wall-clock epochs (cross-process).
+_PROVIDER = "claude"
+_PLAN_TTL_S = 24 * 3600.0
+_PROFILE_URL = "https://api.anthropic.com/api/oauth/profile"
 
 
-def _state_path(config_dir: Path | None) -> Path:
-    return _resolve_config_dir(config_dir) / _STATE_FILENAME
+def _identity(config_dir: Path | None) -> str:
+    return usage_shared.claude_identity(config_dir)
 
 
 def _serialize_usage(data: UsageData) -> dict[str, Any]:
@@ -462,26 +464,18 @@ def _deserialize_usage(raw: Any) -> UsageData | None:
 
 
 def load_shared_state(config_dir: Path | None) -> dict[str, Any]:
-    """Return {"backoff_until": epoch, "fetched_at": epoch, "data": UsageData|None}.
+    """Return {"backoff_until", "fetched_at", "data": UsageData|None,
+    "last_error", "last_attempt_at"} for the account behind *config_dir*.
 
-    Best-effort: missing/corrupt file → all-zero state (never raises)."""
-    out: dict[str, Any] = {"backoff_until": 0.0, "fetched_at": 0.0, "data": None}
-    try:
-        raw = json.loads(_state_path(config_dir).read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return out
-    if not isinstance(raw, dict):
-        return out
-    try:
-        out["backoff_until"] = float(raw.get("backoff_until") or 0.0)
-    except (TypeError, ValueError):
-        pass
-    try:
-        out["fetched_at"] = float(raw.get("fetched_at") or 0.0)
-    except (TypeError, ValueError):
-        pass
-    out["data"] = _deserialize_usage(raw.get("data"))
-    return out
+    Best-effort: missing/corrupt record → all-zero state (never raises)."""
+    rec = usage_shared.read_record(_PROVIDER, _identity(config_dir))
+    return {
+        "backoff_until": rec["backoff_until"],
+        "fetched_at": rec["fetched_at"],
+        "data": _deserialize_usage(rec["payload"]),
+        "last_error": rec["last_error"],
+        "last_attempt_at": rec["last_attempt_at"],
+    }
 
 
 def save_shared_state(
@@ -489,55 +483,118 @@ def save_shared_state(
     *,
     data: UsageData | None = None,
     backoff_until: float | None = None,
+    lease: str | None = None,
 ) -> None:
-    """Merge-write the shared state file (atomic, best-effort).
+    """Merge-write the account's shared record (atomic, best-effort).
 
     `data` given → record the fresh payload + fetched_at=now and CLEAR any
     backoff (a success proves the penalty lapsed). `backoff_until` given →
-    record the deadline, keeping the last good payload for stale display."""
-    path = _state_path(config_dir)
-    current = load_shared_state(config_dir)
+    record the deadline, keeping the last good payload for stale display.
+    Either releases *lease* if this caller held it."""
+    ident = _identity(config_dir)
     if data is not None:
-        current["data"] = data
-        current["fetched_at"] = time.time()
-        current["backoff_until"] = 0.0
+        usage_shared.record_fetch_ok(_PROVIDER, ident, lease, _serialize_usage(data))
     if backoff_until is not None:
-        current["backoff_until"] = float(backoff_until)
-    payload = {
-        "backoff_until": current["backoff_until"],
-        "fetched_at": current["fetched_at"],
-        "data": _serialize_usage(current["data"]) if current["data"] is not None else None,
-    }
+        usage_shared.record_backoff(_PROVIDER, ident, lease, float(backoff_until))
+
+
+def _plan_from_profile(profile: Any) -> str | None:
+    """Plan label from `api/oauth/profile` (server-side truth; the local
+    credentials blob's subscriptionType goes stale after a plan change)."""
+    org = profile.get("organization") if isinstance(profile, dict) else None
+    if not isinstance(org, dict):
+        return None
+    org_type = str(org.get("organization_type") or "")  # claude_pro / claude_max ...
+    tier = org.get("rate_limit_tier")
+    sub = org_type.removeprefix("claude_") or None
+    label = _plan_label(sub, str(tier) if tier else None)
+    return None if label == "Unknown" else label
+
+
+def _resolve_plan(identity: str, token: str, local_plan: str) -> str:
+    """One plan label per ACCOUNT: the shared record's cached server-side
+    plan (refreshed <= 1x/day via `api/oauth/profile`), else the local
+    credentials' label. Never raises — a profile hiccup keeps the fallback."""
     try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_suffix(".json.tmp")
-        tmp.write_text(json.dumps(payload, indent=1), encoding="utf-8")
-        tmp.replace(path)
-    except OSError:
-        _log.debug("could not persist usage state to %s", path, exc_info=True)
+        extra = usage_shared.read_record(_PROVIDER, identity)["extra"]
+        cached = extra.get("plan")
+        if isinstance(cached, str) and time.time() - float(extra.get("plan_at") or 0) < _PLAN_TTL_S:
+            return cached
+        profile = _request_json(
+            _PROFILE_URL,
+            headers={
+                **_HEADERS_BASE,
+                "user-agent": _resolve_user_agent(),
+                "Authorization": f"Bearer {token}",
+            },
+        )
+        plan = _plan_from_profile(profile)
+        if plan:
+            usage_shared.set_extra(_PROVIDER, identity, "plan", plan)
+            usage_shared.set_extra(_PROVIDER, identity, "plan_at", time.time())
+            return plan
+        return cached if isinstance(cached, str) else local_plan
+    except Exception:
+        _log.debug("server-side plan lookup failed", exc_info=True)
+        return local_plan
+
+
+def _with_server_plan(config_dir: Path | None, data: UsageData) -> UsageData:
+    """Swap the local-credentials plan for the account's server-side one."""
+    try:
+        cd = config_dir or Path.home() / ".claude"
+        raw, _source = _load_raw_credentials(cd / ".credentials.json")
+        token = _normalize_credentials(raw or {}).get("access_token")
+        if not token:
+            return data
+        return dataclasses.replace(
+            data, plan=_resolve_plan(_identity(config_dir), token, data.plan)
+        )
+    except Exception:
+        return data
+
+
+def shared_plan(config_dir: Path | None) -> str | None:
+    """Server-side plan cached in the account's shared record (read-only)."""
+    plan = usage_shared.read_record(_PROVIDER, _identity(config_dir))["extra"].get("plan")
+    return plan if isinstance(plan, str) and plan else None
 
 
 def fetch_usage_shared(config_dir: Path | None, max_age_s: float = 300.0) -> UsageData | None:
     """Cross-process-polite `fetch_usage`: reuse another process's recent
-    result, honour a persisted backoff, and record any 429 penalty for
+    result, honour a persisted backoff, take the per-account fetch lease so
+    only one instance hits the network, and record any 429 penalty for
     everyone else. One-shot callers (limit_autoresume signal-b confirmation)
-    should use this instead of `fetch_usage` so they never re-arm a penalty
-    the pollers are already sitting out. May return stale data (or None)
-    while backed off — callers treat it as best-effort telemetry."""
+    should use this instead of `fetch_usage`. May return stale data (or None)
+    while backed off, leased elsewhere, or when THIS instance's auto-fetch
+    switch is OFF (cache-read only) — best-effort telemetry."""
     now = time.time()
+    ident = _identity(config_dir)
     state = load_shared_state(config_dir)
     if state["backoff_until"] > now:
         return state["data"]
     if state["data"] is not None and now - state["fetched_at"] <= max_age_s:
         return state["data"]
+    if not usage_shared.auto_fetch_enabled():
+        return state["data"]
+    lease = usage_shared.try_acquire_lease(_PROVIDER, ident)
+    if lease is None:
+        return state["data"]
     try:
         fresh = fetch_usage(config_dir)
     except RateLimited as exc:
-        save_shared_state(config_dir, backoff_until=now + max(exc.retry_after or 0.0, 300.0))
+        usage_shared.record_backoff(
+            _PROVIDER, ident, lease, now + max(exc.retry_after or 0.0, 300.0)
+        )
         return state["data"]
+    except BaseException:
+        usage_shared.release_lease(_PROVIDER, ident, lease)
+        raise
     if fresh is not None:
-        save_shared_state(config_dir, data=fresh)
+        fresh = _with_server_plan(config_dir, fresh)
+        usage_shared.record_fetch_ok(_PROVIDER, ident, lease, _serialize_usage(fresh))
         return fresh
+    usage_shared.record_failure(_PROVIDER, ident, lease, "fetch failed (auth or network)")
     return state["data"]
 
 
@@ -578,6 +635,7 @@ class LimitStore:
 
     def start(self) -> None:
         self._running = True
+        usage_shared.add_wake_hook(self.wake)
         threading.Thread(target=self._loop, daemon=True, name="limit-store-loop").start()
 
     def stop(self) -> None:
@@ -675,12 +733,38 @@ class LimitStore:
             self._emit(key, shared["data"])
             return
 
+        # This instance's auto-fetch switch is OFF: serve whatever the shared
+        # cache holds (any age) and never touch the network.
+        if not usage_shared.auto_fetch_enabled():
+            with self._lock:
+                if key not in self._refs:
+                    return
+                if shared["data"] is not None:
+                    self._cache[key] = shared["data"]
+                emit_data = self._cache.get(key)
+            self._emit(key, emit_data)
+            return
+
+        # One real fetch per account across every instance: whoever holds
+        # the lease fetches; the rest read the shared record on their next tick.
+        ident = _identity(key)
+        lease = usage_shared.try_acquire_lease(_PROVIDER, ident)
+        if lease is None:
+            with self._lock:
+                if key not in self._refs:
+                    return
+                if shared["data"] is not None:
+                    self._cache[key] = shared["data"]
+                emit_data = self._cache.get(key)
+            self._emit(key, emit_data)
+            return
+
         try:
             data = fetch_usage(key)
         except RateLimited as exc:
             backoff = max(exc.retry_after or 0.0, self._min_backoff_s)
             _log.warning("Rate limited for %s; backing off %.0fs", key, backoff)
-            save_shared_state(key, backoff_until=now + backoff)
+            save_shared_state(key, backoff_until=now + backoff, lease=lease)
             with self._lock:
                 if key not in self._refs:
                     return  # unregistered while fetch was in-flight
@@ -699,8 +783,14 @@ class LimitStore:
             _log.exception("Error fetching usage for %s", key)
             data = None
 
+        if data is None:
+            usage_shared.record_failure(_PROVIDER, ident, lease, "fetch failed (auth or network)")
+        else:
+            data = _with_server_plan(key, data)
         with self._lock:
             if key not in self._refs:
+                if data is not None:
+                    save_shared_state(key, data=data, lease=lease)
                 return  # unregistered while fetch was in-flight
             if data is not None:
                 self._cache[key] = data
@@ -711,7 +801,11 @@ class LimitStore:
         # Persist last (after cache + emit): the UI shouldn't wait on disk
         # I/O, and other processes only need the file eventually.
         if data is not None:
-            save_shared_state(key, data=data)
+            save_shared_state(key, data=data, lease=lease)
+
+    def wake(self) -> None:
+        """Poll now (auto-fetch switch just flipped ON)."""
+        self._wake.set()
 
     def _emit(self, key: Path, data: UsageData | None) -> None:
         if self._on_update is not None:
