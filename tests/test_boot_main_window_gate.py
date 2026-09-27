@@ -61,7 +61,8 @@ class TestBootMainWindowGate:
         assert result is sentinel
         # #631: the gate must be given the boot-phase quit-request predicate so
         # a Ctrl+C during the wizard aborts boot instead of being swallowed.
-        assert gate.call_args.args == (app_mod.MainWindow,)
+        # #725: the factory wraps MainWindow with the removed-provider migration.
+        assert gate.call_args.args == (app_mod._build_main_window,)
         assert callable(gate.call_args.kwargs["quit_requested"])
 
     def test_boot_phase_quit_request_disarms_boot(self, monkeypatch: pytest.MonkeyPatch) -> None:
