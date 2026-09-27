@@ -622,8 +622,8 @@ def settings_role_for(role: str, project: str | None = None) -> str:
 
 
 def pane_display_label(role: str, base_label: str, project: str | None = None) -> str:
-    """The pane tab/header label for *role* (#590 item A): ``"Reviewer ·
-    e2e"``/``"Reviewer · ui"`` for a qa/critic pane whose provider/model/
+    """The pane tab/header label for *role* (#590 item A, #747): ``"QA ·
+    e2e"``/``"Critic · ui"`` for a qa/critic pane whose provider/model/
     effort defers to reviewer's Settings row (see `settings_role_for`),
     else *base_label* unchanged — e.g. a custom preset with
     ``checker="qa"`` keeps qa's own ``"QA"`` label since Settings shows it
@@ -636,7 +636,9 @@ def pane_display_label(role: str, base_label: str, project: str | None = None) -
         from .routing_planner import resolve_role_alias
 
         _, alias_mode = resolve_role_alias(base)
-        return f"Reviewer · {alias_mode}"
+        # #747: show the role the user asked for ("QA · e2e"), not the
+        # internal reviewer alias it resolves to.
+        return f"{'QA' if base == 'qa' else 'Critic'} · {alias_mode}"
     return base_label
 
 

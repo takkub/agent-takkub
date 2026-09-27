@@ -387,11 +387,11 @@ class TestPaneDisplayLabel:
 
     def test_qa_labels_as_reviewer_e2e_under_default_checker(self):
         team_preset.set_current("full", "proj")
-        assert team_preset.pane_display_label("qa", "QA", "proj") == "Reviewer · e2e"
+        assert team_preset.pane_display_label("qa", "QA", "proj") == "QA · e2e"
 
     def test_critic_labels_as_reviewer_ui_regardless_of_checker(self):
         team_preset.set_current("full", "proj")
-        assert team_preset.pane_display_label("critic", "Design Critic", "proj") == "Reviewer · ui"
+        assert team_preset.pane_display_label("critic", "Design Critic", "proj") == "Critic · ui"
 
     def test_qa_keeps_own_label_when_checker_is_explicitly_qa(self):
         team_preset.set_current(
