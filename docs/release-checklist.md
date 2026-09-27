@@ -19,6 +19,10 @@
 
 ## 0. Pre-flight — ต้องเขียวก่อนแตะเวอร์ชัน
 
+**ก่อน bump ต้องเคลียร์ให้หมดทั้งสองกอง** — `takkub issue list --open` = 0 **และ** `takkub backlog pending` = 0
+(การ์ดที่ issue ปิด/ship ไปแล้ว → verify ใน git แล้ว `takkub backlog done <id>`) · งานไหนเข้า batch นี้ไม่ได้
+จริงๆ ให้ถาม user ก่อน bump — ห้ามออก release แล้วค่อยบอกว่ายังเหลือ (v2.1.42 พลาดแบบนี้ 2026-09-27)
+
 ```bash
 takkub qa-gate     # venv-check -> full pytest -> ruff check -> lint-imports, fail-fast + report
 ```

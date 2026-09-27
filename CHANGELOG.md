@@ -4,6 +4,18 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 
 ## [vNEXT]
 
+## [v2.1.43] - 2026-09-27
+
+### Removed (ถอด)
+
+- **ถอด kimi provider ทั้งสาย (#725):** ProviderSpec, helper, ingest adapter, usage/token meter, Settings, role file, docs, tests · `takkub assign --role kimi` / `--provider kimi` ตอบข้อความชัดเจนแทน traceback
+- **migrate ค่าที่ค้าง:** ตอนเปิดโปรแกรม ค่าใน role-models / routing ที่ยังชี้ kimi จะถูกเปลี่ยนเป็น claude (เขียนทับเฉพาะค่า ไม่ลบไฟล์ รันซ้ำได้)
+
+### Fixed (แก้)
+
+- **usage meter พังใน 2.1.42 (#749 #750):** แถว Claude แบบหลายบัญชีเก็บ `windows` เป็น list แต่ chip/popup อ่านเป็น dict → AttributeError ทุก 2 วินาทีและตอนคลิก — รับได้ทั้งสองแบบแล้ว
+- **release checklist:** ก่อน bump ต้องให้ทั้ง issue เปิดและ backlog ค้างเป็นศูนย์
+
 ## [v2.1.42] - 2026-09-27
 
 ### Added (เพิ่ม)
