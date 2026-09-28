@@ -83,6 +83,20 @@ def _two_providers_one_update() -> list[_Item]:
     ]
 
 
+def test_successful_cockpit_update_exits_boot_gate(monkeypatch: pytest.MonkeyPatch) -> None:
+    w = bfw.BootFlowWindow(flow=_FakeFlow())
+    finished: list[bool] = []
+    w.flowFinished.connect(finished.append)
+    spawned: list[list[str]] = []
+    monkeypatch.setattr("subprocess.Popen", lambda argv, **kwargs: spawned.append(argv))
+    monkeypatch.setattr("PyQt6.QtCore.QCoreApplication.quit", lambda: None)
+
+    w._relaunch_cockpit_after_update()
+
+    assert spawned and spawned[0][-2:] == ["-m", "agent_takkub"]
+    assert finished == [False]
+
+
 def _plan(**overrides) -> SimpleNamespace:
     base = dict(
         backup_items=[("v2/ (ข้อมูลระบบ V2)", 15747), ("โปรเจค", 29)],

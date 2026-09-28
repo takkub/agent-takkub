@@ -37,8 +37,10 @@ _DEFAULT_LIMIT = 200_000
 # _DEFAULT_LIMIT. Keep this in sync with shared/models.md in the claude-api
 # skill when Anthropic ships a new model.
 _MODEL_LIMITS: dict[str, int] = {
+    "claude-opus-5-5": 1_000_000,
     "claude-opus-5": 1_000_000,
     "claude-sonnet-5": 1_000_000,
+    "claude-fable-5-1": 1_000_000,
     "claude-fable-5": 1_000_000,
     "claude-opus-4-8": 1_000_000,
     "claude-opus-4-7": 1_000_000,

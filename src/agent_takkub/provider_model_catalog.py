@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import time
 from typing import Any
 
@@ -102,6 +103,25 @@ def cached_ids(provider: str) -> list[str] | None:
         return None
     ids = entry.get("ids")
     return list(ids) if isinstance(ids, list) and ids else None
+
+
+def observe_claude_model(model_id: str) -> None:
+    """Remember a concrete model reported by a live Claude pane.
+
+    Claude has no model-list CLI; a pane's own usage record is an observed
+    model ID and can refresh the picker without making an API call.
+    """
+    if not re.fullmatch(r"claude-[a-z][a-z0-9-]*", model_id or ""):
+        return
+    cache = _load_cache()
+    entry = cache.get("claude")
+    existing = entry.get("ids", []) if isinstance(entry, dict) else []
+    if not isinstance(existing, list):
+        existing = []
+    if model_id in existing:
+        return
+    cache["claude"] = {"ids": [model_id, *existing], "fetched_at": time.time()}
+    _save_cache(cache)
 
 
 def is_stale(provider: str, *, max_age_s: float = MAX_CACHE_AGE_S) -> bool:

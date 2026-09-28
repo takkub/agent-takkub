@@ -405,7 +405,7 @@ _PROVIDER_DESC: dict[str, str] = {
 # defaults to for the signed-in account.
 _MODEL_DEFAULT_LABEL = "(default)"
 
-# Model shortlists per provider — a *snapshot* (2026-08-03, refreshed against
+# Model shortlists per provider — a *snapshot* (refreshed 2026-09-28 against
 # each CLI actually installed on the dev box) offered as dropdown presets AND
 # the permanent fallback for gemini/codex when live discovery hasn't run yet
 # or fails (`_fill_model_combo` merges this with `provider_model_catalog`'s
@@ -424,9 +424,11 @@ _MODELS_BY_PROVIDER: dict[str, tuple[str, ...]] = {
         "opus",
         "sonnet",
         "haiku",
+        "claude-opus-5-5",
         "claude-opus-5",
         "claude-sonnet-5",
         "claude-haiku-4-5",
+        "claude-fable-5-1",
         "claude-fable-5",
         "claude-opus-4-8",
     ),

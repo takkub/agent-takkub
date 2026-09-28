@@ -2145,6 +2145,28 @@ class SpawnEngineMixin:
                 ms=int((time.time() - _t0) * 1000),
             )
             pane.attach_session(session, cwd=spawn_cwd, provider_name=label)
+            if label == "opencode":
+                # OpenCode can keep a live PTY while rendering no TUI at all
+                # on macOS. Make that state visible in the pane instead of
+                # leaving a silent blank screen indefinitely (#758).
+                def _warn_blank_opencode() -> None:
+                    if pane.session is not session or not session.is_alive:
+                        return
+                    if session.first_content_ts() is not None:
+                        return
+                    pane.set_state(
+                        "active",
+                        note="OpenCode ไม่แสดงผล 45 วินาที — ลอง opencode --pure และตรวจ log",
+                    )
+                    _log_event(
+                        "opencode_blank_startup",
+                        role=role_name,
+                        project=project_ns,
+                        transcript=_t_path,
+                    )
+                    self.statusChanged.emit()
+
+                QTimer.singleShot(45_000, _warn_blank_opencode)
             _ekey = _exit_key(project_ns, role_name)
             self._ps(_ekey).corrupt_spawn_retries = 0
             # Record if this spawn used resume (important for auto-respawn logic).

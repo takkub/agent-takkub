@@ -79,6 +79,52 @@ class TestInboxReportSurfacesEveryQueueTier:
         assert items[0]["role"] == "frontend"
         assert items[0]["queue"] == "durable"
 
+    def test_spilled_done_notice_keeps_its_role(self, orch: Orchestrator) -> None:
+        orch._pending_done_notices = {
+            PROJECT: [{"role": "system", "body": "[backend done] report from a failed live write"}]
+        }
+        orch._done_unread = {(PROJECT, "backend"): 1.0}
+
+        items = orch.inbox_report(project=PROJECT, role="backend")
+
+        assert len(items) == 1
+        assert items[0]["role"] == "backend"
+        assert items[0]["queue"] == "durable"
+        assert orch._has_pending_lead_notice(PROJECT, "backend")
+
+    def test_spilled_digest_surfaces_each_role(self, orch: Orchestrator) -> None:
+        digest = (
+            "📬 [Lead Inbox Digest — 2 updates]\n"
+            "• [12:00:01 · 2s ago][backend] done: API ready\n"
+            "• [12:00:02 · 1s ago][reviewer] PASS · reviewed"
+        )
+        orch._pending_done_notices = {PROJECT: [{"role": "system", "body": digest}]}
+
+        items = orch.inbox_report(project=PROJECT)
+
+        assert {(item["role"], item["queue"]) for item in items} == {
+            ("backend", "durable"),
+            ("reviewer", "durable"),
+        }
+        assert len(orch.inbox_report(project=PROJECT, role="reviewer")) == 1
+        assert orch._has_pending_lead_notice(PROJECT, "reviewer")
+
+    def test_unqueued_done_is_recovered_into_durable_inbox(
+        self, orch: Orchestrator, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr("agent_takkub.lead_inbox.time.time", lambda: 300.0)
+        monkeypatch.setattr(orch, "_save_pending_done_notices", lambda project: None)
+        orch._done_unread = {(PROJECT, "backend"): 100.0}
+        orch._done_unread_notice = {(PROJECT, "backend"): ("[backend done] report", "tok")}
+
+        orch._reap_pending_done_notices()
+        orch._reap_pending_done_notices()
+
+        queued = orch._pending_done_notices[PROJECT]
+        assert len(queued) == 1
+        assert queued[0]["body"] == "[backend done] report"
+        assert queued[0]["note"] == "done_recovered"
+
     def test_all_three_tiers_combined(self, orch: Orchestrator) -> None:
         orch._lead_digest_queue = {PROJECT: collections.deque([("[a done] x", None)])}
         orch._lead_notify_queue = {PROJECT: collections.deque([("[b done] y", None)])}

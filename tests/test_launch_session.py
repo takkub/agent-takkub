@@ -87,6 +87,25 @@ def _pane():
 
 
 class TestLaunchSessionCommonTail:
+    def test_opencode_blank_startup_is_visible_after_timeout(self, orch):
+        pane = _pane()
+        callbacks = []
+        with patch(
+            "agent_takkub.spawn_engine.QTimer.singleShot",
+            side_effect=lambda delay, callback: callbacks.append((delay, callback)),
+        ):
+            ok, _, session, _ = _launch(orch, pane, label="opencode")
+        assert ok
+        pane.session = session
+        session.is_alive = True
+        session.first_content_ts.return_value = None
+
+        warning = next(callback for delay, callback in callbacks if delay == 45_000)
+        warning()
+
+        pane.set_state.assert_called_once()
+        assert "ไม่แสดงผล" in pane.set_state.call_args.kwargs["note"]
+
     def test_shell_spawns_and_returns_label_message(self, orch):
         pane = _pane()
         ok, msg, sess, _ = _launch(orch, pane, label="shell")

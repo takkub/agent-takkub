@@ -2406,7 +2406,10 @@ class BootFlowWindow(QDialog):
                 creationflags=SUBPROCESS_NO_WINDOW,
                 env=_succ_env,
             )
-            self._finish(proceed=False)
+            # The replacement process is running; end the boot gate without
+            # constructing another cockpit in this process.
+            self._proceed = False
+            self.accept()
             QCoreApplication.quit()
         except OSError:
             self._proceed_to_migration_check()

@@ -109,12 +109,10 @@ function createMac() {
   const userAppPath = path.join(userAppsDir, 'Takkub Cockpit.app');
   try {
     fs.mkdirSync(userAppsDir, { recursive: true });
-    // Remove any existing copy first so a re-run overwrites cleanly instead
-    // of merging with (possibly stale) files from a prior install.
-    if (fs.existsSync(userAppPath)) {
-      fs.rmSync(userAppPath, { recursive: true, force: true });
-    }
-    spawnSync('cp', ['-R', appDir, userAppsDir], { stdio: 'ignore' });
+    // Keep the bundle directory itself: Dock pins can reference its identity
+    // across npm updates. Replace contents in place instead of deleting and
+    // recreating the .app on every postinstall.
+    fs.cpSync(appDir, userAppPath, { recursive: true, force: true });
   } catch (_e) {
     /* best-effort */
   }
@@ -133,4 +131,4 @@ function create() {
   return null;
 }
 
-module.exports = { create };
+module.exports = { create, createMac };

@@ -41,11 +41,11 @@ _DEFAULT = MAX
 
 # Standard-context model the Lead falls back to under Pro. Keep Opus (best
 # orchestration) but drop the `[1m]` variant that needs usage credits.
-# 2026-08-03: bumped to the current Opus generation (claude-opus-5) — same
+# 2026-09-28: bumped to the current Opus generation (claude-opus-5-5) — same
 # rationale, latest standard-context Opus id, no `[1m]` suffix.
 # Override per-install via the TAKKUB_PRO_LEAD_MODEL env var (read in the
 # orchestrator, not here, to keep this module env-free and trivially testable).
-PRO_LEAD_MODEL = "claude-opus-5"
+PRO_LEAD_MODEL = "claude-opus-5-5"
 
 _PATH = SETTINGS_HOME / "plan.json"
 

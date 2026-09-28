@@ -1073,6 +1073,10 @@ class AgentPane(QFrame):
                 # codex_helper falls back to the literal "codex" when no
                 # turn_context was in the scanned tail — not a real model id.
                 if m and m not in ("unknown", provider):
+                    if provider == "claude":
+                        from .provider_model_catalog import observe_claude_model
+
+                        observe_claude_model(m)
                     return m
             return None
         if provider == "gemini" and self.session is not None:

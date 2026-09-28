@@ -30,12 +30,14 @@ class TestContextLimitForModel:
 
     def test_opus5_no_suffix_is_1m(self) -> None:
         assert context_limit_for_model("claude-opus-5") == 1_000_000
+        assert context_limit_for_model("claude-opus-5-5") == 1_000_000
 
     def test_sonnet5_no_suffix_is_1m(self) -> None:
         assert context_limit_for_model("claude-sonnet-5") == 1_000_000
 
     def test_fable5_no_suffix_is_1m(self) -> None:
         assert context_limit_for_model("claude-fable-5") == 1_000_000
+        assert context_limit_for_model("claude-fable-5-1") == 1_000_000
 
     def test_opus_4x_no_suffix_is_1m(self) -> None:
         assert context_limit_for_model("claude-opus-4-8") == 1_000_000

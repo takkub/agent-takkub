@@ -387,7 +387,7 @@ def _inbox_digest_window_ms() -> int:
 _DONE_NOTICE_RE = re.compile(r"^\[([^\]\r\n]+?)\s+done\](?:\s+(.*))?$", re.DOTALL)
 # (#680) every `[role done]` / `[role FAILED]` tag ANYWHERE in a delivered
 # body (a combined digest carries several) — feeds `_mark_done_notices_delivered`.
-_DONE_NOTICE_TAG_RE = re.compile(r"\[([\w][\w-]*)\s+(?:done|FAILED)\]", re.IGNORECASE)
+_DONE_NOTICE_TAG_RE = re.compile(r"\[([\w][\w#-]*)\s+(?:done|FAILED)\]", re.IGNORECASE)
 # #703: the shape a done report takes once `_flush_lead_digest` has rendered
 # it — `_format_digest_item` prints "• [HH:MM:SS · 3s ago][backend] done:
 # …" and `format_digest_fact_line` prints "• [stamp][qa] PASS [ref #641] ·
@@ -399,8 +399,12 @@ _DONE_NOTICE_TAG_RE = re.compile(r"\[([\w][\w-]*)\s+(?:done|FAILED)\]", re.IGNOR
 # digest that had demonstrably landed (prod unirecon 2026-09-22: four roles
 # flagged, four `lead_inbox_digest count=1` events on record).
 _DIGEST_DONE_LINE_RE = re.compile(
-    r"^\s*•\s*(?:\[[^\]\r\n]*\])?\[([\w][\w-]*)\]\s+(?:done|FAILED|PASS|FAIL|BLOCKED)\b",
+    r"^\s*•\s*(?:\[[^\]\r\n]*\])?\[([\w][\w#-]*)\]\s+(?:done|FAILED|PASS|FAIL|BLOCKED)\b",
     re.IGNORECASE | re.MULTILINE,
+)
+_DIGEST_READ_LINE_RE = re.compile(
+    r"^\s*•\s*\[([\w][\w#-]*)\]\s+\(อ่านแล้วผ่าน takkub inbox",
+    re.MULTILINE,
 )
 _DIGEST_HEADER = "[Lead Inbox Digest"
 
@@ -412,6 +416,10 @@ def done_roles_in_notice(body: str) -> set[str]:
     roles = {m.group(1) for m in _DONE_NOTICE_TAG_RE.finditer(body)}
     if _DIGEST_HEADER in body:
         roles.update(m.group(1) for m in _DIGEST_DONE_LINE_RE.finditer(body))
+        # A report already pulled through `takkub inbox` is collapsed to this
+        # acknowledgement when the digest flushes. It still reached Lead and
+        # must clear the unread marker, or a false "missing" appears later.
+        roles.update(m.group(1) for m in _DIGEST_READ_LINE_RE.finditer(body))
     return roles
 
 
@@ -1224,6 +1232,8 @@ class LeadInboxMixin:
         try:
             for role in done_roles_in_notice(body or ""):
                 unread.pop((project_ns, role), None)
+                self.__dict__.get("_done_unread_notice", {}).pop((project_ns, role), None)
+                self.__dict__.get("_done_recovered", set()).discard((project_ns, role))
         except Exception:
             pass
 
@@ -4957,12 +4967,10 @@ class LeadInboxMixin:
             self._save_pending_done_notices(project_ns)
             _log_event("lead_notify_write_failed", project=project_ns, count=len(items))
             return
-        # Write succeeded — now it is safe to dequeue.
+        # Write succeeded — now it is safe to dequeue. Keep the unread marker
+        # until the Enter/submit verification settles; a paste still sitting
+        # in the composer has not reached Lead as a turn.
         queue.popleft()
-        # #680: the notice text is now physically in Lead's pane — any
-        # `[role done]` / `[role FAILED]` report it carries flips that
-        # role's status from "done (unread)" back to plain "done".
-        self._mark_done_notices_delivered(project_ns, body)
         # #614: stamp when THIS notice landed in Lead's pane. The
         # proactive-compact watchdog uses it to keep the idle clock across
         # the brief not-ready stretch this injection itself causes (Lead
@@ -4987,6 +4995,8 @@ class LeadInboxMixin:
             # clearing the in-flight marker.
             if _outcome is not None and getattr(_outcome, "stuck_in_composer", False):
                 _log_event("lead_notify_stuck_in_composer", project=project_ns)
+            elif lead.session is _notify_sess:
+                self._mark_done_notices_delivered(p, body)
 
         # Self-healing submit: a done-report whose Enter is swallowed mid-paste-
         # render leaves Lead idle with the report unsubmitted — it "won't run on"
@@ -5091,12 +5101,42 @@ class LeadInboxMixin:
         ready prompt — without needing a restart.  Skips projects whose Lead is
         absent or still busy to avoid ping-pong (flush → re-spill → flush loop).
         """
+        # A done report can be written to disk while its notice disappears
+        # from all three outbound queues. Requeue the original notice once
+        # after the normal debounce window so the Lead is woken again (#755).
+        now = time.time()
+        for key, marked_at in list(getattr(self, "_done_unread", {}).items()):
+            if now - marked_at < 120 or key in getattr(self, "_done_recovered", set()):
+                continue
+            project_ns, role = key
+            if self._has_pending_lead_notice(project_ns, role):
+                continue
+            saved = getattr(self, "_done_unread_notice", {}).get(key)
+            if not saved:
+                continue
+            body, pane_token = saved
+            if not hasattr(self, "_done_recovered"):
+                self._done_recovered = set()
+            self._done_recovered.add(key)
+            if not hasattr(self, "_pending_done_notices"):
+                self._pending_done_notices = {}
+            self._pending_done_notices.setdefault(project_ns, []).append(
+                {
+                    "role": role,
+                    "note": "done_recovered",
+                    "body": body,
+                    "pane_token": pane_token,
+                    "queued_ts": marked_at,
+                }
+            )
+            self._save_pending_done_notices(project_ns)
+            _log_event("done_notice_recovered", project=project_ns, role=role)
+
         pending = getattr(self, "_pending_done_notices", None)
         if not pending:
             return
         if not hasattr(self, "_pending_done_since"):
             self._pending_done_since = {}
-        now = time.time()
         for project_ns in list(pending.keys()):
             lead = self._project_panes(project_ns).get(LEAD.name)
             if not (lead and lead.session and lead.session.is_alive):
@@ -5240,6 +5280,8 @@ class LeadInboxMixin:
             # clearing the in-flight marker.
             if _outcome is not None and getattr(_outcome, "stuck_in_composer", False):
                 _log_event("lead_notify_stuck_in_composer", project=project_ns)
+            elif lead.session is sess:
+                self._mark_done_notices_delivered(p, body)
 
         _orch_attr("_delayed_enter_verified", _delayed_enter_verified)(
             lead,

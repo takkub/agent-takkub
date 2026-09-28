@@ -4,6 +4,16 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 
 ## [vNEXT]
 
+## [v2.1.45] - 2026-09-28
+
+### Fixed (แก้)
+
+- **done report ไม่ขึ้น Lead inbox (#755):** digest ที่รวมหลาย role หรือถูกย้ายไปคิวสำรองยังแสดงใต้ role ที่ถูกต้อง; รายงานที่อ่านจาก inbox ก่อน digest ส่งไม่ถูกแจ้งว่า missing ผิดพลาด; หาก notice หลุดจากทุกคิวจะกู้ข้อความเดิมกลับเข้าคิวสำรองอัตโนมัติ และรอการยืนยัน submit ก่อนนับว่าส่งถึง Lead
+- **อัปเดต Cockpit ผ่านหน้าบูตแล้วเจอ AttributeError (#754):** ปิด boot gate ด้วย API ที่มีจริงหลังเปิดโปรเซสเวอร์ชันใหม่
+- **Claude model catalog ค้าง (#756):** เพิ่ม Opus 5.5 และ Fable 5.1 ใน Settings และ context meter, อัปเดตค่าเริ่มต้นของ Lead Pro กับ role ที่ใช้ Opus, และเก็บ model ID ที่ Claude pane รายงานจริงเข้ารายการเลือกอัตโนมัติ
+- **macOS Dock launcher หลุดหลังอัปเดต (#757):** อัปเดตไฟล์ใน `~/Applications/Takkub Cockpit.app` โดยคง bundle เดิมไว้ให้ Dock pin อ้าง path เดิมได้
+- **OpenCode pane ว่างบน macOS (#758):** เมื่อโปรเซสรันแต่ไม่แสดงเนื้อหานาน 45 วินาที แสดงคำแนะนำวินิจฉัยบน pane และบันทึก event แทนการค้างเงียบ
+
 ## [v2.1.44] - 2026-09-27
 
 ### Fixed (แก้)

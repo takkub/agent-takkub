@@ -145,6 +145,7 @@
         "agent_takkub.lead_composer",
         "agent_takkub.orchestrator_text",
         "agent_takkub.performance_settings",
+        "agent_takkub.provider_model_catalog",
         "agent_takkub.provider_spec",
         "agent_takkub.pty_session",
         "agent_takkub.roles",
@@ -161,7 +162,7 @@
         "agent_takkub.spawn_engine"
       ],
       "fan_in": 6,
-      "fan_out": 13
+      "fan_out": 14
     },
     {
       "module": "agent_takkub.agent_pane_model",
@@ -3951,9 +3952,10 @@
         "agent_takkub.provider_update"
       ],
       "imported_by": [
+        "agent_takkub.agent_pane",
         "agent_takkub.settings_window"
       ],
-      "fan_in": 1,
+      "fan_in": 2,
       "fan_out": 4
     },
     {

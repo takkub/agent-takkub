@@ -818,9 +818,9 @@ class TestRoleModelEffortDefaultLabels:
         dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_PROVIDERS_ROLES)
         model_combo = dlg._role_model_combos["reviewer"]
         effort_combo = dlg._role_effort_combos["reviewer"]
-        # reviewer's tier is ("claude-opus-5", "high", ...) — distinct from
+        # reviewer's tier is ("claude-opus-5-5", "high", ...) — distinct from
         # backend's, so the label must be per-role, not one shared constant.
-        assert model_combo.itemText(0) == "(default) → opus-5"
+        assert model_combo.itemText(0) == "(default) → opus-5-5"
         assert effort_combo.itemText(0) == "(ตามค่าเริ่มต้นของ role) → high"
         dlg.deleteLater()
 

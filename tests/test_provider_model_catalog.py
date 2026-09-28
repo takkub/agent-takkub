@@ -49,6 +49,12 @@ class TestMergeCatalog:
 
 
 class TestCacheRoundtrip:
+    def test_live_claude_model_adds_new_picker_id_once(self) -> None:
+        pmc.observe_claude_model("claude-opus-5-5")
+        pmc.observe_claude_model("claude-opus-5-5")
+        pmc.observe_claude_model("opus")
+        assert pmc.cached_ids("claude") == ["claude-opus-5-5"]
+
     def test_cached_ids_none_when_no_cache_file(self) -> None:
         assert pmc.cached_ids("gemini") is None
 

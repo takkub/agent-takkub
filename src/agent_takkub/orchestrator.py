@@ -71,6 +71,7 @@ from .lead_inbox import (  # re-exported for test/compat imports; mixin provides
     _system_marker_role,
     _timing_or_none,
     _unwrap_notice_item,
+    done_roles_in_notice,
 )
 from .lead_wait import LeadWaitMixin  # mixin providing takkub-wait methods (#242)
 from .limit_autoresume import AutoResumeMixin  # mixin providing auto-resume methods
@@ -8639,6 +8640,14 @@ class Orchestrator(
                 if not hasattr(self, "_done_unread"):
                     self._done_unread = {}
                 self._done_unread[(project_ns, from_role)] = time.time()
+                if not hasattr(self, "_done_unread_notice"):
+                    self._done_unread_notice = {}
+                self._done_unread_notice[(project_ns, from_role)] = (
+                    self._redact_forwarded_text(
+                        notice, project_ns, hop="done_recovery", from_role=from_role
+                    ),
+                    origin_pane_token,
+                )
                 self._notify_lead(
                     project_ns,
                     notice,
@@ -9553,7 +9562,9 @@ class Orchestrator(
             # legacy call sites, test fixtures) — either shape is searched.
             for b in bodies:
                 text = b[0] if isinstance(b, tuple) else b
-                if isinstance(text, str) and tag.search(text):
+                if isinstance(text, str) and (
+                    tag.search(text) or role_name in done_roles_in_notice(text)
+                ):
                     return True
             return False
 
@@ -9562,7 +9573,10 @@ class Orchestrator(
         if _any_match(getattr(self, "_lead_notify_queue", {}).get(project_ns, ())):
             return True
         for item in getattr(self, "_pending_done_notices", {}).get(project_ns, ()):
-            if isinstance(item, dict) and item.get("role") == role_name:
+            if isinstance(item, dict) and (
+                item.get("role") == role_name
+                or role_name in done_roles_in_notice(item.get("body", ""))
+            ):
                 return True
         return False
 
@@ -9802,40 +9816,46 @@ class Orchestrator(
 
         for entry in getattr(self, "_lead_notify_queue", {}).get(project_ns, ()):
             body, pane_token, live_ts = _unwrap_notice_item(entry)
-            item_role = _notice_role_tag(body) or "system"
-            if role is not None and item_role != role:
-                continue
-            items.append(
-                {
-                    "role": item_role,
-                    "queue": "live",
-                    "body": body,
-                    "origin_confirmed": _origin_confirmed(
-                        item_role if item_role != "system" else None, pane_token, live_ts
-                    ),
-                }
-            )
+            item_roles = done_roles_in_notice(body) or {_notice_role_tag(body) or "system"}
+            for item_role in sorted(item_roles):
+                if role is not None and item_role != role:
+                    continue
+                items.append(
+                    {
+                        "role": item_role,
+                        "queue": "live",
+                        "body": body,
+                        "origin_confirmed": _origin_confirmed(
+                            item_role if item_role != "system" else None, pane_token, live_ts
+                        ),
+                    }
+                )
 
         for item in getattr(self, "_pending_done_notices", {}).get(project_ns, ()):
             if not isinstance(item, dict):
                 continue
-            item_role = item.get("role") or "system"
-            if role is not None and item_role != role:
-                continue
             item_body = item.get("body", "")
-            tagged_role = _notice_role_tag(item_body) or (
-                item_role if item_role != "system" else None
-            )
-            items.append(
-                {
-                    "role": item_role,
-                    "queue": "durable",
-                    "body": item_body,
-                    "origin_confirmed": _origin_confirmed(
-                        tagged_role, item.get("pane_token"), item.get("queued_ts")
-                    ),
-                }
-            )
+            # Spilled live notices are stored with role=system, including
+            # combined digests. Recover every role inside the body so a
+            # role-filtered inbox does not hide its queued report.
+            item_roles = done_roles_in_notice(item_body) or {
+                _notice_role_tag(item_body) or item.get("role") or "system"
+            }
+            for item_role in sorted(item_roles):
+                if role is not None and item_role != role:
+                    continue
+                items.append(
+                    {
+                        "role": item_role,
+                        "queue": "durable",
+                        "body": item_body,
+                        "origin_confirmed": _origin_confirmed(
+                            item_role if item_role != "system" else None,
+                            item.get("pane_token"),
+                            item.get("queued_ts"),
+                        ),
+                    }
+                )
 
         # #586: surface cancelled deliveries in inbox
         delivery_mgr = getattr(self, "_delivery_manager", None)

@@ -202,6 +202,15 @@ class TestDigestClearsUnread:
         assert done_roles_in_notice("[backend done] all good") == {"backend"}
         assert done_roles_in_notice("• [qa] PASS outside a digest") == set()
 
+    def test_digest_acknowledges_reports_already_read_from_inbox(self) -> None:
+        digest = (
+            "📬 [Lead Inbox Digest — 2 updates]\n"
+            "• [backend] (อ่านแล้วผ่าน takkub inbox · 3s ago)\n"
+            "• [reviewer#1] (อ่านแล้วผ่าน takkub inbox · 3s ago)"
+        )
+        assert done_roles_in_notice(digest) == {"backend", "reviewer#1"}
+        assert done_roles_in_notice("[reviewer#1 done] report") == {"reviewer#1"}
+
     def test_mark_delivered_clears_every_digested_role(self) -> None:
         from agent_takkub.orchestrator import Orchestrator
 
