@@ -90,6 +90,8 @@ def needs_spec_confirmation(task: str) -> bool:
     # Explicit units establish business values anywhere in the task. A bare
     # number only counts when it directly follows a business term (allowing a
     # small connector such as "to" in "refund threshold to 14 days").
+    if not domains:
+        return False
     for value in values:
         if re.search(r"(?:%|เปอร์เซ็นต์|ร้อยละ|บาท|฿|\$|\bTHB)\s*$", value.group(), re.IGNORECASE):
             return True

@@ -60,6 +60,13 @@ def test_confirmation_detects_decimal_rates_but_ignores_versions_and_floating_nu
     assert not needs_spec_confirmation("ค่าคอม saas แล้วเลขข้อ 2")
 
 
+def test_confirmation_requires_business_domain_for_percent_unit_values():
+    assert not needs_spec_confirmation("RAM 90%")
+    assert not needs_spec_confirmation("coverage 80%")
+    assert not needs_spec_confirmation("5h 70% left")
+    assert needs_spec_confirmation("ค่าคอม 2.5%")
+
+
 def test_confirmation_digest_binds_exact_task_text():
     assert confirmation_digest("calculate 12%") == confirmation_digest(" calculate 12% ")
     assert confirmation_digest("calculate 12%") != confirmation_digest("calculate 15%")

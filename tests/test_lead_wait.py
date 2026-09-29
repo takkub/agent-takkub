@@ -66,6 +66,14 @@ def _register_state(orch: Orchestrator, role: str, state: str, project: str = PR
 
 
 class TestBeginWait:
+    def test_refused_queued_assignment_is_removed_from_wait_autodetect(self, orch: Orchestrator):
+        orch.note_assign_queued(PROJECT, "backend")
+        assert (PROJECT, "backend") in orch._recent_assign_queue
+
+        orch.forget_assign_queued(PROJECT, "backend")
+
+        assert (PROJECT, "backend") not in orch._recent_assign_queue
+
     def test_explicit_roles_register(self, orch: Orchestrator) -> None:
         _register_working(orch, "backend")
 

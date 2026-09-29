@@ -233,6 +233,86 @@ class TestAsyncSpawnDispatch:
         qapp.processEvents()
         assert orch.assign_calls == [("backend", None, "do x", False, False, "shared")]
 
+    @pytest.mark.parametrize(
+        ("refusal", "next_step"),
+        [
+            (
+                "ยังไม่ได้ assign: ต้องให้ผู้ใช้กดยืนยัน spec (digest abc123) ก่อนส่งงาน",
+                "ยืนยัน spec",
+            ),
+            (
+                "งานนี้ถึงเพดานและยังไม่ได้ assign ซ้ำ: ต้องให้ผู้ใช้ยืนยันในหน้าต่าง cockpit",
+                "ตรวจสถานะงานและกดยืนยัน",
+            ),
+        ],
+    )
+    def test_async_assign_refusal_notifies_lead_after_queued_ack(
+        self, qapp: QCoreApplication, refusal: str, next_step: str
+    ):
+        class _RejectingOrch(_FakeOrch):
+            def __init__(self, refusal_message):
+                super().__init__()
+                self.notices = []
+                self.refusal_message = refusal_message
+                self._recent_assign_queue = {}
+
+            def note_assign_queued(self, project, role):
+                self._recent_assign_queue[(project, role)] = 1
+
+            def forget_assign_queued(self, project, role):
+                self._recent_assign_queue.pop((project, role), None)
+
+            def assign(self, *args, **kwargs):
+                super().assign(*args, **kwargs)
+                return False, self.refusal_message
+
+            def _notify_lead(self, project, message, **kwargs):
+                self.notices.append((project, message, kwargs))
+
+            def _resolve_project(self, project=None):
+                return project or "test-project"
+
+        orch = _RejectingOrch(refusal)
+        srv = CliServer(orch)
+        sock = _FakeSock()
+
+        srv._dispatch(
+            sock,
+            _auth({"cmd": "assign", "role": "backend", "task": "tax 7%", "mode": "pane"}),
+        )
+        assert _replies(sock)[0]["ok"] is True
+        assert orch.notices == []
+
+        qapp.processEvents()
+
+        assert len(orch.notices) == 1
+        assert orch._recent_assign_queue == {}
+        project, message, metadata = orch.notices[0]
+        assert project == "test-project"
+        assert refusal in message
+        assert next_step in message and "assign" in message
+        assert metadata["kind"] == "assign-rejected"
+
+    def test_fix_loop_ceiling_refusal_reaches_cli_before_ack(self, qapp: QCoreApplication):
+        class _CeilingOrch(_FakeOrch):
+            def backlog_for_assign(self, *args, **kwargs):
+                return False, "fix-loop ceiling reached; use --ack-ceiling", ""
+
+        orch = _CeilingOrch()
+        srv = CliServer(orch)
+        sock = _FakeSock()
+
+        srv._dispatch(
+            sock,
+            _auth({"cmd": "assign", "role": "backend", "task": "retry fix", "mode": "pane"}),
+        )
+
+        reply = _replies(sock)[0]
+        assert reply["ok"] is False
+        assert "fix-loop ceiling reached" in reply["msg"]
+        qapp.processEvents()
+        assert orch.assign_calls == []
+
     def test_assign_passes_flags(
         self, qapp: QCoreApplication, monkeypatch: pytest.MonkeyPatch
     ) -> None:
