@@ -399,7 +399,9 @@ _DONE_NOTICE_TAG_RE = re.compile(r"\[([\w][\w#-]*)\s+(?:done|FAILED)\]", re.IGNO
 # digest that had demonstrably landed (prod unirecon 2026-09-22: four roles
 # flagged, four `lead_inbox_digest count=1` events on record).
 _DIGEST_DONE_LINE_RE = re.compile(
-    r"^\s*•\s*(?:\[[^\]\r\n]*\])?\[([\w][\w#-]*)\]\s+(?:done|FAILED|PASS|FAIL|BLOCKED)\b",
+    # #764: `_occurred_stamp` ends with a space ("[10:08:26 · 3s ago] "), so the
+    # stamp and "[role]" are separated by whitespace — `\s*` between them.
+    r"^\s*•\s*(?:\[[^\]\r\n]*\]\s*)?\[([\w][\w#-]*)\]\s+(?:done|FAILED|PASS|FAIL|BLOCKED)\b",
     re.IGNORECASE | re.MULTILINE,
 )
 _DIGEST_READ_LINE_RE = re.compile(

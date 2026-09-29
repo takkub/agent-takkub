@@ -682,6 +682,35 @@ STUCK_PASTE_SUBMIT_AFTER_S = 15.0
 STUCK_PASTE_SUBMIT_COOLDOWN_S = 30.0
 STUCK_PASTE_SUBMIT_MAX = 4
 
+# #763: quiet time before an unsubmitted composer draft with no busy marker counts
+# as stuck (a draft that is still being typed/painted keeps producing output).
+COMPOSER_DRAFT_IDLE_S = 5.0
+
+
+def _composer_draft_idle(pane) -> bool:
+    """True when *pane*'s composer holds an unsubmitted draft, the provider shows
+    no busy marker, and the screen has been quiet for COMPOSER_DRAFT_IDLE_S.
+    Best-effort: any failure (torn-down session, loose test double) is False."""
+    try:
+        session = pane.session
+        if session is None:
+            return False
+        provider = getattr(pane.model, "provider_name", None) or "claude"
+        pending = session.shows_pending_input()
+        busy = session.shows_busy_marker(provider)
+        quiet = session.seconds_since_output()
+        return (
+            isinstance(pending, bool)
+            and pending
+            and isinstance(busy, bool)
+            and not busy
+            and isinstance(quiet, (int, float))
+            and quiet >= COMPOSER_DRAFT_IDLE_S
+        )
+    except Exception:
+        return False
+
+
 # Structural stale-marker detector (#20). A pane that is alive, has produced no
 # output for STALE_MARKER_QUIET_S (a generating CLI streams continuously, so
 # this long a silence means it is NOT mid-generation), and is matched by NO
@@ -10753,6 +10782,12 @@ class Orchestrator(
         ):
             return "idle-at-prompt"
 
+        if base_state == "working" and _composer_draft_idle(pane):
+            # #763: the brief is still an unsubmitted draft in the composer and
+            # nothing is executing — codex reads not-ready with a draft, so the
+            # bare "working" the ledger holds would tell Lead it started.
+            return "stuck:composer"
+
         if base_state == "working":
             return "waiting-delivery" if delivery_unconfirmed else base_state
 
@@ -16131,7 +16166,9 @@ class Orchestrator(
         input clears (submit landed → pane goes busy)."""
         ps = self._ps(key)
         try:
-            stuck = pane.session.is_at_ready_prompt() and pane.session.shows_pending_input()
+            stuck = pane.session.shows_pending_input() and (
+                pane.session.is_at_ready_prompt() or _composer_draft_idle(pane)
+            )
         except Exception:
             stuck = False
         if not stuck:
