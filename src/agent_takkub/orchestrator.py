@@ -264,10 +264,9 @@ HARVEST_HINT_SEC = int(os.environ.get("TAKKUB_HARVEST_HINT_SEC", "600"))
 # see _on_session_cap_exceeded's docstring for why the cockpit never second-
 # guesses that one. 0 = disabled.
 #
-# Claude-only for now: `/compact` is a Claude Code CLI slash command with no
-# confirmed equivalent on codex/gemini/opencode/cursor — a known
-# multi-provider gap, tracked under #103 rather than silently assumed to work
-# everywhere. See _check_proactive_compact's provider gate.
+# Claude teammates use idle-age `/compact`. Codex Lead has a separate cached-
+# input threshold path below. Gemini, OpenCode, and Cursor Lead recovery stays
+# an explicit ProviderSpec capability gap until an equivalent is confirmed.
 #
 # #465 (user directive 2026-09-01): the real TTL is ~1h, not 25min — the old
 # 25min default fired long before the cache was ever at risk, paying the
@@ -1539,6 +1538,9 @@ class Orchestrator(
     # #663: (provider, probed reset_at, verdict, new_reset_at) from the
     # background quota re-probe thread → Qt thread (`_on_quota_reprobed`).
     quotaReprobed = pyqtSignal(str, float, str, float)
+    # Work-discipline prompts are displayed by MainWindow and answered only
+    # by an explicit user click; CLI-provided digest strings are not proof.
+    taskDisciplineConfirmation = pyqtSignal(object)
     paneRequested = pyqtSignal(
         str, str
     )  # role_name, project — main_window adds pane to the matching tab
@@ -1576,6 +1578,8 @@ class Orchestrator(
     # Teammate crossings also emit this after their safe-idle advisory is queued.
     sessionCapNotice = pyqtSignal(str, str, int, int, bool)
     # project_ns, role, prompt, threshold, is_lead
+    taskBudgetNotice = pyqtSignal(str, str, str, int, int)
+    # project_ns, role, reason, elapsed_seconds, task_tokens
     # UI-only idle notice. The routine reminder uses this cockpit-side channel
     # for every provider (#103) instead of writing+Enter into a provider PTY.
     # `escalated` is true only on the one round that also receives the retained
@@ -2696,6 +2700,32 @@ class Orchestrator(
         _log_event("done_subagent", role=role_name, project=project_ns, note=note[:200])
         return True, f"{role_name} subagent reported done"
 
+    def _confirm_task_discipline(
+        self, kind: str, role: str, project: str, task: str, digest: str
+    ) -> bool:
+        """Wait for the cockpit UI's user decision; caller-supplied hashes do not count."""
+        request = {
+            "kind": kind,
+            "role": role,
+            "project": project,
+            "task": task,
+            "digest": digest,
+            "done": threading.Event(),
+            "confirmed": False,
+        }
+        try:
+            signal = self.taskDisciplineConfirmation
+            if self.receivers(signal.signal.encode("utf-8")) < 1:
+                return False
+            signal.emit(request)
+        except Exception:
+            return False
+        # A same-thread slot shows the modal synchronously. IPC worker calls
+        # wait while Qt's main event loop handles the queued confirmation.
+        if not request["done"].wait(300):
+            return False
+        return bool(request["confirmed"])
+
     def assign(
         self,
         role_name: str,
@@ -2719,6 +2749,8 @@ class Orchestrator(
         base_ref: str | None = None,
         scope: str = "auto",
         subagent_fanout: int = 0,
+        spec_confirmation: str | None = None,
+        budget_confirmation: str | None = None,
     ) -> tuple[bool, str]:
         """*subagent_fanout* (#641): N > 1 = this ONE pane must split the task
         across N native subagents of its own CLI (`takkub assign --shards N`
@@ -2753,6 +2785,31 @@ class Orchestrator(
         (`team_preset.set_override`) and prepends a `[system]` notice ahead
         of *task* so the Lead sees it in the same message; ignored for every
         other role (spawning a teammate doesn't change the project's size)."""
+        from .work_discipline import confirmation_digest, needs_spec_confirmation
+
+        if needs_spec_confirmation(task):
+            expected = confirmation_digest(task)
+            if not self._confirm_task_discipline(
+                "spec", role_name, self._resolve_project(project), task, expected
+            ):
+                _log_event(
+                    "task_spec_confirmation_denied",
+                    role=role_name,
+                    project=self._resolve_project(project),
+                    digest=expected,
+                    preview=" ".join(task.split())[:180],
+                )
+                return (
+                    False,
+                    "ยังไม่ได้ assign: ต้องให้ผู้ใช้กดยืนยัน spec ในหน้าต่าง cockpit "
+                    f"(digest {expected}) ก่อนส่งงาน",
+                )
+            _log_event(
+                "task_spec_confirmed",
+                role=role_name,
+                project=self._resolve_project(project),
+                digest=expected,
+            )
         base_role = role_name.split("#", 1)[0].strip().lower()
         from .removed_providers import is_removed_provider, removed_provider_message
 
@@ -2995,6 +3052,39 @@ class Orchestrator(
                 requested_scope if requested_scope in task_scope.SCOPE_TIERS else "normal"
             )
             source = "lead"
+        from .work_discipline import confirmation_digest
+
+        _discipline_task_text = task_scope.strip_budget(task)
+        _discipline_ps = self._ps(f"{role_check_project_ns}::{role_name}")
+        if (
+            getattr(_discipline_ps, "task_budget_halted", False)
+            and getattr(_discipline_ps, "budget_task_text", "") == _discipline_task_text
+        ):
+            expected_resume = confirmation_digest(_discipline_task_text)
+            if not self._confirm_task_discipline(
+                "budget-resume",
+                role_name,
+                role_check_project_ns,
+                _discipline_task_text,
+                expected_resume,
+            ):
+                _log_event(
+                    "task_budget_reassignment_blocked",
+                    role=role_name,
+                    project=role_check_project_ns,
+                    digest=expected_resume,
+                )
+                return (
+                    False,
+                    "งานนี้ถึงเพดานและยังไม่ได้ assign ซ้ำ: ต้องให้ผู้ใช้ตรวจสถานะและกดยืนยัน "
+                    f"ในหน้าต่าง cockpit ก่อน (digest {expected_resume})",
+                )
+            _log_event(
+                "task_budget_reassignment_confirmed",
+                role=role_name,
+                project=role_check_project_ns,
+                digest=expected_resume,
+            )
         task = task_scope.inject_budget(task, resolved_scope)
         # #762: a reassigned pane inherits the failed-attempt ledger of this
         # work item in its brief, whatever provider/role it lands on.
@@ -4199,6 +4289,9 @@ class Orchestrator(
         ps_assign.last_assigned_task_file = task_file
         ps_assign.last_assigned_scope = scope
         ps_assign.backlog_id = self._take_assign_backlog(project_ns, role_name)
+        from . import task_scope as _task_scope
+
+        ps_assign.budget_task_text = _task_scope.strip_budget(task)
         ps_assign.spawn_provider_hops = 0
         ps_assign.done_kept_since = 0.0
         # #484: a fresh assignment always starts undelivered, even when this
@@ -4211,6 +4304,20 @@ class Orchestrator(
         # picks up screenshots captured for THIS task, not a stale one left
         # over from a previous assignment to the same pane (issue #5).
         ps_assign.assign_ts = time.time()
+        ps_assign.task_token_total = 0
+        ps_assign.task_last_usage_marker = None
+        ps_assign.task_budget_halted = False
+        _assigned_pane = self._project_panes(project).get(role_name)
+        _usage_fn = getattr(_assigned_pane, "current_usage", None)
+        _usage = _usage_fn() if callable(_usage_fn) else None
+        if isinstance(_usage, dict) and isinstance(_usage.get("total"), int):
+            ps_assign.task_last_usage_marker = (
+                _usage.get("total"),
+                _usage.get("input"),
+                _usage.get("output"),
+                _usage.get("model"),
+                ps_assign.last_turn_end_ts,
+            )
         # Task Ledger (A7): write-on-assign — every task, not just long ones,
         # so a role that never calls `takkub done` leaves a visible `[~]` row
         # behind. Degrades on failure (never blocks the assign itself).
@@ -12914,6 +13021,7 @@ class Orchestrator(
         # for another QTimer. Runs before the idle-reminder logic so a
         # recover (which closes the pane) doesn't fight with reminder
         # injection on the same pane.
+        self._check_task_work_limits(now)
         self._check_stuck_panes(now)
         self._reap_done_panes(now)
         # #308: independent stuck-tool watchdog — see its own docstring for
@@ -14031,6 +14139,82 @@ class Orchestrator(
             and ps.last_turn_end_ts >= ps.blocked_on_lead_ts
         )
 
+    def _check_task_work_limits(self, now: float) -> None:
+        """Stop assigned work at its configured elapsed/token budget (#655512b2)."""
+        from .work_discipline import cap_reason, task_limits
+
+        for project_name, project_panes in list(self._panes_by_project.items()):
+            for role, pane in list(project_panes.items()):
+                key = f"{project_name}::{role}"
+                ps = self._ps(key)
+                if not getattr(ps, "last_assigned_task", None) or ps.task_budget_halted:
+                    continue
+                started = getattr(ps, "assign_ts", 0.0) or 0.0
+                if started <= 0:
+                    continue
+                scope = getattr(ps, "last_assigned_scope", None) or "normal"
+                limits = task_limits(scope)
+                usage_fn = getattr(pane, "current_usage", None)
+                usage = usage_fn() if callable(usage_fn) else None
+                total = usage.get("total") if isinstance(usage, dict) else None
+                if isinstance(total, int) and total >= 0:
+                    marker = (
+                        total,
+                        usage.get("input"),
+                        usage.get("output"),
+                        usage.get("model"),
+                        getattr(ps, "last_turn_end_ts", None),
+                    )
+                    if marker != ps.task_last_usage_marker:
+                        ps.task_token_total += total
+                        ps.task_last_usage_marker = marker
+                reason = cap_reason(
+                    elapsed_s=max(0.0, now - started),
+                    minutes=limits.minutes,
+                    context_tokens=ps.task_token_total,
+                    token_cap=limits.tokens,
+                )
+                if reason is None:
+                    continue
+                ps.task_budget_halted = True
+                session = getattr(pane, "session", None)
+                try:
+                    if session is not None and getattr(session, "is_alive", False):
+                        session.write("\x03")
+                except Exception:
+                    pass
+                _log_event(
+                    "task_work_budget_exceeded",
+                    project=project_name,
+                    role=role,
+                    provider=getattr(pane, "provider", None),
+                    reason=reason,
+                    elapsed_seconds=round(max(0.0, now - started)),
+                    tokens=ps.task_token_total,
+                    token_cap=limits.tokens,
+                    time_cap_minutes=limits.minutes,
+                )
+                notice = (
+                    f"⏸️ [{role}] cockpit หยุด task อัตโนมัติ: เกินเพดาน {reason} "
+                    f"(เวลา {limits.minutes} นาที / tokens {limits.tokens:,}) · "
+                    "ตรวจผลที่ทำไปและให้ผู้ใช้อนุมัติ scope/เพดานใหม่ก่อน assign ต่อ"
+                )
+                self.taskBudgetNotice.emit(
+                    project_name,
+                    role,
+                    reason,
+                    round(max(0.0, now - started)),
+                    ps.task_token_total,
+                )
+                if role != LEAD.name:
+                    self._notify_lead(
+                        project_name,
+                        notice,
+                        from_role="system",
+                        note="task_work_budget_exceeded",
+                        kind="task-budget-exceeded",
+                    )
+
     def _check_proactive_compact(self, now: float) -> None:
         """Inject `/compact` into a Claude pane that's been continuously idle
         at its ready prompt for PROACTIVE_COMPACT_IDLE_AFTER_S — see that
@@ -14044,12 +14228,11 @@ class Orchestrator(
         currently rate-limited (rate-limited panes can't run `/compact`
         either — it would just join the same stuck queue).
 
-        Claude-only: gated on `effective_provider_for(...) == CLAUDE`. Other
-        providers are skipped without an alternative action — `/compact` has
-        no confirmed equivalent slash command on codex/gemini/opencode/
-        cursor (tracked as a known gap under #103, not silently assumed to
-        work). A pane whose provider changes mid-episode (rare — provider is
-        fixed at spawn) is simply re-evaluated fresh next tick.
+        Claude uses the idle-age policy. Codex Lead additionally compacts
+        once its cached-input sample exceeds `lead_cached_input_tokens`, at
+        a safe idle prompt. Gemini, OpenCode, and Cursor remain explicit
+        ProviderSpec capability gaps; a provider switch is re-evaluated on
+        each tick.
 
         One `/compact` per idle episode: `proactive_compact_sent_ts` is
         compared against `proactive_compact_idle_since`, so a pane that stays
@@ -14112,8 +14295,6 @@ class Orchestrator(
         (cheap best-effort local file read, never a network fetch) and
         reused for every pane in that project this tick.
         """
-        if PROACTIVE_COMPACT_IDLE_AFTER_S <= 0 and PROACTIVE_COMPACT_OVERAGE_IDLE_AFTER_S <= 0:
-            return
         from .limit_status import is_in_overage, load_shared_state
         from .provider_config import CLAUDE, effective_provider_for
         from .user_profile import config_dir_for
@@ -14256,7 +14437,39 @@ class Orchestrator(
                         # Baseline moved — any prior "nothing new" dedupe
                         # value is stale.
                         ps.proactive_compact_skip_logged_bytes = -1
-                    if effective_provider_for(role, project=project_name) != CLAUDE:
+                    _effective_provider = effective_provider_for(role, project=project_name)
+                    if _effective_provider != CLAUDE:
+                        if role == LEAD.name and _effective_provider == "codex":
+                            from .work_discipline import lead_cached_input_threshold
+
+                            _usage_fn = getattr(pane, "current_usage", None)
+                            _usage = _usage_fn() if callable(_usage_fn) else None
+                            _cached = _usage.get("cache_read") if isinstance(_usage, dict) else None
+                            _cached = int(_cached) if isinstance(_cached, (int, float)) else 0
+                            _threshold = lead_cached_input_threshold()
+                            _busy_reason = self._lead_orchestrate_busy_reason(
+                                project_name, project_panes
+                            )
+                            if (
+                                _cached >= _threshold
+                                and _cached > ps.lead_cached_compact_marker
+                                and _busy_reason is None
+                                and not ps.proactive_compact_pending
+                                and not _session_has_draft(sess)
+                            ):
+                                sess.write("/compact")
+                                _delayed_enter(pane, sess, 150)
+                                ps.lead_cached_compact_marker = _cached
+                                ps.proactive_compact_sent_ts = now
+                                ps.proactive_compact_pending = True
+                                _log_event(
+                                    "lead_cached_context_compacted",
+                                    role=role,
+                                    project=project_name,
+                                    provider=_effective_provider,
+                                    cached_input_tokens=_cached,
+                                    threshold=_threshold,
+                                )
                         continue
 
                     # #465: Lead/specialist "not really idle" gates — see the

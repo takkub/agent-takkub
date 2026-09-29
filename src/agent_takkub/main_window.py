@@ -275,6 +275,8 @@ class MainWindow(
         self.orch.leadNotified.connect(self._on_lead_notified)
         self.orch.leadUnavailable.connect(self._on_lead_unavailable)
         self.orch.sessionCapNotice.connect(self._on_session_cap_notice)
+        self.orch.taskBudgetNotice.connect(self._on_task_budget_notice)
+        self.orch.taskDisciplineConfirmation.connect(self._confirm_task_discipline)
         self.orch.idleReminderNotice.connect(self._on_idle_reminder_notice)
         # #715: question cards for the Lead composer (polls the active Lead).
         from .lead_composer_host import LeadQuestionHost
@@ -1192,6 +1194,45 @@ class MainWindow(
         who = "Lead" if is_lead else role
         body = f"{who} context is {prompt:,} tokens (cap {threshold:,}) — /compact when convenient."
         self._status.showMessage(f"⚠ [{project_ns}] {body}", 15_000)
+
+    def _on_task_budget_notice(
+        self, project_ns: str, role: str, reason: str, elapsed_s: int, tokens: int
+    ) -> None:
+        """Tell the owner when the cockpit has stopped a task at its cap."""
+        elapsed = f"{elapsed_s // 60}m"
+        body = (
+            f"[{project_ns}] หยุด task ของ {role} ถึงเพดาน {reason} "
+            f"(เวลา {elapsed}, {tokens:,} tokens) — ต้องตรวจและอนุมัติการทำต่อ"
+        )
+        self._status.showMessage(f"⏸️ {body}", 30_000)
+        if self._tray and QSystemTrayIcon.isSystemTrayAvailable():
+            self._tray.showMessage(
+                "Task budget reached", body, QSystemTrayIcon.MessageIcon.Warning, 10_000
+            )
+
+    def _confirm_task_discipline(self, request: dict) -> None:
+        """Show a human-owned confirmation dialog for risky assignment/resume."""
+        try:
+            kind = request["kind"]
+            title = "Confirm task understanding" if kind == "spec" else "Resume capped task?"
+            heading = (
+                "Review the business rules and numeric values before assigning:"
+                if kind == "spec"
+                else "This task reached its hard budget. Review the task before resuming:"
+            )
+            box = QMessageBox(self)
+            box.setIcon(QMessageBox.Icon.Warning if kind != "spec" else QMessageBox.Icon.Question)
+            box.setWindowTitle(title)
+            box.setText(f"{heading}\n\nProject: {request['project']} · Role: {request['role']}")
+            box.setInformativeText(request["task"])
+            box.setDetailedText(f"Confirmation digest: {request['digest']}")
+            accept = box.addButton("ผู้ใช้ยืนยัน · ดำเนินการ", QMessageBox.ButtonRole.AcceptRole)
+            cancel = box.addButton("ยกเลิก", QMessageBox.ButtonRole.RejectRole)
+            box.setDefaultButton(cancel)
+            box.exec()
+            request["confirmed"] = box.clickedButton() is accept
+        finally:
+            request["done"].set()
 
     def _on_idle_reminder_notice(
         self,

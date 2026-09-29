@@ -1615,6 +1615,31 @@ class TestProactiveIdleCompact:
 
         pane.session.write.assert_called_once_with("/compact")
 
+    def test_codex_lead_compacts_after_cached_input_threshold(
+        self, orch: Orchestrator, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Non-Claude Lead recovery is driven by Codex's cached-input meter."""
+        monkeypatch.setattr(
+            "agent_takkub.provider_config.effective_provider_for",
+            lambda role, project=None: "codex",
+        )
+        monkeypatch.setattr(
+            "agent_takkub.work_discipline.lead_cached_input_threshold", lambda: 10_000
+        )
+        pane = _make_pane(state="active", at_ready_prompt=True)
+        pane.current_usage.return_value = {"cache_read": 10_001, "total": 12_000}
+        pane.session.output_bytes_total = 5_000
+        orch.panes["lead"] = pane
+        events: list[tuple[str, dict]] = []
+        monkeypatch.setattr(orch_mod, "_log_event", lambda ev, **kw: events.append((ev, kw)))
+
+        orch._check_proactive_compact(now=1_000.0)
+
+        pane.session.write.assert_called_once_with("/compact")
+        event = next(kw for ev, kw in events if ev == "lead_cached_context_compacted")
+        assert event["provider"] == "codex"
+        assert event["cached_input_tokens"] == 10_001
+
     def test_freshly_spawned_pane_with_no_output_is_not_compacted(
         self, orch: Orchestrator, monkeypatch: pytest.MonkeyPatch
     ) -> None:

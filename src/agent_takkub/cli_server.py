@@ -994,6 +994,8 @@ class CliServer(QObject):
                             str(req.get("distinct_from", "") or "").strip().lower() or None
                         ),
                         scope=str(req.get("scope", "auto") or "auto"),
+                        spec_confirmation=(str(req.get("spec_confirmation", "") or "") or None),
+                        budget_confirmation=(str(req.get("budget_confirmation", "") or "") or None),
                     )
                     if auto_mode_note:
                         msg = f"{msg}\n[{auto_mode_note}]"
@@ -1050,6 +1052,8 @@ class CliServer(QObject):
                         ),
                         mode=mode,
                         scope=str(req.get("scope", "auto") or "auto"),
+                        spec_confirmation=(str(req.get("spec_confirmation", "") or "") or None),
+                        budget_confirmation=(str(req.get("budget_confirmation", "") or "") or None),
                         subagent_fanout=subagent_fanout_req,
                     )
                     _wt_inputs_fn = getattr(self._orch, "worktree_assign_inputs", None)

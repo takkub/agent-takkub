@@ -1,6 +1,6 @@
 {
   "generated_by": "grimp 3.14",
-  "module_count": 359,
+  "module_count": 360,
   "modules": [
     {
       "module": "agent_takkub",
@@ -807,10 +807,11 @@
         "agent_takkub.user_profile",
         "agent_takkub.vault_graph",
         "agent_takkub.vault_mirror",
+        "agent_takkub.work_discipline",
         "agent_takkub.worktree_manager",
         "agent_takkub.worktree_reuse"
       ],
-      "fan_in": 117,
+      "fan_in": 118,
       "fan_out": 2
     },
     {
@@ -3471,6 +3472,7 @@
         "agent_takkub.user_profile",
         "agent_takkub.vault_mirror",
         "agent_takkub.venv_integrity",
+        "agent_takkub.work_discipline",
         "agent_takkub.worktree_manager",
         "agent_takkub.worktree_reuse"
       ],
@@ -3483,7 +3485,7 @@
         "agent_takkub.user_actions"
       ],
       "fan_in": 6,
-      "fan_out": 66
+      "fan_out": 67
     },
     {
       "module": "agent_takkub.orchestrator_text",
@@ -5803,6 +5805,17 @@
         "agent_takkub.smoke_gate"
       ],
       "fan_in": 4,
+      "fan_out": 1
+    },
+    {
+      "module": "agent_takkub.work_discipline",
+      "imports": [
+        "agent_takkub.config"
+      ],
+      "imported_by": [
+        "agent_takkub.orchestrator"
+      ],
+      "fan_in": 1,
       "fan_out": 1
     },
     {

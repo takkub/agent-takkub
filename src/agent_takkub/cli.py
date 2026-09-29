@@ -1064,6 +1064,8 @@ def cmd_assign(args: argparse.Namespace) -> dict:
                     "ack_ceiling": (getattr(args, "ack_ceiling", None) or "").strip(),
                     "fresh_worktree": bool(getattr(args, "fresh_worktree", False)),
                     "scope": scope,
+                    "spec_confirmation": getattr(args, "spec_confirmation", None),
+                    "budget_confirmation": getattr(args, "budget_confirmation", None),
                 }
             )
         )
@@ -1116,6 +1118,8 @@ def cmd_assign(args: argparse.Namespace) -> dict:
                         "ack_ceiling": (getattr(args, "ack_ceiling", None) or "").strip(),
                         "fresh_worktree": bool(getattr(args, "fresh_worktree", False)),
                         "scope": scope,
+                        "spec_confirmation": getattr(args, "spec_confirmation", None),
+                        "budget_confirmation": getattr(args, "budget_confirmation", None),
                     }
                 )
             )
@@ -1165,6 +1169,8 @@ def cmd_assign(args: argparse.Namespace) -> dict:
                         "ack_ceiling": (getattr(args, "ack_ceiling", None) or "").strip(),
                         "fresh_worktree": bool(getattr(args, "fresh_worktree", False)),
                         "scope": scope,
+                        "spec_confirmation": getattr(args, "spec_confirmation", None),
+                        "budget_confirmation": getattr(args, "budget_confirmation", None),
                     }
                 )
             )
@@ -1225,6 +1231,8 @@ def cmd_assign(args: argparse.Namespace) -> dict:
                 "ack_ceiling": (getattr(args, "ack_ceiling", None) or "").strip(),
                 "fresh_worktree": bool(getattr(args, "fresh_worktree", False)),
                 "scope": scope,
+                "spec_confirmation": getattr(args, "spec_confirmation", None),
+                "budget_confirmation": getattr(args, "budget_confirmation", None),
             }
         )
     )
@@ -5513,6 +5521,18 @@ def build_parser() -> argparse.ArgumentParser:
         "tiny: small fixes/styling (forbids new test files, full suite, or qa-gate); "
         "normal: standard task (verify the change, no new test files); "
         "deep: high risk (schema/auth/payment/infra) — test real logic + allow gate.",
+    )
+    sa.add_argument(
+        "--spec-confirmation",
+        default=None,
+        metavar="HASH",
+        help="legacy field; cannot confirm a task (the cockpit requires a user click)",
+    )
+    sa.add_argument(
+        "--budget-confirmation",
+        default=None,
+        metavar="HASH",
+        help="legacy field; cannot resume a capped task (the cockpit requires a user click)",
     )
     sa.add_argument(
         "--mode",

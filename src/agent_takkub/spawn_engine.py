@@ -877,6 +877,15 @@ class PaneState:
     # can scan the artifacts dir for screenshots newer than the assignment
     # (issue #5 — screenshot evidence auto-attach). 0.0 = never assigned.
     assign_ts: float = 0.0
+    # Per-task hard work limits (#655512b2). Usage samples are deduplicated
+    # by their provider-reported turn totals; unsupported meters are surfaced
+    # in the provider capability matrix and still receive the time ceiling.
+    task_token_total: int = 0
+    task_last_usage_marker: tuple | None = None
+    task_budget_halted: bool = False
+    budget_task_text: str = ""
+    task_spec_confirmation_digest: str = ""
+    lead_cached_compact_marker: int = 0
     # _requires_commit_on_done: warns Lead of uncommitted changes when done() fires
     requires_commit_on_done: bool = False
     # _auto_chain_panes: pane is tagged --auto-chain; done() fires verify-hop when last

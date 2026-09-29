@@ -1266,6 +1266,62 @@ class TestReroutePaneToProvider:
         o._notify_lead.assert_called_once()
         assert "ย้ายไป codex" in o._notify_lead.call_args.args[1]
 
+    def test_quota_watchdog_reroutes_teammate_with_codex_lead_in_isolated_home(
+        self, monkeypatch, tmp_path
+    ) -> None:
+        """Reproduce the non-Claude-Lead case and verify its audit events."""
+        import json
+        from types import SimpleNamespace
+
+        from agent_takkub import config, provider_config, provider_state
+        from agent_takkub import orchestrator as orch_mod
+
+        event_log = tmp_path / "runtime" / "events.log"
+        monkeypatch.setattr(config, "RUNTIME_DIR", event_log.parent)
+        monkeypatch.setattr(orch_mod, "EVENTS_LOG", event_log)
+        monkeypatch.setattr(provider_state, "_QUOTA_PATH", tmp_path / "provider-quota.json")
+        monkeypatch.setattr(provider_config, "_provider_available", lambda _provider: True)
+        monkeypatch.setattr(auto_resume, "is_enabled", lambda: True)
+        monkeypatch.setenv("TAKKUB_EVENTS_LOG_SYNC", "1")
+
+        o = self._orch_with_respawn_hooks()
+        now = time.time()
+        lead = SimpleNamespace(model=SimpleNamespace(provider_name="codex"), state="working")
+        worker = SimpleNamespace(
+            model=SimpleNamespace(provider_name="claude"),
+            session=MagicMock(is_alive=True),
+            state="working",
+            _session_cwd=str(tmp_path),
+        )
+        worker.session.rate_limit_reset_at.return_value = now + 3600
+        worker.session.quota_stall_marker.return_value = "usage limit reached"
+        worker.session.current_model_label.return_value = None
+        worker.session.is_at_limit_choice_modal.return_value = False
+        o._panes_by_project = {"saas_admin_amb": {"lead": lead, "devops": worker}}
+        o._schedule_rate_limit_notice = MagicMock()
+        o._schedule_provider_quota_reset_notice = MagicMock()
+        o._ps("saas_admin_amb::devops").last_assigned_task = "continue the assigned work"
+
+        with (
+            patch("agent_takkub.limit_autoresume._write_progress_marker"),
+            patch(
+                "agent_takkub.limit_autoresume.QTimer.singleShot", side_effect=lambda _ms, fn: fn()
+            ),
+        ):
+            assert o._rate_limit_suppressed("saas_admin_amb", "devops", worker, now)
+            ps = o._ps("saas_admin_amb::devops")
+            ps.limit_confirm_first_attempt_ts = now - auto_resume.CONFIRM_FALLBACK_TIMEOUT_S - 1
+            o._maybe_auto_resume_park("saas_admin_amb", "devops", worker, now)
+
+        rows = [json.loads(line) for line in event_log.read_text(encoding="utf-8").splitlines()]
+        assert any(row["event"] == "rate_limit_detected" for row in rows)
+        rerouted = next(row for row in rows if row["event"] == "pane_quota_rerouted")
+        assert rerouted["role"] == "devops"
+        assert rerouted["from_provider"] == "claude"
+        assert rerouted["to_provider"] == "codex"
+        respawn = next(row for row in rows if row["event"] == "quota_reroute_respawn")
+        assert respawn["ok"] is True
+
     def test_lead_respawn_gets_cross_provider_takeover_context(self) -> None:
         o = self._orch_with_respawn_hooks()
         ps = o._ps("proj::lead")
