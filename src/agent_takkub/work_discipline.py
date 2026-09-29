@@ -18,16 +18,24 @@ DEFAULT_LIMITS = {
     "deep": {"minutes": 360, "tokens": 500_000},
 }
 DEFAULT_LEAD_CACHED_INPUT_TOKENS = 100_000
-_BUSINESS_SPEC = re.compile(
-    r"(?:\b(?:formula|threshold|condition|pricing|business rule|eligibility|"
-    r"calculation|percentage|percent|ratio|commission|tax|fee|discount)\b"
-    r"|(?:สูตร|เงื่อนไข|กฎธุรกิจ|คำนวณ|เปอร์เซ็นต์|ร้อยละ|ราคา|ค่าธรรมเนียม))",
+_BUSINESS_DOMAIN = re.compile(
+    r"\b(?:commission|turnover|pricing|price|tax|fee|discount|payout|"
+    r"business\s+rule|eligibility|refund|deposit|withdrawal|balance|"
+    r"revenue|sales|subtotal|total|formula|calculation)\b"
+    r"|ค่าคอม(?:มิชชั่น)?|คอมมิชชั่น|เปอร์เซ็นต์|ร้อยละ|ภาษี|ราคา|"
+    r"ค่าธรรมเนียม|ส่วนลด|(?<!ต่อ)ยอด(?:ขาย|เงิน|ฝาก|ถอน)?|เงิน|บาท|สูตรคำนวณ",
     re.IGNORECASE,
 )
-_NUMBER = re.compile(
-    r"(?<![\w])(?:\d+(?:[.,]\d+)?%?|\$\s*\d+|"
-    r"\d+\s*(?:ms|sec|seconds?|minutes?|hours?|วัน|บาท))(?![\w])",
-    re.I,
+_BUSINESS_VALUE = re.compile(
+    r"(?<![\w])(?:\d+(?:[.,]\d+)?|\$\s*\d+(?:[.,]\d+)?)"
+    r"(?:\s*%|\s*(?:บาท|dollars?|usd|eur|percent|เปอร์เซ็นต์|ร้อยละ))?"
+    r"(?![\w])|(?:>=|<=|>|<|=|×|\*|÷|/)\s*\d|\d\s*(?:>=|<=|>|<|=|×|\*|÷|/)",
+    re.IGNORECASE,
+)
+_TECHNICAL_VALUE = re.compile(
+    r"(?<![\w])(?:v?\d+(?:\.\d+){1,}|\d+\s*(?:px|ms|s|sec|seconds?|"
+    r"minutes?|hours?|kb|mb|gb|tokens?|files?|rounds?)|\d+:\d+)(?![\w])",
+    re.IGNORECASE,
 )
 
 
@@ -38,9 +46,11 @@ class TaskLimits:
 
 
 def needs_spec_confirmation(task: str) -> bool:
-    """Conservative detector for business rules and numeric constraints."""
-    text = re.sub(r"(?<!\w)#\d+\b", "", task or "")
-    return bool(_NUMBER.search(text) or _BUSINESS_SPEC.search(text))
+    """Only gate numeric/formula rules tied to a business domain."""
+    text = re.sub(r"`[^`]*`|(?<!\w)#\d+\b|(?:[\w./\\-]+\.py:\d+)", " ", task or "")
+    text = re.sub(r"(?:[A-Za-z]:)?[\\/]?(?:[\w.-]+[\\/])+[\w.-]+", " ", text)
+    text = _TECHNICAL_VALUE.sub(" ", text)
+    return bool(_BUSINESS_DOMAIN.search(text) and _BUSINESS_VALUE.search(text))
 
 
 def confirmation_digest(task: str) -> str:

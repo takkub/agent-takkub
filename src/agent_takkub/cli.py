@@ -5512,13 +5512,13 @@ def build_parser() -> argparse.ArgumentParser:
         "--spec-confirmation",
         default=None,
         metavar="HASH",
-        help="confirm the exact task text after presenting its numeric/business rules to the user",
+        help="legacy field; cannot confirm a task (the cockpit requires a user click)",
     )
     sa.add_argument(
         "--budget-confirmation",
         default=None,
         metavar="HASH",
-        help="resume the same task after its hard budget stop, only after user approval",
+        help="legacy field; cannot resume a capped task (the cockpit requires a user click)",
     )
     sa.add_argument(
         "--mode",

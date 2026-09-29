@@ -1538,6 +1538,9 @@ class Orchestrator(
     # #663: (provider, probed reset_at, verdict, new_reset_at) from the
     # background quota re-probe thread → Qt thread (`_on_quota_reprobed`).
     quotaReprobed = pyqtSignal(str, float, str, float)
+    # Work-discipline prompts are displayed by MainWindow and answered only
+    # by an explicit user click; CLI-provided digest strings are not proof.
+    taskDisciplineConfirmation = pyqtSignal(object)
     paneRequested = pyqtSignal(
         str, str
     )  # role_name, project — main_window adds pane to the matching tab
@@ -2685,6 +2688,32 @@ class Orchestrator(
         _log_event("done_subagent", role=role_name, project=project_ns, note=note[:200])
         return True, f"{role_name} subagent reported done"
 
+    def _confirm_task_discipline(
+        self, kind: str, role: str, project: str, task: str, digest: str
+    ) -> bool:
+        """Wait for the cockpit UI's user decision; caller-supplied hashes do not count."""
+        request = {
+            "kind": kind,
+            "role": role,
+            "project": project,
+            "task": task,
+            "digest": digest,
+            "done": threading.Event(),
+            "confirmed": False,
+        }
+        try:
+            signal = self.taskDisciplineConfirmation
+            if self.receivers(signal.signal.encode("utf-8")) < 1:
+                return False
+            signal.emit(request)
+        except Exception:
+            return False
+        # A same-thread slot shows the modal synchronously. IPC worker calls
+        # wait while Qt's main event loop handles the queued confirmation.
+        if not request["done"].wait(300):
+            return False
+        return bool(request["confirmed"])
+
     def assign(
         self,
         role_name: str,
@@ -2748,19 +2777,11 @@ class Orchestrator(
 
         if needs_spec_confirmation(task):
             expected = confirmation_digest(task)
-            prior_spec_digest = ""
-            try:
-                prior_spec_digest = getattr(
-                    self._ps(f"{self._resolve_project(project)}::{role_name}"),
-                    "task_spec_confirmation_digest",
-                    "",
-                )
-            except Exception:
-                pass
-            confirmed = (spec_confirmation or "").strip().lower() == expected
-            if not confirmed and prior_spec_digest != expected:
+            if not self._confirm_task_discipline(
+                "spec", role_name, self._resolve_project(project), task, expected
+            ):
                 _log_event(
-                    "task_spec_confirmation_required",
+                    "task_spec_confirmation_denied",
                     role=role_name,
                     project=self._resolve_project(project),
                     digest=expected,
@@ -2768,16 +2789,9 @@ class Orchestrator(
                 )
                 return (
                     False,
-                    "ต้องยืนยันความเข้าใจก่อน assign: ตรวจตัวเลข/สูตร/เงื่อนไขธุรกิจในงานนี้ "
-                    f"แล้วสรุปกลับให้ผู้ใช้ยืนยัน จากนั้นส่ง --spec-confirmation {expected} "
-                    "พร้อม assign งานเดิมทุกตัวอักษร",
+                    "ยังไม่ได้ assign: ต้องให้ผู้ใช้กดยืนยัน spec ในหน้าต่าง cockpit "
+                    f"(digest {expected}) ก่อนส่งงาน",
                 )
-            try:
-                self._ps(
-                    f"{self._resolve_project(project)}::{role_name}"
-                ).task_spec_confirmation_digest = expected
-            except Exception:
-                pass
             _log_event(
                 "task_spec_confirmed",
                 role=role_name,
@@ -3035,7 +3049,13 @@ class Orchestrator(
             and getattr(_discipline_ps, "budget_task_text", "") == _discipline_task_text
         ):
             expected_resume = confirmation_digest(_discipline_task_text)
-            if (budget_confirmation or "").strip().lower() != expected_resume:
+            if not self._confirm_task_discipline(
+                "budget-resume",
+                role_name,
+                role_check_project_ns,
+                _discipline_task_text,
+                expected_resume,
+            ):
                 _log_event(
                     "task_budget_reassignment_blocked",
                     role=role_name,
@@ -3044,8 +3064,8 @@ class Orchestrator(
                 )
                 return (
                     False,
-                    "งานนี้ถึงเพดานและถูกหยุดแล้ว ต้องรายงานสถานะให้ผู้ใช้ตรวจและรออนุมัติก่อน "
-                    f"จากนั้นจึงส่งงานเดิมซ้ำด้วย --budget-confirmation {expected_resume}",
+                    "งานนี้ถึงเพดานและยังไม่ได้ assign ซ้ำ: ต้องให้ผู้ใช้ตรวจสถานะและกดยืนยัน "
+                    f"ในหน้าต่าง cockpit ก่อน (digest {expected_resume})",
                 )
             _log_event(
                 "task_budget_reassignment_confirmed",

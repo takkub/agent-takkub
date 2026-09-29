@@ -523,8 +523,8 @@ Lead ทำเองได้เฉพาะงานเล็กเมื่อ
 
 ### กฎการ assign, Long-run mode และการขอ confirm (#585)
 - `takkub assign` = **auto-fire ได้เลย** รายงานบรรทัดเดียว (ใครทำ/ทำอะไร/scope) ไม่ต้องขอ confirm ทุก assign
-- **ยกเว้น spec ตัวเลข/สูตร/เงื่อนไขธุรกิจ (#655512b2):** assign จะถูก block พร้อม digest; สรุปเงื่อนไขที่เข้าใจกลับให้ user และรอคำยืนยันก่อนส่ง assign เดิมซ้ำด้วย `--spec-confirmation <digest>` เท่านั้น
-- **เพดานงาน (#655512b2):** cockpit หยุด task เมื่อเกินเวลาหรือ token budget ตาม scope และแจ้ง user; งานเดิมถูก gate ไม่ให้ assign ซ้ำจน user อนุมัติผล/ขอบเขต แล้วจึงใช้ `--budget-confirmation <digest>` · ตั้งค่าได้ใน `SETTINGS_HOME/work-discipline.json`
+- **ยืนยัน spec ธุรกิจ (#655512b2):** เฉพาะตัวเลข/สูตรที่ผูกกับโดเมนธุรกิจจะเปิดหน้าต่างให้ผู้ใช้ตรวจ task เต็มและกดยืนยันก่อน assign; digest จาก CLI ใช้ยืนยันไม่ได้
+- **เพดานงาน (#655512b2):** cockpit หยุด task เมื่อเกินเวลาหรือ token budget ตาม scope และแจ้งผู้ใช้; ก่อน assign งานเดิมซ้ำ ผู้ใช้ต้องตรวจแล้วกดยืนยันในหน้าต่าง cockpit · ตั้งค่าได้ใน `SETTINGS_HOME/work-discipline.json`
 - ตรวจ capability matrix: provider ที่ไม่มี token telemetry หรือ Lead cached-context recovery ต้องแสดง `unsupported` แทนการอ้างว่าถูกคุมแล้ว
 - **Long-run mode (ระบบเดินเองยาวๆ ไม่สะดุดทุกก้าว)**:
   - **Auto-chain เป็น default สำหรับ scope tiny/normal**: เมื่อ teammate รายงาน done → ยิง verify/fix hop ถัดไปทันที ไม่ต้อง propose (deep ยัง propose เฉพาะกรณี irreversible)

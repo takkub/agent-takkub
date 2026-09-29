@@ -2,8 +2,8 @@
 
 The cockpit enforces these controls for every provider:
 
-- `takkub assign` blocks tasks containing numeric constraints or formula/business-rule terms. The Lead must summarize those constraints to the user, wait for an explicit confirmation, then repeat the exact task with `--spec-confirmation <digest>`.
-- Every assignment gets a hard time budget. Claude, Codex, and OpenCode also get a token budget based on observed provider usage samples. A cap sends Ctrl+C, records `task_work_budget_exceeded` in `runtime/events.log`, and alerts the user in the cockpit. The same task cannot be assigned again until the user approves and the Lead passes `--budget-confirmation <digest>`.
+- `takkub assign` blocks numeric business rules (for example, commission/turnover with a percentage or amount). The cockpit shows the full task and waits for the user to click confirm. CLI digest fields cannot satisfy this gate. The same user-click gate applies before reassigning a task stopped at its hard budget.
+- Every assignment gets a hard time budget. Claude, Codex, and OpenCode also get a token budget based on observed provider usage samples. A cap sends Ctrl+C, records `task_work_budget_exceeded` in `runtime/events.log`, and alerts the user in the cockpit. The same task cannot be assigned again until the user approves in the cockpit's confirmation dialog.
 - Quota hits use the existing bounded provider reroute flow. Its audit events are `pane_quota_rerouted` and `quota_reroute_respawn`.
 
 Defaults by scope are tiny 30 minutes / 50k tokens, normal 120 minutes / 200k tokens, and deep 360 minutes / 500k tokens. Adjust per-scope values in `SETTINGS_HOME/work-discipline.json`:

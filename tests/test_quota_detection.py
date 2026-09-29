@@ -274,6 +274,23 @@ class TestRateLimitSuppressedNotifiesImmediately:
         assert ps.quota_marker == "individual quota reached"
         assert ps.quota_provider == "gemini"
 
+    def test_non_claude_lead_does_not_disable_teammate_quota_detection(self) -> None:
+        """A Codex Lead still receives and can act on a teammate's quota hit."""
+        o = _bare_orch_with_notify()
+        now = time.time()
+        pane = _quota_pane(now + 6000)
+        lead = MagicMock()
+        lead.model.provider_name = "codex"
+        o._panes_by_project = {"proj": {"lead": lead, "frontend": pane}}
+        with (
+            patch("agent_takkub.orchestrator.QTimer.singleShot"),
+            patch("agent_takkub.orchestrator._log_event") as log_event,
+        ):
+            assert o._rate_limit_suppressed("proj", "frontend", pane, now) is True
+        assert o._pane_state["proj::frontend"].quota_provider == "gemini"
+        assert any(call.args[0] == "rate_limit_detected" for call in log_event.call_args_list)
+        assert o._notify_lead.call_count == 1
+
     def test_model_downgrade_surfaced_in_notice(self) -> None:
         o = _bare_orch_with_notify()
         now = time.time()

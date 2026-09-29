@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import threading
 from types import SimpleNamespace
 
 from agent_takkub.work_discipline import (
@@ -14,8 +15,30 @@ from agent_takkub.work_discipline import (
 
 def test_spec_confirmation_detects_numeric_and_business_rule_tasks():
     assert needs_spec_confirmation("Set the refund threshold to 14 days")
-    assert needs_spec_confirmation("Implement the eligibility condition for refunds")
+    assert needs_spec_confirmation("Set commission turnover 65 to 3% when payout > 100,000 baht")
+    assert not needs_spec_confirmation("Implement the eligibility condition for refunds")
     assert not needs_spec_confirmation("Fix typo in issue #514")
+
+
+def test_real_task_corpus_ignores_technical_numbers_and_code_spans():
+    # Representative excerpts from the five live task documents named in the
+    # 655512b2 fix brief. Keep their recurring code/version/count syntax here
+    # so CI does not depend on the operator's private runtime directory.
+    corpus = (
+        "ทำ 4 ข้อ · ข้อ 3 จำกัดรอบแก้ pane backend issue #762",
+        "fix รอบ 1 (#762) · test 3 ตัว · backlog_for_assign",
+        "config.py:297, 355 · Codex · DATA_HOME · project skill",
+        "ใบงานยาว (~2.5KB ไทย) · 2 ครั้งติดวันนี้ 09:30 และ 09:31",
+        "worktree wt/backend-1790649023 · 0 commit ahead · --backlog · ต่อยอด fix_loop",
+        "provider_spec.py:1627 v2.1.46 10s 390px 5 files ≤2 rounds `tax 8%`",
+    )
+    assert all(not needs_spec_confirmation(task) for task in corpus)
+
+
+def test_confirmation_detects_numeric_business_rules_but_not_technical_refs():
+    assert needs_spec_confirmation("Update commission handling in provider_spec.py:1627") is False
+    assert needs_spec_confirmation("Change tax to 7% in src/tax.py:1627")
+    assert needs_spec_confirmation("ปรับค่าคอม turnover 65 เป็น 3% เมื่อยอด > 100,000 บาท")
 
 
 def test_confirmation_digest_binds_exact_task_text():
@@ -47,7 +70,7 @@ def test_provider_discipline_gaps_are_visible_in_capability_matrix():
     assert capability_matrix(PROVIDER_REGISTRY["cursor"])["task_token_budget"] == "unsupported"
 
 
-def test_assign_blocks_numbered_work_without_exact_spec_confirmation(monkeypatch):
+def test_assign_does_not_treat_digest_flag_as_user_confirmation(monkeypatch):
     from agent_takkub import orchestrator as orch_mod
     from agent_takkub.orchestrator import Orchestrator
 
@@ -58,12 +81,83 @@ def test_assign_blocks_numbered_work_without_exact_spec_confirmation(monkeypatch
     orch = Orchestrator.__new__(Orchestrator)
     orch._resolve_project = lambda project=None: project or "test-project"
     ok, message = Orchestrator.assign(
-        orch, "backend", None, "Set refund threshold to 14 days", project="test-project"
+        orch,
+        "backend",
+        None,
+        "Set refund threshold to 14 days",
+        project="test-project",
+        spec_confirmation=confirmation_digest("Set refund threshold to 14 days"),
     )
     assert not ok
-    assert "--spec-confirmation" in message
-    assert events[0][0] == "task_spec_confirmation_required"
+    assert "ผู้ใช้" in message
+    assert events[0][0] == "task_spec_confirmation_denied"
     assert events[0][1]["digest"] == confirmation_digest("Set refund threshold to 14 days")
+
+
+def test_cockpit_confirmation_slot_returns_the_users_button_choice(monkeypatch):
+    from agent_takkub import main_window
+
+    class FakeMessageBox:
+        class Icon:
+            Question = 1
+            Warning = 2
+
+        class ButtonRole:
+            AcceptRole = 1
+            RejectRole = 2
+
+        clicked = None
+
+        def __init__(self, _parent):
+            self.buttons = []
+
+        def setIcon(self, _value):
+            pass
+
+        def setWindowTitle(self, _value):
+            pass
+
+        def setText(self, _value):
+            pass
+
+        def setInformativeText(self, value):
+            self.task = value
+
+        def setDetailedText(self, _value):
+            pass
+
+        def addButton(self, label, _role):
+            button = object()
+            self.buttons.append((label, button))
+            return button
+
+        def setDefaultButton(self, _button):
+            pass
+
+        def exec(self):
+            self.clicked = self.buttons[0][1] if self.accept else self.buttons[1][1]
+
+        def clickedButton(self):
+            return self.clicked
+
+    accepted = []
+    for choice in (True, False):
+        FakeMessageBox.accept = choice
+        monkeypatch.setattr(main_window, "QMessageBox", FakeMessageBox)
+        request = {
+            "kind": "spec",
+            "role": "backend",
+            "project": "test-project",
+            "task": "Set tax to 7%",
+            "digest": "digest",
+            "done": threading.Event(),
+            "confirmed": False,
+        }
+        main_window.MainWindow._confirm_task_discipline(object(), request)
+        assert request["done"].is_set()
+        assert request["confirmed"] is choice
+        accepted.append(request["confirmed"])
+    assert accepted == [True, False]
 
 
 def test_task_budget_watchdog_interrupts_and_logs_once(monkeypatch, tmp_path):
