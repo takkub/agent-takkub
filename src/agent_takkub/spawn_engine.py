@@ -760,6 +760,9 @@ class PaneState:
     last_assigned_task_file: str | None = None
     # #585: task scope budget tier ("tiny" | "normal" | "deep")
     last_assigned_scope: str | None = None
+    # #762: backlog card this assignment runs under — the stable work identity
+    # the fix-loop ledger keys failure sequences on (survives role/provider swap).
+    backlog_id: str = ""
     # #641: N > 0 when the current assign is a subagent fan-out (`--shards N`
     # on a non-browser role = ONE pane + N native subagents). Consulted at
     # spawn to allow the CLI's subagent tool for THIS pane only (claude:

@@ -355,6 +355,7 @@ _RUNTIME_DIR_MODULES = (
     "agent_takkub.disk_usage",
     "agent_takkub.project_memory",  # #687 central memory, copies RUNTIME_DIR at import time
     "agent_takkub.backlog",  # #684 project backlog, copies RUNTIME_DIR at import time
+    "agent_takkub.fix_loop",  # #762 fix-loop ledger, copies RUNTIME_DIR at import time
 )
 _EVENTS_LOG_MODULES = (
     "agent_takkub.config",

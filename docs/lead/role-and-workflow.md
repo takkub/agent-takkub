@@ -74,8 +74,7 @@ Teammates: frontend · backend · mobile · devops · qa · reviewer · critic �
 
 ### Long-run mode (ระบบเดินเองยาวๆ ไม่สะดุดทุกก้าว)
 1. **auto-chain เป็น default สำหรับ scope tiny/normal**: done → verify/fix hop ถัดไปยิงเองทันที ไม่ต้อง propose (deep ยังคง propose เฉพาะกรณี irreversible)
-2. **fix loop อัตโนมัติ**: tiny/normal ที่ FAILED → ยิงกลับ role เดิม (หรือตาม signature) เองได้เลย
-   **เพดานกันวน: เรื่องเดียวกัน (รวม fix จาก review) ไม่เกิน 2 รอบ** — รอบ 3 = ship ที่ผ่านแล้ว + เปิด issue ที่เหลือ · re-verify แค่ยืนยัน finding เดิม ห้ามสั่ง reviewer "เจาะเพิ่ม"
+2. **fix loop มีเพดานที่โค้ดบังคับ (#762)**: tiny/normal FAILED → notice นับ `รอบ n/2` (ยัง propose-then-fire ไม่ auto-dispatch) · **รอบ 3 = 🛑 CEILING หยุด แจ้ง user** พร้อมหลักฐาน — ship ที่ผ่านแล้ว + เปิด issue ที่เหลือ · re-verify แค่ยืนยัน finding เดิม · ใช้ `--backlog <id>` เดิมตอน re-assign เพื่อให้ ledger ติด brief · รายละเอียด `docs/lead/fix-loop.md`
 3. **สรุปถึง user ครั้งเดียวตอนจบ batch**: done ระหว่างทางลง digest/audit log ไม่เด้งหา user ทุกใบ (#464)
 4. **Quota-hit reroute (#514) ทำงานจริง**: pane ตันเพราะโควตา orchestrator ย้าย provider ให้เอง ไม่ต้องรอ user
 5. **Lead ห้ามหยุดรอแบบ block** (กฎ #287/#242): ใช้ `takkub wait` เท่านั้น จบ turn ให้ระบบ delivery ปลุก
@@ -84,7 +83,7 @@ Teammates: frontend · backend · mobile · devops · qa · reviewer · critic �
 ### Done-handoff rules
 หลัง `[<role> done] <note>` (fail = `[<role> FAILED] <reason>`):
 - **scope=tiny:** **ห้ามเรียก qa/reviewer** — Lead อ่าน diff เอง สรุปงานแล้วจบได้เลย
-- **scope=tiny/normal fix loop:** ยิง fix loop ต่อเองได้ทันที (auto-chain ไม่ต้องรอ confirm, เพดาน ≤ 2 รอบ)
+- **scope=tiny/normal fix loop:** propose แล้วยิง fix ≤ 2 รอบ/เรื่อง รอบ 3 โค้ดหยุดให้ (#762)
 - **scope=deep:** verify sequence ((มี compose) devops ยก stack -> QA ท้ายสุด) · DEV ยังไม่จบ ห้ามเรียก QA · verify pass -> propose ship (ห้าม push เอง) · verify fail -> propose fix loop
 `classify_failure(note)` suggest role ใน fix-loop (devops > backend > frontend > qa) — เป็น suggestion, Lead ตัดสิน
 
