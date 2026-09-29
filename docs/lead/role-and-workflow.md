@@ -6,9 +6,7 @@
 1. **สรุปงาน (Summary & Plan):** สรุปเป้าหมายและวางแผนงานชัดเจน
 2. **ห้ามแก้ source code เอง:** ห้าม Write/Edit ใต้ project paths/BLOCKED_DIRS เว้นแต่เข้าเกณฑ์ tiny-fix carve-out (#585)
 3. **มอบหมายงาน (`takkub assign`):** ส่งงานให้ specialist เสมอ ทุก provider ใช้กฎเดียวกัน (Claude, Codex, Gemini/agy, OpenCode, Cursor)
-4. **ห้ามสั่ง pane ไปอ่านไฟล์ที่ Lead อ่านแล้ว:** ใส่ข้อสรุปที่ verify แล้วลงใน task spec แทน (Read กิน 64% ของ token ทั้ง session)
-
-Teammates: frontend · backend · mobile · devops · qa · reviewer · critic · gemini · codex · opencode · cursor
+4. **ใบงานทุก provider:** อ่าน `docs/lead/task-brief.md` ก่อน assign · ห้ามสั่ง pane ไปอ่านไฟล์ที่ Lead อ่านแล้ว — ส่งข้อสรุปที่ verify แล้วแทน
 
 **Pointers เอกสารเฉพาะเรื่อง (on-demand):**
 `docs/lead/team-presets.md` · `docs/lead/worktree-isolation.md` · `docs/lead/provider-substitution.md` · `docs/lead/report-publish.md` · `docs/lead/noise-audit.md` · `docs/lead/vault.md` · `docs/lead/multi-project.md` · `docs/lead/effort-and-scanning.md` · `docs/lead/patterns.md` · `docs/lead/cli-reference.md` · `docs/lead/anti-patterns.md`
@@ -67,22 +65,6 @@ Teammates: frontend · backend · mobile · devops · qa · reviewer · critic �
 ### Proposal template (เฉพาะ 3 กรณีข้างบน)
 - **Format:** ตาราง `| Role | Scope | Task | cwd |` (ทุก row ต้องมี Scope tiny/normal/deep และ cwd ห้าม blank) + note (parallel/sequential) + คำถาม confirm พร้อม default
 - **Confirm handling:** "ok/ลุย/go" = fire · "แก้: X→Y" = update รอ confirm · "แก้ X แล้วลุยเลย" = apply + fire · "ไม่เอา" = abort · ห้าม assume คำตอบคลุมเครือ ("เออๆ") ให้ถามซ้ำ
-
----
-
-## ใบงานมาตรฐานก่อน assign (ทุก provider)
-
-Lead ต้องส่งผลลัพธ์ที่ต้องการให้ชัด ไม่ส่งเพียง "แก้ให้ผ่าน" หรือชื่อ issue ลอยๆ ใช้โครงนี้ใน task ทุกใบ (งาน tiny ย่อแต่ยังมีผลลัพธ์และวิธีตรวจ):
-
-1. **Goal / acceptance:** อาการหรือผลลัพธ์ที่ผู้ใช้ต้องการ และสิ่งที่ต้องเห็นเมื่อจบ
-2. **Evidence:** อาการปัจจุบัน, คำสั่ง/ขั้นตอนที่ทำให้เกิด, log หรือ path ที่ตรวจแล้ว; แยกข้อเท็จจริงออกจากสมมติฐาน
-3. **Scope:** cwd, ไฟล์หรือ subsystem ที่เกี่ยวข้อง, สิ่งที่ห้ามแตะ และ dependency ที่ต้องรอ
-4. **Work:** งานที่ role นี้รับผิดชอบและวิธีตรวจที่เล็กที่สุดซึ่งพิสูจน์ผลจริง (รวม OS/provider ที่เสี่ยง)
-5. **Handoff:** ให้รายงานสถานะ สิ่งที่เปลี่ยน หลักฐานการตรวจ และสิ่งที่ยังค้างตามสัญญารายงานที่ระบบแนบในทุก task
-
-**เมื่อสั่งแก้ซ้ำ:** แนบ failure ล่าสุดพร้อมสิ่งที่ลองไปแล้วและผลของแต่ละรอบ; ระบุว่า hypothesis ใหม่ต่างจากรอบก่อนอย่างไร และให้ตรวจ failure เดิมก่อนขยาย scope. ถ้าหลักฐานยังไม่พอ ให้สั่งเก็บหลักฐานเฉพาะจุดก่อนสั่งแก้โค้ด. ถ้าอาการเดิมยังอยู่หลังสองรอบ ให้หยุด auto assign เรื่องเดิม รายงานข้อเท็จจริงและทางเลือกแก่ user; อย่าเปลี่ยน provider เพื่อเริ่มเดาใหม่โดยทิ้งประวัติ.
-
-**รูปแบบสรุปถึง user:** ผลลัพธ์ก่อน (เสร็จ / ยังไม่เสร็จ / ติดอะไร) → หลักฐานที่ตรวจจริง → สิ่งค้างและขั้นตอนถัดไป. ไม่รายงานว่า "ผ่าน" จากการแก้ไฟล์หรือการรัน test อย่างเดียวถ้ายังไม่พิสูจน์พฤติกรรมที่ผู้ใช้ขอ.
 
 ---
 
