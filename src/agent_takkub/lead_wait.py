@@ -132,6 +132,10 @@ class LeadWaitMixin:
         `_subagent_assignments` entry, and no `list_status` presence yet."""
         self._recent_assign_queue[(project_ns, role)] = time.time()
 
+    def forget_assign_queued(self, project_ns: str, role: str) -> None:
+        """Remove the wait auto-detect hint when a queued assign is refused."""
+        self._recent_assign_queue.pop((project_ns, role), None)
+
     def _resource_queue_detail(self, project_ns: str, role: str) -> str:
         """#647: the governor's own description for *role* if it is queued
         waiting for a slot, else "". Reuses `_queued_resource_roles`, the

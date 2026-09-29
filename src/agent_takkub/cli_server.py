@@ -426,6 +426,45 @@ class CliServer(QObject):
             return ""
         return notice_fn(project_ns, role) or ""
 
+    def _run_queued_assign(self, role: str, kwargs: dict) -> None:
+        """Dispatch an already-acknowledged assign and surface late refusals.
+
+        The CLI has replied ``task queued`` before this callback runs, so the
+        caller cannot receive ``assign()``'s eventual ``(False, message)``.
+        Keep all async assign paths on this one notice route.
+        """
+        result = self._orch.assign(role, **kwargs)
+        if not isinstance(result, tuple) or len(result) < 2 or result[0] is not False:
+            return
+        notify = getattr(self._orch, "_notify_lead", None)
+        if not callable(notify):
+            return
+        project = kwargs.get("project")
+        resolve_project = getattr(self._orch, "_resolve_project", None)
+        if callable(resolve_project):
+            try:
+                project = resolve_project(project)
+            except Exception:
+                pass
+        project = project or "default"
+        forget_queued = getattr(self._orch, "forget_assign_queued", None)
+        if callable(forget_queued):
+            forget_queued(project, role)
+        message = str(result[1] or "assign ถูกปฏิเสธ")
+        if "ยืนยัน spec" in message:
+            next_step = "เปิดหน้าต่าง cockpit กดยืนยัน spec แล้วสั่ง assign งานนี้ใหม่"
+        elif "เพดาน" in message and "ยืนยัน" in message:
+            next_step = "ตรวจสถานะงานและกดยืนยันในหน้าต่าง cockpit แล้วสั่ง assign ใหม่"
+        else:
+            next_step = "ทำตามเงื่อนไขที่แจ้งด้านบน แล้วสั่ง assign งานนี้ใหม่"
+        notify(
+            project,
+            f"⚠️ assign ของ {role} ถูกปฏิเสธหลัง CLI ตอบรับคิวแล้ว:\n{message}\nวิธีทำต่อ: {next_step}",
+            from_role=role,
+            note=message[:200],
+            kind="assign-rejected",
+        )
+
     def _on_ready_read(self, sock: QTcpSocket) -> None:
         # Reject connections whose buffered data exceeds the frame cap without a
         # terminating newline — canReadLine() will be False while bytesAvailable()
@@ -1074,7 +1113,7 @@ class CliServer(QObject):
                             except Exception:
                                 inputs = None
                             if not isinstance(inputs, dict) or not inputs:
-                                self._orch.assign(_role, **_kw)
+                                self._run_queued_assign(_role, _kw)
                                 return
 
                             def _create(_inp=inputs):
@@ -1097,7 +1136,8 @@ class CliServer(QObject):
                                         None,
                                         "git worktree add ล้มเหลว (worker) — ใช้ shared cwd แทน",
                                     )
-                                self._orch.assign(_role, worktree_prepared=prepared, **_kw)
+                                _prepared_kw = {**_kw, "worktree_prepared": prepared}
+                                self._run_queued_assign(_role, _prepared_kw)
 
                             self._run_off_thread(_create, _dispatch_prepared)
 
@@ -1105,7 +1145,9 @@ class CliServer(QObject):
                     else:
                         self._fire_staggered(
                             delay,
-                            lambda _role=role, _kw=_assign_kwargs: self._orch.assign(_role, **_kw),
+                            lambda _role=role, _kw=_assign_kwargs: self._run_queued_assign(
+                                _role, _kw
+                            ),
                         )
                     ack_msg = f"task queued for {role} (spawning async, +{delay}ms)"
                     if (role or "").strip().lower() == "reviewer" and mode in {"code", "e2e", "ui"}:
