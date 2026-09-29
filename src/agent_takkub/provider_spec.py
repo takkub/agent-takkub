@@ -183,6 +183,13 @@ class ProviderSpec:
 
     # ─── 5. Context injection strategy ───
     context_strategy: str = "none"
+    # Native SKILL.md discovery dir (auto-trigger from description). With
+    # `native_skill_home_var` set it is relative to that env var's dir in the
+    # pane (codex: $CODEX_HOME/skills); otherwise project-relative (claude:
+    # .claude/skills). None = no verified native dir → AGENTS.md appendix and
+    # a visible gap in `takkub skills effective`. See native_skills.py.
+    native_skill_dir: str | None = None
+    native_skill_home_var: str | None = None
     cheatsheet_filename: str | None = None
     inline_learned_notes: bool = False
     use_file_guards: bool = False
@@ -712,6 +719,7 @@ claude_spec = ProviderSpec(
     install_instructions=(
         "Install Anthropic Claude Code via npm: `npm install -g @anthropic-ai/claude-code`"
     ),
+    native_skill_dir=".claude/skills",
     custom_discovery_fn=_discover_claude,
     autonomy_flags={"default": ["--dangerously-skip-permissions"]},  # spawn_engine.py:1441
     extra_static_args=["--setting-sources", "project,local"],  # spawn_engine.py:1442-1443
@@ -933,6 +941,10 @@ codex_spec = ProviderSpec(
     # #404 window) — enough for a warm-cache MCP boot (measured 2-7s for
     # playwright/chrome-devtools/graft) to have genuinely finished.
     boot_splash_paste_after_s=10.0,
+    # codex >= 0.157 discovers $CODEX_HOME/skills/<name>/SKILL.md natively
+    # (auto-trigger; `.system` is codex's own bundle — never overwritten).
+    native_skill_dir="skills",
+    native_skill_home_var="CODEX_HOME",
     context_strategy="agents_md_file",
     cheatsheet_filename="AGENTS.md",
     inline_learned_notes=False,
@@ -1624,7 +1636,7 @@ def capability_matrix(spec: ProviderSpec) -> dict[str, str]:
     """State of every `CAPABILITY_NAMES` entry for *spec*, derived from its
     flags (see the comment above). `capability_overrides` wins per key."""
     m: dict[str, str] = {}
-    if spec.context_strategy == "append_system_prompt_file":
+    if spec.context_strategy == "append_system_prompt_file" or spec.native_skill_dir:
         m["skills"] = "supported"
     elif spec.context_strategy == "agents_md_file":
         m["skills"] = "partial"  # instruction bridge: no auto-trigger / bundled scripts
