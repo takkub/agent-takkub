@@ -4,6 +4,22 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 
 ## [vNEXT]
 
+### Added (เพิ่ม)
+
+- **บังคับวินัยงานทุก provider (backlog 655512b2):** งานที่มีกฎธุรกิจเป็นตัวเลข (ค่าคอม/%/บาท/ภาษี ฯลฯ) ต้องให้ผู้ใช้กดยืนยัน spec ในหน้าต่าง cockpit ก่อน assign · ทุก task มีเพดานเวลาและ token (tiny 30 นาที/100k · normal 120 นาที/1M · deep 360 นาที/5M ปรับได้ใน `work-discipline.json` ใต้ SETTINGS_HOME) เกินแล้ว Ctrl+C + แจ้งผู้ใช้ + assign ซ้ำต้องให้ผู้ใช้ยืนยัน · นับ token เฉพาะเทิร์นที่เกิดหลัง assign (ไม่นับ cache read) · Codex Lead compact เมื่อ cached input เกินเกณฑ์ · assign ที่ถูกปฏิเสธหลัง CLI ตอบรับคิวแจ้ง Lead ทันที · gap ของ gemini/cursor (ไม่มี token meter) แสดงใน capability matrix
+- **เพดานรอบแก้ถูกบังคับจริง (#762):** ledger ถาวรต่อใบงาน นับต่อข้าม role/provider · ครบเพดาน `takkub assign` ปฏิเสธจนกว่าจะใส่ `--ack-ceiling "<เหตุผล>"` · re-assign ที่ไม่ใส่ `--backlog` ผูกกลับใบเดิม · ประวัติความพยายามแนบไปกับใบงานของ pane ใหม่
+- **skill กลางเรียกใช้แบบ native ใน codex (backlog 82a5bb37):** global skills link เข้า `CODEX_HOME/skills` ที่แยกใต้ DATA_HOME (codex auto-trigger ได้เอง) · project skills ยังเป็น AGENTS.md appendix กันรั่วข้ามโปรเจค · provider ที่ยังไม่รองรับแสดง GAP ใน `takkub skills effective`
+- **fix-loop ใช้ worktree เดิม:** assign `--isolation worktree` ของใบงานเดิมกลับไปใช้ worktree เดิมแทนสร้างใหม่ว่างเปล่า (`--fresh-worktree` บังคับสร้างใหม่)
+
+### Fixed (แก้)
+
+- **ใบงานยาวภาษาไทยค้างในช่องพิมพ์ codex แต่สถานะบอก working (#763):** ตรวจ draft ได้ถูกแม้ตัวแสดงผลตัดสระบน/วรรณยุกต์ · สถานะใหม่ `stuck:composer` · ระบบกด submit ให้เองเมื่อค้าง
+- **Lead ได้ done ซ้ำหลัง ~2 นาที (#764):** digest line ที่มีช่องว่างหลัง timestamp ถูกนับว่าอ่านแล้ว
+- **ย้าย provider ตอนโควตาหมดแล้วได้ผลงานเก่าของ task อื่นติดไป (#765):** Recent summary ของ role แนบเฉพาะบรรทัดที่เกี่ยวกับงานปัจจุบัน
+- **assign role เดียวกันซ้อนกันแล้วใบ backlog สลับ:** ผูกใบตามข้อความงานของแต่ละ request
+- **ตรวจจับกฎธุรกิจทศนิยมได้ถูกต้อง:** ค่าอย่าง `2.5%` และ `3.75 percent` ต้องขอยืนยัน spec ขณะที่เลขเวอร์ชัน `2.1.46` และเลขประกอบในบันทึกงานเทคนิคไม่ทำให้ขึ้นหน้าต่างยืนยัน
+- **deps:** codeql-action 4.38.2 (#759), ruff 0.16.9 (#760)
+
 ## [v2.1.45] - 2026-09-28
 
 ### Fixed (แก้)
