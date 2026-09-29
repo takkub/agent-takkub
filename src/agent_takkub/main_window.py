@@ -275,6 +275,7 @@ class MainWindow(
         self.orch.leadNotified.connect(self._on_lead_notified)
         self.orch.leadUnavailable.connect(self._on_lead_unavailable)
         self.orch.sessionCapNotice.connect(self._on_session_cap_notice)
+        self.orch.taskBudgetNotice.connect(self._on_task_budget_notice)
         self.orch.idleReminderNotice.connect(self._on_idle_reminder_notice)
         # #715: question cards for the Lead composer (polls the active Lead).
         from .lead_composer_host import LeadQuestionHost
@@ -1192,6 +1193,21 @@ class MainWindow(
         who = "Lead" if is_lead else role
         body = f"{who} context is {prompt:,} tokens (cap {threshold:,}) — /compact when convenient."
         self._status.showMessage(f"⚠ [{project_ns}] {body}", 15_000)
+
+    def _on_task_budget_notice(
+        self, project_ns: str, role: str, reason: str, elapsed_s: int, tokens: int
+    ) -> None:
+        """Tell the owner when the cockpit has stopped a task at its cap."""
+        elapsed = f"{elapsed_s // 60}m"
+        body = (
+            f"[{project_ns}] หยุด task ของ {role} ถึงเพดาน {reason} "
+            f"(เวลา {elapsed}, {tokens:,} tokens) — ต้องตรวจและอนุมัติการทำต่อ"
+        )
+        self._status.showMessage(f"⏸️ {body}", 30_000)
+        if self._tray and QSystemTrayIcon.isSystemTrayAvailable():
+            self._tray.showMessage(
+                "Task budget reached", body, QSystemTrayIcon.MessageIcon.Warning, 10_000
+            )
 
     def _on_idle_reminder_notice(
         self,

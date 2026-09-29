@@ -1062,6 +1062,8 @@ def cmd_assign(args: argparse.Namespace) -> dict:
                     "distinct_from": distinct_from,
                     "backlog_id": (getattr(args, "backlog", None) or "").strip(),
                     "scope": scope,
+                    "spec_confirmation": getattr(args, "spec_confirmation", None),
+                    "budget_confirmation": getattr(args, "budget_confirmation", None),
                 }
             )
         )
@@ -1112,6 +1114,8 @@ def cmd_assign(args: argparse.Namespace) -> dict:
                         "distinct_from": distinct_from,
                         "backlog_id": (getattr(args, "backlog", None) or "").strip(),
                         "scope": scope,
+                        "spec_confirmation": getattr(args, "spec_confirmation", None),
+                        "budget_confirmation": getattr(args, "budget_confirmation", None),
                     }
                 )
             )
@@ -1159,6 +1163,8 @@ def cmd_assign(args: argparse.Namespace) -> dict:
                         "distinct_from": distinct_from,
                         "backlog_id": (getattr(args, "backlog", None) or "").strip(),
                         "scope": scope,
+                        "spec_confirmation": getattr(args, "spec_confirmation", None),
+                        "budget_confirmation": getattr(args, "budget_confirmation", None),
                     }
                 )
             )
@@ -1217,6 +1223,8 @@ def cmd_assign(args: argparse.Namespace) -> dict:
                 "distinct_from": distinct_from,
                 "backlog_id": (getattr(args, "backlog", None) or "").strip(),
                 "scope": scope,
+                "spec_confirmation": getattr(args, "spec_confirmation", None),
+                "budget_confirmation": getattr(args, "budget_confirmation", None),
             }
         )
     )
@@ -5499,6 +5507,18 @@ def build_parser() -> argparse.ArgumentParser:
         "tiny: small fixes/styling (forbids new test files, full suite, or qa-gate); "
         "normal: standard task (verify the change, no new test files); "
         "deep: high risk (schema/auth/payment/infra) — test real logic + allow gate.",
+    )
+    sa.add_argument(
+        "--spec-confirmation",
+        default=None,
+        metavar="HASH",
+        help="confirm the exact task text after presenting its numeric/business rules to the user",
+    )
+    sa.add_argument(
+        "--budget-confirmation",
+        default=None,
+        metavar="HASH",
+        help="resume the same task after its hard budget stop, only after user approval",
     )
     sa.add_argument(
         "--mode",
