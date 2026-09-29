@@ -2816,6 +2816,11 @@ class Orchestrator(
         other role (spawning a teammate doesn't change the project's size)."""
         from .work_discipline import confirmation_digest, needs_spec_confirmation
 
+        # #762: bind THIS request's backlog card before anything reads it.
+        try:
+            self.activate_assign_backlog(project, role_name, task)
+        except Exception:  # bare test doubles / storage trouble never block an assign
+            pass
         if needs_spec_confirmation(task):
             expected = confirmation_digest(task)
             if not self._confirm_task_discipline(
@@ -11952,22 +11957,48 @@ class Orchestrator(
             return False, msg, {}
         return True, f"assign [{item['id']}] → {role}: {msg}", {"id": item["id"]}
 
-    # #762: backlog id of the assign that is about to spawn, per (project, base
-    # role). cli_server links the card synchronously, then assign() runs — this
-    # hands the id across without widening assign()'s signature. TTL bounds a
-    # stale entry from an assign that never reached spawn.
+    # #762: backlog id of the assign that is about to spawn. cli_server links
+    # the card synchronously (`backlog_for_assign` → *stash*, keyed by project,
+    # base role AND the request's task text), then assign() runs later. Two
+    # same-role assigns can interleave (stash A, stash B, dispatch A, dispatch
+    # B), so a single per-role slot handed A's card to B. `activate` moves the
+    # card of THIS task into the per-role *active* slot right before the
+    # synchronous spawn path reads it (peek/take). TTL bounds a stale entry
+    # from an assign that never reached spawn.
     _ASSIGN_BACKLOG_TTL_S = 120.0
 
     def _assign_backlog_key(self, project_ns: str, role: str) -> tuple[str, str]:
         return (project_ns, _split_shard(str(role).lower().strip())[0])
 
-    def _stash_assign_backlog(self, project_ns: str, role: str, item_id: str) -> None:
-        if not hasattr(self, "_pending_assign_backlog"):
-            self._pending_assign_backlog = {}
-        self._pending_assign_backlog[self._assign_backlog_key(project_ns, role)] = (
-            item_id,
-            time.time(),
-        )
+    @staticmethod
+    def _assign_task_fp(task: str) -> str:
+        import hashlib
+
+        return hashlib.sha1(" ".join(str(task or "").split()).encode("utf-8")).hexdigest()[:16]
+
+    def _stash_assign_backlog(
+        self, project_ns: str, role: str, item_id: str, task: str = ""
+    ) -> None:
+        if not hasattr(self, "_stashed_assign_backlog"):
+            self._stashed_assign_backlog = {}
+        self._stashed_assign_backlog[
+            (*self._assign_backlog_key(project_ns, role), self._assign_task_fp(task))
+        ] = (item_id, time.time())
+
+    def activate_assign_backlog(self, project: str | None, role: str, task: str) -> str:
+        """Make the card stashed for *this* task the active one for its role
+        (cleared when this task has none, so a foreign card never leaks in);
+        idempotent — the stash entry survives until the spawn consumes it."""
+        pns = self._resolve_project(project)
+        key = self._assign_backlog_key(pns, role)
+        stash = getattr(self, "_stashed_assign_backlog", {})
+        active = self.__dict__.setdefault("_pending_assign_backlog", {})
+        entry = stash.get((*key, self._assign_task_fp(task)))
+        if entry and time.time() - entry[1] <= self._ASSIGN_BACKLOG_TTL_S:
+            active[key] = entry
+            return entry[0]
+        active.pop(key, None)
+        return ""
 
     def _peek_assign_backlog(self, project_ns: str, role: str) -> str:
         entry = getattr(self, "_pending_assign_backlog", {}).get(
@@ -11982,6 +12013,9 @@ class Orchestrator(
         getattr(self, "_pending_assign_backlog", {}).pop(
             self._assign_backlog_key(project_ns, role), None
         )
+        stash = getattr(self, "_stashed_assign_backlog", {})
+        for k in [k for k, v in stash.items() if v[0] == found or time.time() - v[1] > 600]:
+            stash.pop(k, None)
         return found
 
     # #714 ─────────────────────────────────────────────────────────────────
@@ -12050,7 +12084,7 @@ class Orchestrator(
         )
         stash = getattr(self, "_stash_assign_backlog", None)
         if callable(stash):
-            stash(project_ns, role, item["id"])
+            stash(project_ns, role, item["id"], task)
         head = (
             f"📋 backlog [{item['id']}] {item['title']}"
             + (" (สร้างใบให้อัตโนมัติ)" if not backlog_id and is_new else "")

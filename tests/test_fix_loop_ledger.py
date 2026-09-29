@@ -62,7 +62,8 @@ def _assign(orch: Orchestrator, role: str, card: str, task: str, scope: str = "n
     """What cli_server + assign() do for a new dispatch: link the card, then
     seed the pane's per-assignment state from it."""
     _pane(orch, role)
-    orch._stash_assign_backlog(PROJ, role, card)
+    orch._stash_assign_backlog(PROJ, role, card, task)
+    orch.activate_assign_backlog(PROJ, role, task)
     orch._pane_state[_exit_key(PROJ, role)] = PaneState(
         last_assigned_task=task,
         last_assigned_scope=scope,
@@ -160,6 +161,7 @@ def _dispatch(orch: Orchestrator, role: str, task: str, **kw):
     ok, note, cid = orch.backlog_for_assign(PROJ, role, task, **kw)
     if ok:
         _pane(orch, role)
+        orch.activate_assign_backlog(PROJ, role, task)
         orch._pane_state[_exit_key(PROJ, role)] = PaneState(
             last_assigned_task=task,
             backlog_id=orch._take_assign_backlog(PROJ, role),
@@ -218,3 +220,20 @@ def test_unrelated_task_is_not_bound_or_refused(orch) -> None:
         PROJ, "backend", "add pagination to the invoices listing endpoint"
     )
     assert ok and cid2 != cid and "นับความพยายามต่อ" not in note
+
+
+def test_interleaved_same_role_assigns_keep_their_own_card(orch) -> None:
+    """Reviewer replay: stash A, stash B, then dispatch A and B in order —
+    each must get its own card (one per-role slot handed A's to B)."""
+    _, _, ida = orch.backlog_for_assign(PROJ, "backend", "task alpha: fix parser crash")
+    _, _, idb = orch.backlog_for_assign(PROJ, "backend", "task beta: add export endpoint")
+    assert ida and idb and ida != idb
+    for task, want in (
+        ("task beta: add export endpoint", idb),
+        ("task alpha: fix parser crash", ida),
+    ):
+        assert orch.activate_assign_backlog(PROJ, "backend", task) == want
+        assert orch._peek_assign_backlog(PROJ, "backend") == want
+        assert orch._take_assign_backlog(PROJ, "backend") == want
+    assert orch.activate_assign_backlog(PROJ, "backend", "never linked") == ""
+    assert orch._peek_assign_backlog(PROJ, "backend") == ""

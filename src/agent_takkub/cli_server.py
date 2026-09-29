@@ -974,6 +974,9 @@ class CliServer(QObject):
                         backlog_note = b_note if isinstance(b_note, str) else ""
                 if cmd == "assign" and req.get("fresh_worktree") and backlog_note:
                     _forget = getattr(self._orch, "worktree_reuse_forget", None)
+                    _act = getattr(self._orch, "activate_assign_backlog", None)
+                    if callable(_act):
+                        _act(from_project, str(role), str(req.get("task", "") or ""))
                     if callable(_forget):
                         _forget(from_project, str(role))
                 if cmd == "assign" and mode == "subagent":
@@ -1062,6 +1065,9 @@ class CliServer(QObject):
                         # ordinary assign with the prepared worktree.
                         def _staged_worktree_assign(_role=role, _kw=_assign_kwargs):
                             try:
+                                _act = getattr(self._orch, "activate_assign_backlog", None)
+                                if callable(_act):
+                                    _act(_kw["project"], _role, _kw["task"])
                                 inputs = _wt_inputs_fn(
                                     _role, _kw["cwd"], _kw["project"], _kw.get("base_ref")
                                 )
