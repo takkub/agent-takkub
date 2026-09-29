@@ -1062,6 +1062,7 @@ def cmd_assign(args: argparse.Namespace) -> dict:
                     "distinct_from": distinct_from,
                     "backlog_id": (getattr(args, "backlog", None) or "").strip(),
                     "ack_ceiling": (getattr(args, "ack_ceiling", None) or "").strip(),
+                    "fresh_worktree": bool(getattr(args, "fresh_worktree", False)),
                     "scope": scope,
                 }
             )
@@ -1113,6 +1114,7 @@ def cmd_assign(args: argparse.Namespace) -> dict:
                         "distinct_from": distinct_from,
                         "backlog_id": (getattr(args, "backlog", None) or "").strip(),
                         "ack_ceiling": (getattr(args, "ack_ceiling", None) or "").strip(),
+                        "fresh_worktree": bool(getattr(args, "fresh_worktree", False)),
                         "scope": scope,
                     }
                 )
@@ -1161,6 +1163,7 @@ def cmd_assign(args: argparse.Namespace) -> dict:
                         "distinct_from": distinct_from,
                         "backlog_id": (getattr(args, "backlog", None) or "").strip(),
                         "ack_ceiling": (getattr(args, "ack_ceiling", None) or "").strip(),
+                        "fresh_worktree": bool(getattr(args, "fresh_worktree", False)),
                         "scope": scope,
                     }
                 )
@@ -1220,6 +1223,7 @@ def cmd_assign(args: argparse.Namespace) -> dict:
                 "distinct_from": distinct_from,
                 "backlog_id": (getattr(args, "backlog", None) or "").strip(),
                 "ack_ceiling": (getattr(args, "ack_ceiling", None) or "").strip(),
+                "fresh_worktree": bool(getattr(args, "fresh_worktree", False)),
                 "scope": scope,
             }
         )
@@ -5572,6 +5576,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="(#762) the fix-loop ceiling refuses another fix assign of work that "
         "already failed 3x; pass this ONLY after the user approved trying again. "
         "REASON is logged to events.log.",
+    )
+    sa.add_argument(
+        "--fresh-worktree",
+        action="store_true",
+        dest="fresh_worktree",
+        help="with --isolation worktree: force a brand-new worktree even if this role's "
+        "own unmerged worktree for the same --backlog card exists (default = reuse it, "
+        "so a fix-loop re-assign lands where the work is; --base also forces new)",
     )
     sa.add_argument(
         "--distinct-from",

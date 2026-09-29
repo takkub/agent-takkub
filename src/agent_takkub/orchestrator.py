@@ -4486,6 +4486,18 @@ class Orchestrator(
         base_cwd = cwd or default_cwd_for_role(base_role, project=project_ns)
         if not base_cwd:
             return None
+        reuse = None
+        if not base_ref:
+            from . import worktree_reuse
+
+            found = worktree_reuse.find(
+                project_ns,
+                (getattr(self, "_peek_assign_backlog", None) or (lambda *_: ""))(
+                    project_ns, role_name
+                ),
+                base_role,
+            )
+            reuse = found.as_dict() if found else None
         sibling_ports = {
             ps.worktree.get("port", 0)
             for key, ps in getattr(self, "_pane_state", {}).items()
@@ -4498,7 +4510,15 @@ class Orchestrator(
             "ts": int(time.time()),
             "exclude_ports": sibling_ports,
             "base_ref": base_ref,
+            "reuse": reuse,
         }
+
+    def worktree_reuse_forget(self, project: str | None, role: str) -> None:
+        """`assign --fresh-worktree`: drop the remembered worktree of the stashed card."""
+        from . import worktree_reuse
+
+        pns = self._resolve_project(project)
+        worktree_reuse.forget(pns, self._peek_assign_backlog(pns, role), _split_shard(role)[0])
 
     def done_git_inputs(self, from_role: str, project: str | None = None) -> dict | None:
         """(#408) The cheap, main-thread half of `done()`'s git fact gather:
@@ -4618,10 +4638,23 @@ class Orchestrator(
             for key, ps in getattr(self, "_pane_state", {}).items()
             if key.startswith(f"{project_ns}::") and ps.worktree
         } - {0}
+        from . import worktree_reuse
+
+        base_role_wt = _split_shard(role_name)[0]
+        backlog_wt = (getattr(self, "_peek_assign_backlog", None) or (lambda *_: ""))(
+            project_ns, role_name
+        )
+        # Fix-loop re-assign for the same card: land in that role's own
+        # unmerged worktree instead of minting an empty one (--base forces new).
+        reusable = (
+            None if base_ref else worktree_reuse.find(project_ns, backlog_wt, base_role_wt, mgr)
+        )
         if prepared is not None:
             # #408: `git worktree add` already ran off the Qt thread
             # (`worktree_assign_inputs` → cli_server worker → here).
             info, reason = prepared
+        elif reusable is not None:
+            info, reason = reusable, ""
         else:
             info, reason = mgr.create(
                 base_cwd,
@@ -4633,9 +4666,11 @@ class Orchestrator(
             )
         if info is None:
             return _fallback(reason)
+        reused = reusable is not None and reusable.path == info.path
+        worktree_reuse.record(project_ns, backlog_wt, base_role_wt, info)
 
         _log_event(
-            "worktree_created",
+            "worktree_reused" if reused else "worktree_created",
             role=role_name,
             project=project_ns,
             branch=info.branch,
@@ -4658,7 +4693,8 @@ class Orchestrator(
         # `takkub assign` ack string below instead of a separate notice.
         worktree_spawn_note = (
             f" · 🌿 isolated worktree branch `{info.branch}` "
-            f"(build แยก ไม่ชนกับ pane อื่น · merge เป็น proposal ตอน done)"
+            f"({'ใช้ worktree เดิมของใบงานเดียวกันต่อ — งานเก่ายังอยู่ที่นี่' if reused else 'build แยก ไม่ชนกับ pane อื่น'}"
+            f" · merge เป็น proposal ตอน done)"
             f"{linked_note}{env_note}"
         )
         # #444: a fresh `--isolation worktree` cwd is a path Claude Code has
@@ -4692,7 +4728,9 @@ class Orchestrator(
             info.path,
             # Scoped policy override: the pane must commit on ITS OWN branch or
             # finalize can never produce a merge proposal (e2e finding, #81).
-            _append_worktree_hint(task, info.branch, wt_cfg.post_create, info.port),
+            _append_worktree_hint(
+                task, info.branch, () if reused else wt_cfg.post_create, info.port
+            ),
             requires_commit=requires_commit,
             auto_chain=auto_chain,
             shard_total=shard_total,

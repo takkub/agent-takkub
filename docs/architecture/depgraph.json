@@ -1,6 +1,6 @@
 {
   "generated_by": "grimp 3.14",
-  "module_count": 357,
+  "module_count": 358,
   "modules": [
     {
       "module": "agent_takkub",
@@ -295,9 +295,10 @@
         "agent_takkub.cli",
         "agent_takkub.fix_loop",
         "agent_takkub.orchestrator",
-        "agent_takkub.pane_guard"
+        "agent_takkub.pane_guard",
+        "agent_takkub.worktree_reuse"
       ],
-      "fan_in": 5,
+      "fan_in": 6,
       "fan_out": 3
     },
     {
@@ -804,9 +805,10 @@
         "agent_takkub.user_profile",
         "agent_takkub.vault_graph",
         "agent_takkub.vault_mirror",
-        "agent_takkub.worktree_manager"
+        "agent_takkub.worktree_manager",
+        "agent_takkub.worktree_reuse"
       ],
-      "fan_in": 115,
+      "fan_in": 116,
       "fan_out": 2
     },
     {
@@ -3452,7 +3454,8 @@
         "agent_takkub.user_profile",
         "agent_takkub.vault_mirror",
         "agent_takkub.venv_integrity",
-        "agent_takkub.worktree_manager"
+        "agent_takkub.worktree_manager",
+        "agent_takkub.worktree_reuse"
       ],
       "imported_by": [
         "agent_takkub.app",
@@ -3463,7 +3466,7 @@
         "agent_takkub.user_actions"
       ],
       "fan_in": 6,
-      "fan_out": 65
+      "fan_out": 66
     },
     {
       "module": "agent_takkub.orchestrator_text",
@@ -3630,9 +3633,10 @@
         "agent_takkub.project_memory",
         "agent_takkub.project_nav",
         "agent_takkub.role_memory",
-        "agent_takkub.task_ledger"
+        "agent_takkub.task_ledger",
+        "agent_takkub.worktree_reuse"
       ],
-      "fan_in": 6,
+      "fan_in": 7,
       "fan_out": 0
     },
     {
@@ -5801,10 +5805,25 @@
         "agent_takkub.shared_dev_tools",
         "agent_takkub.skill_scan",
         "agent_takkub.spawn_engine",
-        "agent_takkub.user_profile"
+        "agent_takkub.user_profile",
+        "agent_takkub.worktree_reuse"
       ],
-      "fan_in": 13,
+      "fan_in": 14,
       "fan_out": 3
+    },
+    {
+      "module": "agent_takkub.worktree_reuse",
+      "imports": [
+        "agent_takkub.backlog",
+        "agent_takkub.config",
+        "agent_takkub.path_safe",
+        "agent_takkub.worktree_manager"
+      ],
+      "imported_by": [
+        "agent_takkub.orchestrator"
+      ],
+      "fan_in": 1,
+      "fan_out": 4
     }
   ]
 }
