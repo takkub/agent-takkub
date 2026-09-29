@@ -954,12 +954,14 @@ class CliServer(QObject):
                     and callable(_backlog_fn)
                     and str(role).split("#", 1)[0].strip().lower() != "lead"
                 ):
+                    _ack = str(req.get("ack_ceiling", "") or "").strip()
                     try:
                         b_res = _backlog_fn(
                             from_project,
                             str(role),
                             str(req.get("task", "") or ""),
                             (str(req.get("backlog_id", "") or "").strip() or None),
+                            **({"ack_ceiling": _ack} if _ack else {}),
                         )
                     except Exception:
                         # Backlog trouble never blocks the assign itself.

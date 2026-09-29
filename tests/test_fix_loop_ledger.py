@@ -10,7 +10,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 from PyQt6.QtCore import QCoreApplication, QObject
 
-from agent_takkub import fix_loop
+from agent_takkub import backlog, fix_loop
 from agent_takkub import orchestrator as orch_mod
 from agent_takkub.orchestrator import LEAD, Orchestrator, PaneState, _exit_key
 
@@ -32,6 +32,7 @@ def orch(qapp, tmp_path, monkeypatch) -> Orchestrator:
     monkeypatch.setattr(orch_mod, "_resolve_vault_dir", lambda: None)
     monkeypatch.setattr(orch_mod, "active_project", lambda: (PROJ, {}))
     monkeypatch.setattr(fix_loop, "RUNTIME_DIR", tmp_path)
+    monkeypatch.setattr(backlog, "RUNTIME_DIR", tmp_path)
     with patch("agent_takkub.orchestrator.Orchestrator._load_pending_cc", lambda self: None):
         o = Orchestrator.__new__(Orchestrator)
         QObject.__init__(o)
@@ -151,3 +152,69 @@ def test_deep_scope_always_proposes_and_verify_pass_resets(orch) -> None:
     orch.done("qa", note="all green", project=PROJ)
     assert fix_loop.brief_block(PROJ, fix_loop.identity_for("card1", "")) == ""
     assert fix_loop.brief_block(PROJ, fix_loop.identity_for("card2", "")) != ""
+
+
+def _dispatch(orch: Orchestrator, role: str, task: str, **kw):
+    """The real gate a `takkub assign` passes: backlog_for_assign, then the
+    pane state assign() seeds from the card it stashed."""
+    ok, note, cid = orch.backlog_for_assign(PROJ, role, task, **kw)
+    if ok:
+        _pane(orch, role)
+        orch._pane_state[_exit_key(PROJ, role)] = PaneState(
+            last_assigned_task=task,
+            backlog_id=orch._take_assign_backlog(PROJ, role),
+            assign_ts=time.time(),
+            task_id=f"t-{role}-{time.time_ns()}",
+        )
+    return ok, note, cid
+
+
+TASK = "fix the login KeyError token in auth/session.py so sessions persist"
+
+
+def test_ceiling_refuses_assign_then_ack_passes_and_logs(orch, monkeypatch) -> None:
+    events: list[tuple] = []
+    monkeypatch.setattr(orch_mod, "_log_event", lambda name, **kw: events.append((name, kw)))
+    ok, _, cid = _dispatch(orch, "backend", TASK)
+    assert ok
+    for role in ("backend", "frontend", "codex"):
+        _fail(orch, role, FAIL_A)
+        if role != "codex":
+            assert _dispatch(
+                orch, "frontend" if role == "backend" else "codex", TASK, backlog_id=cid
+            )[0]
+    ok, note, _ = orch.backlog_for_assign(PROJ, "backend", "another try", backlog_id=cid)
+    assert not ok and "ceiling" in note and "--ack-ceiling" in note
+    # Read-only diagnosis is never refused.
+    assert orch.backlog_for_assign(PROJ, "reviewer", "find root cause", backlog_id=cid)[0]
+    ok, _, _ = orch.backlog_for_assign(
+        PROJ, "backend", "another try", backlog_id=cid, ack_ceiling="user said go"
+    )
+    assert ok
+    assert any(n == "fix_loop_ceiling_acked" and kw["reason"] == "user said go" for n, kw in events)
+    assert any(n == "fix_loop_assign_refused" for n, _ in events)
+
+
+def test_reassign_without_backlog_flag_keeps_counting(orch) -> None:
+    ok, _, cid = _dispatch(orch, "backend", TASK)
+    _fail(orch, "backend", FAIL_A)
+    # Lead re-assigns with reworded text and NO --backlog: same card, count continues.
+    ok, note, cid2 = _dispatch(orch, "backend", TASK + " (retry)")
+    assert ok and cid2 == cid and "นับความพยายามต่อ" in note
+    n2 = _fail(orch, "backend", FAIL_A)
+    assert "2/2" in n2
+    _dispatch(orch, "backend", TASK + " again")
+    assert "CEILING" in _fail(orch, "backend", FAIL_A)
+    ok, note, _ = orch.backlog_for_assign(PROJ, "backend", TASK + " once more")
+    assert not ok and "ceiling" in note
+
+
+def test_unrelated_task_is_not_bound_or_refused(orch) -> None:
+    ok, _, cid = _dispatch(orch, "backend", TASK)
+    for _i in range(3):
+        _fail(orch, "backend", FAIL_A)
+        _dispatch(orch, "backend", TASK, backlog_id=cid)
+    ok, note, cid2 = orch.backlog_for_assign(
+        PROJ, "backend", "add pagination to the invoices listing endpoint"
+    )
+    assert ok and cid2 != cid and "นับความพยายามต่อ" not in note

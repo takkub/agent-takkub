@@ -32,6 +32,9 @@ _LOCK = threading.Lock()
 # Roles whose clean `done` means "verified" — only these close a sequence (a
 # fixer's own done is the attempt, not the proof it worked).
 VERIFY_ROLES = frozenset({"qa", "reviewer", "critic", "tester", "security"})
+# Read-only diagnosis is the sanctioned way out of a stopped loop, so these
+# roles are never refused at the ceiling.
+CEILING_EXEMPT_ROLES = VERIFY_ROLES | frozenset({"analyst"})
 
 _REF_TAG = re.compile(r"\[ref [^\]]*\]")
 BRIEF_MARK = "## ประวัติความพยายามแก้ก่อนหน้า"
@@ -59,6 +62,20 @@ def identity_for(backlog_id: str | None, task_text: str) -> str:
     text = (lead_owned_text(task_text) or task_text or "").split(BRIEF_MARK)[0]
     norm = _NOISE.sub("", " ".join(text.lower().split()))
     return "task:" + hashlib.sha1(norm.encode("utf-8", "replace")).hexdigest()[:12]
+
+
+def _ref_of(task_text: str) -> str:
+    from .notice_facts import extract_issue_ref
+
+    return extract_issue_ref(task_text) or ""
+
+
+def _task_tokens(task_text: str) -> list[str]:
+    from .notice_facts import lead_owned_text
+
+    text = (lead_owned_text(task_text) or task_text or "").split(BRIEF_MARK)[0]
+    text = _NOISE.sub(" ", text.lower())
+    return sorted({t.strip("./\\-") for t in _WORD.findall(text)} - _STOP)
 
 
 def signature_tokens(note: str) -> list[str]:
@@ -129,7 +146,7 @@ def _render(seq: dict, decision: FixLoopDecision, scope: str, evidence: str) -> 
         text = (
             f"🛑 **FIX-LOOP CEILING** — เรื่องเดียวกันล้มเหลวเป็นครั้งที่ {n} "
             f"(เพดาน {MAX_FIX_LOOP_ATTEMPTS} รอบ, scope={scope}) — "
-            "**ห้าม auto-dispatch / assign fix ซ้ำเรื่องนี้** แจ้ง user ก่อน\n"
+            "**`takkub assign` เรื่องนี้ถูกระบบปฏิเสธจนกว่า user อนุมัติ** แจ้ง user ก่อน\n"
             f"หลักฐานล่าสุด: {evidence}\n"
             f"ความพยายามที่ผ่านมา:\n{prior}\n"
             "ทางวินิจฉัยใหม่ (เลือกอย่างใดอย่างหนึ่ง แล้วให้ user confirm):\n"
@@ -137,7 +154,9 @@ def _render(seq: dict, decision: FixLoopDecision, scope: str, evidence: str) -> 
             "โดยแนบตารางความพยายามข้างบน\n"
             "  • เปลี่ยน role/provider ที่ต่างจากเดิม พร้อม ledger ข้างบนใน brief "
             "(ห้ามเริ่มเดาใหม่จากศูนย์)\n"
-            "  • ตัดขอบเขต/ขอข้อมูลเพิ่มจาก user (log, repro, env จริง)"
+            "  • ตัดขอบเขต/ขอข้อมูลเพิ่มจาก user (log, repro, env จริง)\n"
+            "user อนุมัติให้ลองต่อแล้วเท่านั้น: "
+            '`takkub assign ... --ack-ceiling "<เหตุผลที่ user อนุมัติ>"` (บันทึกลง events.log)'
         )
         return text, True
     if decision.action == "propose":
@@ -163,6 +182,7 @@ def record_failure(
     provider: str = "",
     scope: str = "normal",
     attempt_token: str = "",
+    task_text: str = "",
 ) -> FixLoopOutcome:
     """Count one failed attempt and return the ceiling decision. A repeat
     *attempt_token* (same assignment / same shard group) is one attempt, not
@@ -199,13 +219,18 @@ def record_failure(
         else:
             seq["attempts"].append(row)
         seq["tokens"] = sorted(set(seq["tokens"]) | set(tokens))[:60]
+        if task_text:
+            merged = set(seq.get("task_tokens", [])) | set(_task_tokens(task_text))
+            seq["task_tokens"] = sorted(merged)[:120]
+            seq["ref"] = _ref_of(task_text)
         seq["updated_ts"] = time.time()
+        attempt = len(seq["attempts"])
+        decision = check_fix_loop_ceiling(scope, attempt, failure_signature=_first_line(note, 60))
+        seq["stopped"] = decision.action == "ask_user"
         try:
             _save(project, store)
         except OSError:
             pass  # ledger trouble never blocks the failure notice itself
-    attempt = len(seq["attempts"])
-    decision = check_fix_loop_ceiling(scope, attempt, failure_signature=_first_line(note, 60))
     text, stopped = _render(seq, decision, decision_scope(scope), _first_line(note, 300))
     return FixLoopOutcome(attempt, decision, stopped, text)
 
@@ -248,3 +273,49 @@ def brief_block(project: str, identity: str) -> str:
     for s in seqs:
         parts.append(_render_attempts(s))
     return "\n".join(parts)
+
+
+def match_identity(project: str, task_text: str) -> str:
+    """Identity of an existing failure sequence this (card-less) task text
+    continues — same issue ref, or Jaccard-similar wording — else "". Lets a
+    re-assign without --backlog keep counting instead of restarting at 0."""
+    ref = _ref_of(task_text)
+    toks = _task_tokens(task_text)
+    best_id, best = "", 0.0
+    for s in _load(project)["sequences"].values():
+        if not s.get("attempts"):
+            continue
+        if ref and s.get("ref") == ref:
+            score = 1.0
+        elif toks and s.get("task_tokens"):
+            score = _jaccard(toks, s["task_tokens"])
+            if score < _MATCH_JACCARD:
+                continue
+        else:
+            continue
+        if score > best:
+            best_id, best = s.get("identity", ""), score
+    return best_id
+
+
+def ceiling_refusal(project: str, identity: str, role: str) -> str:
+    """Refusal text when *identity* sits at the tiny/normal ceiling and *role*
+    is a fixer; "" when the assign may proceed (verify/diagnosis roles, deep
+    scope and untouched work are never refused)."""
+    if role in CEILING_EXEMPT_ROLES:
+        return ""
+    hit = [
+        s
+        for s in _load(project)["sequences"].values()
+        if s.get("identity") == identity and s.get("stopped")
+    ]
+    if not hit:
+        return ""
+    seq = max(hit, key=lambda s: s.get("updated_ts", 0))
+    return (
+        f"🛑 assign ถูกปฏิเสธ (fix-loop ceiling, #762): เรื่องนี้ล้มเหลวซ้ำ "
+        f"{len(seq['attempts'])} ครั้งแล้ว (เพดาน {MAX_FIX_LOOP_ATTEMPTS} รอบ)\n"
+        f"ความพยายามที่ผ่านมา:\n{_render_attempts(seq)}\n"
+        "ทางใหม่: assign reviewer/critic แบบ read-only หา root cause, เปลี่ยนวิธี/ขอข้อมูลเพิ่มจาก user "
+        '— หรือถ้า user อนุมัติให้ลองต่อ ใส่ --ack-ceiling "<เหตุผล>"'
+    )

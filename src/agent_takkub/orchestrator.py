@@ -7497,6 +7497,7 @@ class Orchestrator(
                 provider=str(provider),
                 scope=scope or "normal",
                 attempt_token=token,
+                task_text=task_text,
             )
             _log_event(
                 "fix_loop_recorded",
@@ -11805,7 +11806,12 @@ class Orchestrator(
 
     # #714 ─────────────────────────────────────────────────────────────────
     def backlog_for_assign(
-        self, project: str | None, role: str, task: str, backlog_id: str | None = None
+        self,
+        project: str | None,
+        role: str,
+        task: str,
+        backlog_id: str | None = None,
+        ack_ceiling: str | None = None,
     ) -> tuple[bool, str, str]:
         """The mandatory backlog step of every `takkub assign` (#714): link the
         given card, or create one from the task text. Returns
@@ -11815,6 +11821,36 @@ class Orchestrator(
         from . import backlog
 
         project_ns = self._resolve_project(project)
+        rebound = False
+        try:
+            # #762: the fix-loop ceiling is enforced here, before any card is made.
+            from . import fix_loop
+
+            identity = fix_loop.identity_for(backlog_id, task)
+            if not (backlog_id or "").strip():
+                prior = fix_loop.match_identity(project_ns, task)
+                if prior.startswith("backlog:"):
+                    card = backlog.get_item(project_ns, prior[len("backlog:") :])
+                    if card and card.get("status") not in backlog._TERMINAL_STATUSES:
+                        backlog_id, rebound = card["id"], True
+                if prior:
+                    identity = prior
+            refusal = fix_loop.ceiling_refusal(
+                project_ns, identity, _split_shard(str(role).lower().strip())[0]
+            )
+            if refusal:
+                reason = (ack_ceiling or "").strip()
+                _log_event(
+                    "fix_loop_ceiling_acked" if reason else "fix_loop_assign_refused",
+                    role=role,
+                    project=project_ns,
+                    identity=identity,
+                    reason=reason[:200],
+                )
+                if not reason:
+                    return False, refusal, ""
+        except Exception:
+            _log_event("fix_loop_gate_error", role=role, project=project_ns)
         try:
             item, is_new = backlog.ensure_for_assign(project_ns, role, task, backlog_id)
         except ValueError as e:
@@ -11830,12 +11866,15 @@ class Orchestrator(
             item=item["id"],
             auto=not backlog_id,
             new_work=is_new,
+            fix_loop_rebound=rebound,
         )
         stash = getattr(self, "_stash_assign_backlog", None)
         if callable(stash):
             stash(project_ns, role, item["id"])
-        head = f"📋 backlog [{item['id']}] {item['title']}" + (
-            " (สร้างใบให้อัตโนมัติ)" if not backlog_id and is_new else ""
+        head = (
+            f"📋 backlog [{item['id']}] {item['title']}"
+            + (" (สร้างใบให้อัตโนมัติ)" if not backlog_id and is_new else "")
+            + (" (ผูกกับใบเดิมของ fix-loop — นับความพยายามต่อ)" if rebound else "")
         )
         return True, head, item["id"]
 

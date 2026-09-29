@@ -1061,6 +1061,7 @@ def cmd_assign(args: argparse.Namespace) -> dict:
                     "team": team,
                     "distinct_from": distinct_from,
                     "backlog_id": (getattr(args, "backlog", None) or "").strip(),
+                    "ack_ceiling": (getattr(args, "ack_ceiling", None) or "").strip(),
                     "scope": scope,
                 }
             )
@@ -1111,6 +1112,7 @@ def cmd_assign(args: argparse.Namespace) -> dict:
                         "team": team,
                         "distinct_from": distinct_from,
                         "backlog_id": (getattr(args, "backlog", None) or "").strip(),
+                        "ack_ceiling": (getattr(args, "ack_ceiling", None) or "").strip(),
                         "scope": scope,
                     }
                 )
@@ -1158,6 +1160,7 @@ def cmd_assign(args: argparse.Namespace) -> dict:
                         "team": team,
                         "distinct_from": distinct_from,
                         "backlog_id": (getattr(args, "backlog", None) or "").strip(),
+                        "ack_ceiling": (getattr(args, "ack_ceiling", None) or "").strip(),
                         "scope": scope,
                     }
                 )
@@ -1216,6 +1219,7 @@ def cmd_assign(args: argparse.Namespace) -> dict:
                 "team": team,
                 "distinct_from": distinct_from,
                 "backlog_id": (getattr(args, "backlog", None) or "").strip(),
+                "ack_ceiling": (getattr(args, "ack_ceiling", None) or "").strip(),
                 "scope": scope,
             }
         )
@@ -5559,6 +5563,15 @@ def build_parser() -> argparse.ArgumentParser:
         "under a card: without --backlog one is created from the task text "
         "automatically. Starting new work prints the other pending cards — "
         "tell the user about them.",
+    )
+    sa.add_argument(
+        "--ack-ceiling",
+        default=None,
+        metavar="REASON",
+        dest="ack_ceiling",
+        help="(#762) the fix-loop ceiling refuses another fix assign of work that "
+        "already failed 3x; pass this ONLY after the user approved trying again. "
+        "REASON is logged to events.log.",
     )
     sa.add_argument(
         "--distinct-from",
