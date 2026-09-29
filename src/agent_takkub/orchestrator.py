@@ -91,7 +91,6 @@ from .orchestrator_text import (  # re-exported for test/app/main_window imports
     TASK_HANDOFF_THRESHOLD,
     UI_NO_UI_MARKER,
     _append_report_rules_hint,
-    _append_task_execution_contract,
     _append_verify_fail_hint,
     _append_worktree_hint,
     _build_transcript_path,
@@ -3973,7 +3972,6 @@ class Orchestrator(
             task = _rewrite_task_for_codex(task)
         task = _append_verify_fail_hint(task, base_role_a)
         task = _append_report_rules_hint(task)  # #653
-        task = _append_task_execution_contract(task)
         # v2-hardening C (Adaptive Escalation) — a NEW task dispatched to a
         # role whose pane is still alive (pane_is_running, computed above)
         # is being reassigned before its previous task ever closed out: the
