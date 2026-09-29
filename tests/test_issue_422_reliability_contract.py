@@ -133,7 +133,8 @@ class TestCapabilityMatrix:
 
     def test_claude_native_skills_others_partial(self) -> None:
         assert capability_state("claude", "skills") == "supported"
-        for other in ("codex", "gemini", "opencode", "cursor"):
+        assert capability_state("codex", "skills") == "supported"  # $CODEX_HOME/skills
+        for other in ("gemini", "opencode", "cursor"):
             assert capability_state(other, "skills") == "partial", other
 
     def test_resume_follows_the_flag_the_engine_actually_checks(self) -> None:
@@ -169,8 +170,8 @@ class TestCapabilityMatrix:
         findings = check_provider_capabilities()
         assert {f.name for f in findings} == set(PROVIDER_REGISTRY)
         assert all(f.status in (Status.OK, Status.INFO) for f in findings)
-        codex = next(f for f in findings if f.name == "codex")
-        assert "partial: " in codex.detail and "skills" in codex.detail
+        gem = next(f for f in findings if f.name == "gemini")
+        assert "partial: " in gem.detail and "skills" in gem.detail
 
     def test_lead_question_support_and_codex_gap_are_explicit(self) -> None:
         for provider in ("claude", "gemini", "opencode"):
@@ -233,10 +234,11 @@ class TestSkillsCli:
 
     def test_effective_flags_missing_and_provider_bridge(self, skills_world: dict, capsys) -> None:
         args = argparse.Namespace(
-            skills_cmd="effective", project=None, role="backend", provider="codex"
+            skills_cmd="effective", project=None, role="backend", provider="gemini"
         )
         resp = cli.cmd_skills(args)
         out = capsys.readouterr().out
+        assert "GAP" in out
         assert resp["ok"] is False and "ghost" in resp["msg"]
         assert "✓ proj-skill" in out
         assert "✗ ghost" in out

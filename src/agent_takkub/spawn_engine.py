@@ -2791,6 +2791,27 @@ class SpawnEngineMixin:
                     _skill_extra = skill_policy.render_skill_appendix(
                         base_role, _skill_roots_for_project(project_ns), spec.context_strategy
                     )
+                    # Native SKILL.md discovery (codex $CODEX_HOME/skills):
+                    # link the central store; on success the appendix is
+                    # redundant. Any failure keeps the appendix + warns.
+                    from .native_skills import link_native_skills, project_has_skills
+
+                    _nat, _nat_err = link_native_skills(spec, project_ns)
+                    # Only global skills are linked (shared home); project
+                    # skills still need the per-project appendix.
+                    if _nat == "linked" and not project_has_skills(project_ns):
+                        _skill_extra = ""
+                    elif _nat != "not_native":
+                        _log_event(
+                            "provider_capability_fallback",
+                            role=role_name,
+                            project=project_ns,
+                            provider=spec.name,
+                            capability="skills",
+                            state="partial",
+                            fallback="native_link_" + _nat,
+                            errors=_nat_err[:3],
+                        )
                     if _skill_extra:
                         # #422 item 2: this role HAS Skill Matrix skills and
                         # this provider only gets them as instruction text

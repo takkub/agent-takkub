@@ -3561,6 +3561,12 @@ def cmd_skills(args: argparse.Namespace) -> dict:
             continue
         info, scope = entry
         print(f"  ✓ {name}  [{scope}]  {info.path}")
+    if spec is not None:
+        from .native_skills import native_skill_gap
+
+        _gap = native_skill_gap(spec)
+        if _gap:
+            print(f"  ⚠ GAP: {_gap}")
     if spec is not None and skills_state != "supported" and assigned:
         print(
             "  ⚠ provider นี้ได้ skill แบบ instruction-only — "
