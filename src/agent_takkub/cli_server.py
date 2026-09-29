@@ -954,12 +954,14 @@ class CliServer(QObject):
                     and callable(_backlog_fn)
                     and str(role).split("#", 1)[0].strip().lower() != "lead"
                 ):
+                    _ack = str(req.get("ack_ceiling", "") or "").strip()
                     try:
                         b_res = _backlog_fn(
                             from_project,
                             str(role),
                             str(req.get("task", "") or ""),
                             (str(req.get("backlog_id", "") or "").strip() or None),
+                            **({"ack_ceiling": _ack} if _ack else {}),
                         )
                     except Exception:
                         # Backlog trouble never blocks the assign itself.
@@ -970,6 +972,10 @@ class CliServer(QObject):
                             self._reply(sock, ok=False, msg=str(b_note))
                             return
                         backlog_note = b_note if isinstance(b_note, str) else ""
+                if cmd == "assign" and req.get("fresh_worktree") and backlog_note:
+                    _forget = getattr(self._orch, "worktree_reuse_forget", None)
+                    if callable(_forget):
+                        _forget(from_project, str(role))
                 if cmd == "assign" and mode == "subagent":
                     ok, msg = self._orch.assign(
                         role,
@@ -1062,8 +1068,10 @@ class CliServer(QObject):
                                 return
 
                             def _create(_inp=inputs):
-                                from .worktree_manager import WorktreeManager
+                                from .worktree_manager import WorktreeInfo, WorktreeManager
 
+                                if _inp.get("reuse"):
+                                    return WorktreeInfo.from_dict(_inp["reuse"]), ""
                                 return WorktreeManager().create(
                                     _inp["base_cwd"],
                                     _inp["project_ns"],

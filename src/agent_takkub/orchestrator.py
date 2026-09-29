@@ -2510,6 +2510,7 @@ class Orchestrator(
             "provider": parent_provider,
             "capsule": str(capsule_path),
             "scope": scope,
+            "backlog_id": self._take_assign_backlog(project_ns, role_name),
         }
         try:
             from .task_ledger import create_assignment
@@ -2637,7 +2638,18 @@ class Orchestrator(
 
         body = note if failed else self._condense_done_note(note, note, "", session_path)
         notice = (
-            self._build_verify_fail_handoff(role_name, note)
+            self._build_verify_fail_handoff(
+                role_name,
+                note,
+                fix_loop_hook=self._fix_loop_hook(
+                    project_ns,
+                    role_name,
+                    task_text=str(state.get("task") or ""),
+                    backlog_id=str(state.get("backlog_id") or ""),
+                    scope=state.get("scope"),
+                    token=str(state.get("task_id") or ""),
+                ),
+            )
             if failed
             else f"[{role_name} done · subagent] {body}".rstrip()
         )
@@ -2984,6 +2996,21 @@ class Orchestrator(
             )
             source = "lead"
         task = task_scope.inject_budget(task, resolved_scope)
+        # #762: a reassigned pane inherits the failed-attempt ledger of this
+        # work item in its brief, whatever provider/role it lands on.
+        try:
+            from . import fix_loop
+
+            _fl_block = fix_loop.brief_block(
+                role_check_project_ns,
+                fix_loop.identity_for(
+                    self._peek_assign_backlog(role_check_project_ns, role_name), task
+                ),
+            )
+            if _fl_block:
+                task = f"{task}\n\n{_fl_block}"
+        except Exception:
+            _log_event("fix_loop_brief_error", role=role_name, project=role_check_project_ns)
 
         # #585 metric: record scope_assigned and scope_override in events.log (audit only)
         _log_event(
@@ -4171,6 +4198,7 @@ class Orchestrator(
         ps_assign.last_assigned_task = delivery_task
         ps_assign.last_assigned_task_file = task_file
         ps_assign.last_assigned_scope = scope
+        ps_assign.backlog_id = self._take_assign_backlog(project_ns, role_name)
         ps_assign.spawn_provider_hops = 0
         ps_assign.done_kept_since = 0.0
         # #484: a fresh assignment always starts undelivered, even when this
@@ -4458,6 +4486,18 @@ class Orchestrator(
         base_cwd = cwd or default_cwd_for_role(base_role, project=project_ns)
         if not base_cwd:
             return None
+        reuse = None
+        if not base_ref:
+            from . import worktree_reuse
+
+            found = worktree_reuse.find(
+                project_ns,
+                (getattr(self, "_peek_assign_backlog", None) or (lambda *_: ""))(
+                    project_ns, role_name
+                ),
+                base_role,
+            )
+            reuse = found.as_dict() if found else None
         sibling_ports = {
             ps.worktree.get("port", 0)
             for key, ps in getattr(self, "_pane_state", {}).items()
@@ -4470,7 +4510,15 @@ class Orchestrator(
             "ts": int(time.time()),
             "exclude_ports": sibling_ports,
             "base_ref": base_ref,
+            "reuse": reuse,
         }
+
+    def worktree_reuse_forget(self, project: str | None, role: str) -> None:
+        """`assign --fresh-worktree`: drop the remembered worktree of the stashed card."""
+        from . import worktree_reuse
+
+        pns = self._resolve_project(project)
+        worktree_reuse.forget(pns, self._peek_assign_backlog(pns, role), _split_shard(role)[0])
 
     def done_git_inputs(self, from_role: str, project: str | None = None) -> dict | None:
         """(#408) The cheap, main-thread half of `done()`'s git fact gather:
@@ -4590,10 +4638,23 @@ class Orchestrator(
             for key, ps in getattr(self, "_pane_state", {}).items()
             if key.startswith(f"{project_ns}::") and ps.worktree
         } - {0}
+        from . import worktree_reuse
+
+        base_role_wt = _split_shard(role_name)[0]
+        backlog_wt = (getattr(self, "_peek_assign_backlog", None) or (lambda *_: ""))(
+            project_ns, role_name
+        )
+        # Fix-loop re-assign for the same card: land in that role's own
+        # unmerged worktree instead of minting an empty one (--base forces new).
+        reusable = (
+            None if base_ref else worktree_reuse.find(project_ns, backlog_wt, base_role_wt, mgr)
+        )
         if prepared is not None:
             # #408: `git worktree add` already ran off the Qt thread
             # (`worktree_assign_inputs` → cli_server worker → here).
             info, reason = prepared
+        elif reusable is not None:
+            info, reason = reusable, ""
         else:
             info, reason = mgr.create(
                 base_cwd,
@@ -4605,9 +4666,11 @@ class Orchestrator(
             )
         if info is None:
             return _fallback(reason)
+        reused = reusable is not None and reusable.path == info.path
+        worktree_reuse.record(project_ns, backlog_wt, base_role_wt, info)
 
         _log_event(
-            "worktree_created",
+            "worktree_reused" if reused else "worktree_created",
             role=role_name,
             project=project_ns,
             branch=info.branch,
@@ -4630,7 +4693,8 @@ class Orchestrator(
         # `takkub assign` ack string below instead of a separate notice.
         worktree_spawn_note = (
             f" · 🌿 isolated worktree branch `{info.branch}` "
-            f"(build แยก ไม่ชนกับ pane อื่น · merge เป็น proposal ตอน done)"
+            f"({'ใช้ worktree เดิมของใบงานเดียวกันต่อ — งานเก่ายังอยู่ที่นี่' if reused else 'build แยก ไม่ชนกับ pane อื่น'}"
+            f" · merge เป็น proposal ตอน done)"
             f"{linked_note}{env_note}"
         )
         # #444: a fresh `--isolation worktree` cwd is a path Claude Code has
@@ -4664,7 +4728,9 @@ class Orchestrator(
             info.path,
             # Scoped policy override: the pane must commit on ITS OWN branch or
             # finalize can never produce a merge proposal (e2e finding, #81).
-            _append_worktree_hint(task, info.branch, wt_cfg.post_create, info.port),
+            _append_worktree_hint(
+                task, info.branch, () if reused else wt_cfg.post_create, info.port
+            ),
             requires_commit=requires_commit,
             auto_chain=auto_chain,
             shard_total=shard_total,
@@ -7423,13 +7489,80 @@ class Orchestrator(
             f"2. re-assign งานเดิมกลับไปที่ {from_role} ได้เลย ไม่ต้องรอเจ้าของ"
         )
 
+    def _fix_loop_close_on_verify(self, project_ns: str, from_role: str, ps) -> None:
+        """#762: a clean `done` from a verify role closes only the sequences of
+        the work item it verified (a fixer's own done is the attempt, not proof)."""
+        from . import fix_loop
+
+        if _split_shard(from_role)[0] not in fix_loop.VERIFY_ROLES:
+            return
+        try:
+            fix_loop.reset(
+                project_ns, fix_loop.identity_for(ps.backlog_id, ps.last_assigned_task or "")
+            )
+        except Exception:
+            _log_event("fix_loop_reset_error", role=from_role, project=project_ns)
+
+    def _fix_loop_hook(
+        self,
+        project_ns: str,
+        from_role: str,
+        *,
+        task_text: str,
+        backlog_id: str,
+        scope: str | None,
+        token: str,
+    ):
+        """#762: closure for `_build_verify_fail_handoff` that records this
+        failure in the persistent fix-loop ledger. Identity/provider are
+        resolved here so the ledger survives role/provider switches."""
+        from . import fix_loop
+
+        identity = fix_loop.identity_for(backlog_id, task_text)
+        try:
+            from .provider_config import effective_provider_for
+
+            provider = effective_provider_for(_split_shard(from_role)[0], project_ns) or ""
+        except Exception:
+            provider = ""
+
+        def hook(body: str):
+            out = fix_loop.record_failure(
+                project_ns,
+                identity,
+                body,
+                role=from_role,
+                provider=str(provider),
+                scope=scope or "normal",
+                attempt_token=token,
+                task_text=task_text,
+            )
+            _log_event(
+                "fix_loop_recorded",
+                project=project_ns,
+                role=from_role,
+                identity=identity,
+                attempt=out.attempt,
+                stopped=out.stopped,
+                scope=scope or "normal",
+            )
+            return out
+
+        return hook
+
     @staticmethod
-    def _build_verify_fail_handoff(from_role: str, note: str) -> str:
+    def _build_verify_fail_handoff(from_role: str, note: str, fix_loop_hook=None) -> str:
         """Lead-facing prompt when a pane reports `done --fail` (QA/verify failed).
 
         Surfaces the failure and tells Lead to PROPOSE a fix loop — never
         auto-fire. Feedback routing stays human-in-the-loop (propose-then-fire),
         matching the cockpit's safety doctrine.
+
+        *fix_loop_hook* (#762): ``body -> fix_loop.FixLoopOutcome``. Called only
+        once the report is confirmed a real code failure (after the blocked /
+        precondition-mismatch branches) so a blocked prerequisite is never
+        counted as a fix attempt. At the ceiling the proposal is replaced by a
+        STOP notice; below it the attempt counter + prior attempts are shown.
         """
         body = note.strip() or "(no detail given)"
         # #296: BLOCKED before FAILED. A pane that couldn't run because
@@ -7475,8 +7608,19 @@ class Orchestrator(
                 suggest = f"🔎 signature ชี้ไปที่ **{fix_role}** ({why}) — เสนอ route กลับ role นี้ก่อน\n"
         except Exception:
             pass
+        loop_text = ""
+        if fix_loop_hook is not None:
+            try:
+                _loop = fix_loop_hook(body)
+            except Exception:
+                _loop = None
+            if _loop is not None:
+                if _loop.stopped:
+                    return f"[{from_role} FAILED] {body}\n\n{_loop.text}"
+                loop_text = _loop.text + "\n"
         return (
             f"[{from_role} FAILED] {body}\n\n"
+            f"{loop_text}"
             "⚠️ verify/QA รายงาน FAIL — เสนอ fix loop (propose-then-fire, ห้าม auto):\n"
             f"{suggest}"
             "1. อ่าน failure ข้างบน หา root cause\n"
@@ -8342,6 +8486,28 @@ class Orchestrator(
         # and simply computes its own facts fresh in that (rarer) case.
         digest_facts = None
         _worktree_digest_precomputed = None
+        _fl_hook = None
+        if failed:
+            # #762: shard failures of one fan-out are ONE attempt (token =
+            # group generation); otherwise one attempt per assignment.
+            _fl_group = getattr(self, "_shard_groups", {}).get(
+                f"{project_ns}::{_split_shard(from_role)[0]}"
+            )
+            _fl_token = (
+                f"shard-gen-{_fl_group.generation}"
+                if _fl_group is not None and _split_shard(from_role)[1] is not None
+                else str(had_task_id)
+            )
+            _fl_hook = self._fix_loop_hook(
+                project_ns,
+                from_role,
+                task_text=_ps_done.last_assigned_task or "",
+                backlog_id=_ps_done.backlog_id,
+                scope=_assigned_scope,
+                token=_fl_token,
+            )
+        else:
+            self._fix_loop_close_on_verify(project_ns, from_role, _ps_done)
         if failed:
             notice_body = note
             elapsed_since_assign = (time.time() - had_assign_ts) if had_assign_ts else float("inf")
@@ -8394,7 +8560,9 @@ class Orchestrator(
                     # #538: the pane called `--blocked`, but the note names a
                     # concrete file/function — treat it as a real fail so it
                     # gets routed to a fixable role, not "wait for a human".
-                    notice = self._build_verify_fail_handoff(from_role, full_note)
+                    notice = self._build_verify_fail_handoff(
+                        from_role, full_note, fix_loop_hook=_fl_hook
+                    )
                     _log_event(
                         "verify_code_root_cause_despite_blocked_flag",
                         project=project_ns,
@@ -8413,7 +8581,9 @@ class Orchestrator(
                         declared=True,
                     )
             else:
-                notice = self._build_verify_fail_handoff(from_role, f"{ref_tag}{note}")
+                notice = self._build_verify_fail_handoff(
+                    from_role, f"{ref_tag}{note}", fix_loop_hook=_fl_hook
+                )
                 _log_event(
                     "verify_failed", project=project_ns, role=from_role, note=(note or "")[:200]
                 )
@@ -11640,9 +11810,46 @@ class Orchestrator(
             return False, msg, {}
         return True, f"assign [{item['id']}] → {role}: {msg}", {"id": item["id"]}
 
+    # #762: backlog id of the assign that is about to spawn, per (project, base
+    # role). cli_server links the card synchronously, then assign() runs — this
+    # hands the id across without widening assign()'s signature. TTL bounds a
+    # stale entry from an assign that never reached spawn.
+    _ASSIGN_BACKLOG_TTL_S = 120.0
+
+    def _assign_backlog_key(self, project_ns: str, role: str) -> tuple[str, str]:
+        return (project_ns, _split_shard(str(role).lower().strip())[0])
+
+    def _stash_assign_backlog(self, project_ns: str, role: str, item_id: str) -> None:
+        if not hasattr(self, "_pending_assign_backlog"):
+            self._pending_assign_backlog = {}
+        self._pending_assign_backlog[self._assign_backlog_key(project_ns, role)] = (
+            item_id,
+            time.time(),
+        )
+
+    def _peek_assign_backlog(self, project_ns: str, role: str) -> str:
+        entry = getattr(self, "_pending_assign_backlog", {}).get(
+            self._assign_backlog_key(project_ns, role)
+        )
+        if entry and time.time() - entry[1] <= self._ASSIGN_BACKLOG_TTL_S:
+            return entry[0]
+        return ""
+
+    def _take_assign_backlog(self, project_ns: str, role: str) -> str:
+        found = self._peek_assign_backlog(project_ns, role)
+        getattr(self, "_pending_assign_backlog", {}).pop(
+            self._assign_backlog_key(project_ns, role), None
+        )
+        return found
+
     # #714 ─────────────────────────────────────────────────────────────────
     def backlog_for_assign(
-        self, project: str | None, role: str, task: str, backlog_id: str | None = None
+        self,
+        project: str | None,
+        role: str,
+        task: str,
+        backlog_id: str | None = None,
+        ack_ceiling: str | None = None,
     ) -> tuple[bool, str, str]:
         """The mandatory backlog step of every `takkub assign` (#714): link the
         given card, or create one from the task text. Returns
@@ -11652,6 +11859,36 @@ class Orchestrator(
         from . import backlog
 
         project_ns = self._resolve_project(project)
+        rebound = False
+        try:
+            # #762: the fix-loop ceiling is enforced here, before any card is made.
+            from . import fix_loop
+
+            identity = fix_loop.identity_for(backlog_id, task)
+            if not (backlog_id or "").strip():
+                prior = fix_loop.match_identity(project_ns, task)
+                if prior.startswith("backlog:"):
+                    card = backlog.get_item(project_ns, prior[len("backlog:") :])
+                    if card and card.get("status") not in backlog._TERMINAL_STATUSES:
+                        backlog_id, rebound = card["id"], True
+                if prior:
+                    identity = prior
+            refusal = fix_loop.ceiling_refusal(
+                project_ns, identity, _split_shard(str(role).lower().strip())[0]
+            )
+            if refusal:
+                reason = (ack_ceiling or "").strip()
+                _log_event(
+                    "fix_loop_ceiling_acked" if reason else "fix_loop_assign_refused",
+                    role=role,
+                    project=project_ns,
+                    identity=identity,
+                    reason=reason[:200],
+                )
+                if not reason:
+                    return False, refusal, ""
+        except Exception:
+            _log_event("fix_loop_gate_error", role=role, project=project_ns)
         try:
             item, is_new = backlog.ensure_for_assign(project_ns, role, task, backlog_id)
         except ValueError as e:
@@ -11667,9 +11904,15 @@ class Orchestrator(
             item=item["id"],
             auto=not backlog_id,
             new_work=is_new,
+            fix_loop_rebound=rebound,
         )
-        head = f"📋 backlog [{item['id']}] {item['title']}" + (
-            " (สร้างใบให้อัตโนมัติ)" if not backlog_id and is_new else ""
+        stash = getattr(self, "_stash_assign_backlog", None)
+        if callable(stash):
+            stash(project_ns, role, item["id"])
+        head = (
+            f"📋 backlog [{item['id']}] {item['title']}"
+            + (" (สร้างใบให้อัตโนมัติ)" if not backlog_id and is_new else "")
+            + (" (ผูกกับใบเดิมของ fix-loop — นับความพยายามต่อ)" if rebound else "")
         )
         return True, head, item["id"]
 

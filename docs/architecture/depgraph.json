@@ -1,6 +1,6 @@
 {
   "generated_by": "grimp 3.14",
-  "module_count": 357,
+  "module_count": 359,
   "modules": [
     {
       "module": "agent_takkub",
@@ -293,10 +293,12 @@
       "imported_by": [
         "agent_takkub.backlog_dialog",
         "agent_takkub.cli",
+        "agent_takkub.fix_loop",
         "agent_takkub.orchestrator",
-        "agent_takkub.pane_guard"
+        "agent_takkub.pane_guard",
+        "agent_takkub.worktree_reuse"
       ],
-      "fan_in": 4,
+      "fan_in": 6,
       "fan_out": 3
     },
     {
@@ -726,6 +728,7 @@
         "agent_takkub.disk_usage",
         "agent_takkub.doctor",
         "agent_takkub.exec_mode",
+        "agent_takkub.fix_loop",
         "agent_takkub.git_status",
         "agent_takkub.graft_autobuild",
         "agent_takkub.graft_store",
@@ -804,9 +807,10 @@
         "agent_takkub.user_profile",
         "agent_takkub.vault_graph",
         "agent_takkub.vault_mirror",
-        "agent_takkub.worktree_manager"
+        "agent_takkub.worktree_manager",
+        "agent_takkub.worktree_reuse"
       ],
-      "fan_in": 115,
+      "fan_in": 117,
       "fan_out": 2
     },
     {
@@ -2850,6 +2854,21 @@
       "fan_out": 2
     },
     {
+      "module": "agent_takkub.fix_loop",
+      "imports": [
+        "agent_takkub.backlog",
+        "agent_takkub.config",
+        "agent_takkub.notice_facts",
+        "agent_takkub.path_safe",
+        "agent_takkub.task_scope"
+      ],
+      "imported_by": [
+        "agent_takkub.orchestrator"
+      ],
+      "fan_in": 1,
+      "fan_out": 5
+    },
+    {
       "module": "agent_takkub.gemini_helper",
       "imports": [
         "agent_takkub._win_console"
@@ -3305,9 +3324,10 @@
         "agent_takkub.provider_spec"
       ],
       "imported_by": [
+        "agent_takkub.fix_loop",
         "agent_takkub.orchestrator"
       ],
-      "fan_in": 1,
+      "fan_in": 2,
       "fan_out": 1
     },
     {
@@ -3407,6 +3427,7 @@
         "agent_takkub.digest_facts",
         "agent_takkub.disk_usage",
         "agent_takkub.exec_mode",
+        "agent_takkub.fix_loop",
         "agent_takkub.graft_autobuild",
         "agent_takkub.headless_pane",
         "agent_takkub.lead_context",
@@ -3450,7 +3471,8 @@
         "agent_takkub.user_profile",
         "agent_takkub.vault_mirror",
         "agent_takkub.venv_integrity",
-        "agent_takkub.worktree_manager"
+        "agent_takkub.worktree_manager",
+        "agent_takkub.worktree_reuse"
       ],
       "imported_by": [
         "agent_takkub.app",
@@ -3461,7 +3483,7 @@
         "agent_takkub.user_actions"
       ],
       "fan_in": 6,
-      "fan_out": 64
+      "fan_out": 66
     },
     {
       "module": "agent_takkub.orchestrator_text",
@@ -3625,12 +3647,14 @@
       "imports": [],
       "imported_by": [
         "agent_takkub.backlog",
+        "agent_takkub.fix_loop",
         "agent_takkub.project_memory",
         "agent_takkub.project_nav",
         "agent_takkub.role_memory",
-        "agent_takkub.task_ledger"
+        "agent_takkub.task_ledger",
+        "agent_takkub.worktree_reuse"
       ],
-      "fan_in": 5,
+      "fan_in": 7,
       "fan_out": 0
     },
     {
@@ -5421,12 +5445,13 @@
       "imports": [],
       "imported_by": [
         "agent_takkub.decide",
+        "agent_takkub.fix_loop",
         "agent_takkub.orchestrator",
         "agent_takkub.orchestrator_text",
         "agent_takkub.routing_planner",
         "agent_takkub.task_ledger"
       ],
-      "fan_in": 5,
+      "fan_in": 6,
       "fan_out": 0
     },
     {
@@ -5801,10 +5826,25 @@
         "agent_takkub.shared_dev_tools",
         "agent_takkub.skill_scan",
         "agent_takkub.spawn_engine",
-        "agent_takkub.user_profile"
+        "agent_takkub.user_profile",
+        "agent_takkub.worktree_reuse"
       ],
-      "fan_in": 14,
+      "fan_in": 15,
       "fan_out": 3
+    },
+    {
+      "module": "agent_takkub.worktree_reuse",
+      "imports": [
+        "agent_takkub.backlog",
+        "agent_takkub.config",
+        "agent_takkub.path_safe",
+        "agent_takkub.worktree_manager"
+      ],
+      "imported_by": [
+        "agent_takkub.orchestrator"
+      ],
+      "fan_in": 1,
+      "fan_out": 4
     }
   ]
 }
