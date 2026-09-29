@@ -129,6 +129,7 @@ def _assistant(model: str, inp: int, cc: int, cr: int, out: int) -> str:
     return json.dumps(
         {
             "type": "assistant",
+            "uuid": f"msg-{model}",
             "message": {
                 "model": model,
                 "usage": {
@@ -162,6 +163,7 @@ class TestReadLastUsage:
         assert u["prompt"] == 150  # 100 + 20 + 30
         assert u["total"] == 157
         assert u["output"] == 7
+        assert u["task_turn_id"] == "msg-claude-b"
 
     def test_tail_fast_path_large_file(self, tmp_path: pathlib.Path) -> None:
         f = tmp_path / "big.jsonl"

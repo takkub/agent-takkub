@@ -393,7 +393,7 @@ def read_opencode_token_usage(db_path: Path, session_id: str) -> dict | None:
         cur = conn.cursor()
         cur.execute(
             """
-            SELECT data FROM message
+            SELECT id, data FROM message
             WHERE session_id = ? AND json_extract(data, '$.role') = 'assistant'
             ORDER BY time_created DESC LIMIT 1
             """,
@@ -435,6 +435,7 @@ def read_opencode_token_usage(db_path: Path, session_id: str) -> dict | None:
         "prompt": prompt,
         "total": prompt + out,
         "limit": None,
+        "task_turn_id": str(row["id"]),
     }
 
 

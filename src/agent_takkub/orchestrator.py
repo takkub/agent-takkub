@@ -2744,7 +2744,7 @@ class Orchestrator(
         }
         try:
             signal = self.taskDisciplineConfirmation
-            if self.receivers(signal.signal.encode("utf-8")) < 1:
+            if self.receivers(signal) < 1:
                 return False
             signal.emit(request)
         except Exception:
@@ -4345,7 +4345,7 @@ class Orchestrator(
                 _usage.get("input"),
                 _usage.get("output"),
                 _usage.get("model"),
-                ps_assign.last_turn_end_ts,
+                _usage.get("task_turn_id"),
             )
         # Task Ledger (A7): write-on-assign — every task, not just long ones,
         # so a role that never calls `takkub done` leaves a visible `[~]` row
@@ -14176,7 +14176,7 @@ class Orchestrator(
 
     def _check_task_work_limits(self, now: float) -> None:
         """Stop assigned work at its configured elapsed/token budget (#655512b2)."""
-        from .work_discipline import cap_reason, task_limits
+        from .work_discipline import cap_reason, task_limits, task_turn_tokens
 
         for project_name, project_panes in list(self._panes_by_project.items()):
             for role, pane in list(project_panes.items()):
@@ -14198,10 +14198,17 @@ class Orchestrator(
                         usage.get("input"),
                         usage.get("output"),
                         usage.get("model"),
-                        getattr(ps, "last_turn_end_ts", None),
+                        usage.get("task_turn_id"),
                     )
                     if marker != ps.task_last_usage_marker:
-                        ps.task_token_total += total
+                        # current_usage() is a latest-turn/context snapshot for
+                        # every meter. The first sample after assignment may be
+                        # a resumed session's old turn, so establish a baseline
+                        # and only count subsequent completed turns.
+                        if ps.task_last_usage_marker is not None:
+                            turn_tokens = task_turn_tokens(getattr(pane, "provider", None), usage)
+                            if turn_tokens is not None:
+                                ps.task_token_total += turn_tokens
                         ps.task_last_usage_marker = marker
                 reason = cap_reason(
                     elapsed_s=max(0.0, now - started),
@@ -14211,13 +14218,15 @@ class Orchestrator(
                 )
                 if reason is None:
                     continue
-                ps.task_budget_halted = True
                 session = getattr(pane, "session", None)
                 try:
-                    if session is not None and getattr(session, "is_alive", False):
-                        session.write("\x03")
+                    if session is None or not getattr(session, "is_alive", False):
+                        continue
+                    if session.write("\x03") is not True:
+                        continue
                 except Exception:
-                    pass
+                    continue
+                ps.task_budget_halted = True
                 _log_event(
                     "task_work_budget_exceeded",
                     project=project_name,

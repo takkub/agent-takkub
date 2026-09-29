@@ -877,9 +877,11 @@ class PaneState:
     # can scan the artifacts dir for screenshots newer than the assignment
     # (issue #5 — screenshot evidence auto-attach). 0.0 = never assigned.
     assign_ts: float = 0.0
-    # Per-task hard work limits (#655512b2). Usage samples are deduplicated
-    # by their provider-reported turn totals; unsupported meters are surfaced
-    # in the provider capability matrix and still receive the time ceiling.
+    # Per-task hard work limits (#655512b2). current_usage() exposes the
+    # latest-turn/context snapshot, not a cumulative task counter. The
+    # assignment snapshot is the baseline; later completed turns add fresh
+    # input/cache creation/output (cache reads are replayed context). Source
+    # turn IDs, not turn-end timestamps, distinguish otherwise identical data.
     task_token_total: int = 0
     task_last_usage_marker: tuple | None = None
     task_budget_halted: bool = False
