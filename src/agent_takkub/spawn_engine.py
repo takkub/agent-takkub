@@ -363,6 +363,18 @@ def _prepare_spawn_system_prompt(
         return None
 
 
+# One short contract in the pane's native context. Task text and the handoff
+# threshold stay untouched; both Claude and AGENTS.md providers get the same text.
+_TASK_EXECUTION_CONTEXT = """
+\n## Task execution and report contract
+Confirm the requested outcome and inspect prior failure evidence before changing code.
+Do not repeat an edit or test with no new hypothesis. After two attempts with
+the same symptom, send Lead the observed facts and the next diagnostic check.
+Verify the outcome where possible. Report: STATUS; CHANGED paths; EVIDENCE from
+a real run; REMAINING work. Never claim an unrun check passed.
+"""
+
+
 # Filename shape written above via `output_file=str(role_md_path.with_name(
 # f"{stem}.spawn-{pane_scope}{suffix}"))`: `CLAUDE.spawn-<16 hex chars>.md`.
 # `pane_scope` is `sha256(f"{project_ns}\0{role_name}")[:16]` (see spawn()) —
@@ -2802,7 +2814,7 @@ class SpawnEngineMixin:
                 try:
                     from . import skill_policy
 
-                    _skill_extra = skill_policy.render_skill_appendix(
+                    _skill_extra = _TASK_EXECUTION_CONTEXT + skill_policy.render_skill_appendix(
                         base_role, _skill_roots_for_project(project_ns), spec.context_strategy
                     )
                     # Native SKILL.md discovery (codex $CODEX_HOME/skills):
@@ -3278,7 +3290,7 @@ class SpawnEngineMixin:
                     )
                     _existing_md = ""
                     role_context_available = False
-                _appendix = ""
+                _appendix = _TASK_EXECUTION_CONTEXT
                 # Issue #33: pointer to Lead's project-memory so the teammate can
                 # read domain rules (package manager, ports, vendor patterns) on
                 # demand without relying on Lead to echo them in every task spec.
