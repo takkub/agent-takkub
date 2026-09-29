@@ -302,10 +302,11 @@ def find_latest_session(
 _TAIL_SCAN_BYTES = 512 * 1024
 
 
-def _scan_lines_for_usage(lines) -> tuple[dict | None, str | None]:
-    """Return (last_usage_block, last_model) from an iterable of JSONL lines."""
+def _scan_lines_for_usage(lines) -> tuple[dict | None, str | None, str | None]:
+    """Return the latest usage block, model, and message identity."""
     last_usage: dict | None = None
     last_model: str | None = None
+    last_turn_id: str | None = None
     for line in lines:
         if not line.strip():
             continue
@@ -323,7 +324,8 @@ def _scan_lines_for_usage(lines) -> tuple[dict | None, str | None]:
             continue
         last_usage = u
         last_model = msg.get("model") or last_model
-    return last_usage, last_model
+        last_turn_id = j.get("uuid") or msg.get("id") or j.get("timestamp")
+    return last_usage, last_model, str(last_turn_id) if last_turn_id is not None else None
 
 
 def read_last_usage(jsonl: Path) -> dict | None:
@@ -342,6 +344,7 @@ def read_last_usage(jsonl: Path) -> dict | None:
 
     last_usage: dict | None = None
     last_model: str | None = None
+    last_turn_id: str | None = None
 
     # Fast path: scan only the tail. The newest assistant turn is near EOF.
     if size > _TAIL_SCAN_BYTES:
@@ -352,7 +355,7 @@ def read_last_usage(jsonl: Path) -> dict | None:
             nl = raw.find(b"\n")  # drop the partial leading line
             if nl != -1:
                 raw = raw[nl + 1 :]
-            last_usage, last_model = _scan_lines_for_usage(
+            last_usage, last_model, last_turn_id = _scan_lines_for_usage(
                 raw.decode("utf-8", "replace").splitlines()
             )
         except OSError:
@@ -363,7 +366,7 @@ def read_last_usage(jsonl: Path) -> dict | None:
     if last_usage is None:
         try:
             with jsonl.open("r", encoding="utf-8", errors="replace") as f:
-                last_usage, last_model = _scan_lines_for_usage(f)
+                last_usage, last_model, last_turn_id = _scan_lines_for_usage(f)
         except OSError:
             return None
 
@@ -382,6 +385,7 @@ def read_last_usage(jsonl: Path) -> dict | None:
         "prompt": prompt,
         "total": prompt + out,
         "model": last_model or "unknown",
+        "task_turn_id": last_turn_id,
     }
 
 

@@ -13,15 +13,15 @@ from dataclasses import dataclass
 from pathlib import Path
 
 DEFAULT_LIMITS = {
-    "tiny": {"minutes": 30, "tokens": 50_000},
-    "normal": {"minutes": 120, "tokens": 200_000},
-    "deep": {"minutes": 360, "tokens": 500_000},
+    "tiny": {"minutes": 30, "tokens": 100_000},
+    "normal": {"minutes": 120, "tokens": 1_000_000},
+    "deep": {"minutes": 360, "tokens": 5_000_000},
 }
 DEFAULT_LEAD_CACHED_INPUT_TOKENS = 100_000
 _BUSINESS_DOMAIN = re.compile(
     r"\b(?:commission|turnover|pricing|price|tax|fee|discount|payout|"
     r"business\s+rule|eligibility|refund|deposit|withdrawal|balance|"
-    r"revenue|sales|subtotal|total|formula|calculation)\b"
+    r"revenue|sales|subtotal)\b"
     r"|ค่าคอม(?:มิชชั่น)?|คอมมิชชั่น|เปอร์เซ็นต์|ร้อยละ|ภาษี|ราคา|"
     r"ค่าธรรมเนียม|ส่วนลด|(?<!ต่อ)ยอด(?:ขาย|เงิน|ฝาก|ถอน)?|เงิน|บาท|สูตรคำนวณ",
     re.IGNORECASE,
@@ -37,6 +37,11 @@ _TECHNICAL_VALUE = re.compile(
     r"minutes?|hours?|kb|mb|gb|tokens?|files?|rounds?)|\d+:\d+)(?![\w])",
     re.IGNORECASE,
 )
+_QUOTED_EXAMPLE = re.compile(
+    r"(?:for example|e\.g\.|such as|เช่น|ตัวอย่าง(?:งาน)?)[^\n]*"
+    r"(?:“[^”]*”|\"[^\"]*\"|'[^']*'|‘[^’]*’)",
+    re.IGNORECASE,
+)
 
 
 @dataclass(frozen=True)
@@ -45,12 +50,42 @@ class TaskLimits:
     tokens: int
 
 
+def task_turn_tokens(provider: str | None, usage: dict) -> int | None:
+    """Return countable tokens for one completed provider turn.
+
+    The usage badge's ``total`` is a latest-turn/context snapshot, so it must
+    never be accumulated as though it were a session counter. Count fresh
+    input, cache creation, and output for each turn; omit cache reads because
+    they replay prior context and otherwise dominate normal tasks. Codex's
+    ``input`` includes its cached input, unlike Claude/OpenCode, so subtract
+    ``cache_read`` for that provider. Gemini/Cursor and unknown providers have
+    no confirmed usage schema and receive the time ceiling only.
+    """
+    if provider not in {"claude", "codex", "opencode"}:
+        return None
+    try:
+        input_tokens = max(0, int(usage.get("input") or 0))
+        cache_creation = max(0, int(usage.get("cache_creation") or 0))
+        output = max(0, int(usage.get("output") or 0))
+        if provider == "codex":
+            input_tokens = max(0, input_tokens - int(usage.get("cache_read") or 0))
+        return input_tokens + cache_creation + output
+    except (TypeError, ValueError, OverflowError):
+        return None
+
+
 def needs_spec_confirmation(task: str) -> bool:
     """Only gate numeric/formula rules tied to a business domain."""
-    text = re.sub(r"`[^`]*`|(?<!\w)#\d+\b|(?:[\w./\\-]+\.py:\d+)", " ", task or "")
+    text = _QUOTED_EXAMPLE.sub(" ", task or "")
+    text = re.sub(r"`[^`]*`|(?<!\w)#\d+\b|(?:[\w./\\-]+\.py:\d+)", " ", text)
     text = re.sub(r"(?:[A-Za-z]:)?[\\/]?(?:[\w.-]+[\\/])+[\w.-]+", " ", text)
     text = _TECHNICAL_VALUE.sub(" ", text)
-    return bool(_BUSINESS_DOMAIN.search(text) and _BUSINESS_VALUE.search(text))
+    domains = tuple(_BUSINESS_DOMAIN.finditer(text))
+    values = tuple(_BUSINESS_VALUE.finditer(text))
+    # Long engineering tasks often describe the gate itself (including words
+    # such as "percentage") and contain unrelated list numbers. Require the
+    # business term and value to appear in the same short phrase.
+    return any(abs(domain.start() - value.start()) <= 100 for domain in domains for value in values)
 
 
 def confirmation_digest(task: str) -> str:

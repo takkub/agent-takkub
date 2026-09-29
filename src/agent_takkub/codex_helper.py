@@ -227,7 +227,7 @@ def resolve_newest_codex_session_for_cwd(
 _CODEX_TAIL_SCAN_BYTES = 512 * 1024
 
 
-def _scan_lines_for_codex_token_count(lines) -> tuple[dict | None, str | None]:
+def _scan_lines_for_codex_token_count(lines) -> tuple[dict | None, str | None, str | None]:
     """Return `(last event_msg.payload.info block, last live model id)` seen
     in `lines` — either half may be None.
 
@@ -240,6 +240,7 @@ def _scan_lines_for_codex_token_count(lines) -> tuple[dict | None, str | None]:
     """
     last_info: dict | None = None
     last_model: str | None = None
+    last_turn_id: str | None = None
     for line in lines:
         if not line.strip():
             continue
@@ -263,7 +264,12 @@ def _scan_lines_for_codex_token_count(lines) -> tuple[dict | None, str | None]:
         info = payload.get("info")
         if isinstance(info, dict):
             last_info = info
-    return last_info, last_model
+            ordinal = j.get("ordinal")
+            timestamp = j.get("timestamp")
+            last_turn_id = (
+                f"{timestamp}:{ordinal}" if timestamp is not None and ordinal is not None else None
+            )
+    return last_info, last_model, last_turn_id
 
 
 def read_codex_token_usage(jsonl: Path) -> dict | None:
@@ -304,6 +310,7 @@ def read_codex_token_usage(jsonl: Path) -> dict | None:
 
     last_info: dict | None = None
     last_model: str | None = None
+    last_turn_id: str | None = None
     if size > _CODEX_TAIL_SCAN_BYTES:
         try:
             with open(jsonl, "rb") as f:
@@ -312,7 +319,7 @@ def read_codex_token_usage(jsonl: Path) -> dict | None:
             nl = raw.find(b"\n")
             if nl != -1:
                 raw = raw[nl + 1 :]
-            last_info, last_model = _scan_lines_for_codex_token_count(
+            last_info, last_model, last_turn_id = _scan_lines_for_codex_token_count(
                 raw.decode("utf-8", "replace").splitlines()
             )
         except OSError:
@@ -321,7 +328,7 @@ def read_codex_token_usage(jsonl: Path) -> dict | None:
     if last_info is None:
         try:
             with jsonl.open("r", encoding="utf-8", errors="replace") as f:
-                last_info, last_model = _scan_lines_for_codex_token_count(f)
+                last_info, last_model, last_turn_id = _scan_lines_for_codex_token_count(f)
         except OSError:
             return None
 
@@ -351,6 +358,7 @@ def read_codex_token_usage(jsonl: Path) -> dict | None:
         "prompt": prompt,
         "total": prompt + out,
         "limit": int(limit) if isinstance(limit, (int, float)) and limit else None,
+        "task_turn_id": last_turn_id,
     }
 
 

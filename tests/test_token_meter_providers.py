@@ -96,6 +96,7 @@ class TestReadCodexTokenUsage:
         assert u["prompt"] == 1500  # input + cached, NOT total_token_usage's cumulative sum
         assert u["total"] == 1600
         assert u["limit"] == 258_400
+        assert u["task_turn_id"] == "2026-08-30T04:55:19.286Z:1"
 
     def test_takes_the_newest_of_several_token_count_events(self, tmp_path: pathlib.Path) -> None:
         f = tmp_path / "rollout.jsonl"
@@ -265,6 +266,7 @@ class TestReadOpencodeTokenUsage:
         assert u["output"] == 581
         assert u["prompt"] == 2985 + 32256  # input + cache.write + cache.read
         assert u["limit"] is None
+        assert u["task_turn_id"] == "m1"
 
     def test_takes_newest_assistant_message(self, tmp_path: pathlib.Path) -> None:
         db = tmp_path / "opencode.db"
