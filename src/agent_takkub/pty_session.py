@@ -17,6 +17,7 @@ import subprocess
 import sys
 import threading
 import time
+import unicodedata
 from collections import deque
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
@@ -1072,6 +1073,16 @@ _STATUS_CHROME_KEYWORDS: tuple[str, ...] = (
 )
 
 
+_ESC_SEQ_RE = re.compile(r"\[[0-9;?]*[ -/]*[@-~]")
+
+
+def _fragment_key(text: str) -> str:
+    """Lowercased, escape-sequence-free, combining-mark-free form of *text* for
+    the composer-presence substring check (#763)."""
+    text = _ESC_SEQ_RE.sub("", text).strip().lower()
+    return "".join(c for c in text if unicodedata.category(c) not in ("Mn", "Cf"))
+
+
 def _input_has_content(region: str, fragment: str, *, glyph_only: bool = False) -> bool:
     """True when the bottom input region shows pasted/typed content.
 
@@ -1091,8 +1102,13 @@ def _input_has_content(region: str, fragment: str, *, glyph_only: bool = False) 
     if not glyph_only:
         if any(marker in region for marker in _PASTED_PLACEHOLDERS):
             return True
-        frag = fragment.strip().lower()[:_INPUT_FRAGMENT_LEN]
-        if bool(frag) and frag in region:
+        # #763: compare mark-stripped text on both sides. The fragment can be the
+        # head of a bracketed-paste payload (leading ESC[200~), and pyte drops
+        # Thai combining marks (์ ็ ั …) when it renders the composer, so a long
+        # Thai task sitting inline never matched a raw substring — the stuck
+        # draft read as "no pending input" and the delivery was marked accepted.
+        frag = _fragment_key(fragment)[:_INPUT_FRAGMENT_LEN]
+        if bool(frag) and frag in _fragment_key(region):
             return True
 
     # #738: raw rows, not pre-stripped ones — the WRAPPED-draft rule below has to
