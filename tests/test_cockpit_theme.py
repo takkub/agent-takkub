@@ -13,9 +13,13 @@ from agent_takkub import cockpit_theme
 @pytest.fixture(autouse=True)
 def _reset_font_cache(monkeypatch: pytest.MonkeyPatch):
     """`ensure_fonts_loaded()` memoizes into a module global — reset it per
-    test so a `_FONTS_DIR` monkeypatch actually takes effect."""
+    test so a `_FONTS_DIR` monkeypatch actually takes effect. The theme
+    variant is also a mutable module global; other test modules can leave it
+    light, so this module starts and ends each test in its documented default."""
+    cockpit_theme.apply_variant("dark")
     monkeypatch.setattr(cockpit_theme, "_font_cache", None)
     yield
+    cockpit_theme.apply_variant("dark")
     monkeypatch.setattr(cockpit_theme, "_font_cache", None)
 
 

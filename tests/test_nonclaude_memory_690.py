@@ -150,6 +150,7 @@ def test_agents_md_carries_project_memory_and_role_rule(qapp, monkeypatch, tmp_p
     )
 
     assert "Project memory" in extra
+    assert "Task execution and report contract" in extra
     assert str(mem_md) in extra
     # role part names the DIRECTORY + the env rule, never one role's file —
     # AGENTS.md is shared per cwd (see memory_prompt docstring)
@@ -182,6 +183,8 @@ def test_user_owned_agents_md_carries_memory_through_the_paste(qapp, monkeypatch
     )
     assert paste is not None
     assert "#690" in paste
+    assert "Task execution and report contract" in paste
+    assert "Never claim an unrun check passed." in paste
     assert str(mem_md) in paste
     assert str(role_file) in paste  # per-pane paste: the concrete file is safe
     assert paste.index("#690") < paste.index("do it")

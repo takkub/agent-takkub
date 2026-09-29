@@ -4484,6 +4484,8 @@ class Orchestrator(
             # instead of losing it silently.
             _pending_lang = ps_assign.pending_lang_directive
             ps_assign.pending_lang_directive = None
+            _pending_contract = getattr(ps_assign, "pending_task_execution_context", None)
+            ps_assign.pending_task_execution_context = None
             # #690: same fallback for the project/role memory pointers —
             # after the language line, which stays the paste's first line.
             _pending_mem = getattr(ps_assign, "pending_memory_note", None)
@@ -4491,6 +4493,8 @@ class Orchestrator(
             _prefix = []
             if _pending_lang:
                 _prefix.append(f"[ภาษาที่ตอบ (#621)] {_pending_lang}")
+            if _pending_contract:
+                _prefix.append(_pending_contract)
             if _pending_mem:
                 _prefix.append(_pending_mem)
             if _prefix:

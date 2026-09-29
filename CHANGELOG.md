@@ -18,6 +18,7 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 - **ย้าย provider ตอนโควตาหมดแล้วได้ผลงานเก่าของ task อื่นติดไป (#765):** Recent summary ของ role แนบเฉพาะบรรทัดที่เกี่ยวกับงานปัจจุบัน
 - **assign role เดียวกันซ้อนกันแล้วใบ backlog สลับ:** ผูกใบตามข้อความงานของแต่ละ request
 - **ตรวจจับกฎธุรกิจทศนิยมได้ถูกต้อง:** ค่าอย่าง `2.5%` และ `3.75 percent` ต้องขอยืนยัน spec ขณะที่เลขเวอร์ชัน `2.1.46` และเลขประกอบในบันทึกงานเทคนิคไม่ทำให้ขึ้นหน้าต่างยืนยัน
+- **ส่ง task/report contract ให้ทุก provider:** pane ได้รูปแบบรายงาน STATUS/CHANGED/EVIDENCE/REMAINING และเมื่อ `AGENTS.md` เป็นของผู้ใช้ กติกานี้ส่งผ่าน task paste โดยไม่เขียนทับไฟล์
 - **deps:** codeql-action 4.38.2 (#759), ruff 0.16.9 (#760)
 
 ## [v2.1.45] - 2026-09-28

@@ -881,6 +881,9 @@ class PaneState:
     # returns, prepending it to the initial task paste as a fallback so the
     # directive still reaches the pane by some route.
     pending_lang_directive: str | None = None
+    # PR #761: if a project-owned AGENTS.md prevents managed context injection,
+    # carry the execution/report contract through the one-shot task paste.
+    pending_task_execution_context: str | None = None
     # #690: same fallback channel for the project/role memory pointers when a
     # non-claude pane's AGENTS.md is user-owned (they never landed there).
     pending_memory_note: str | None = None
@@ -2814,7 +2817,7 @@ class SpawnEngineMixin:
                 try:
                     from . import skill_policy
 
-                    _skill_extra = _TASK_EXECUTION_CONTEXT + skill_policy.render_skill_appendix(
+                    _skill_extra = skill_policy.render_skill_appendix(
                         base_role, _skill_roots_for_project(project_ns), spec.context_strategy
                     )
                     # Native SKILL.md discovery (codex $CODEX_HOME/skills):
@@ -2838,6 +2841,9 @@ class SpawnEngineMixin:
                             fallback="native_link_" + _nat,
                             errors=_nat_err[:3],
                         )
+                    # Keep the shared task contract even when native global
+                    # skills made their appendix redundant.
+                    _skill_extra = _TASK_EXECUTION_CONTEXT + _skill_extra
                     if _skill_extra:
                         # #422 item 2: this role HAS Skill Matrix skills and
                         # this provider only gets them as instruction text
@@ -2895,9 +2901,20 @@ class SpawnEngineMixin:
                     if _role_mem is not None:
                         _skill_extra += memory_prompt.shared_role_memory_block(_role_mem.parent)
                     _planted, _agents_md_reason = ensure_agents_md(spawn_cwd, extra=_skill_extra)
-                    if not _planted and _agents_md_reason == "user-owned":
+                    if not _planted:
                         _ps_fallback = self._ps(_exit_key(project_ns, role_name))
-                        if _lang_line:
+                        _ps_fallback.pending_task_execution_context = _TASK_EXECUTION_CONTEXT
+                        _log_event(
+                            "provider_capability_fallback",
+                            role=role_name,
+                            project=project_ns,
+                            provider=spec.name,
+                            capability="task_execution_context",
+                            state="partial",
+                            fallback="initial_task_paste",
+                            reason=_agents_md_reason,
+                        )
+                        if _agents_md_reason == "user-owned" and _lang_line:
                             # #621 M3: user-owned AGENTS.md means _skill_extra
                             # (directive included) never gets written — carry
                             # the directive through the initial-task paste
@@ -2907,7 +2924,11 @@ class SpawnEngineMixin:
                         # #690: same fallback for memory. The paste is
                         # per-pane, so naming this role's concrete file is
                         # safe here (unlike the shared AGENTS.md).
-                        _mem_note = memory_prompt.paste_memory_note(_mem_path, _role_mem)
+                        _mem_note = (
+                            memory_prompt.paste_memory_note(_mem_path, _role_mem)
+                            if _agents_md_reason == "user-owned"
+                            else ""
+                        )
                         if _mem_note:
                             _ps_fallback.pending_memory_note = _mem_note
                             _log_event(
