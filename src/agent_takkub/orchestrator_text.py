@@ -1194,35 +1194,6 @@ def _append_report_rules_hint(task: str) -> str:
     return task + _REPORT_RULES_APPENDIX
 
 
-_TASK_EXECUTION_MARKER = "<!-- takkub-task-execution-v1 -->"
-_TASK_EXECUTION_APPENDIX = """
-
----
-
-<!-- takkub-task-execution-v1 -->
-## Shared task contract (every provider)
-Before editing, identify the requested outcome, the relevant path and the smallest real check.
-For a failed or repeated task, read the previous failure and attempts first. Change the
-hypothesis or gather new evidence; do not repeat the same edit/test with no new information.
-After two attempts with the same symptom, or when progress stalls without new evidence,
-send Lead a concise diagnosis with observed facts, attempted fixes, and the next discriminating check.
-Verify the user-visible outcome where possible. Report to Lead in this order:
-STATUS (done/failed/blocked); CHANGED (paths or none); EVIDENCE (command/observation);
-REMAINING (specific risk or none). Never claim a check ran if it did not.
-"""
-
-
-def _append_task_execution_contract(task: str) -> str:
-    """Append one provider-neutral work/report contract to every assigned task.
-
-    Marker guards crash replay and queued reassignment against duplicate appendices.
-    The task remains first, so the operator's specific instructions keep priority.
-    """
-    if _TASK_EXECUTION_MARKER in task:
-        return task
-    return task + _TASK_EXECUTION_APPENDIX
-
-
 def _append_verify_fail_hint(task: str, base_role: str) -> str:
     """For verify roles (qa/reviewer), append the `takkub done --fail` reporting
     instruction so a failed check routes back into a Lead-proposed fix loop.
