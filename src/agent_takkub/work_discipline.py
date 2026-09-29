@@ -34,7 +34,9 @@ _BUSINESS_VALUE = re.compile(
     re.IGNORECASE,
 )
 _TECHNICAL_VALUE = re.compile(
-    r"(?<![\w])(?:v?\d+(?:\.\d+){2,}|\d+(?:\.\d+)?\s*(?:px|ms|s|sec|seconds?|"
+    # A dotted release/version has at least two dots. Do not consume decimal
+    # business values such as 2.5% or 3.75 percent as though they were versions.
+    r"(?<![\w])(?:v\d+(?:\.\d+)+|\d+(?:\.\d+){2,}|\d+(?:\.\d+)?\s*(?:px|ms|s|sec|seconds?|"
     r"minutes?|hours?|kb|mb|gb|tokens?|files?|rounds?)|\d+:\d+)(?![\w])",
     re.IGNORECASE,
 )
@@ -99,7 +101,11 @@ def needs_spec_confirmation(task: str) -> bool:
             if domain.end() > value.start():
                 continue
             between = text[domain.end() : value.start()]
-            if re.fullmatch(r"[\s:=]*(?:to|เป็น|คือ)?[\s:=]*", between, re.IGNORECASE):
+            if re.fullmatch(
+                r"[\s:=]*(?:to|is|equals|set\s+to|เป็น|คือ)?[\s:=]*",
+                between,
+                re.IGNORECASE,
+            ):
                 return True
     return False
 

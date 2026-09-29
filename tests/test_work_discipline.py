@@ -55,9 +55,19 @@ def test_confirmation_detects_decimal_rates_but_ignores_versions_and_floating_nu
     assert needs_spec_confirmation("ค่าคอม 2.5%")
     assert needs_spec_confirmation("3.75 เปอร์เซ็นต์")
     assert needs_spec_confirmation("fee 1.5% ต่อรายการ")
+    assert needs_spec_confirmation("fee is 2.5 percent of each deposit")
+    assert needs_spec_confirmation("withdrawal fee 3.75 บาท")
     assert not needs_spec_confirmation("v2.1.46 / 2.1.46")
     assert not needs_spec_confirmation("ตัวอย่างค่าคอม saas ใกล้เลข 2 ลอยๆ")
     assert not needs_spec_confirmation("ค่าคอม saas แล้วเลขข้อ 2")
+
+
+def test_detector_review_corpus_does_not_treat_incidental_numbers_as_business_values():
+    maintenance_note = (
+        "Review the detector false positive: the example 'commission turnover' appears "
+        "in the report, and 2 files still need checking."
+    )
+    assert not needs_spec_confirmation(maintenance_note)
 
 
 def test_confirmation_requires_business_domain_for_percent_unit_values():
