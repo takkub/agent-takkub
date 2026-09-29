@@ -186,7 +186,18 @@ def _memory_lines(records: list[MemoryRecord]) -> list[str]:
     return [f"- ({r.kind.value}, {r.confidence.value}) {r.content}" for r in records]
 
 
-def _recent_summary_lines(project: str | None, role: str) -> list[str]:
+# #765: the rolling summary is per (project, role), not per task — its
+# `current_state` is the headline of the LAST FINISHED task, so injecting it
+# unconditionally handed a fresh/rerouted pane an older task's verdict. A line
+# is kept only when it shares this many content tokens with the current task.
+_SUMMARY_MIN_OVERLAP = 2
+
+
+def _summary_line_relevant(line: str, task_tokens: set[str]) -> bool:
+    return len(set(tokenize(line)) & task_tokens) >= _SUMMARY_MIN_OVERLAP
+
+
+def _recent_summary_lines(project: str | None, role: str, task_text: str = "") -> list[str]:
     from agent_takkub.core.conversation.flag import v2_conversation_enabled
 
     if not v2_conversation_enabled():
@@ -207,7 +218,8 @@ def _recent_summary_lines(project: str | None, role: str) -> list[str]:
         lines.append(f"- pending: {item}")
     if summary.next_action:
         lines.append(f"- next: {summary.next_action}")
-    return lines
+    task_tokens = set(tokenize(task_text))
+    return [ln for ln in lines if _summary_line_relevant(ln, task_tokens)]
 
 
 def build_context(
@@ -249,7 +261,7 @@ def build_context(
 
     used = sum(_token_cost(r.content) for r in records)
     remaining = budget_tokens - used
-    summary_lines = _recent_summary_lines(project, role) if remaining > 0 else []
+    summary_lines = _recent_summary_lines(project, role, task_text) if remaining > 0 else []
 
     if not memory_lines and not summary_lines:
         return ""
