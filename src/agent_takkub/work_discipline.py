@@ -19,7 +19,7 @@ DEFAULT_LIMITS = {
 }
 DEFAULT_LEAD_CACHED_INPUT_TOKENS = 100_000
 _BUSINESS_DOMAIN = re.compile(
-    r"\b(?:commission|turnover|pricing|price|tax|fee|discount|payout|"
+    r"\b(?:commission|turnover|pricing|price|tax|fee|discount|payout|threshold|"
     r"business\s+rule|eligibility|refund|deposit|withdrawal|balance|"
     r"revenue|sales|subtotal)\b"
     r"|ค่าคอม(?:มิชชั่น)?|คอมมิชชั่น|เปอร์เซ็นต์|ร้อยละ|ภาษี|ราคา|"
@@ -27,13 +27,14 @@ _BUSINESS_DOMAIN = re.compile(
     re.IGNORECASE,
 )
 _BUSINESS_VALUE = re.compile(
-    r"(?<![\w])(?:\d+(?:[.,]\d+)?|\$\s*\d+(?:[.,]\d+)?)"
-    r"(?:\s*%|\s*(?:บาท|dollars?|usd|eur|percent|เปอร์เซ็นต์|ร้อยละ))?"
-    r"(?![\w])|(?:>=|<=|>|<|=|×|\*|÷|/)\s*\d|\d\s*(?:>=|<=|>|<|=|×|\*|÷|/)",
+    r"(?<![\w])(?:[$฿]\s*\d+(?:[.,]\d+)?|\d+(?:[.,]\d+)?)"
+    r"(?:\s*(?:%|บาท|฿|\$|THB|dollars?|usd|eur|percent|เปอร์เซ็นต์|ร้อยละ))"
+    r"(?![\w])|(?<![\w])(?:[$฿]\s*\d+(?:[.,]\d+)?|\d+(?:[.,]\d+)?\s*THB)(?![\w])|"
+    r"(?<![\w])\d+(?:[.,]\d+)?(?![\w])",
     re.IGNORECASE,
 )
 _TECHNICAL_VALUE = re.compile(
-    r"(?<![\w])(?:v?\d+(?:\.\d+){1,}|\d+\s*(?:px|ms|s|sec|seconds?|"
+    r"(?<![\w])(?:v?\d+(?:\.\d+){2,}|\d+(?:\.\d+)?\s*(?:px|ms|s|sec|seconds?|"
     r"minutes?|hours?|kb|mb|gb|tokens?|files?|rounds?)|\d+:\d+)(?![\w])",
     re.IGNORECASE,
 )
@@ -76,16 +77,29 @@ def task_turn_tokens(provider: str | None, usage: dict) -> int | None:
 
 def needs_spec_confirmation(task: str) -> bool:
     """Only gate numeric/formula rules tied to a business domain."""
-    text = _QUOTED_EXAMPLE.sub(" ", task or "")
+    text = task or ""
+    # Quoted literals in task descriptions often explain false positives or
+    # give sample input. They are not the rule being requested.
+    text = re.sub(r"“[^”]*”|‘[^’]*’|\"[^\"]*\"|'[^']*'", " ", text)
+    text = _QUOTED_EXAMPLE.sub(" ", text)
     text = re.sub(r"`[^`]*`|(?<!\w)#\d+\b|(?:[\w./\\-]+\.py:\d+)", " ", text)
     text = re.sub(r"(?:[A-Za-z]:)?[\\/]?(?:[\w.-]+[\\/])+[\w.-]+", " ", text)
     text = _TECHNICAL_VALUE.sub(" ", text)
     domains = tuple(_BUSINESS_DOMAIN.finditer(text))
     values = tuple(_BUSINESS_VALUE.finditer(text))
-    # Long engineering tasks often describe the gate itself (including words
-    # such as "percentage") and contain unrelated list numbers. Require the
-    # business term and value to appear in the same short phrase.
-    return any(abs(domain.start() - value.start()) <= 100 for domain in domains for value in values)
+    # Explicit units establish business values anywhere in the task. A bare
+    # number only counts when it directly follows a business term (allowing a
+    # small connector such as "to" in "refund threshold to 14 days").
+    for value in values:
+        if re.search(r"(?:%|เปอร์เซ็นต์|ร้อยละ|บาท|฿|\$|\bTHB)\s*$", value.group(), re.IGNORECASE):
+            return True
+        for domain in domains:
+            if domain.end() > value.start():
+                continue
+            between = text[domain.end() : value.start()]
+            if re.fullmatch(r"[\s:=]*(?:to|เป็น|คือ)?[\s:=]*", between, re.IGNORECASE):
+                return True
+    return False
 
 
 def confirmation_digest(task: str) -> str:

@@ -51,6 +51,15 @@ def test_confirmation_detects_numeric_business_rules_but_not_technical_refs():
     assert needs_spec_confirmation("ปรับค่าคอม turnover 65 เป็น 3% เมื่อยอด > 100,000 บาท")
 
 
+def test_confirmation_detects_decimal_rates_but_ignores_versions_and_floating_numbers():
+    assert needs_spec_confirmation("ค่าคอม 2.5%")
+    assert needs_spec_confirmation("3.75 เปอร์เซ็นต์")
+    assert needs_spec_confirmation("fee 1.5% ต่อรายการ")
+    assert not needs_spec_confirmation("v2.1.46 / 2.1.46")
+    assert not needs_spec_confirmation("ตัวอย่างค่าคอม saas ใกล้เลข 2 ลอยๆ")
+    assert not needs_spec_confirmation("ค่าคอม saas แล้วเลขข้อ 2")
+
+
 def test_confirmation_digest_binds_exact_task_text():
     assert confirmation_digest("calculate 12%") == confirmation_digest(" calculate 12% ")
     assert confirmation_digest("calculate 12%") != confirmation_digest("calculate 15%")
