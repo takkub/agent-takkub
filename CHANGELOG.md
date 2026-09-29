@@ -4,6 +4,8 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 
 ## [vNEXT]
 
+## [v2.1.46] - 2026-09-29
+
 ### Added (เพิ่ม)
 
 - **บังคับวินัยงานทุก provider (backlog 655512b2):** งานที่มีกฎธุรกิจเป็นตัวเลข (ค่าคอม/%/บาท/ภาษี ฯลฯ) ต้องให้ผู้ใช้กดยืนยัน spec ในหน้าต่าง cockpit ก่อน assign · ทุก task มีเพดานเวลาและ token (tiny 30 นาที/100k · normal 120 นาที/1M · deep 360 นาที/5M ปรับได้ใน `work-discipline.json` ใต้ SETTINGS_HOME) เกินแล้ว Ctrl+C + แจ้งผู้ใช้ + assign ซ้ำต้องให้ผู้ใช้ยืนยัน · นับ token เฉพาะเทิร์นที่เกิดหลัง assign (ไม่นับ cache read) · Codex Lead compact เมื่อ cached input เกินเกณฑ์ · assign ที่ถูกปฏิเสธหลัง CLI ตอบรับคิวแจ้ง Lead ทันที · gap ของ gemini/cursor (ไม่มี token meter) แสดงใน capability matrix
