@@ -65,7 +65,7 @@ def test_conversation_source_reads_rolling_summary(runtime, monkeypatch):
     )
 
     items = ConversationSource().retrieve(
-        "anything", project="proj", role="backend", budget_tokens=2000
+        "extend the login endpoint", project="proj", role="backend", budget_tokens=2000
     )
     assert any("wired the login endpoint" in i.text for i in items)
     assert all(i.source == "conversation" for i in items)
@@ -73,7 +73,7 @@ def test_conversation_source_reads_rolling_summary(runtime, monkeypatch):
 
 def test_conversation_source_flag_off_returns_nothing(runtime):
     items = ConversationSource().retrieve(
-        "anything", project="proj", role="backend", budget_tokens=2000
+        "extend the login endpoint", project="proj", role="backend", budget_tokens=2000
     )
     assert items == []
 

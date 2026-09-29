@@ -278,9 +278,28 @@ def test_recent_summary_included_when_conversation_flag_on(runtime, monkeypatch)
     conv_dir = conv_store.conversation_dir("proj", conv_id)
     save_summary(conv_dir, RollingSummary(current_state="[backend] wired the login endpoint"))
 
-    out = context_builder.build_context("proj", "backend", "anything", 2000)
+    out = context_builder.build_context("proj", "backend", "extend the login endpoint", 2000)
     assert "### Recent summary" in out
     assert "wired the login endpoint" in out
+
+
+def test_recent_summary_skips_unrelated_older_task(runtime, monkeypatch):
+    """#765: last finished task's verdict must not leak into an unrelated task."""
+    from agent_takkub.core.conversation.store import ConversationStore, conversation_id_for
+    from agent_takkub.core.conversation.summary import RollingSummary, save_summary
+
+    monkeypatch.setenv("TAKKUB_V2_CONVERSATION", "1")
+    conv_dir = ConversationStore().conversation_dir("proj", conversation_id_for("proj", "reviewer"))
+    save_summary(
+        conv_dir,
+        RollingSummary(
+            current_state="[reviewer] Round 4 Final verdict NOT RELEASABLE config tail-checker"
+        ),
+    )
+    out = context_builder.build_context(
+        "proj", "reviewer", "review batch 2.1.46 release notes", 2000
+    )
+    assert "NOT RELEASABLE" not in out
 
 
 def test_recent_summary_omitted_when_conversation_flag_off(runtime, monkeypatch):

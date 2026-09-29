@@ -77,7 +77,10 @@ def huge_summary(runtime, monkeypatch):
     conv_id = conversation_id_for("proj", "backend")
     save_summary(
         store.conversation_dir("proj", conv_id),
-        RollingSummary(current_state="huge unbudgeted summary content " * 3000),
+        RollingSummary(
+            current_state="fix spacing refactor whole feature huge unbudgeted summary content "
+            * 3000
+        ),
     )
 
 

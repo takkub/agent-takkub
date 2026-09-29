@@ -21,7 +21,7 @@ class ConversationSource:
     ) -> list[ContextItem]:
         if budget_tokens <= 0:
             return []
-        lines = _cb._recent_summary_lines(project, role)
+        lines = _cb._recent_summary_lines(project, role, query)
         return [
             ContextItem(
                 text=line,
