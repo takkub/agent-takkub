@@ -489,6 +489,23 @@ class TestDetectProjectKind:
 
 
 class TestNodeProjectGate:
+    def test_auto_lint_failure_writes_report_and_runs_following_checks(
+        self, node_repo, monkeypatch, tmp_path
+    ):
+        (node_repo / "package.json").write_text(
+            '{"scripts":{"verify":"npm run lint && npm run typecheck && npm test",'
+            '"typecheck":"tsc --noEmit","test":"vitest run"}}',
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(qa_gate, "_runtime_dir", lambda: tmp_path / "runtime")
+        monkeypatch.setattr(subprocess, "run", _fake_run_factory([], [1, 0, 0]))
+        report = qa_gate.run_gate(cwd=node_repo, auto=True)
+        assert not report.ok
+        assert next(s for s in report.steps if s.name == "typecheck").ok
+        assert next(s for s in report.steps if s.name == "test").ok
+        assert report.report_path and report.report_path.is_file()
+        assert next(s for s in report.steps if s.name == "verify").log_path.is_file()
+
     def test_runs_the_projects_own_checks_instead_of_pytest(self, node_repo, monkeypatch) -> None:
         recorder: list = []
         monkeypatch.setattr(subprocess, "run", _fake_run_factory(recorder, []))
@@ -502,7 +519,7 @@ class TestNodeProjectGate:
         assert any("tsc" in " ".join(map(str, cmd)) for cmd in ran)
         assert report.ok
 
-    def test_a_failing_check_fails_the_gate_and_skips_the_rest(
+    def test_a_failing_check_fails_the_gate_and_runs_independent_checks(
         self, node_repo, monkeypatch
     ) -> None:
         # detect step is free; the first real check fails.
@@ -512,7 +529,8 @@ class TestNodeProjectGate:
 
         assert not report.ok
         assert report.exit_code != 0
-        assert any(s.skipped for s in report.steps), "fail-fast must skip the later checks"
+        assert any(s.name == "typecheck" and not s.skipped for s in report.steps)
+        assert any(s.name == "test" and not s.skipped for s in report.steps)
 
     def test_targeted_paths_are_reported_as_ignored_not_swallowed(
         self, node_repo, monkeypatch
@@ -546,7 +564,7 @@ class TestNodeProjectGate:
         assert names.index("typecheck") < names.index("test")
         assert not report.ok
         assert next(s for s in report.steps if s.name == "typecheck").ok is False
-        assert next(s for s in report.steps if s.name == "test").skipped
+        assert next(s for s in report.steps if s.name == "test").ok
 
     def test_verify_script_is_preferred_and_uses_the_lockfile_pm(
         self, node_repo, monkeypatch

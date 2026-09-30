@@ -352,7 +352,9 @@ def _node_script_command(
     return pm_run(pm, script), None
 
 
-def node_checks(cwd: Path, *, limit_concurrency: bool = False) -> list[Check]:
+def node_checks(
+    cwd: Path, *, limit_concurrency: bool = False, prefer_verify: bool = True
+) -> list[Check]:
     """The Node gate (#329 + #368). Order matters — typecheck runs BEFORE test
     because the whole point is that vitest/jest transpile through esbuild and
     never see a type error: a spec written against an old signature passes
@@ -372,7 +374,7 @@ def node_checks(cwd: Path, *, limit_concurrency: bool = False) -> list[Check]:
     pm = detect_package_manager(cwd, pkg)
     checks: list[Check] = []
 
-    if "verify" in scripts:
+    if "verify" in scripts and prefer_verify:
         verify_cmd, verify_env = _node_script_command(
             cwd, pkg, pm, "verify", str(scripts["verify"]), limit_concurrency=limit_concurrency
         )

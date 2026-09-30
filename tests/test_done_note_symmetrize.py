@@ -107,7 +107,8 @@ class TestShortNoteUnchanged:
         assert len(note) < TASK_HANDOFF_THRESHOLD
         orch.done("backend", note=note, project=proj)
 
-        assert captured == [f"[backend done] {note}"]
+        assert captured[0].split("\n⚠️", 1)[0] == f"[backend done] {note}"
+        assert "note incomplete" in captured[0]
         assert "📄 รายงานเต็ม" not in captured[0]
 
 
@@ -190,7 +191,7 @@ class TestThresholdBoundary:
         assert len(note) == TASK_HANDOFF_THRESHOLD - 1
         orch.done("backend", note=note, project=proj)
 
-        assert captured[0] == f"[backend done] {note}"
+        assert captured[0].split("\n⚠️", 1)[0] == f"[backend done] {note}"
 
     def test_exactly_at_threshold_condenses(self, orch, tmp_path):
         proj = "proj"
@@ -256,7 +257,7 @@ class TestEvidenceStillAppended:
         assert "evidence.png" in notice
         # evidence tail must survive even though the headline was truncated;
         # #159 appends a "(size ⚠tags)" suffix after the filename now
-        assert notice.rstrip().endswith(")")
+        assert notice.split("\n⚠️", 1)[0].rstrip().endswith(")")
         assert "evidence.png (" in notice
 
     def test_evidence_appended_to_short_note_unchanged(self, orch, tmp_path):

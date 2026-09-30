@@ -725,7 +725,7 @@ def classify_code_root_cause(note: str) -> tuple[bool, str]:
     return False, ""
 
 
-def classify_failure(note: str) -> tuple[str | None, str]:
+def classify_failure(note: str, source_role: str = "") -> tuple[str | None, str]:
     """Map a verify-fail note to the role a fix loop should target (Tier 2c).
 
     Returns ``(role, reason)`` from the first matching signature, or
@@ -742,6 +742,19 @@ def classify_failure(note: str) -> tuple[str | None, str]:
         return None, ""
     if classify_blocked(s)[0]:
         return None, ""
+    # File ownership is stronger evidence than words such as 'renderer' in
+    # a backend test name. Leave mixed ownership to the root-cause rules.
+    owners = set()
+    for pattern, owner in (
+        (r"(?:backend|api|server)[/\\][\w./\\-]+\.(?:[cm]?[jt]sx?|py)\b", "backend"),
+        (r"(?:frontend|web|client)[/\\][\w./\\-]+\.(?:[cm]?[jt]sx?)\b", "frontend"),
+    ):
+        if re.search(pattern, s, re.I):
+            owners.add(owner)
+    if len(owners) == 1:
+        return owners.pop(), "failure file ownership"
+    if source_role.split("#", 1)[0] in ("backend", "frontend", "mobile", "devops"):
+        return source_role.split("#", 1)[0], "failing task role"
     for pattern, role, reason in _FAILURE_RULES:
         if pattern.search(s):
             return role, reason

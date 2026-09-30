@@ -58,6 +58,8 @@ def picker_question_on_screen(session, provider: str | None) -> bool:
     except Exception:
         return False
     folded = "\n".join(lines[-PICKER_SCREEN_TAIL_LINES:]).casefold()
+    if any(marker.casefold() in folded for marker in quota_markers_for(provider or "")):
+        return False
     return any(all(marker.casefold() in folded for marker in group) for group in groups)
 
 
@@ -1894,6 +1896,7 @@ def post_boot_settle_s_for(provider: str) -> float:
 # *talked about* limits hypothetically ("if you hit your limit"); a real
 # banner declares the limit HIT or names the reset.
 GENERIC_QUOTA_MARKERS: tuple[str, ...] = (
+    "usage limit reached",
     "limit reached",
     "limit will reset",
     "reached your usage",

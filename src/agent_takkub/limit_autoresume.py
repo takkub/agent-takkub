@@ -590,6 +590,8 @@ class AutoResumeMixin:
         cwd = _pane_cwd(pane)
         task = ps.last_assigned_task or ""
         is_lead = role == LEAD.name
+        progress_tail = _pane_output_tail(pane)
+        transcript_path = getattr(pane, "_transcript_path", None)
         lead_takeover = (
             _lead_provider_takeover_brief(
                 project, pane, hit_provider, new_provider, self._panes_by_project.get(project, {})
@@ -777,6 +779,11 @@ class AutoResumeMixin:
                     f"{new_provider} — ทำต่อจากจุดที่ค้างไว้ (ถ้าเพิ่งเริ่มงานให้เริ่มใหม่ได้เลย), "
                     "ถ้าเสร็จแล้วรายงานด้วย `takkub done`"
                 )
+                if isinstance(transcript_path, str) and transcript_path:
+                    note += f"\nPrevious transcript: {transcript_path}"
+                if progress_tail:
+                    note += "\nPrevious pane's latest output (context):\n" + progress_tail
+                note += "\nInspect the current diff and pending messages before continuing."
                 self._send_when_ready(role, task + note, project=project)
 
         QTimer.singleShot(2_000, _do_reroute_respawn)

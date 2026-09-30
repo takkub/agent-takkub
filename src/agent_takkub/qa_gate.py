@@ -152,6 +152,7 @@ class StepResult:
     # — `ok` stays True so it never trips `GateReport.ok`; `warn` is what a
     # renderer checks to still show it as WARN rather than a bare PASS.
     warn: bool = False
+    failed_suites: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -1119,6 +1120,15 @@ def _run_step(name: str, cmd: list[str], env: dict, cwd: Path, log_dir: Path | N
         memory_log_path.write_text("\n".join(memory_samples) + "\n", encoding="utf-8")
     tail_lines = [ln for ln in output.strip().splitlines() if ln.strip()][-6:]
     detail = " / ".join(tail_lines) if tail_lines else "(no output)"
+    plain_output = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", output)
+    failed_suites = list(
+        dict.fromkeys(
+            match.group(1).strip()
+            for match in re.finditer(
+                r"^\s*(?:FAIL|❯)\s+(.+?\.(?:[cm]?[jt]sx?))(?:\s|$)", plain_output, re.M
+            )
+        )
+    )
     # #349: an exit code pytest never documents, with no summary line, is an
     # abort — not a test failure. Say so plainly instead of leaving the
     # reader to guess from a bare non-zero returncode.
@@ -1161,6 +1171,7 @@ def _run_step(name: str, cmd: list[str], env: dict, cwd: Path, log_dir: Path | N
         proc.returncode,
         log_path,
         memory_log_path,
+        failed_suites=failed_suites,
     )
 
 
@@ -1928,10 +1939,23 @@ def _non_python_gate(
             marker.unlink(missing_ok=True)
 
         report.steps.append(step)
-        if not step.ok:
-            for rest in checks[index + 1 :]:
-                report.steps.append(_skip(rest.name, f"{check.name} failed — fail-fast"))
-            break
+        if check.name == "verify" and not step.ok and "lint" in str(db_scripts.get("verify", "")):
+            # A project's combined `verify` may stop at lint before reaching
+            # its typecheck/test. Run the available independent checks too.
+            from .verify import node_checks
+
+            existing_names = {c.name for c in checks}
+            checks.extend(
+                c
+                for c in node_checks(
+                    check.cwd or root, limit_concurrency=limit_concurrency, prefer_verify=False
+                )
+                if c.name != "lint"
+                and c.name not in existing_names
+                and (only_names is None or c.name in only_names)
+            )
+        # Independent Node checks still provide useful evidence after lint,
+        # typecheck or tests fail. The aggregate remains a failure.
 
     # #475: last step, and only on a genuine full-tier run — `only_names`
     # rules out the style/none tier (a plain typecheck), `targeted` rules out
@@ -2049,7 +2073,7 @@ def run_gate(
         elif tier.tier == "targeted" and kind == "node":
             node_targeted = tier.targeted or None
     if write_report is None:
-        write_report = targeted is None and tier is None
+        write_report = targeted is None
 
     env = dict(os.environ)
     # #349: zero-cost, and the exact difference between "died silently, no
@@ -2257,6 +2281,8 @@ def render_table(report: GateReport) -> str:
     for s in report.steps:
         result = _step_result_label(s)
         lines.append(f"{s.name:<12} {result:<7} {s.seconds:>6.1f}s  {s.detail[:100]}")
+        for suite in s.failed_suites:
+            lines.append(f"             FAIL {suite}")
         if s.log_path:
             lines.append(f"             log: {s.log_path}")
         if s.memory_log_path:
@@ -2295,6 +2321,9 @@ def render_report_md(report: GateReport, head: str) -> str:
         result = _step_result_label(s)
         detail = s.detail.replace("|", "\\|").replace("\n", " ")[:200]
         lines.append(f"| {s.name} | {result} | {s.seconds:.1f}s | {detail} |")
+        for suite in s.failed_suites:
+            safe_suite = suite.replace("|", "\\|")
+            lines.append(f"| {s.name} | FAIL | | {safe_suite} |")
         if s.log_path:
             lines.append(f"| | | | log: `{s.log_path}` |")
         if s.memory_log_path:

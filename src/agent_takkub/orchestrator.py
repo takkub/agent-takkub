@@ -7666,12 +7666,19 @@ class Orchestrator(
         from . import fix_loop
 
         identity = fix_loop.identity_for(backlog_id, task_text)
+        pane = self._project_panes(project_ns).get(from_role)
+        provider = getattr(getattr(pane, "model", None), "provider_name", "")
+        ps = getattr(self, "_pane_state", {}).get(f"{project_ns}::{from_role}")
+        if not isinstance(provider, str) or not provider:
+            provider = getattr(ps, "provider_override", None) or ""
         try:
             from .provider_config import effective_provider_for
 
-            provider = effective_provider_for(_split_shard(from_role)[0], project_ns) or ""
+            provider = (
+                provider or effective_provider_for(_split_shard(from_role)[0], project_ns) or ""
+            )
         except Exception:
-            provider = ""
+            pass
 
         def hook(body: str):
             out = fix_loop.record_failure(
@@ -7750,7 +7757,7 @@ class Orchestrator(
         try:
             from .routing_planner import classify_failure
 
-            fix_role, why = classify_failure(body)
+            fix_role, why = classify_failure(body, source_role=from_role)
             if fix_role:
                 suggest = f"🔎 signature ชี้ไปที่ **{fix_role}** ({why}) — เสนอ route กลับ role นี้ก่อน\n"
         except Exception:
@@ -8883,6 +8890,39 @@ class Orchestrator(
         health_line = self._drain_pane_health(project_ns, from_role)
         if health_line:
             notice = f"{notice}\n{health_line}"
+        # Report quality and delivery confirmation are separate from task
+        # success. Keep these warnings visible even in a condensed digest.
+        from .orchestrator_text import done_report_warnings
+
+        review_warnings = done_report_warnings(raw_note)
+        if had_assign_ts:
+            try:
+                from . import role_messages
+
+                followups = [
+                    rec
+                    for rec in role_messages.read(RUNTIME_DIR, project_ns, role=from_role)
+                    if rec.get("from") == "lead"
+                    and rec.get("state") in ("sent", "delivered")
+                    and rec.get("ts", 0) >= had_assign_ts
+                ]
+                if followups:
+                    ids = ", ".join(str(rec.get("id", "")) for rec in followups)
+                    review_warnings.append(
+                        f"Lead follow-ups require review ({ids}); delivery does not confirm processing. "
+                        f"Read takkub messages --role {from_role} before accepting this report."
+                    )
+            except Exception:
+                _log_event("done_followup_review_error", role=from_role, project=project_ns)
+        if review_warnings:
+            warning_text = "⚠️ " + " · ".join(review_warnings)
+            notice += "\n" + warning_text
+            if digest_facts is not None:
+                from dataclasses import replace
+
+                digest_facts = replace(
+                    digest_facts, headline=digest_facts.headline + " — " + warning_text
+                )
 
         # Shard panes suppress clean per-shard notices in favour of the
         # consolidated handoff. Failures still surface immediately so the
@@ -12182,19 +12222,29 @@ class Orchestrator(
         and is correct, it simply had no CLI entry point until now."""
         project_ns = self._resolve_project(project)
         pane = self._project_panes(project_ns).get(role)
+        queued = getattr(self, "_pending_assignments", {}).pop(_exit_key(project_ns, role), [])
+        queue_msg = f"cancelled {len(queued)} queued assignment(s) for '{role}'" if queued else ""
         if pane is None:
-            return self._cancel_queued_resource_task(role, project_ns)
+            ok, msg = self._cancel_queued_resource_task(role, project_ns)
+            if queued:
+                return True, queue_msg + (f"\n{msg}" if ok else "")
+            return ok, msg
         delivery_manager = getattr(self, "_delivery_manager", None)
         if delivery_manager is None:
-            return True, f"no pending delivery for '{role}' (nothing has ever been delivered)"
+            return (
+                True,
+                queue_msg or f"no pending delivery for '{role}' (nothing has ever been delivered)",
+            )
         generation = int(getattr(pane, "_session_generation", 0))
         cancelled = delivery_manager.cancel_for_session(project_ns, role, generation)
         if cancelled:
             last_ids = getattr(self, "_last_delivery_ids", None)
             if last_ids is not None:
                 last_ids.pop((project_ns, role), None)
-            return True, f"cancelled {cancelled} pending delivery(ies) for '{role}'"
-        return True, f"no pending delivery for '{role}'"
+            return True, f"cancelled {cancelled} pending delivery(ies) for '{role}'" + (
+                f"\n{queue_msg}" if queued else ""
+            )
+        return True, queue_msg or f"no pending delivery for '{role}'"
 
     def _cancel_queued_resource_task(self, role: str, project_ns: str) -> tuple[bool, str]:
         """`takkub task cancel --role <r>` for a role that never got a pane

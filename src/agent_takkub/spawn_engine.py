@@ -364,7 +364,9 @@ Confirm the requested outcome and inspect prior failure evidence before changing
 Do not repeat an edit or test with no new hypothesis. After two attempts with
 the same symptom, send Lead the observed facts and the next diagnostic check.
 Verify the outcome where possible. Report: STATUS; CHANGED paths; EVIDENCE from
-a real run; REMAINING work. Never claim an unrun check passed.
+a real run; REMOVED paths (or None); REMAINING work. Use these field names in
+the takkub done note. Check takkub messages before done and incorporate Lead's
+follow-ups. Never claim an unrun check passed.
 """
 
 

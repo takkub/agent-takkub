@@ -879,7 +879,7 @@ def _is_heavy_build_or_suite(cmd: str) -> tuple[bool, str]:
         if re.search(r"\b-(?:b|p|-build|-project)\b", tail, re.I) or not re.search(
             r"\b[\w./\\-]+\.tsx?\b", tail, re.I
         ):
-            return True, "tsc_project"
+            return True, "tsc_typecheck" if re.search(r"--noEmit\b", tail, re.I) else "tsc_project"
     m_pw = re.search(
         rf"{_CMD_START}(?:npx\s+)?playwright\s+test\b(?P<tail>[^\n|;&]*)", cmd, re.I | re.M
     )
@@ -931,6 +931,8 @@ def _is_machine_busy_from_snapshot(
     role: str,
     snapshot_path: pathlib.Path | None = None,
     machine_state_path: pathlib.Path | None = None,
+    *,
+    check_working_panes: bool = True,
 ) -> tuple[bool, str]:
     """Check if the machine is busy from a recent session snapshot (#585
     round 2; #587 B1 adds the machine-state.json source).
@@ -981,7 +983,7 @@ def _is_machine_busy_from_snapshot(
     other_working = [
         r for r in working_panes if normalise_role(str(r).split("@", 1)[0]) != norm_role
     ]
-    if other_working:
+    if other_working and check_working_panes:
         return True, (
             f"มี pane อื่นกำลังทำงาน ({', '.join(str(r) for r in other_working)}) "
             "— นับทั้งเครื่องทุกโปรเจค (takkub list เห็นเฉพาะโปรเจคนี้)"
@@ -4329,7 +4331,10 @@ def classify(
         is_heavy, heavy_type = _is_heavy_build_or_suite(cmd)
         if is_heavy:
             busy, busy_reason = _is_machine_busy_from_snapshot(
-                name, snapshot_path=snapshot_path, machine_state_path=machine_state_path
+                name,
+                snapshot_path=snapshot_path,
+                machine_state_path=machine_state_path,
+                check_working_panes=heavy_type != "tsc_typecheck",
             )
             if busy:
                 return Verdict(

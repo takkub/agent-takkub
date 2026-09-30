@@ -155,6 +155,38 @@ def test_deep_scope_always_proposes_and_verify_pass_resets(orch) -> None:
     assert fix_loop.brief_block(PROJ, fix_loop.identity_for("card2", "")) != ""
 
 
+def test_failure_ledger_records_actual_live_provider(orch):
+    _assign(orch, "backend", "card1", "fix login #900")
+    orch._project_panes(PROJ)["backend"].model.provider_name = "claude"
+    orch._pane_state[_exit_key(PROJ, "backend")].provider_override = "gemini"
+    with patch.object(fix_loop, "record_failure", wraps=fix_loop.record_failure) as record:
+        _fail(orch, "backend", FAIL_A)
+    assert record.call_args.kwargs["provider"] == "claude"
+
+
+@pytest.mark.parametrize("provider", ["claude", "codex", "gemini", "opencode", "cursor"])
+def test_done_surfaces_incomplete_note_and_delivered_followup(orch, provider):
+    from agent_takkub import role_messages
+
+    _assign(orch, "backend", "card1", "fix login #900")
+    orch._project_panes(PROJ)["backend"].model.provider_name = provider
+    orch._project_panes(PROJ)["backend"].session.shows_busy_queue_confirm.return_value = False
+    msg_id = role_messages.append(
+        orch_mod.RUNTIME_DIR,
+        PROJ,
+        to_role="backend",
+        from_role="lead",
+        body="Use the corrected specification",
+        generation=1,
+    )
+    role_messages.mark_delivered(orch_mod.RUNTIME_DIR, PROJ, msg_id)
+    ok, _ = orch.done("backend", note="finished", project=PROJ)
+    assert ok
+    notice = orch.notices[-1]
+    assert "note incomplete" in notice
+    assert msg_id in notice and "delivery does not confirm processing" in notice
+
+
 def _dispatch(orch: Orchestrator, role: str, task: str, **kw):
     """The real gate a `takkub assign` passes: backlog_for_assign, then the
     pane state assign() seeds from the card it stashed."""

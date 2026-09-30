@@ -671,6 +671,11 @@ def _git_lead_only_task_warning(task: str, isolation: str) -> str:
     for m in _GIT_LEAD_ONLY_TASK_RE.finditer(task or ""):
         if _negated_at(task, m.start()):
             continue
+        prefix = task[task.rfind("\n", 0, m.start()) + 1 : m.start()]
+        if re.search(
+            r"(?:ถูก|เคย|เพราะ|was|were|had been|previously)\s*(?:`|\"|'|เป็น\s*)?$", prefix, re.I
+        ):
+            continue
         sub = m.group("sub").lower().split()[0]
         note = _GIT_SUB_BLOCKED_ON_SHARED.get(sub)
         if note is None:
@@ -681,7 +686,9 @@ def _git_lead_only_task_warning(task: str, isolation: str) -> str:
     bullets = "".join(f"\n   · git {sub}: {note}" for sub, note in found.items())
     return (
         "\n⚠️ task นี้สั่งให้ pane ใช้คำสั่ง git ที่ pane_guard บล็อกบน shared tree (#707) — "
-        "pane จะชน guard ตอนท้ายงานแล้วเสียรอบ แก้ข้อความ task หรือบอกไว้ว่า Lead จะทำส่วนนี้ให้:" + bullets
+        "pane จะชน guard ตอนท้ายงานแล้วเสียรอบ แก้ข้อความ task หรือบอกไว้ว่า Lead จะทำส่วนนี้ให้:"
+        + bullets
+        + "\nหมายเหตุ: warning นี้ไม่บล็อก assign — สถานะการส่งงานอยู่ในผลลัพธ์ข้างบน"
     )
 
 

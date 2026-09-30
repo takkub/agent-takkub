@@ -1234,6 +1234,8 @@ class TestReroutePaneToProvider:
         ps.effort_override = "high"
         pane = MagicMock()
         pane._session_cwd = "C:/work/api"
+        pane._transcript_path = "runtime/backend.md"
+        pane.session.display_lines.return_value = ["[x] fixed aggregate", "[ ] run tests"]
         o._panes_by_project["proj"] = {"backend": pane}
         with patch(
             "agent_takkub.limit_autoresume.QTimer.singleShot",
@@ -1262,6 +1264,9 @@ class TestReroutePaneToProvider:
         sent_role, sent_task = o._send_when_ready.call_args.args[:2]
         assert sent_role == "backend"
         assert "implement the thing" in sent_task
+        assert "[x] fixed aggregate" in sent_task
+        assert "[ ] run tests" in sent_task
+        assert "runtime/backend.md" in sent_task
         assert "claude" in sent_task and "codex" in sent_task
         o._notify_lead.assert_called_once()
         assert "ย้ายไป codex" in o._notify_lead.call_args.args[1]

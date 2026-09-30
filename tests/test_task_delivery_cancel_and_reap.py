@@ -63,6 +63,18 @@ def orch(qapp, monkeypatch) -> Orchestrator:
 
 
 class TestCancelTaskDelivery:
+    def test_cancel_drops_assignments_waiting_behind_busy_pane(self, orch):
+        orch._panes_by_project["P"] = {"backend": _pane(_live_session())}
+        orch._pending_assignments = {
+            "P::backend": [{"task": "obsolete", "_queued_task_id": "queued1"}],
+            "Q::backend": [{"task": "other project"}],
+        }
+        ok, msg = orch.cancel_task_delivery("backend", project="P")
+        assert ok and "cancelled 1 queued assignment" in msg
+        assert "P::backend" not in orch._pending_assignments
+        assert orch._pending_assignments["Q::backend"]
+        assert not orch._dispatch_next_assignment("P", "backend")
+
     def test_cancels_pending_delivery_for_current_generation(self, orch: Orchestrator) -> None:
         # Also pins #295: explicit `takkub cancel` must drop the delivery
         # however far it got, unlike `send`'s softer supersede handling.

@@ -32,6 +32,26 @@ from .roles import LEAD
 from .token_meter import encode_path_for_claude
 
 
+def done_report_warnings(note: str) -> list[str]:
+    """Provider-independent quality flags; never turn an incomplete note into PASS evidence."""
+    warnings = []
+    missing = [
+        label
+        for label in ("CHANGED", "EVIDENCE", "REMOVED")
+        if not re.search(rf"\b{label}\s*:\s*\S", note or "", re.I)
+    ]
+    if missing:
+        warnings.append("note incomplete: missing " + ", ".join(missing))
+    if re.search(
+        r"(?:skip\w*|ไม่ได้รัน|ไม่ยืนยัน|ยกเว้น)[^\n]{0,60}(?:tsc|typecheck)|"
+        r"(?:tsc|typecheck)[^\n]{0,60}(?:skip\w*|ไม่ได้รัน|ไม่ยืนยัน)",
+        note or "",
+        re.I,
+    ):
+        warnings.append("typecheck unverified")
+    return warnings
+
+
 def _orch_attr(name: str, default):
     """Read a module-level attribute through the orchestrator façade at call time.
 
