@@ -7,7 +7,7 @@ from types import SimpleNamespace
 
 from agent_takkub import pane_guard, qa_gate
 from agent_takkub.cli import _git_lead_only_task_warning
-from agent_takkub.orchestrator_text import done_report_warnings
+from agent_takkub.orchestrator_text import done_note_preview, done_report_warnings
 from agent_takkub.provider_spec import picker_question_on_screen, quota_markers_for
 from agent_takkub.routing_planner import classify_failure
 
@@ -53,6 +53,17 @@ def test_done_quality_flags_missing_fields_and_unverified_typecheck():
     assert "note incomplete" in done_report_warnings("81 tests passed")[0]
     assert not done_report_warnings("CHANGED: x.py\nEVIDENCE: pytest 1 passed\nREMOVED: None")
     assert "typecheck unverified" in done_report_warnings("ยกเว้น tsc ไม่ยืนยัน typecheck")
+
+
+def test_done_preview_handles_both_os_paths_and_rejects_old_session():
+    body = "## Note\n\nSTATUS: done\nCHANGED: file.ts\n\n## Transcript\n\nRaw byte stream (with ANSI): `runtime/sessions/frontend-142500.transcript.log`\n"
+    assert (
+        done_note_preview(
+            body, transcript_path=r"C:\runtime\sessions\frontend-142500.transcript.log"
+        )
+        == "STATUS: done\nCHANGED: file.ts"
+    )
+    assert not done_note_preview(body, transcript_path="frontend-previous.transcript.log")
 
 
 def test_real_subprocess_failure_lists_all_suites_and_saves_full_log(tmp_path):

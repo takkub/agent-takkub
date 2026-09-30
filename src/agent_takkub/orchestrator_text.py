@@ -32,6 +32,28 @@ from .roles import LEAD
 from .token_meter import encode_path_for_claude
 
 
+def done_note_preview(body: str, *, transcript_path=None, max_lines: int = 5) -> str:
+    """Read the durable report for a closed session, avoiding lossy PTY redraws."""
+    if transcript_path:
+        # Reports store an absolute or repo-relative transcript reference.
+        # Match its filename across OS path separators; never use a report
+        # from an older session just because the role name is the same.
+        transcript_name = str(transcript_path).replace("\\", "/").rsplit("/", 1)[-1]
+        reference = re.search(r"Raw byte stream \(with ANSI\): `([^`]+)`", body)
+        if (
+            not reference
+            or reference.group(1).replace("\\", "/").rsplit("/", 1)[-1] != transcript_name
+        ):
+            return ""
+    match = re.search(r"^## Note\s*\n(.*?)(?=^## Transcript\s*$|\Z)", body, re.M | re.S)
+    if not match:
+        return ""
+    lines = [
+        _clean_progress_line(line).strip() for line in match.group(1).splitlines() if line.strip()
+    ]
+    return "\n".join(lines[:max_lines])
+
+
 def done_report_warnings(note: str) -> list[str]:
     """Provider-independent quality flags; never turn an incomplete note into PASS evidence."""
     warnings = []

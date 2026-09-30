@@ -743,7 +743,8 @@ class TestDoneNoticeAppendFormat:
 
         for quiet_role in ("backend", "devops"):
             assert "⚠ no evidence cited" not in captured[quiet_role], quiet_role
-            assert captured[quiet_role] == f"[{quiet_role} done] finished"
+            assert captured[quiet_role].split("\n⚠️", 1)[0] == f"[{quiet_role} done] finished"
+            assert "note incomplete" in captured[quiet_role]
 
     def test_note_citing_path_suppresses_warning(self, orch, tmp_path, monkeypatch):
         """A warn-role note that cites a path-like/test-result token is
@@ -765,7 +766,10 @@ class TestDoneNoticeAppendFormat:
 
         assert captured
         assert "⚠ no evidence cited" not in captured[0]
-        assert captured[0] == "[reviewer done] reviewed, see docs/review-notes.md"
+        assert (
+            captured[0].split("\n⚠️", 1)[0] == "[reviewer done] reviewed, see docs/review-notes.md"
+        )
+        assert "note incomplete" in captured[0]
 
     def test_note_without_citation_gets_tagged(self, orch, tmp_path, monkeypatch):
         """A warn-role note with no path/test-result reference and no scanned

@@ -11697,6 +11697,14 @@ class Orchestrator(
                                 break
 
             done_events: list[str] = []
+            latest_done_preview = ""
+            latest_done_ts = 0.0
+            closed_preview = (
+                state in ("done", "exited")
+                or state.startswith("closed")
+                or display_state in ("done", "exited")
+                or display_state.startswith("closed")
+            ) and (pane is None or pane.session is None or not pane.session.is_alive)
             sessions_root = RUNTIME_DIR / "sessions"
             if sessions_root.is_dir():
                 for day_dir in sorted(sessions_root.iterdir(), reverse=True):
@@ -11711,10 +11719,25 @@ class Orchestrator(
                         if not f.name.startswith(f"{pane_role}-"):
                             continue
                         try:
-                            if f.stat().st_mtime >= since_ts:
+                            report_ts = f.stat().st_mtime
+                            if report_ts >= since_ts:
                                 done_events.append(f.name)
+                                if closed_preview and report_ts > latest_done_ts:
+                                    from .orchestrator_text import done_note_preview
+
+                                    preview = done_note_preview(
+                                        f.read_text(encoding="utf-8"),
+                                        transcript_path=transcript_path,
+                                    )
+                                    if preview:
+                                        latest_done_preview = preview
+                                        latest_done_ts = report_ts
                         except OSError:
                             pass
+
+            if latest_done_preview:
+                transcript_tail = latest_done_preview
+                exit_hint = ""
 
             quota_resets_at = info.get("quota_resets_at") or 0.0
             quota_resets_human = _human_duration(quota_resets_at - now) if quota_resets_at else ""

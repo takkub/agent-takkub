@@ -255,8 +255,9 @@ class TestFoldedIntoTheRealReport:
         monkeypatch.setattr(
             done_orch, "_notify_lead", lambda ns, notice, **kw: captured.append(notice) or None
         )
-        done_orch.done("backend", note="เสร็จแล้ว", project=PROJECT)
-        assert captured == ["[backend done] เสร็จแล้ว"], "nothing observed ⇒ nothing added"
+        note = "เสร็จแล้ว\nCHANGED: backend.py\nEVIDENCE: pytest passed\nREMOVED: None"
+        done_orch.done("backend", note=note, project=PROJECT)
+        assert captured == [f"[backend done] {note}"], "complete note with no health observations"
 
     def test_done_drains_so_the_next_pane_starts_clean(
         self, done_orch: Orchestrator, monkeypatch: pytest.MonkeyPatch

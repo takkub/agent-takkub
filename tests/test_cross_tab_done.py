@@ -204,7 +204,8 @@ class TestVerifyFailFeedbackRouting:
 
         orch.done("qa", note="all green", project=proj, failed=False)
 
-        assert captured and captured[0] == "[qa done] all green"
+        assert captured and captured[0].split("\n⚠️", 1)[0] == "[qa done] all green"
+        assert "note incomplete" in captured[0]
 
 
 # ─────────────────────────────────────────────────────────────

@@ -25,6 +25,73 @@ from agent_takkub.orchestrator import (
 )
 
 
+@pytest.mark.parametrize("provider", ["claude", "codex", "gemini", "opencode", "cursor", "agy"])
+def test_closed_pane_preview_uses_its_done_report(runtime_tmp, tmp_path, provider):
+    from datetime import datetime
+
+    from agent_takkub.vault_mirror import _render_decision_note
+
+    transcript = tmp_path / "frontend-142500.transcript.log"
+    transcript.write_text(
+        "STATUS: เสรอง frontend จbody attributes\neshokShow deta7ls o e t", encoding="utf-8"
+    )
+    now = datetime.now()
+    folder = runtime_tmp / "sessions" / now.strftime("%Y-%m-%d") / "default"
+    folder.mkdir(parents=True)
+    note = "STATUS: done\nCHANGED: frontend.tsx\nEVIDENCE: screenshot.png\nREMAINING: None"
+    (folder / "frontend-142555.md").write_text(
+        _render_decision_note("default", "frontend", note, now, transcript_path=str(transcript)),
+        encoding="utf-8",
+    )
+    # A newer report belonging to another session must not replace this one.
+    (folder / "frontend-143000.md").write_text(
+        _render_decision_note(
+            "default", "frontend", "wrong session", now, transcript_path="other.transcript.log"
+        ),
+        encoding="utf-8",
+    )
+    pane = _FakePane(state="exited", session_alive=False, transcript_path=str(transcript))
+    pane.model = MagicMock(provider_name=provider)
+    orch = _FakeOrch()
+    orch._panes_by_project["default"] = {"frontend": pane}
+    report = orch.pane_status_report("default")
+    assert report["panes"]["frontend"]["transcript_tail"] == note
+    assert not report["panes"]["frontend"]["exit_hint"]
+    # The real close removes the pane; the status row is then a tombstone.
+    orch._panes_by_project["default"] = {}
+    orch._recent_exit_tombstones = lambda project, existing: {"frontend": "closed (14:25)"}
+    orch._find_latest_transcript_path = lambda project, role: transcript
+    report = orch.pane_status_report("default")
+    assert report["panes"]["frontend"]["state"] == "closed (14:25)"
+    assert report["panes"]["frontend"]["transcript_tail"] == note
+
+
+def test_live_pane_preview_keeps_rendered_screen(runtime_tmp, tmp_path):
+    from datetime import datetime
+
+    from agent_takkub.vault_mirror import _render_decision_note
+
+    transcript = tmp_path / "backend.transcript.log"
+    transcript.write_text("redraw fragments", encoding="utf-8")
+    now = datetime.now()
+    folder = runtime_tmp / "sessions" / now.strftime("%Y-%m-%d") / "default"
+    folder.mkdir(parents=True)
+    (folder / "backend-120000.md").write_text(
+        _render_decision_note(
+            "default", "backend", "previous done", now, transcript_path=str(transcript)
+        ),
+        encoding="utf-8",
+    )
+    pane = _FakePane(state="working", transcript_path=str(transcript))
+    pane.session.display_lines.return_value = ["current live output"]
+    orch = _FakeOrch()
+    orch._panes_by_project["default"] = {"backend": pane}
+    assert (
+        orch.pane_status_report("default")["panes"]["backend"]["transcript_tail"]
+        == "current live output"
+    )
+
+
 class _FakePane:
     """Minimal pane stub for stall-detection tests."""
 
