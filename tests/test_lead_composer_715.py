@@ -84,6 +84,37 @@ def _pump(app, seconds: float) -> None:
         app.processEvents()
 
 
+def test_composer_font_controls_resize_and_restore(qapp, tmp_path, monkeypatch) -> None:
+    import agent_takkub.lead_composer as composer_mod
+
+    values = {}
+
+    class FakeSettings:
+        def __init__(self, *args):
+            pass
+
+        def value(self, key, default):
+            return values.get(key, default)
+
+        def setValue(self, key, value):
+            values[key] = value
+
+    monkeypatch.setattr(composer_mod, "QSettings", FakeSettings)
+    first = LeadComposer(tmp_path)
+    first.editor.setPlainText("draft line")
+    height_before = first.editor.height()
+    first._btn_font_larger.click()
+    assert first.editor.font().pointSize() == 15
+    assert first.editor.height() > height_before
+    assert first.editor.toPlainText() == "draft line"
+    second = LeadComposer(tmp_path)
+    assert second.editor.font().pointSize() == 15
+    second._btn_font_reset.click()
+    assert second.editor.font().pointSize() == 14
+    first.close()
+    second.close()
+
+
 class TestComposeMessage:
     def test_text_only(self) -> None:
         assert compose_message("  สวัสดี  ", []) == "สวัสดี"

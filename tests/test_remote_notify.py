@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import os
+import threading
 import time
 from datetime import UTC, datetime
 from pathlib import Path
@@ -1243,6 +1244,35 @@ class TestProviderQuestionRecords:
 
 
 class TestLeadOutputTailAskQuestion:
+    def test_agy_question_read_does_not_block_qt_poller(self, qapp, tmp_path):
+        blocker = threading.Event()
+        entered = threading.Event()
+        calls = []
+        notifier = LeadNotifier(_FakeOrch(), _FakeBroadcaster())
+        tail = notify_mod._Tail(tmp_path / "session.jsonl", "session-1", provider="gemini")
+
+        def slow_sqlite_read(_path, _project):
+            calls.append(1)
+            entered.set()
+            blocker.wait(2)
+            return [{"status": 9}]
+
+        try:
+            start = time.monotonic()
+            assert notifier._agy_question_records_ready("proj", tail, slow_sqlite_read) is None
+            assert time.monotonic() - start < 0.2
+            assert entered.wait(1)
+            assert notifier._agy_question_records_ready("proj", tail, slow_sqlite_read) is None
+            assert len(calls) == 1
+            blocker.set()
+            notifier._agy_question_reads["proj"][1].join(1)
+            assert notifier._agy_question_records_ready("proj", tail, slow_sqlite_read) == [
+                {"status": 9}
+            ]
+        finally:
+            blocker.set()
+            notifier.stop()
+
     def test_ask_user_question_pushes_blocked_on_picker(self, qapp, tmp_path, config_dir):
         orch = _FakeOrch()
         broadcaster = _FakeBroadcaster()

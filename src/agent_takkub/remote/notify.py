@@ -33,9 +33,9 @@ isolated `<DATA_HOME>/claude-config`) store, so the file is found by
 spawned with (`pane_env.inject_user_profile_env`), so a project pinned to a
 non-default profile still resolves correctly.
 
-Runs entirely on the Qt main thread (constructed inside
-`RemoteControl._start`) — a normal Qt object on a normal `QTimer`, not
-something a handler thread ever touches. Each poll tick only reads the byte
+The Qt poller is constructed inside `RemoteControl._start`; agy SQLite
+question reads run in bounded daemon workers so a locked provider DB cannot
+freeze the UI. Each JSONL poll tick only reads the byte
 range appended since the last tick (per-project `offset`), never re-reads
 the whole file — a Lead session log can grow into the tens of MB over a
 long run.
@@ -56,6 +56,7 @@ from __future__ import annotations
 import json
 import re
 import sqlite3
+import threading
 import time
 from collections import Counter
 from collections.abc import Callable, Iterator
@@ -2334,6 +2335,11 @@ class LeadNotifier(QObject):
         self._uuidless_resolved_at: dict[str, float] = {}
         # project_ns -> monotonic time of the last FAILED resolve (#640).
         self._unresolved_at: dict[str, float] = {}
+        # agy question steps live in SQLite. A locked or busy provider DB can
+        # take seconds despite sqlite's short connection timeout, so the Qt
+        # poller only checks completed reads; one daemon worker per project is
+        # allowed at a time. Each result is tied to its exact session.
+        self._agy_question_reads: dict[str, tuple[tuple, threading.Thread, dict]] = {}
         self._timer = QTimer(self)
         self._timer.setInterval(_POLL_MS)
         self._timer.timeout.connect(self._poll_all)
@@ -2562,7 +2568,14 @@ class LeadNotifier(QObject):
             if scanner.live_records is None:
                 return False, None
             try:
-                records = scanner.live_records(tail.path, project_ns)
+                if tail.provider == "gemini":
+                    records = self._agy_question_records_ready(
+                        project_ns, tail, scanner.live_records
+                    )
+                    if records is None:
+                        return False, None
+                else:
+                    records = scanner.live_records(tail.path, project_ns)
             except (OSError, ValueError, TypeError):
                 return False, None
             for rec in reversed(records):
@@ -2719,6 +2732,32 @@ class LeadNotifier(QObject):
             self._lead_working[project_ns] = True
             self._broadcaster.push("working", activity, project_ns)
 
+    def _agy_question_records_ready(
+        self, project_ns: str, tail: _Tail, reader
+    ) -> list[dict] | None:
+        """Return a completed agy SQLite read, or schedule one without waiting."""
+        key = (str(tail.path), tail.session_uuid, tail.spawn_ts, tail.provider)
+        pending = self._agy_question_reads.get(project_ns)
+        if pending is not None and pending[0] == key:
+            thread, result = pending[1], pending[2]
+            if thread.is_alive():
+                return None
+            del self._agy_question_reads[project_ns]
+            return result.get("records", [])
+
+        result: dict = {}
+
+        def read() -> None:
+            try:
+                result["records"] = reader(tail.path, project_ns)
+            except (OSError, ValueError, TypeError):
+                result["records"] = []
+
+        thread = threading.Thread(target=read, name="agy-question-read", daemon=True)
+        self._agy_question_reads[project_ns] = (key, thread, result)
+        thread.start()
+        return None
+
     # ── done events ───────────────────────────────────────────────────
     def _on_done(self, project_ns: str, role: str, note: str) -> None:
         # H-A: stamp the event's own project, not whatever project happens
@@ -2765,4 +2804,5 @@ class LeadNotifier(QObject):
         self._structured_text_seen.clear()
         self._session_keys.clear()
         self._pending_session_changes.clear()
+        self._agy_question_reads.clear()
         self._timer.stop()

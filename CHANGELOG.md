@@ -4,6 +4,21 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 
 ## [vNEXT]
 
+## [v2.1.47] - 2026-09-30
+
+### Added (เพิ่ม)
+
+- **ปรับขนาดตัวอักษรช่องพิมพ์ Lead (#766):** ปุ่มลด/เพิ่ม/คืนค่าเริ่มต้น ปรับความสูงตามขนาดและจำค่าข้ามการเปิด cockpit
+
+### Fixed (แก้)
+
+- **Codex Lead compact วนซ้ำ:** นับ cached input เพิ่มจากครั้งก่อนให้ครบ threshold ก่อน compact อีกครั้ง และเริ่มนับใหม่เมื่อ session reset
+- **ลิงก์ terminal (#767):** เปิด plain URL และ OSC 8 ผ่านเบราว์เซอร์ระบบ คลิกขวาคัดลอก URL พร้อมแจ้งเมื่อ opener ล้มเหลว
+- **AskUserQuestion (#768) และ done→assign (#769):** กัน notice แทรก picker ของ Lead และส่ง brief ใหม่ผ่านเส้นทาง paste เมื่อ resume เก็บ system prompt เดิม
+- **สถานะ/guard (#770 #771):** เรนเดอร์ transcript tail ผ่าน terminal emulator; ไม่ตีความข้อความใน quote หรือ `> (` เป็น process substitution และไม่ส่ง guard deny ทุกครั้งไปกวน Lead
+- **UI stall (#772 #773):** ย้ายการประเมิน token ของ plugin และการอ่าน SQLite คำถาม Antigravity ออกจาก Qt main thread
+- **issue local (#774):** แสดงพาธ V2 จริง จับคู่ title กับ GitHub issue ที่มีอยู่ และเพิ่ม `issue close --local`
+
 ## [v2.1.46] - 2026-09-29
 
 ### Added (เพิ่ม)

@@ -479,6 +479,13 @@ def test_cmd_list_output(capsys) -> None:
     assert "some bug" in captured.out
 
 
+def test_cmd_list_local_number_is_unambiguous(capsys) -> None:
+    item = {"number": 1, "title": "local report", "status": "open", "url": "local://issue/1"}
+    with patch("agent_takkub.issues.list_issues", return_value=[item]):
+        cmd_issue_list(_args())
+    assert "L1" in capsys.readouterr().out
+
+
 def test_cmd_list_empty(capsys) -> None:
     with patch("agent_takkub.issues.list_issues", return_value=[]):
         resp = cmd_issue_list(_args())
@@ -1090,7 +1097,7 @@ def test_list_issues_merges_unreconciled_local_backlog(tmp_path, monkeypatch, ca
     )
 
     with patch("agent_takkub.issues._gh") as mock_gh:
-        mock_gh.side_effect = ["takkub/agent-takkub", "[]"]  # gh now works, but empty
+        mock_gh.side_effect = ["takkub/agent-takkub", "[]", "[]"]  # gh now works, but empty
         items = list_issues()
 
     assert any(i["number"] == 1 and i["title"] == "stranded local issue" for i in items)
@@ -1105,7 +1112,7 @@ def test_list_issues_no_backlog_no_warning(tmp_path, monkeypatch, capsys) -> Non
     monkeypatch.setattr("agent_takkub.issues.DATA_HOME", fake_repo_root)
 
     with patch("agent_takkub.issues._gh") as mock_gh:
-        mock_gh.side_effect = ["takkub/agent-takkub", "[]"]
+        mock_gh.side_effect = ["takkub/agent-takkub", "[]", "[]"]
         items = list_issues()
 
     assert items == []
@@ -1133,12 +1140,61 @@ def test_list_issues_backlog_respects_filters(tmp_path, monkeypatch) -> None:
     )
 
     with patch("agent_takkub.issues._gh") as mock_gh:
-        mock_gh.side_effect = ["takkub/agent-takkub", "[]"]
+        mock_gh.side_effect = ["takkub/agent-takkub", "[]", "[]"]
         items = list_issues(filter_open=True)
 
     numbers = [i["number"] for i in items]
     assert 2 in numbers
     assert 1 not in numbers
+
+
+def test_list_issues_reconciles_closed_github_match(tmp_path, monkeypatch, capsys) -> None:
+    import agent_takkub.issues as issues_mod
+    from agent_takkub.core.storage.v2_target import write_data
+
+    monkeypatch.setattr(issues_mod, "REPO_ROOT", tmp_path)
+    monkeypatch.setattr(issues_mod, "DATA_HOME", tmp_path)
+    store = issues_mod._cockpit_bug_v2_target()
+    write_data(
+        store,
+        [
+            {
+                "number": 1,
+                "title": "Same fixed bug",
+                "status": "open",
+                "url": "local://issue/1",
+                "severity": "med",
+            }
+        ],
+    )
+    gh_match = {
+        "number": 697,
+        "title": "same  fixed BUG",
+        "state": "CLOSED",
+        "url": "https://github.com/takkub/agent-takkub/issues/697",
+    }
+    with patch("agent_takkub.issues._gh") as mock_gh:
+        mock_gh.side_effect = ["takkub/agent-takkub", "[]", json.dumps([gh_match])]
+        assert list_issues(filter_open=True) == []
+    assert "unreconciled" not in capsys.readouterr().err
+    saved = issues_mod._load_local_issues(tmp_path)
+    assert saved[0]["migrated_to"] == gh_match["url"]
+    assert saved[0]["status"] == "closed"
+
+
+def test_close_explicit_local_record_even_when_github_available(tmp_path, monkeypatch) -> None:
+    import agent_takkub.issues as issues_mod
+    from agent_takkub.core.storage.v2_target import write_data
+
+    monkeypatch.setattr(issues_mod, "DATA_HOME", tmp_path)
+    write_data(
+        issues_mod._cockpit_bug_v2_target(),
+        [{"number": 1, "title": "local only", "status": "open", "url": "local://issue/1"}],
+    )
+    with patch("agent_takkub.issues._gh") as mock_gh:
+        assert issues_mod.close_issue("1", local=True) == "local://issue/1"
+        mock_gh.assert_not_called()
+    assert issues_mod._load_local_issues(tmp_path)[0]["status"] == "closed"
 
 
 def test_cli_issue_show_defaults_to_cockpit_bug(monkeypatch) -> None:

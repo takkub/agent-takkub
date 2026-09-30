@@ -10,12 +10,13 @@ targeted-tests rule.
 
 from __future__ import annotations
 
+import time
 from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
 from PyQt6.QtCore import QSettings, Qt
-from PyQt6.QtWidgets import QDialog, QMessageBox
+from PyQt6.QtWidgets import QApplication, QDialog, QMessageBox
 
 from agent_takkub import (
     auto_resume,
@@ -1137,9 +1138,16 @@ class TestPluginsMatrixView:
         )
         dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_MCP_MATRIX)
         view = dlg._stack.widget(settings_window.VIEW_MCP_MATRIX).widget()
+        deadline = time.monotonic() + 2
+        while time.monotonic() < deadline:
+            QApplication.processEvents()
+            labels = [lbl.text() for lbl in view.findChildren(QLabel)]
+            if "~1.2k tok" in labels:
+                break
+            time.sleep(0.01)
         labels = [lbl.text() for lbl in view.findChildren(QLabel)]
         assert any("โหลดเข้าทุก pane" in t for t in labels)
-        assert any("tok" in t for t in labels)
+        assert "~1.2k tok" in labels
         dlg.deleteLater()
 
 

@@ -834,6 +834,24 @@ class _ModelCatalogRefreshThread(QThread):
         self.resultReady.emit(provider_model_catalog.refresh_stale())
 
 
+class _PluginCostsThread(QThread):
+    """Estimate marketplace token costs without reading cache files on Qt."""
+
+    resultReady: pyqtSignal = pyqtSignal(dict)
+
+    def __init__(self, items: list[str], generation: int) -> None:
+        super().__init__(None)
+        self._items = list(items)
+        self._generation = generation
+
+    def run(self) -> None:
+        try:
+            costs = pane_tools_dialog.marketplace_token_costs(self._items)
+        except OSError:
+            costs = {}
+        self.resultReady.emit({"generation": self._generation, "costs": costs})
+
+
 # #688: keep-alive for running catalog threads, mirroring update_panel's
 # _NPM_THREADS. The thread must NOT be parented to the SettingsWindow: the
 # dialog is WA_DeleteOnClose, so a Cancel/Esc while discovery is still
@@ -847,6 +865,7 @@ _CATALOG_THREADS: set[_ModelCatalogRefreshThread] = set()
 # closing Settings during the up-to-60s `npx autoskills` scan (or the
 # install that follows) aborted the whole cockpit the same way.
 _AUTOSKILLS_THREADS: set[QThread] = set()
+_PLUGIN_COST_THREADS: set[QThread] = set()
 
 
 def _start_detached(thread: QThread, registry: set) -> None:
@@ -4116,8 +4135,13 @@ class SettingsWindow(
         name_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
         name_lbl.setToolTip(item)
         lay.addWidget(name_lbl)
-        if cost_tokens is not None:
-            cost_lbl = QLabel(token_estimate.format_tokens(cost_tokens), cell)
+        if cost_tokens is not None or category == "Plugin":
+            cost_text = (
+                token_estimate.format_tokens(cost_tokens) if cost_tokens is not None else "…"
+            )
+            cost_lbl = QLabel(cost_text, cell)
+            if category == "Plugin":
+                cost_lbl.setObjectName("pluginTokenCost")
             cost_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
             cost_lbl.setToolTip(
                 "Estimated boot-context cost — every pane of a role with this "
@@ -4348,17 +4372,32 @@ class SettingsWindow(
         }
         self._orig_plugin_items = {r: [m for m in v if m in rendered] for r, v in full_orig.items()}
         matrix = pane_tools_dialog.build_matrix(_matrix_roles(), items, self._orig_plugin_items)
-        costs = pane_tools_dialog.marketplace_token_costs(items)
         self._plugin_toggles = self._populate_matrix_grid(
             self._plugins_grid,
             _matrix_roles(),
             items,
             matrix,
             column_category="Plugin",
-            item_costs=costs,
         )
+        self._plugin_cost_items = list(items)
+        self._plugin_cost_generation = getattr(self, "_plugin_cost_generation", 0) + 1
+        if items:
+            thread = _PluginCostsThread(items, self._plugin_cost_generation)
+            thread.resultReady.connect(self._on_plugin_costs_ready)
+            _start_detached(thread, _PLUGIN_COST_THREADS)
         self._plugins_empty.setVisible(not items)
         self._plugins_matrix_panel.setVisible(bool(items))
+
+    def _on_plugin_costs_ready(self, payload: dict) -> None:
+        if payload.get("generation") != getattr(self, "_plugin_cost_generation", 0):
+            return
+        costs = payload.get("costs") or {}
+        for col, name in enumerate(getattr(self, "_plugin_cost_items", ()), start=1):
+            cell = self._plugins_grid.itemAtPosition(0, col)
+            header = cell.widget() if cell is not None else None
+            label = header.findChild(QLabel, "pluginTokenCost") if header is not None else None
+            if label is not None:
+                label.setText(token_estimate.format_tokens(costs.get(name, 0)))
 
     # ──────────────────────────────────────────────────────────
     # view: Skills (#515 — merged Skill Catalog + Skill Matrix into one

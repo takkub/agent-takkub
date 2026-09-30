@@ -4813,7 +4813,7 @@ def cmd_session_report(_: argparse.Namespace) -> dict:
         return {"ok": True, "msg": ""}
 
 
-_GUARD_NOTIFY_LEAD_RULE_PREFIXES = ("host_network:", "git_lead_only:commit", "instance_guard:")
+_GUARD_NOTIFY_LEAD_RULE_PREFIXES = ("host_network:", "git_lead_only:commit")
 
 
 def _log_guard_denied(role: str, command: str, verdict: object) -> None:
@@ -6759,8 +6759,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     # issue close
-    sic = si_sub.add_parser("close", help="close an issue by GitHub number")
-    sic.add_argument("id", help="GitHub issue number (e.g. 123, #123)")
+    sic = si_sub.add_parser("close", help="close a GitHub issue or local fallback record")
+    sic.add_argument("id", help="issue number (e.g. 123, #123)")
+    sic.add_argument("--local", action="store_true", help="close the local fallback record")
     sic.add_argument(
         "--note", default="", metavar="MSG", help="cause / fix summary (posted as comment)"
     )

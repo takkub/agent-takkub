@@ -34,11 +34,11 @@ from datetime import datetime
 from pathlib import Path
 
 from PyQt6.QtCore import QEvent, QObject, QTimer, QUrl, pyqtSignal, pyqtSlot
-from PyQt6.QtGui import QDesktopServices
+from PyQt6.QtGui import QDesktopServices, QGuiApplication
 from PyQt6.QtWebChannel import QWebChannel
 from PyQt6.QtWebEngineCore import QWebEnginePage
 from PyQt6.QtWebEngineWidgets import QWebEngineView
-from PyQt6.QtWidgets import QVBoxLayout, QWidget
+from PyQt6.QtWidgets import QMessageBox, QVBoxLayout, QWidget
 
 _STATIC_DIR = Path(__file__).resolve().parent / "static"
 _INDEX_URL = QUrl.fromLocalFile(str(_STATIC_DIR / "terminal.html"))
@@ -371,6 +371,7 @@ class _Bridge(QObject):
     pageReady = pyqtSignal()
     imageDataPasted = pyqtSignal(str, str)  # base64_data, mime_type
     openUrlRequested = pyqtSignal(str)  # web URL clicked in a pane
+    copyUrlRequested = pyqtSignal(str)  # web URL copied from a pane
     openPathRequested = pyqtSignal(str)  # file path clicked in a pane
     fontZoomedSig = pyqtSignal(int)  # pt size after a Ctrl/Cmd+wheel zoom or Ctrl/Cmd+0 reset
 
@@ -387,6 +388,11 @@ class _Bridge(QObject):
     def openUrl(self, uri: str) -> None:
         """Called from JS when the user clicks a web link (WebLinksAddon)."""
         self.openUrlRequested.emit(uri)
+
+    @pyqtSlot(str)
+    def copyUrl(self, uri: str) -> None:
+        """Called from JS when the user right-clicks a web link."""
+        self.copyUrlRequested.emit(uri)
 
     @pyqtSlot(str)
     def openPath(self, path: str) -> None:
@@ -557,6 +563,7 @@ class TerminalWidget(QWidget):
         self._bridge.pageReady.connect(self._on_page_ready)
         self._bridge.imageDataPasted.connect(self._on_image_pasted)
         self._bridge.openUrlRequested.connect(self._on_open_url)
+        self._bridge.copyUrlRequested.connect(self._on_copy_url)
         self._bridge.openPathRequested.connect(self._on_open_path)
         self._bridge.fontZoomedSig.connect(self._on_font_zoomed)
 
@@ -1078,13 +1085,30 @@ class TerminalWidget(QWidget):
         Routing through QDesktopServices opens them in the real browser.
         """
         u = (uri or "").strip()
+        url = QUrl(u)
         # M3#13: drop file:// — a clicked file:// URL bypasses _on_open_path's
         # confinement + exec-extension guards and would hand an arbitrary local
         # path straight to the OS opener. Web/mail schemes only.
-        if not u or not u.lower().startswith(("http://", "https://", "mailto:")):
+        if not url.isValid() or url.scheme().lower() not in {"http", "https", "mailto"}:
             return
-        QDesktopServices.openUrl(QUrl(u))
-        self._log_link_event("open_url", u)
+        if url.scheme().lower() in {"http", "https"} and not url.host():
+            return
+        if QDesktopServices.openUrl(url):
+            self._log_link_event("open_url", u)
+        else:
+            self._log_link_event("open_url_failed", u)
+            QMessageBox.warning(self, "เปิดลิงก์ไม่ได้", f"เบราว์เซอร์หลักเปิดลิงก์นี้ไม่ได้:\n{u}")
+
+    def _on_copy_url(self, uri: str) -> None:
+        """Copy an allowed web link without attempting navigation."""
+        u = (uri or "").strip()
+        url = QUrl(u)
+        if not url.isValid() or url.scheme().lower() not in {"http", "https", "mailto"}:
+            return
+        if url.scheme().lower() in {"http", "https"} and not url.host():
+            return
+        QGuiApplication.clipboard().setText(u)
+        self._log_link_event("copy_url", u)
 
     def _on_open_path(self, raw: str) -> None:
         """Handle a clicked file path (html→browser for exec-flagged files

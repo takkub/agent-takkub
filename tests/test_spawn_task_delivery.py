@@ -318,6 +318,41 @@ def test_fresh_claude_prompt_write_failure_falls_back_once_to_pointer(
     assert assign_event.kwargs["effective_provider"] == "claude"
 
 
+def test_resumed_done_pane_receives_new_task_pointer_not_old_prompt_trigger(
+    orch: Orchestrator, tmp_path: Path
+) -> None:
+    """#769: --resume retains the old system prompt, even with a new prompt file."""
+    key = _exit_key(TEST_PROJECT, "backend")
+
+    def prior_done(_staging: Path) -> None:
+        ps = orch._ps(key)
+        ps.session_uuid = "old-session-id"
+        ps.session_uuid_cwd = str(tmp_path)
+        ps.session_provider = "claude"
+        ps.task_id = "old-task-id"
+        orch._recent_exits[key] = {
+            "cwd": str(tmp_path),
+            "ts": time.time(),
+            "provider": "claude",
+            "session_uuid": "old-session-id",
+            "task_id": "old-task-id",
+        }
+
+    task = "[ROLE: backend]\n" + ("NEW BRIEF\n" * 80)
+    with patch("agent_takkub.orchestrator._log_event") as assign_log:
+        spawn_calls, mock_send, _role_file = _spawn_claude_assign(
+            orch, tmp_path, task, pre_spawn=prior_done
+        )
+
+    assert "--resume" in spawn_calls[0]["argv"]
+    sent = mock_send.call_args.args[1]
+    assert sent != _CURRENT_TASK_TRIGGER
+    assert "file-read tool" in sent
+    assert orch._ps(key).spawn_initial_task_state == "fallback"
+    assign_event = next(call for call in assign_log.call_args_list if call.args[0] == "assign")
+    assert assign_event.kwargs["initial_delivery_reason"] == "resumed-session"
+
+
 def test_running_claude_pane_keeps_mid_session_pointer_flow(
     orch: Orchestrator,
     tmp_path: Path,

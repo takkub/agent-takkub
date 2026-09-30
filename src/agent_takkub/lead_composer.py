@@ -27,7 +27,7 @@ import time
 import uuid
 from datetime import datetime
 
-from PyQt6.QtCore import QMimeData, Qt, pyqtSignal
+from PyQt6.QtCore import QMimeData, QSettings, Qt, pyqtSignal
 from PyQt6.QtGui import QImage, QKeyEvent
 from PyQt6.QtWidgets import (
     QButtonGroup,
@@ -51,6 +51,8 @@ IMAGE_SUFFIXES = frozenset({".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"})
 _ATTACHMENT_KEEP_DAYS = 14
 _EDITOR_MIN_LINES = 2
 _EDITOR_MAX_LINES = 8
+_FONT_SIZE_KEY = "lead_composer/font_size"
+_FONT_SIZE_DEFAULT = 14
 _INPUT_PLACEHOLDER = "พิมพ์ถึง Lead…  (Enter ส่ง · Shift+Enter ขึ้นบรรทัด · ลากไฟล์/Ctrl+V รูป มาวางได้)"
 _CLI_PLACEHOLDER = "โหมด CLI — พิมพ์ใน terminal ได้เลย · กด ⌨ เพื่อกลับ"
 _INPUT_MODE_TOOLTIP = "โหมด input — terminal ล็อกอยู่ · กดเพื่อสลับไปพิมพ์ใน terminal"
@@ -319,6 +321,29 @@ class LeadComposer(QFrame):
         self.editor.imagePasted.connect(self._on_image_pasted)
         self.editor.textChanged.connect(self._fit_editor)
         row.addWidget(self.editor, 1)
+        self._font_size = _FONT_SIZE_DEFAULT
+        try:
+            saved_size = int(
+                QSettings("agent-takkub", "cockpit").value(_FONT_SIZE_KEY, _FONT_SIZE_DEFAULT)
+            )
+        except (TypeError, ValueError):
+            saved_size = _FONT_SIZE_DEFAULT
+        self.set_font_size(saved_size, persist=False)
+        self._btn_font_smaller = QToolButton()
+        self._btn_font_smaller.setText("A−")
+        self._btn_font_smaller.setToolTip("ลดขนาดตัวอักษรช่องพิมพ์")
+        self._btn_font_smaller.clicked.connect(lambda: self.set_font_size(self._font_size - 1))
+        row.addWidget(self._btn_font_smaller, 0, Qt.AlignmentFlag.AlignBottom)
+        self._btn_font_reset = QToolButton()
+        self._btn_font_reset.setText("A")
+        self._btn_font_reset.setToolTip("คืนขนาดตัวอักษรช่องพิมพ์")
+        self._btn_font_reset.clicked.connect(lambda: self.set_font_size(_FONT_SIZE_DEFAULT))
+        row.addWidget(self._btn_font_reset, 0, Qt.AlignmentFlag.AlignBottom)
+        self._btn_font_larger = QToolButton()
+        self._btn_font_larger.setText("A+")
+        self._btn_font_larger.setToolTip("เพิ่มขนาดตัวอักษรช่องพิมพ์")
+        self._btn_font_larger.clicked.connect(lambda: self.set_font_size(self._font_size + 1))
+        row.addWidget(self._btn_font_larger, 0, Qt.AlignmentFlag.AlignBottom)
         self._btn_attach = QToolButton()
         self._btn_attach.setText("📎")
         self._btn_attach.setToolTip("แนบไฟล์/รูป")
@@ -346,6 +371,16 @@ class LeadComposer(QFrame):
     # ── public API ──────────────────────────────────────────────────────
     def attachments(self) -> list[str]:
         return list(self._attachments)
+
+    def set_font_size(self, points: int, *, persist: bool = True) -> None:
+        """Resize the draft editor and keep the chosen size across launches."""
+        self._font_size = max(10, min(24, int(points)))
+        font = self.editor.font()
+        font.setPointSize(self._font_size)
+        self.editor.setFont(font)
+        self._fit_editor()
+        if persist:
+            QSettings("agent-takkub", "cockpit").setValue(_FONT_SIZE_KEY, self._font_size)
 
     def add_attachments(self, paths: list[str]) -> None:
         for p in paths:

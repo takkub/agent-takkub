@@ -501,6 +501,22 @@ class TestPaneStatusReport:
         assert "plain line" in tail
         assert "bold yellow" in tail
 
+    def test_exited_pane_status_renders_cursor_repaints(self, runtime_tmp, tmp_path):
+        transcript = tmp_path / "backend.transcript.log"
+        transcript.write_bytes(
+            b"old row\x1b[1;1H\x1b[2Knew row\x1b[2;1H\x1b[38;2;230;219;116mready\x1b[0m"
+        )
+        orch = _FakeOrch()
+        pane = _FakePane(state="done", transcript_path=str(transcript))
+        pane.session = None
+        orch._panes_by_project["default"] = {"backend": pane}
+        report = orch.pane_status_report("default")
+        tail = report["panes"]["backend"]["transcript_tail"]
+        assert "new row" in tail
+        assert "ready" in tail
+        assert "old row" not in tail
+        assert ";2;230;219;116m" not in tail
+
     def test_transcript_tail_strips_private_mode_csi(
         self, runtime_tmp: pathlib.Path, tmp_path: pathlib.Path
     ) -> None:

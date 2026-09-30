@@ -148,6 +148,27 @@ class TestDynamicWriteTargets:
         )
         assert v is not None and not v.allowed
 
+    def test_quoted_issue_body_is_not_a_dynamic_redirect(self) -> None:
+        commands = [
+            'echo "a > (b)"',
+            'echo "a >(b)"',
+            'cat > "body.md" <<\'EOF\'\necho "a > (b)"\nEOF',
+        ]
+        for command in commands:
+            verdict = pane_guard.evaluate_instance_guard(command, "lead")
+            assert verdict is None or verdict.allowed, (command, verdict)
+
+    def test_real_process_substitution_redirect_stays_blocked(self) -> None:
+        verdict = pane_guard.evaluate_instance_guard("echo x >(which python)", "lead")
+        assert verdict is not None and verdict.rule == "instance_guard:dynamic_write_target"
+
+    def test_instance_guard_denial_is_audited_without_lead_progress(self, monkeypatch) -> None:
+        requests = []
+        monkeypatch.setattr(cli, "_hook_request", lambda payload: requests.append(payload))
+        verdict = pane_guard.Verdict(False, rule="instance_guard:dynamic_write_target", reason="x")
+        cli._notify_lead_of_guard_block("backend", verdict)
+        assert requests == []
+
 
 class TestEditWriteTools:
     @pytest.mark.parametrize("tool", ["Edit", "Write"])

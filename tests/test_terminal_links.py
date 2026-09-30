@@ -10,6 +10,48 @@ from __future__ import annotations
 from agent_takkub.terminal_widget import _resolve_open_path
 
 
+def test_url_click_and_copy_use_allowed_schemes(_qt_session_app, monkeypatch):
+    from types import SimpleNamespace
+
+    import agent_takkub.terminal_widget as terminal_mod
+
+    events = []
+    opens = []
+    copied = []
+    monkeypatch.setattr(
+        terminal_mod.QDesktopServices, "openUrl", lambda url: opens.append(url.toString()) or True
+    )
+    monkeypatch.setattr(
+        terminal_mod.QGuiApplication, "clipboard", lambda: SimpleNamespace(setText=copied.append)
+    )
+    pane = SimpleNamespace(_log_link_event=lambda kind, value: events.append((kind, value)))
+    terminal_mod.TerminalWidget._on_open_url(pane, "https://example.com/path")
+    terminal_mod.TerminalWidget._on_copy_url(pane, "https://example.com/path")
+    terminal_mod.TerminalWidget._on_open_url(pane, "file:///C:/private.txt")
+    terminal_mod.TerminalWidget._on_copy_url(pane, "javascript:alert(1)")
+    assert opens == ["https://example.com/path"]
+    assert copied == ["https://example.com/path"]
+    assert events == [
+        ("open_url", "https://example.com/path"),
+        ("copy_url", "https://example.com/path"),
+    ]
+
+
+def test_url_open_failure_is_reported(_qt_session_app, monkeypatch):
+    from types import SimpleNamespace
+
+    import agent_takkub.terminal_widget as terminal_mod
+
+    events = []
+    messages = []
+    monkeypatch.setattr(terminal_mod.QDesktopServices, "openUrl", lambda url: False)
+    monkeypatch.setattr(terminal_mod.QMessageBox, "warning", lambda *args: messages.append(args))
+    pane = SimpleNamespace(_log_link_event=lambda kind, value: events.append((kind, value)))
+    terminal_mod.TerminalWidget._on_open_url(pane, "https://example.com/")
+    assert events == [("open_url_failed", "https://example.com/")]
+    assert messages and "https://example.com/" in messages[0][-1]
+
+
 class TestResolveOpenPath:
     def test_absolute_existing(self, tmp_path):
         f = tmp_path / "report.html"

@@ -300,13 +300,6 @@ def _apply_v2_account_env_override(
 _CURRENT_TASK_BEGIN = "\n\n<!-- takkub-current-spawn-task:start -->"
 _CURRENT_TASK_END = "<!-- takkub-current-spawn-task:end -->"
 _CURRENT_TASK_TRIGGER = "Start the current task from the one-shot system-prompt block now."
-# #739: a `--resume`d session already holds the task it last finished; the
-# generic sentence above let it answer with that task's report again. Still
-# one short line (never bracket-pasted, see _finish_spawn_initial_task).
-_RESUMED_TASK_TRIGGER = (
-    "Start the NEW task [task {tid}] from the one-shot system-prompt block now "
-    "- it is a new assignment, not a task you already finished in this conversation."
-)
 
 
 def _prepare_spawn_system_prompt(
@@ -2036,10 +2029,10 @@ class SpawnEngineMixin:
     ) -> None:
         """Finalize a one-shot task accepted by this native spawn.
 
-        *resumed* (#739): the session rejoined the role's previous
-        conversation, which already holds the task it last finished — the
-        trigger then names the NEW task id instead of the generic sentence the
-        pane could read as "continue what you were doing".
+        A resumed conversation may keep its original system prompt even when
+        the new process was launched with a new append-system-prompt file.
+        Deliver the new task through the verified paste path in that case;
+        a tiny trigger would leave the pane looking at its old task (#769).
 
         A successful system-prompt preload needs only a tiny turn-start trigger,
         never the task body or pointer. If the prompt file could not be
@@ -2055,7 +2048,7 @@ class SpawnEngineMixin:
         ps.spawn_initial_task = None
         ps.spawn_initial_task_fallback = None
         ps.spawn_initial_prompt_file = None
-        if preloaded:
+        if preloaded and not resumed:
             ps.spawn_initial_task_state = "delivered"
             _log_event(
                 "spawn_initial_task_preloaded",
@@ -2080,8 +2073,6 @@ class SpawnEngineMixin:
             # composer, which the idle watchdog's `[auto-reminder]` nudge
             # (IDLE_REMINDER_TEXT) picks up.
             trigger = _CURRENT_TASK_TRIGGER
-            if resumed and ps.task_id:
-                trigger = _RESUMED_TASK_TRIGGER.format(tid=ps.task_id[:8])
             self._send_when_ready_no_repaste(role_name, trigger, project=project_ns)
             return
         ps.spawn_initial_task_state = "fallback"
@@ -2089,7 +2080,7 @@ class SpawnEngineMixin:
             "spawn_initial_task_pointer_fallback",
             role=role_name,
             project=project_ns,
-            reason="fallback-after-fail",
+            reason="resumed-session" if resumed else "fallback-after-fail",
         )
         if fallback:
             self._send_when_ready_no_repaste(role_name, fallback, project=project_ns)

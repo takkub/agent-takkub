@@ -160,6 +160,36 @@ class TestBusyLeadStillGetsDelivery:
 
         assert "[backend FAILED]" not in _written(lead.session)
 
+    def test_question_picker_holds_notice_until_answered(
+        self, orch: Orchestrator, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        clock = [1_000_000.0]
+        monkeypatch.setattr("agent_takkub.lead_inbox.time.time", lambda: clock[0])
+        picker_open = [True]
+        monkeypatch.setattr(
+            "agent_takkub.provider_spec.picker_question_on_screen",
+            lambda _session, _provider: picker_open[0],
+        )
+        lead = _pane(session=_live_session(ready=False))
+        orch._panes_by_project[PROJECT] = {"lead": lead}
+
+        with (
+            patch("agent_takkub.lead_inbox.QTimer.singleShot"),
+            patch("agent_takkub.lead_inbox._log_event"),
+        ):
+            orch._notify_lead(PROJECT, "[backend FAILED] build broke")
+            clock[0] += _LEAD_BUSY_DELIVER_AFTER_S + 30
+            orch._pump_lead_notify(PROJECT)
+            assert not lead.session.write.called
+            assert orch._lead_notify_queue[PROJECT]
+
+            picker_open[0] = False
+            orch._pump_lead_notify(PROJECT)
+            clock[0] += _LEAD_BUSY_DELIVER_AFTER_S + 1
+            orch._pump_lead_notify(PROJECT)
+
+        assert "[backend FAILED] build broke" in _written(lead.session)
+
     def test_draft_hold_still_wins_over_the_busy_escalation(
         self, orch: Orchestrator, monkeypatch: pytest.MonkeyPatch
     ) -> None:

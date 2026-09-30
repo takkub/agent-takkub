@@ -2918,7 +2918,7 @@ _PS_SWITCH_PARAMS = frozenset(
 # `tee (Get-Command python).Source` — the value is decided at run time, the
 # guard cannot resolve it, and no pane task ever needs it: deny.
 _SUBST_DEST_RE = re.compile(r"""^["']?(?:\$\(|`|\(|@\()""")
-_REDIRECT_SUBST_RE = re.compile(r"""(?:>>|>|1>|2>|\*>)\s*["']?(?:\$\(|`|\()""")
+_REDIRECT_SUBST_RE = re.compile(r"""(?:>>|>|1>|2>|\*>)\s*["']?(?:\$\(|`)|(?:>>|>|1>|2>|\*>)\(""")
 _PS_ARG_TOKEN_RE = re.compile(r"""[^\s"']+|"[^"]*"|'[^']*'""")
 
 
@@ -2958,9 +2958,28 @@ def _ps_dynamic_write_target(seg: str) -> str | None:
 def _subst_write_dest(seg: str) -> str | None:
     """The command-substitution write destination in *seg* (redirect target,
     or the last argument of cp/mv/tee/Copy-Item/Move-Item), else None."""
-    m = _REDIRECT_SUBST_RE.search(seg)
-    if m:
-        return m.group(0).strip()
+    # A redirect-looking phrase inside quoted prose is not a shell redirect.
+    # In particular `echo "a > (b)"` must not be treated as process
+    # substitution. The redirect operator itself must be outside quotes;
+    # a quoted destination (`> "$(cmd)"`) is still a dynamic target.
+    quote = ""
+    escaped = False
+    quoted_positions: set[int] = set()
+    for i, ch in enumerate(seg):
+        if escaped:
+            escaped = False
+        elif ch in ("\\", "`"):
+            escaped = True
+        elif quote:
+            if ch == quote:
+                quote = ""
+            else:
+                quoted_positions.add(i)
+        elif ch in ("'", '"'):
+            quote = ch
+    for m in _REDIRECT_SUBST_RE.finditer(seg):
+        if m.start() not in quoted_positions:
+            return m.group(0).strip()
     for pat in (_FILE_COPY_CMDS, _FILE_MOVE_CMDS):
         for cm in pat.finditer(seg):
             tokens = [

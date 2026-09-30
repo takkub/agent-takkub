@@ -1640,6 +1640,28 @@ class TestProactiveIdleCompact:
         assert event["provider"] == "codex"
         assert event["cached_input_tokens"] == 10_001
 
+        # A cumulative meter rises slightly after compaction. That must not
+        # trigger another /compact on every watchdog tick.
+        pane.session.write.reset_mock()
+        pane.current_usage.return_value = {"cache_read": 10_100, "total": 12_100}
+        orch._check_proactive_compact(now=1_005.0)
+        orch._check_proactive_compact(now=1_010.0)
+        pane.session.write.assert_not_called()
+
+        # A full new threshold worth of cached input is a new episode.
+        pane.current_usage.return_value = {"cache_read": 20_001, "total": 22_000}
+        orch._check_proactive_compact(now=1_015.0)
+        pane.session.write.assert_called_once_with("/compact")
+
+        # A fresh session resets the cumulative provider meter. The old
+        # marker must not suppress its first legitimate threshold crossing.
+        pane.session.write.reset_mock()
+        pane.current_usage.return_value = {"cache_read": 100, "total": 150}
+        orch._check_proactive_compact(now=1_020.0)
+        pane.current_usage.return_value = {"cache_read": 10_001, "total": 11_000}
+        orch._check_proactive_compact(now=1_025.0)
+        pane.session.write.assert_called_once_with("/compact")
+
     def test_freshly_spawned_pane_with_no_output_is_not_compacted(
         self, orch: Orchestrator, monkeypatch: pytest.MonkeyPatch
     ) -> None:

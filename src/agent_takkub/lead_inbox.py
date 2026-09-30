@@ -4812,6 +4812,17 @@ class LeadInboxMixin:
                 self._save_pending_done_notices(project_ns)
             return
 
+        # A question picker consumes input as menu keys, not as Lead prose.
+        # The busy-delivery fallback below used to paste a notice into that
+        # menu after five seconds; the user's later answers then rejected the
+        # AskUserQuestion tool instead of reaching the model (#768).
+        from .provider_spec import picker_question_on_screen
+
+        provider = getattr(getattr(lead, "model", None), "provider_name", None) or "claude"
+        if picker_question_on_screen(lead.session, provider):
+            QTimer.singleShot(400, lambda: self._pump_lead_notify(project_ns))
+            return
+
         if not lead.session.is_at_ready_prompt():
             # Lead is busy — check retry cap before re-scheduling.
             if not hasattr(self, "_lead_notify_retry"):

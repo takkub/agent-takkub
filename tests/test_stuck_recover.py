@@ -333,9 +333,10 @@ class TestCheckStuckPanes:
 
         assert fake.close_calls == []
         assert fake.spawn_calls == []
+        # Lead's own picker is already visible to the user. Sending a notice
+        # into that same pane can consume picker keys and reject the answer.
         assert [notice for _, notice, _ in fake.notify_calls if "รอผู้ใช้ตอบคำถาม" in notice] == [
             "⏳ backend รอผู้ใช้ตอบคำถาม",
-            "⏳ lead รอผู้ใช้ตอบคำถาม",
         ]
 
     def test_stuck_recovery_restores_assign_provider_model_and_effort(self, monkeypatch) -> None:

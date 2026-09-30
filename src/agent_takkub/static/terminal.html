@@ -24,6 +24,12 @@
     .xterm-viewport::-webkit-scrollbar-track { background: #18181b; }
     .xterm-viewport::-webkit-scrollbar-thumb { background: #3f3f46; border-radius: 5px; }
     .xterm-viewport::-webkit-scrollbar-thumb:hover { background: #52525b; }
+    #copy-toast {
+      display: none; position: absolute; right: 12px; bottom: 12px;
+      padding: 5px 9px; color: #e6e6e6; background: #27272a;
+      border: 1px solid #52525b; border-radius: 5px;
+      font: 12px sans-serif; pointer-events: none; z-index: 5;
+    }
   </style>
   <script src="xterm.js"></script>
   <script src="xterm-addon-fit.js"></script>
@@ -32,6 +38,7 @@
 </head>
 <body>
   <div id="term"></div>
+  <div id="copy-toast" role="status" aria-live="polite">คัดลอกลิงก์แล้ว</div>
   <script>
     // ------------------------------------------------------------------
     // xterm.js terminal setup
@@ -71,9 +78,23 @@
     // Hand the URI to Python (QDesktopServices) so it opens in the real
     // browser. `bridge` is null until QWebChannel connects, but this
     // closure only runs on click, long after that.
-    term.loadAddon(new WebLinksAddon.WebLinksAddon((event, uri) => {
+    let hoveredWebLink = null;
+    const openWebLink = (event, uri) => {
+      if (event.button !== 0) return;  // right click is reserved for copying
       if (bridge && bridge.openUrl) bridge.openUrl(uri);
+    };
+    const webLinkHover = (event, uri) => { hoveredWebLink = uri; };
+    const webLinkLeave = () => { hoveredWebLink = null; };
+    term.loadAddon(new WebLinksAddon.WebLinksAddon(openWebLink, {
+      hover: webLinkHover, leave: webLinkLeave,
     }));
+    // OSC 8 hyperlinks have a separate xterm handler. Its default displays
+    // a confirmation and calls window.open(), which QtWebEngine may block.
+    term.options.linkHandler = {
+      activate: openWebLink,
+      hover: webLinkHover,
+      leave: webLinkLeave,
+    };
 
     // File paths — xterm's WebLinksAddon only matches URLs, so absolute
     // (C:\... or /...) and project-relative (docs/x.md, src\a\b.py) paths
@@ -107,7 +128,9 @@
             text: raw,
             range: { start: { x: startX, y: lineNumber }, end: { x: endX, y: lineNumber } },
             decorations: { pointerCursor: true, underline: true },
-            activate(ev, uri) { if (bridge && bridge.openPath) bridge.openPath(uri); },
+            activate(ev, uri) {
+              if (ev.button === 0 && bridge && bridge.openPath) bridge.openPath(uri);
+            },
           });
         }
         callback(links.length ? links : undefined);
@@ -115,6 +138,19 @@
     });
 
     term.open(document.getElementById('term'));
+    let copyToastTimer = null;
+    document.getElementById('term').addEventListener('contextmenu', (event) => {
+      if (!hoveredWebLink) return;
+      event.preventDefault();
+      event.stopPropagation();
+      if (bridge && bridge.copyUrl) {
+        bridge.copyUrl(hoveredWebLink);
+        const toast = document.getElementById('copy-toast');
+        toast.style.display = 'block';
+        clearTimeout(copyToastTimer);
+        copyToastTimer = setTimeout(() => { toast.style.display = 'none'; }, 1500);
+      }
+    });
     fit.fit();
     term.focus();
 

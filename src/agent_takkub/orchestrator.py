@@ -4506,7 +4506,9 @@ class Orchestrator(
         elif initial_delivery == "pending":
             initial_delivery_reason = "queued-pending"
         elif initial_delivery == "fallback":
-            initial_delivery_reason = "fallback-after-fail"
+            initial_delivery_reason = (
+                "resumed-session" if ps_assign.last_spawn_resumed else "fallback-after-fail"
+            )
         elif PROVIDER_REGISTRY[effective_provider].system_prompt_flag is None:
             initial_delivery_reason = "provider-unsupported (by design)"
         else:
@@ -11561,7 +11563,11 @@ class Orchestrator(
                     # preview.
                     if len(raw) >= _TRANSCRIPT_TAIL_BYTES and b"\n" in raw:
                         raw = raw.split(b"\n", 1)[1]
-                    clean_lines = _extract_transcript_lines(raw, max_lines=5)
+                    # A finished pane has no live display_lines() screen.
+                    # Replay its transcript through the terminal emulator:
+                    # regex line splitting leaves cursor/SGR fragments and
+                    # combines repainted rows in `takkub status` (#770).
+                    clean_lines = _render_pty_tail(raw, max_lines=5)
                     transcript_tail = "\n".join(clean_lines)
                     if state == "exited" or display_state == "exited":
                         exit_hint = "\n".join(clean_lines[-3:])
@@ -14529,12 +14535,20 @@ class Orchestrator(
                             _cached = _usage.get("cache_read") if isinstance(_usage, dict) else None
                             _cached = int(_cached) if isinstance(_cached, (int, float)) else 0
                             _threshold = lead_cached_input_threshold()
+                            if _cached < ps.lead_cached_compact_marker:
+                                # A fresh provider session starts a new usage
+                                # counter even when this PaneState survives.
+                                ps.lead_cached_compact_marker = 0
                             _busy_reason = self._lead_orchestrate_busy_reason(
                                 project_name, project_panes
                             )
                             if (
                                 _cached >= _threshold
-                                and _cached > ps.lead_cached_compact_marker
+                                # cache_read is cumulative for the Codex
+                                # session. Requiring only a larger value sent
+                                # /compact again on every 5s watchdog tick
+                                # after the first threshold crossing (#775).
+                                and _cached - ps.lead_cached_compact_marker >= _threshold
                                 and _busy_reason is None
                                 and not ps.proactive_compact_pending
                                 and not _session_has_draft(sess)
@@ -15600,7 +15614,7 @@ class Orchestrator(
         waiting = picker_question_on_screen(getattr(pane, "session", None), provider)
         if ps is None and waiting:
             ps = self._ps(key)
-        if waiting and not ps.picker_wait_notice_active:
+        if waiting and not ps.picker_wait_notice_active and role != LEAD.name:
             self._notify_lead(
                 project,
                 f"⏳ {role} รอผู้ใช้ตอบคำถาม",

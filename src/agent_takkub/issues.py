@@ -346,6 +346,12 @@ def _get_local_issues_path(cwd: str | Path | None) -> Path:
     return Path(cwd or ".").resolve() / ".takkub_issues.json"
 
 
+def _actual_local_issues_path(cwd: str | Path | None) -> Path:
+    """Return the store users can inspect, including the V2 cockpit store."""
+    path = _get_local_issues_path(cwd)
+    return _cockpit_bug_v2_target() if _is_cockpit_bug_path(path) else path
+
+
 def _cockpit_bug_v2_target() -> Path:
     """`v2/state/issues/local.json` — the ONLY local-issues path with a V2
     target (ladder step 5's ``local-issues`` mapping is always
@@ -408,6 +414,8 @@ def _filter_local_issues(
 ) -> list[dict[str, Any]]:
     results = []
     for iss in issues:
+        if iss.get("migrated_to"):
+            continue
         status = iss.get("status", "open").lower()
         if filter_open and not filter_closed and status != "open":
             continue
@@ -617,10 +625,7 @@ def list_issues(
                 gh_args += ["--label", f"noticed-in:{noticed_in}"]
 
             out = _gh(*gh_args, cwd=detect_cwd)
-            if not out:
-                return []
-
-            raw = json.loads(out)
+            raw = json.loads(out) if out else []
             results = []
             for item in raw:
                 label_names = [lb["name"] for lb in item.get("labels", [])]
@@ -666,8 +671,47 @@ def list_issues(
             # Merge any matching backlog in instead of dropping it.
             local_cwd = _local_store_cwd(detect_cwd, cockpit_bug=cockpit_bug)
             try:
+                all_local = _load_local_issues(local_cwd)
+                pending_local = [i for i in all_local if not i.get("migrated_to")]
+                if pending_local:
+                    # A --open query will not contain a matching closed issue.
+                    # Reconcile unique title matches across both states.
+                    try:
+                        gh_all = json.loads(
+                            _gh(
+                                "issue",
+                                "list",
+                                "--repo",
+                                repo,
+                                "--state",
+                                "all",
+                                "--json",
+                                "number,title,state,url",
+                                "--limit",
+                                "1000",
+                                cwd=detect_cwd,
+                            )
+                        )
+                    except (RuntimeError, ValueError, json.JSONDecodeError):
+                        gh_all = []
+                    by_title: dict[str, list[dict]] = {}
+                    for item in gh_all:
+                        title_key = " ".join(item.get("title", "").casefold().split())
+                        if title_key:
+                            by_title.setdefault(title_key, []).append(item)
+                    changed = False
+                    for item in pending_local:
+                        matches = by_title.get(
+                            " ".join(item.get("title", "").casefold().split()), []
+                        )
+                        if len(matches) == 1:
+                            item["migrated_to"] = matches[0]["url"]
+                            item["status"] = "closed"
+                            changed = True
+                    if changed:
+                        _save_local_issues(all_local, local_cwd)
                 local_backlog = _filter_local_issues(
-                    _load_local_issues(local_cwd),
+                    all_local,
                     filter_open=filter_open,
                     filter_closed=filter_closed,
                     severity=severity,
@@ -677,11 +721,11 @@ def list_issues(
             except RuntimeError:
                 local_backlog = []
             if local_backlog:
-                local_path = _get_local_issues_path(local_cwd)
+                local_path = _actual_local_issues_path(local_cwd)
                 print(
                     f"⚠ takkub issue: {len(local_backlog)} unreconciled local issue(s) found in "
-                    f"{local_path} (not on GitHub) — included below; migrate with "
-                    "'takkub issue new' against GitHub or reconcile manually.",
+                    f"{local_path} (not on GitHub) — included below; close with "
+                    "'takkub issue close --local N' or reconcile manually.",
                     file=sys.stderr,
                 )
                 results.extend(local_backlog)
@@ -706,6 +750,7 @@ def close_issue(
     note: str = "",
     cwd: str | Path | None = None,
     cockpit_bug: bool = True,
+    local: bool = False,
 ) -> str:
     """Close an issue by number. Returns the issue URL. Falls back to local store if GitHub is unavailable.
 
@@ -715,7 +760,10 @@ def close_issue(
     instead (CLI: `--no-cockpit-bug`).
     """
     number = _parse_issue_number(issue_id)
-    detect_cwd, repo, use_local = _resolve_repo_for_op(cwd, cockpit_bug, f"close #{number}")
+    if local:
+        detect_cwd, repo, use_local = cwd, "", True
+    else:
+        detect_cwd, repo, use_local = _resolve_repo_for_op(cwd, cockpit_bug, f"close #{number}")
 
     if not use_local:
         try:
@@ -1039,7 +1087,7 @@ def cmd_issue_list(args: Any) -> dict:
     _safe_print("-" * 80)
     for item in items:
         _safe_print(
-            f"#{item['number']:<5} "
+            f"{('L' if str(item.get('url', '')).startswith('local://') else '#') + str(item['number']):<6} "
             f"{item.get('severity', ''):<5} "
             f"{item.get('status', ''):<8} "
             f"{item.get('role', ''):<12} "
@@ -1061,6 +1109,7 @@ def cmd_issue_close(args: Any) -> dict:
             note=getattr(args, "note", "") or "",
             cwd=cwd,
             cockpit_bug=getattr(args, "cockpit_bug", True),
+            local=getattr(args, "local", False),
         )
     except (ValueError, RuntimeError) as exc:
         return {"ok": False, "msg": str(exc)}
