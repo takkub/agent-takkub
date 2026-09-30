@@ -173,3 +173,23 @@ class TestTokenMeterContext:
         m.record_token_meter_result({"status": "unsupported", "model": None, "reason": "no schema"})
         ctx = m.token_meter_context()
         assert ctx == {"prompt": None, "limit": None, "pct": None, "status": "unsupported"}
+
+
+def test_explicit_claude_fallback_warns_without_token_sample():
+    model = _model()
+    model.provider_name = "claude"
+    model.record_token_meter_result(
+        {
+            "status": "no_data",
+            "model": "claude-haiku-4-5",
+            "model_fallback": {
+                "originalModel": "claude-sonnet-5.5",
+                "fallbackModel": "claude-haiku-4-5",
+            },
+        }
+    )
+    display = model.provider_model_display(live_model="claude-haiku-4-5")
+    assert display.mismatch
+    assert "⚠" in display.short_text
+    assert "sonnet-5.5" in display.tooltip
+    assert model.current_usage() is None

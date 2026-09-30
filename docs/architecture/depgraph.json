@@ -187,6 +187,7 @@
         "agent_takkub.auto_issue_capture",
         "agent_takkub.auto_issue_signals",
         "agent_takkub.auto_migrate_boot",
+        "agent_takkub.bg_pool",
         "agent_takkub.boot_flow_window",
         "agent_takkub.cockpit_theme",
         "agent_takkub.config",
@@ -194,6 +195,7 @@
         "agent_takkub.main_window",
         "agent_takkub.orchestrator",
         "agent_takkub.orchestrator_text",
+        "agent_takkub.provider_model_catalog",
         "agent_takkub.removed_providers",
         "agent_takkub.service_spawner",
         "agent_takkub.theme_settings",
@@ -204,7 +206,7 @@
         "agent_takkub.__main__"
       ],
       "fan_in": 1,
-      "fan_out": 16
+      "fan_out": 18
     },
     {
       "module": "agent_takkub.auto_issue_capture",
@@ -318,10 +320,11 @@
       "imports": [],
       "imported_by": [
         "agent_takkub.agent_pane",
+        "agent_takkub.app",
         "agent_takkub.decide",
         "agent_takkub.orchestrator"
       ],
-      "fan_in": 3,
+      "fan_in": 4,
       "fan_out": 0
     },
     {
@@ -3997,9 +4000,11 @@
       ],
       "imported_by": [
         "agent_takkub.agent_pane",
+        "agent_takkub.app",
+        "agent_takkub.provider_model_refresh",
         "agent_takkub.settings_window"
       ],
-      "fan_in": 2,
+      "fan_in": 4,
       "fan_out": 4
     },
     {
@@ -4007,6 +4012,7 @@
       "imports": [
         "agent_takkub._win_console",
         "agent_takkub.codex_helper",
+        "agent_takkub.provider_model_catalog",
         "agent_takkub.provider_models",
         "agent_takkub.role_models"
       ],
@@ -4014,7 +4020,7 @@
         "agent_takkub.provider_model_catalog"
       ],
       "fan_in": 1,
-      "fan_out": 4
+      "fan_out": 5
     },
     {
       "module": "agent_takkub.provider_models",

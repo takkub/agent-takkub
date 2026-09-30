@@ -407,3 +407,23 @@ class TestResolvePaneSessionDispatch:
 
     def test_unknown_provider_returns_none(self) -> None:
         assert resolve_pane_session("some-future-provider", "C:/repo") is None
+
+
+def test_claude_fallback_is_visible_before_first_usage(tmp_path):
+    import json
+
+    from agent_takkub.token_meter import read_pane_usage
+
+    transcript = tmp_path / "fallback.jsonl"
+    fallback = {
+        "type": "system",
+        "subtype": "model_fallback",
+        "originalModel": "claude-sonnet-5.5",
+        "fallbackModel": "claude-haiku-4-5",
+        "trigger": "model_not_found",
+    }
+    transcript.write_text(json.dumps(fallback), encoding="utf-8")
+    usage = read_pane_usage("claude", transcript)
+    assert usage["status"] == "no_data"
+    assert usage["model"] == "claude-haiku-4-5"
+    assert usage["model_fallback"]["originalModel"] == "claude-sonnet-5.5"

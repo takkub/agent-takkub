@@ -129,3 +129,33 @@ def test_worker_routes_through_the_guard(qapp, monkeypatch) -> None:
     pane._refresh_token_meter()
 
     assert calls == [(None, None)]
+
+
+def test_claude_model_fallback_emits_once_and_updates_warning(qapp, monkeypatch, tmp_path):
+    from agent_takkub import token_meter
+
+    pane = _make_pane(qapp)
+    pane.session = MagicMock()
+    pane.model.provider_name = "claude"
+    pane.model.spawn_model = "claude-sonnet-5.5"
+    cand = tmp_path / "claude-session.jsonl"
+    events = []
+    monkeypatch.setattr(
+        token_meter, "_log_event", lambda event, **details: events.append((event, details))
+    )
+    usage = {
+        "status": "no_data",
+        "model": "claude-haiku-4-5",
+        "model_fallback": {
+            "originalModel": "claude-sonnet-5.5",
+            "fallbackModel": "claude-haiku-4-5",
+            "trigger": "model_not_found",
+        },
+    }
+    pane._apply_token_meter(cand, usage)
+    pane._apply_token_meter(cand, usage)
+    assert len(events) == 1
+    assert events[0][0] == "provider_model_fallback"
+    assert "haiku-4-5" in pane._provider_label.text()
+    assert "⚠" in pane._provider_label.text()
+    pane.deleteLater()

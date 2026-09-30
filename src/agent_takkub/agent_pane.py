@@ -977,6 +977,10 @@ class AgentPane(QFrame):
                 if cand is not None:
                     try:
                         usage = read_pane_usage(provider, cand)
+                        if provider == "claude" and usage and usage.get("model"):
+                            from .provider_model_catalog import observe_claude_model
+
+                            observe_claude_model(usage["model"])
                     except Exception:
                         usage = None
             finally:
@@ -1031,6 +1035,19 @@ class AgentPane(QFrame):
         if usage is None:
             return
         self.model.record_token_meter_result(usage)
+        fallback = usage.get("model_fallback")
+        if fallback:
+            key = (str(cand), fallback["originalModel"], fallback["fallbackModel"])
+            if key != getattr(self, "_last_model_fallback", None):
+                self._last_model_fallback = key
+                from .token_meter import _log_event
+
+                _log_event(
+                    "provider_model_fallback",
+                    provider=self.model.provider_name,
+                    role=self.role.name,
+                    **fallback,
+                )
         self._refresh_provider_label()
         status = usage.get("status", "ok")
         if status != "ok":
@@ -1068,15 +1085,11 @@ class AgentPane(QFrame):
         provider = self.model.provider_name
         if provider in ("claude", "codex"):
             usage = self.model.last_usage_raw
-            if usage and usage.get("status", "ok") == "ok":
+            if usage and (usage.get("status", "ok") == "ok" or usage.get("model_fallback")):
                 m = usage.get("model")
                 # codex_helper falls back to the literal "codex" when no
                 # turn_context was in the scanned tail — not a real model id.
                 if m and m not in ("unknown", provider):
-                    if provider == "claude":
-                        from .provider_model_catalog import observe_claude_model
-
-                        observe_claude_model(m)
                     return m
             return None
         if provider == "gemini" and self.session is not None:

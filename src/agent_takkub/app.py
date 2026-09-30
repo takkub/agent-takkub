@@ -1374,6 +1374,9 @@ def main(argv: list[str] | None = None) -> int:
                     return 1
 
     w = _boot_main_window()
+    from . import bg_pool, provider_model_catalog
+
+    bg_pool.submit(provider_model_catalog.refresh_boot_catalog)
     boot_phase("main_window_built")
     if _quit_requested:
         # #631: Ctrl+C/SIGTERM landed during the boot-flow wizard (or the

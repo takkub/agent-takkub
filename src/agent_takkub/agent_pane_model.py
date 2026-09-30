@@ -168,7 +168,8 @@ class AgentPaneModel:
 
         return resolve_provider_model_display(
             provider=self.provider_name,
-            spawn_model=self.spawn_model,
+            spawn_model=self.spawn_model
+            or (self.last_usage_raw or {}).get("model_fallback", {}).get("originalModel"),
             spawn_effort=self.spawn_effort,
             spawn_explicit=self.spawn_model_explicit,
             live_model=live_model,

@@ -106,3 +106,24 @@ class TestApplyDocsDir:
         env: dict[str, str] = {}
         _apply_artifacts_dir(env, "myproj")  # must not raise
         assert "TAKKUB_DOCS_DIR" in env
+
+
+def test_unavailable_central_output_paths_use_existing_temp_fallback(runtime_dir, monkeypatch):
+    import os
+    import tempfile
+
+    fallback_paths = []
+
+    def make_temp(*, prefix):
+        target = runtime_dir.parent / prefix
+        os.mkdir(target)
+        fallback_paths.append(target)
+        return str(target)
+
+    monkeypatch.setattr(tempfile, "mkdtemp", make_temp)
+    monkeypatch.setattr(Path, "mkdir", lambda *a, **kw: (_ for _ in ()).throw(OSError("read-only")))
+    env = {}
+    _apply_artifacts_dir(env, "project")
+    assert Path(env["TAKKUB_ARTIFACTS_DIR"]) == fallback_paths[0]
+    assert Path(env["TAKKUB_DOCS_DIR"]) == fallback_paths[1]
+    assert all(path.is_dir() for path in fallback_paths)

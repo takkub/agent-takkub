@@ -296,7 +296,7 @@ class TestRefreshGemini:
 
 
 class TestOtherProvidersAreGaps:
-    @pytest.mark.parametrize("name", ["claude", "cursor", "opencode"])
+    @pytest.mark.parametrize("name", ["cursor", "opencode"])
     def test_reports_gap_without_touching_subprocess(
         self, name: str, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -308,7 +308,7 @@ class TestOtherProvidersAreGaps:
         assert not called
 
     def test_every_gap_provider_has_a_documented_reason(self) -> None:
-        for name in ("claude", "cursor", "opencode"):
+        for name in ("cursor", "opencode"):
             assert name in pmr.NO_MODEL_DISCOVERY_GAPS
 
     def test_a_provider_is_never_both_supported_and_a_documented_gap(self) -> None:
@@ -511,3 +511,84 @@ class TestCodexDiscovery:
         outcome = pmr.refresh_provider_model("codex", "/bin/codex")
         assert outcome.status == pmr.STATUS_BUMPED
         assert role_models.model_for("backend", "codex") == "gpt-5.7-terra"
+
+
+class TestDiscoverClaudeModels:
+    def test_initialize_lists_models_without_a_user_turn(self, monkeypatch):
+        calls = []
+
+        def fake_run(argv, **kwargs):
+            calls.append((argv, kwargs))
+            return subprocess.CompletedProcess(
+                argv,
+                0,
+                json.dumps(
+                    {
+                        "type": "control_response",
+                        "response": {
+                            "subtype": "success",
+                            "request_id": "model-discovery",
+                            "response": {
+                                "models": [
+                                    {"value": "sonnet", "resolvedModel": "claude-sonnet-5-5"},
+                                    {
+                                        "value": "haiku",
+                                        "resolvedModel": "claude-haiku-4-5-20251001",
+                                    },
+                                ]
+                            },
+                        },
+                    }
+                ),
+                "",
+            )
+
+        monkeypatch.setattr(pmr.subprocess, "run", fake_run)
+        assert pmr._discover_claude_models("claude") == [
+            "claude-sonnet-5-5",
+            "sonnet",
+            "claude-haiku-4-5-20251001",
+            "haiku",
+        ]
+        argv, kwargs = calls[0]
+        assert "--no-session-persistence" in argv
+        messages = [json.loads(line) for line in kwargs["input"].splitlines()]
+        assert messages == [
+            {
+                "type": "control_request",
+                "request_id": "model-discovery",
+                "request": {"subtype": "initialize"},
+            }
+        ]
+
+    @pytest.mark.parametrize(
+        "stdout,code",
+        [
+            ("not JSON", 0),
+            ("{}", 0),
+            ("", 1),
+            (
+                json.dumps(
+                    {
+                        "type": "control_response",
+                        "response": {"subtype": "error", "request_id": "model-discovery"},
+                    }
+                ),
+                0,
+            ),
+        ],
+    )
+    def test_discovery_errors_are_not_cached_as_models(self, monkeypatch, stdout, code):
+        monkeypatch.setattr(
+            pmr.subprocess,
+            "run",
+            lambda *args, **kw: subprocess.CompletedProcess([], code, stdout, ""),
+        )
+        assert pmr._discover_claude_models("claude") is None
+
+    def test_timeout_is_bounded(self, monkeypatch):
+        def timeout(*args, **kwargs):
+            raise subprocess.TimeoutExpired("claude", 30)
+
+        monkeypatch.setattr(pmr.subprocess, "run", timeout)
+        assert pmr._discover_claude_models("claude") is None

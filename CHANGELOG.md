@@ -4,6 +4,19 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 
 ## [vNEXT]
 
+## [v2.1.48] - 2026-09-30
+
+### Fixed (แก้)
+
+- **assign/cancel (#775):** ยกเลิก queued assignment พร้อม task และบอกชัดเมื่อ git advisory ยังอนุญาตให้ assign; ข้อความเล่าเหตุการณ์เก่าไม่ trigger warning
+- **quota handoff (#776):** ไม่ตีความ usage limit เป็นคำถามผู้ใช้ และส่ง transcript path กับ output ล่าสุดให้ pane ที่รับงานต่อ
+- **done/multi-provider (#777 #778):** ตรวจ CHANGED/EVIDENCE/REMOVED ทุก provider, แสดงงานค้างของ Lead inbox, ใช้ provider ที่รันจริงใน fix-loop และ route ตามเจ้าของไฟล์/role ก่อน keyword ทั่วไป
+- **QA/typecheck (#780 #781):** เก็บ Node QA report และชื่อ suite ที่ล้มเหลว; lint fail ไม่ข้าม typecheck/test อิสระ และ pane อื่นทำงานไม่บล็อก tsc เมื่อทรัพยากรเครื่องยังพอ
+- **closed pane status (#782):** ใช้ Note จาก done report ของ transcript เดียวกันแทน terminal preview ที่เสียหลัง pane ปิด รองรับทุก provider
+- **Claude model picker (#783):** discover model ผ่าน CLI initialize ตอน boot/เปิด Settings โดยไม่ส่ง generation และใช้ auth ของ CLI; normalize dotted model ID ตอน Save; ตรวจ model_fallback แล้วแสดง model จริงพร้อม warning และ event ก่อนมี token usage
+- **Codex artifacts (#784):** เพิ่ม writable directories เฉพาะ artifacts/docs ของโปรเจกต์ให้ session รวม Lead; central path ที่สร้างไม่ได้ fallback ไป temporary directory ที่สร้างสำเร็จ
+- **Windows CI:** ทดสอบ lease expiry ด้วยเวลาที่ควบคุมได้ เพื่อไม่ให้ disk I/O ช้าทำ assertion ก่อน expiry ล้มเหลว
+
 ## [v2.1.47] - 2026-09-30
 
 ### Added (เพิ่ม)

@@ -2683,3 +2683,13 @@ os._exit(0)  # skip teardown; the stub worker may still be sleeping
             f"#688 regressed\nstderr: {proc.stderr[-2000:]}"
         )
         assert proc.returncode == 0
+
+
+def test_save_normalizes_dotted_claude_model_for_role_and_provider():
+    dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_PROVIDERS_ROLES)
+    dlg._provider_model_combos["claude"].setCurrentText("claude-sonnet-5.5")
+    dlg._role_model_combos["backend"].setCurrentText("claude-sonnet-5.5")
+    dlg._on_save_apply_clicked()
+    assert provider_models.model_for("claude") == "claude-sonnet-5-5"
+    assert role_models.model_for("backend", "claude") == "claude-sonnet-5-5"
+    dlg.deleteLater()

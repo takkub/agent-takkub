@@ -105,6 +105,19 @@ def cached_ids(provider: str) -> list[str] | None:
     return list(ids) if isinstance(ids, list) and ids else None
 
 
+def normalize_claude_model(model_id: str) -> str:
+    """Correct dotted Claude version spellings, preserving custom backend IDs."""
+    if model_id.startswith("claude-"):
+        return re.sub(r"(?<=\d)\.(?=\d)", "-", model_id)
+    return model_id
+
+
+def store_discovered_ids(provider: str, ids: list[str]) -> None:
+    cache = _load_cache()
+    cache[provider] = {"ids": ids, "fetched_at": time.time()}
+    _save_cache(cache)
+
+
 def observe_claude_model(model_id: str) -> None:
     """Remember a concrete model reported by a live Claude pane.
 
@@ -120,7 +133,10 @@ def observe_claude_model(model_id: str) -> None:
         existing = []
     if model_id in existing:
         return
-    cache["claude"] = {"ids": [model_id, *existing], "fetched_at": time.time()}
+    # Observing one ID is not a catalog discovery. It must not postpone the
+    # next active refresh (#783), especially for caches from older releases.
+    fetched_at = entry.get("fetched_at", 0) if isinstance(entry, dict) else 0
+    cache["claude"] = {"ids": [model_id, *existing], "fetched_at": fetched_at}
     _save_cache(cache)
 
 
@@ -163,9 +179,7 @@ def refresh_cache(provider: str) -> list[str] | None:
     ids = discover(binary)
     if not ids:
         return None
-    cache = _load_cache()
-    cache[provider] = {"ids": ids, "fetched_at": time.time()}
-    _save_cache(cache)
+    store_discovered_ids(provider, ids)
     return ids
 
 
@@ -182,3 +196,13 @@ def refresh_stale(providers: tuple[str, ...] = DISCOVERABLE_PROVIDERS) -> dict[s
         if ids:
             results[provider] = ids
     return results
+
+
+def refresh_boot_catalog() -> dict[str, list[str]]:
+    """Boot worker: refresh only installed, enabled providers, without pin edits."""
+    from . import provider_update
+
+    eligible = tuple(
+        p for p in DISCOVERABLE_PROVIDERS if provider_update.eligibility_gap(p) is None
+    )
+    return refresh_stale(eligible)

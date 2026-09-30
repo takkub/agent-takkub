@@ -1,23 +1,20 @@
 """Boot-time model-catalog refresh per provider (user directive 2026-08-20:
 "gemini ออก 3.7 แล้วแต่ cockpit ยังรู้จัก/เลือกรุ่นเก่าอยู่").
 
-Runs in the SAME boot phase as the binary update (`provider_update.py`),
-gated by the exact same eligibility rule: only a provider that is both
-installed AND enabled is ever probed (`provider_update.eligibility_gap`).
+Boot catalog refresh runs off the UI thread after the boot gate, using
+provider_update.eligibility_gap: only installed, enabled providers are probed.
 
-Only ever touches a provider's PINNED model
+Pin refresh only touches a provider's PINNED model
 (`provider_models.model_for(name)` is not None). An unpinned provider
 already always rides its own CLI's default model, which is inherently
 fresh — nothing to refresh. `provider_models.set_model()` is the exact same
 persistence Settings uses, so a bump here is indistinguishable from the user
 picking the newer model themselves; Settings can still override it manually
-afterward.
+afterward. Claude refreshes its offered catalog without rewriting pins.
 
-Discovery is implemented ONLY where BOTH (a) an official CLI subcommand for
-listing models is confirmed to exist, AND (b) its real output was captured
-and verified against the actual installed binary on 2026-08-20 — never a
-guessed output format or a hardcoded "latest model id" table (a hardcoded
-table would go stale the exact same way this feature exists to fix).
+Discovery uses captured CLI model-list output, Codex's model cache, and
+Claude's SDK initialize control response (verified on 2026-09-30, no user
+turn or API-key-only endpoint). No generation is sent to discover models.
 See docs/audit/2026-08-20-boot-update-policy.md for the full per-provider
 proof/gap table, including why opencode (mechanism confirmed, real output
 captured) was deliberately NOT implemented this wave: its `models` command
@@ -52,13 +49,6 @@ STATUS_GAP = "gap"  # no confirmed discovery mechanism for this provider
 # NO_AUTOUPDATE_KNOB_GAPS — same "document instead of guess" policy).
 # Flagged to issue #103 (comment posted 2026-08-20).
 NO_MODEL_DISCOVERY_GAPS: dict[str, str] = {
-    "claude": (
-        "no `claude models`-style list subcommand (confirmed via `claude --help`, "
-        "2026-08-20); the CLI's own always-fresh alternative is its --model TIER "
-        "ALIASES ('opus'/'sonnet'/'fable'/'haiku' always resolve to that tier's "
-        "latest release) but resolving an alias to a concrete id requires a real, "
-        "billed generation — not run automatically just to check freshness"
-    ),
     "cursor": (
         "`agent models` is documented to exist (cursor.com CLI reference) but cursor "
         "is not installed on any machine this feature was built against — output "
@@ -92,6 +82,77 @@ def _run(argv: list[str], timeout: float = 30.0) -> subprocess.CompletedProcess[
         errors="replace",
         creationflags=SUBPROCESS_NO_WINDOW,
     )
+
+
+def _discover_claude_models(binary: str) -> list[str] | None:
+    """Read the CLI SDK initialize catalog, using its own auth, without a turn.
+
+    Captured against Claude 2.1.284 on 2026-09-30: control_response.response
+    .response.models contains value/resolvedModel/displayName entries. This
+    works with Claude's subscription auth; no API key or generation is needed.
+    EOF closes the probe; no user message or persisted session is sent.
+    """
+    request = (
+        json.dumps(
+            {
+                "type": "control_request",
+                "request_id": "model-discovery",
+                "request": {"subtype": "initialize"},
+            }
+        )
+        + "\n"
+    )
+    try:
+        result = subprocess.run(
+            [
+                binary,
+                "--print",
+                "--input-format",
+                "stream-json",
+                "--output-format",
+                "stream-json",
+                "--verbose",
+                "--no-session-persistence",
+            ],
+            input=request,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=30,
+            check=False,
+            creationflags=SUBPROCESS_NO_WINDOW,
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        return None
+    if result.returncode:
+        return None
+    for line in result.stdout.splitlines():
+        try:
+            message = json.loads(line)
+            if message.get("type") != "control_response":
+                continue
+            response = message["response"]
+            if (
+                response.get("request_id") != "model-discovery"
+                or response.get("subtype") != "success"
+            ):
+                continue
+            models = response["response"]["models"]
+            if not isinstance(models, list):
+                return None
+            ids = []
+            for model in models:
+                if not isinstance(model, dict):
+                    continue
+                for field in ("resolvedModel", "value"):
+                    value = model.get(field)
+                    if isinstance(value, str) and value and value != "default" and value not in ids:
+                        ids.append(value)
+            return ids or None
+        except (ValueError, KeyError, TypeError, AttributeError):
+            continue
+    return None
 
 
 def _discover_gemini_models_json(binary: str) -> list[str] | None:
@@ -304,6 +365,7 @@ def _pick_latest_per_family(ids: list[str]) -> dict[tuple[str, ...], str]:
 # reference captured here would shadow the module attribute the rest of the
 # codebase (and every test) patches.
 _DISCOVERY: dict[str, str] = {
+    "claude": "_discover_claude_models",
     "gemini": "_discover_gemini_models",
     "codex": "_discover_codex_models",
 }
@@ -418,6 +480,16 @@ def refresh_provider_model(name: str, binary: str) -> ModelRefreshOutcome:
     not re-check `provider_state` itself, since it is only ever called from
     the same worker that already ran the binary-update eligibility check.
     """
+    if name == "claude":
+        # Claude's catalog includes tier aliases/custom endpoints. Refresh the
+        # picker, preserving pins rather than guessing recency from those IDs.
+        from .provider_model_catalog import store_discovered_ids
+
+        ids = _discover_claude_models(binary)
+        if not ids:
+            return ModelRefreshOutcome(name, STATUS_DISCOVERY_FAILED, "model discovery failed")
+        store_discovered_ids(name, ids)
+        return ModelRefreshOutcome(name, STATUS_UP_TO_DATE, "model catalog refreshed")
     if name in _DISCOVERY:
         return _refresh_pins(name, binary)
     gap = NO_MODEL_DISCOVERY_GAPS.get(name, "no discovery mechanism wired for this provider")

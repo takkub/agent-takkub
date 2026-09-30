@@ -62,6 +62,7 @@ def _spawn_codex_and_capture_argv(
     *,
     role: str = "codex",
     allowed_mcps: list[str] | None = None,
+    output_env: dict[str, str] | None = None,
 ):
     from agent_takkub import pane_tools_policy as ptp
     from agent_takkub import shared_dev_tools as sdt
@@ -89,7 +90,8 @@ def _spawn_codex_and_capture_argv(
         patch.object(orch, "_final_gate_clear", return_value=True),
         patch("agent_takkub.orchestrator.PtySession") as mock_pty_cls,
         patch("agent_takkub.orchestrator.QTimer.singleShot"),
-        patch("agent_takkub.orchestrator._build_pane_env", return_value={}),
+        patch("agent_takkub.orchestrator._build_pane_env", return_value=output_env or {}),
+        patch("agent_takkub.orchestrator._build_lead_env", return_value=output_env or {}),
         patch("agent_takkub.spawn_engine.sys.platform", platform),
         patch(
             "agent_takkub.provider_config.effective_provider_for",
@@ -149,6 +151,26 @@ def test_windows_codex_trust_assertion_accepts_lowercase_host_path():
 
 
 class TestCodexArgvNetworkAccess:
+    @pytest.mark.parametrize("platform", ["win32", "darwin", "linux"])
+    @pytest.mark.parametrize("role", ["codex", "lead"])
+    def test_project_output_directories_are_writable(
+        self, qapp, monkeypatch, tmp_path, platform, role
+    ):
+        artifacts = str(tmp_path / "central exports" / TEST_PROJECT)
+        docs = str(tmp_path / "central docs" / TEST_PROJECT)
+        argv = _spawn_codex_and_capture_argv(
+            qapp,
+            monkeypatch,
+            tmp_path,
+            platform,
+            role=role,
+            output_env={"TAKKUB_ARTIFACTS_DIR": artifacts, "TAKKUB_DOCS_DIR": docs},
+        )
+        assert [argv[i + 1] for i, arg in enumerate(argv[:-1]) if arg == "--add-dir"] == [
+            artifacts,
+            docs,
+        ]
+
     def test_lead_spawn_uses_provider_trust_argv(self, qapp, monkeypatch, tmp_path):
         argv = _spawn_codex_and_capture_argv(qapp, monkeypatch, tmp_path, "win32", role="lead")
         assert argv[:4] == [

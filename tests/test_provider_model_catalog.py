@@ -129,3 +129,41 @@ class TestRefreshStale:
 
         assert results == {"codex": ["gpt-9.9"]}
         assert pmc.cached_ids("codex") == ["gpt-9.9"]
+
+
+@pytest.mark.parametrize(
+    "model,expected",
+    [
+        ("claude-sonnet-5.5", "claude-sonnet-5-5"),
+        ("claude-opus-5.5[1m]", "claude-opus-5-5[1m]"),
+        ("custom/model-5.5", "custom/model-5.5"),
+        ("sonnet", "sonnet"),
+    ],
+)
+def test_normalize_claude_model(model, expected):
+    assert pmc.normalize_claude_model(model) == expected
+
+
+def test_claude_active_catalog_refresh_is_used_by_picker(monkeypatch):
+    monkeypatch.setattr(provider_update, "_discover", lambda spec: "claude")
+    monkeypatch.setattr(
+        pmr, "_discover_claude_models", lambda binary: ["claude-sonnet-5-5", "sonnet"]
+    )
+    assert pmc.refresh_cache("claude") == ["claude-sonnet-5-5", "sonnet"]
+    assert "claude-sonnet-5-5" in pmc.merge_catalog(("sonnet",), pmc.cached_ids("claude"))
+
+
+def test_boot_discovery_skips_disabled_and_missing_providers(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        provider_update, "eligibility_gap", lambda name: None if name == "claude" else object()
+    )
+    monkeypatch.setattr(pmc, "refresh_stale", lambda providers: calls.append(providers) or {})
+    assert pmc.refresh_boot_catalog() == {}
+    assert calls == [("claude",)]
+
+
+def test_passive_observation_does_not_mark_catalog_fresh():
+    pmc.observe_claude_model("claude-haiku-4-5")
+    assert pmc.cached_ids("claude") == ["claude-haiku-4-5"]
+    assert pmc.is_stale("claude")

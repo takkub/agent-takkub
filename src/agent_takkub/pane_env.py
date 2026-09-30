@@ -49,7 +49,9 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
 from datetime import datetime
+from pathlib import Path
 
 from ._win_console import SUBPROCESS_NO_WINDOW
 
@@ -362,7 +364,8 @@ def _apply_artifacts_dir(env: dict[str, str], project_ns: str) -> None:
     try:
         artifacts_dir.mkdir(parents=True, exist_ok=True)
     except OSError:
-        pass
+        # #784: inject an existing writable fallback rather than a dead path.
+        artifacts_dir = Path(tempfile.mkdtemp(prefix="takkub-artifacts-"))
     env["TAKKUB_ARTIFACTS_DIR"] = str(artifacts_dir)
 
     # Recomputed from RUNTIME_DIR at call time (not the frozen config.DOCS_DIR
@@ -372,7 +375,7 @@ def _apply_artifacts_dir(env: dict[str, str], project_ns: str) -> None:
     try:
         docs_dir.mkdir(parents=True, exist_ok=True)
     except OSError:
-        pass
+        docs_dir = Path(tempfile.mkdtemp(prefix="takkub-docs-"))
     env["TAKKUB_DOCS_DIR"] = str(docs_dir)
 
 

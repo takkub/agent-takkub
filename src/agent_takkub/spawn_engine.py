@@ -2994,6 +2994,13 @@ class SpawnEngineMixin:
             autonomy_argv = list(
                 spec.autonomy_flags.get(sys.platform, spec.autonomy_flags.get("default", []))
             )
+            if spec.name == "codex":
+                # #784: central evidence/docs live outside the workspace.
+                # Grant only this project's two directories, including resume.
+                for env_key in ("TAKKUB_ARTIFACTS_DIR", "TAKKUB_DOCS_DIR"):
+                    writable_dir = env.get(env_key)
+                    if writable_dir:
+                        autonomy_argv.extend(["--add-dir", writable_dir])
             if spec.trust_argv is not None and spawn_cwd:
                 # #730: Pass trusted folder config via session-scoped argv override (-c).
                 # Codex 0.157.1 prompts "Trust this folder?" on untrusted directories,

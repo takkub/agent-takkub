@@ -40,6 +40,7 @@ _MODEL_LIMITS: dict[str, int] = {
     "claude-opus-5-5": 1_000_000,
     "claude-opus-5": 1_000_000,
     "claude-sonnet-5": 1_000_000,
+    "claude-sonnet-5-5": 1_000_000,
     "claude-fable-5-1": 1_000_000,
     "claude-fable-5": 1_000_000,
     "claude-opus-4-8": 1_000_000,
@@ -576,6 +577,36 @@ def provider_session_id_for_cwd(
     return None
 
 
+def read_claude_model_fallback(jsonl: Path) -> dict | None:
+    """Detect explicit CLI model fallback even before its first usage record."""
+    try:
+        with jsonl.open("rb") as stream:
+            stream.seek(0, 2)
+            size = stream.tell()
+            stream.seek(max(0, size - _TAIL_SCAN_BYTES))
+            raw = stream.read()
+        if size > _TAIL_SCAN_BYTES:
+            raw = raw.partition(b"\n")[2]
+    except OSError:
+        return None
+    for line in reversed(raw.decode("utf-8", "replace").splitlines()):
+        try:
+            record = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(record, dict) or record.get("subtype") != "model_fallback":
+            continue
+        original = record.get("originalModel")
+        fallback = record.get("fallbackModel")
+        if isinstance(original, str) and isinstance(fallback, str) and original and fallback:
+            return {
+                "originalModel": original,
+                "fallbackModel": fallback,
+                "trigger": record.get("trigger", ""),
+            }
+    return None
+
+
 def read_pane_usage(provider: str, cand: object) -> dict | None:
     """Read the unified usage dict at an already-resolved `cand` (from
     `resolve_pane_session`). Returns None only when `cand` itself is falsy —
@@ -591,9 +622,21 @@ def read_pane_usage(provider: str, cand: object) -> dict | None:
 
     if provider == "claude":
         usage = read_last_usage(cand)
+        fallback = read_claude_model_fallback(cand)
         if usage is None:
-            return None
-        return {**usage, "status": "ok", "limit": None}
+            if fallback is None:
+                return None
+            return {
+                "status": "no_data",
+                "model": fallback["fallbackModel"],
+                "model_fallback": fallback,
+            }
+        return {
+            **usage,
+            "status": "ok",
+            "limit": None,
+            **({"model_fallback": fallback} if fallback else {}),
+        }
 
     if provider == "codex":
         from .codex_helper import read_codex_token_usage

@@ -427,6 +427,7 @@ _MODELS_BY_PROVIDER: dict[str, tuple[str, ...]] = {
         "claude-opus-5-5",
         "claude-opus-5",
         "claude-sonnet-5",
+        "claude-sonnet-5-5",
         "claude-haiku-4-5",
         "claude-fable-5-1",
         "claude-fable-5",
@@ -1612,7 +1613,10 @@ class SettingsWindow(
             # broadcast; the value is read at spawn time, so it lands on the
             # next pane).
             for provider, combo in provider_model_combos.items():
-                provider_models.set_model(provider, _combo_model(combo))
+                selected_model = _combo_model(combo)
+                if provider == "claude":
+                    selected_model = provider_model_catalog.normalize_claude_model(selected_model)
+                provider_models.set_model(provider, selected_model)
             dropped_effort_roles: list[str] = []
             for role, combo in role_model_combos.items():
                 # Bind the model to the CLI it was picked for, so switching the
@@ -1627,9 +1631,10 @@ class SettingsWindow(
                 # the global entries on this first write (role_models's own
                 # first-save snapshot), mirroring what save_role_overrides
                 # already does for providers.
-                role_models.set_model(
-                    role, role_provider, _combo_model(combo), project=self._project
-                )
+                selected_model = _combo_model(combo)
+                if role_provider == "claude":
+                    selected_model = provider_model_catalog.normalize_claude_model(selected_model)
+                role_models.set_model(role, role_provider, selected_model, project=self._project)
                 effort_combo = role_effort_combos.get(role)
                 if effort_combo is not None:
                     if not effort_combo.isEnabled() and role_models.effort_for(
