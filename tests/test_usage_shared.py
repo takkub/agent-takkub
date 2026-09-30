@@ -12,6 +12,7 @@ import threading
 import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -92,11 +93,19 @@ class TestRecord:
         [t.join() for t in threads]
         assert usage_shared.read_record("claude", "acct:c")["extra"]["n"] == 90
 
-    def test_lease_is_exclusive_and_expires(self) -> None:
+    def test_lease_is_exclusive_and_expires(self, monkeypatch) -> None:
+        # Real disk I/O on a busy Windows runner can take longer than this
+        # short lease. Control its clock while keeping locking and I/O real.
+        now = [1000.0]
+        monkeypatch.setattr(
+            usage_shared,
+            "time",
+            SimpleNamespace(time=lambda: now[0], monotonic=time.monotonic, sleep=time.sleep),
+        )
         first = usage_shared.try_acquire_lease("claude", "acct:l", ttl_s=0.3)
         assert first is not None
         assert usage_shared.try_acquire_lease("claude", "acct:l") is None
-        time.sleep(0.4)
+        now[0] += 0.4
         assert usage_shared.try_acquire_lease("claude", "acct:l") is not None
 
     def test_corrupt_record_reads_as_blank(self) -> None:
