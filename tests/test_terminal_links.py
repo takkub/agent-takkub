@@ -49,7 +49,7 @@ def test_url_open_failure_is_reported(_qt_session_app, monkeypatch):
     pane = SimpleNamespace(_log_link_event=lambda kind, value: events.append((kind, value)))
     terminal_mod.TerminalWidget._on_open_url(pane, "https://example.com/")
     assert events == [("open_url_failed", "https://example.com/")]
-    assert messages and "https://example.com/" in messages[0][-1]
+    assert messages and messages[0][-1] == ("เบราว์เซอร์หลักเปิดลิงก์นี้ไม่ได้:\nhttps://example.com/")
 
 
 class TestResolveOpenPath:
