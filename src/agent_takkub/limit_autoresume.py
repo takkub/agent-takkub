@@ -331,7 +331,13 @@ def _strip_takeover_briefs(tail: str) -> str:
 
 
 def _lead_provider_takeover_brief(
-    project: str, pane: AgentPane | None, hit_provider: str, new_provider: str, panes: dict
+    project: str,
+    pane: AgentPane | None,
+    hit_provider: str,
+    new_provider: str,
+    panes: dict,
+    *,
+    manual: bool = False,
 ) -> str:
     """Build the cross-provider context a replacement Lead can safely use.
 
@@ -343,9 +349,13 @@ def _lead_provider_takeover_brief(
     """
     lines = [
         "[system] Lead provider takeover",
-        f"The previous Lead ({hit_provider}) hit its quota. You are the replacement Lead on "
-        f"{new_provider}; continue coordinating the same unfinished work.",
-        "CLI sessions cannot resume across providers. Read the managed project context first, then "
+        (
+            f"The previous Lead ({hit_provider}) was replaced by the user. "
+            if manual
+            else f"The previous Lead ({hit_provider}) hit its quota. "
+        )
+        + f"You are the replacement Lead on {new_provider}; continue coordinating the same unfinished work.",
+        "This is a fresh CLI session. Read the managed project context first, then "
         "use the sources below before deciding or assigning work.",
     ]
     transcript = getattr(pane, "_transcript_path", None) if pane is not None else None
@@ -513,13 +523,13 @@ class AutoResumeMixin:
             provider_state.set_quota_reset_at(hit_provider, reset_at)
             self._schedule_provider_quota_reset_notice(project, hit_provider, reset_at)
 
-        if ps.quota_reroute_count >= auto_resume.MAX_REROUTE_ROUNDS:
+        candidate = self._pick_reroute_provider(project, role, ps, hit_provider)
+        if candidate is not None and ps.quota_reroute_count >= auto_resume.MAX_REROUTE_ROUNDS:
             # #699: bounded like park rounds — a task that keeps hitting a
             # wall on every provider stops here, visibly, instead of cycling.
             self._give_up_auto_resume(project, role, ps, reason="reroute_round_cap")
             return
 
-        candidate = self._pick_reroute_provider(project, role, ps, hit_provider)
         if candidate is not None:
             self._reroute_pane_to_provider(project, role, ps, candidate, hit_provider, reset_at)
             return
@@ -578,6 +588,8 @@ class AutoResumeMixin:
         new_provider: str,
         hit_provider: str,
         reset_at: float,
+        *,
+        manual: bool = False,
     ) -> None:
         """Close the quota-hit pane and respawn the SAME role on
         `new_provider`, resending its outstanding task with a short
@@ -594,7 +606,12 @@ class AutoResumeMixin:
         transcript_path = getattr(pane, "_transcript_path", None)
         lead_takeover = (
             _lead_provider_takeover_brief(
-                project, pane, hit_provider, new_provider, self._panes_by_project.get(project, {})
+                project,
+                pane,
+                hit_provider,
+                new_provider,
+                self._panes_by_project.get(project, {}),
+                manual=manual,
             )
             if is_lead
             else ""
@@ -608,19 +625,22 @@ class AutoResumeMixin:
                 killed_children = []
             if killed_children:
                 lead_takeover += (
-                    "\n\nProcesses killed with the previous Lead during quota reroute: "
+                    "\n\nProcesses killed with the previous Lead during replacement: "
                     + ", ".join(killed_children[:10])
                     + ("…" if len(killed_children) > 10 else "")
                     + ". Check whether any work needs to be restarted."
                 )
-        if is_lead:
+        if is_lead and not manual:
             # Keep the original quota provider available for reset recovery
             # even though close() intentionally pops PaneState.
             self.__dict__.setdefault("_lead_quota_recovery", {}).setdefault(
                 project, (hit_provider, cwd, lead_takeover, reset_at)
             )
+        elif is_lead:
+            self.__dict__.get("_lead_quota_recovery", {}).pop(project, None)
+            self.__dict__.get("_lead_quota_recovery_spawned_at", {}).pop(project, None)
         key = f"{project}::{role}"
-        reroute_count = ps.quota_reroute_count + 1
+        reroute_count = 0 if manual else ps.quota_reroute_count + 1
 
         # Snapshot everything close() pops that must survive the respawn —
         # same fields _auto_recover_stuck snapshots, minus the session uuid
@@ -634,15 +654,23 @@ class AutoResumeMixin:
         snap_assign_dirty_snapshot = ps.assign_dirty_snapshot
         snap_assign_non_git = bool(ps.assign_non_git)
         snap_distinct_from = ps.distinct_from
-        snap_model_override = ps.model_override
-        snap_effort_override = ps.effort_override
+        # A CLI-specific model/effort from the exhausted provider can make
+        # the replacement fail at launch (e.g. Claude's model sent to Codex).
+        # Same-provider manual replacement may keep those explicit choices.
+        snap_model_override = ps.model_override if new_provider == hit_provider else None
+        snap_effort_override = ps.effort_override if new_provider == hit_provider else None
 
         _write_progress_marker(
-            project, role, ps, pane, status="rerouted", reason=f"{hit_provider}->{new_provider}"
+            project,
+            role,
+            ps,
+            pane,
+            status="rerouted",
+            reason=("manual_lead_replace" if manual else f"{hit_provider}->{new_provider}"),
         )
         human = _human_duration(max(0, reset_at - time.time())) if reset_at else "ไม่ทราบ"
         _log_event(
-            "pane_quota_rerouted",
+            "lead_manually_replaced" if manual else "pane_quota_rerouted",
             role=role,
             project=project,
             from_provider=hit_provider,
@@ -672,12 +700,17 @@ class AutoResumeMixin:
             # and the takeover brief was pasted into the SAME pane every
             # 5 s tick — 300+ rounds on prod before anyone noticed.
             close_kwargs["force"] = True
-            close_kwargs["reason"] = "quota_reroute"
+            close_kwargs["reason"] = "manual_lead_replace" if manual else "quota_reroute"
         self.close(role, **close_kwargs)
-        if is_lead:
+        # close() pops PaneState. Keep the handover latch on the fresh state
+        # until the timer runs, so another × click cannot queue a second
+        # replacement while the old Lead is shutting down.
+        self._ps(key).quota_reroute_pending = True
+        if is_lead and not manual:
             try:
                 self.leadUnavailable.emit(
-                    project, f"Lead is restarting after {hit_provider} quota reroute"
+                    project,
+                    f"Lead is restarting after {hit_provider} quota reroute",
                 )
             except RuntimeError:  # bare __new__ test fixture has no Qt C++ base
                 pass
@@ -690,7 +723,7 @@ class AutoResumeMixin:
             _ps_r.effort_override = snap_effort_override
             _ps_r.last_assigned_task = task
             _ps_r.quota_reroute_count = reroute_count
-            _ps_r.quota_reroute_from = hit_provider
+            _ps_r.quota_reroute_from = "" if manual else hit_provider
             _ps_r.distinct_from = snap_distinct_from
             if snap_auto_chain:
                 _ps_r.auto_chain = snap_auto_chain

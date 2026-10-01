@@ -17,6 +17,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from .provider_config import PROVIDER_RING
+
 # How many park→wake cycles are allowed per pane for its CURRENT assigned
 # task before giving up and leaving it to the Lead. Reset whenever a fresh
 # task is assign()ed. Guards against silently burning quota on a task that
@@ -29,7 +31,10 @@ MAX_PARK_ROUNDS = 3
 # looped 300+ rounds in 25 minutes on prod (close ignored → spawn "already
 # running" → takeover brief pasted into the same quota-hit pane every 5 s
 # tick) — a cap turns any such regression into a bounded, visible stop.
-MAX_REROUTE_ROUNDS = 3
+# Four switches can visit every provider in the five-provider ring. Keep the
+# guard for a provider that recovers and immediately fails again, but never
+# stop before the last available provider has been tried.
+MAX_REROUTE_ROUNDS = len(PROVIDER_RING) - 1
 
 # If a pane hits the limit again this soon after being woken, the fresh
 # window is already exhausted too (or the task itself is pathological) —

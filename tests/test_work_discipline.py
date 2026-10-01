@@ -164,61 +164,56 @@ def test_assign_does_not_treat_digest_flag_as_user_confirmation(monkeypatch):
     assert events[0][1]["digest"] == confirmation_digest("Set refund threshold to 14 days")
 
 
+def test_rejected_spec_removes_its_unstarted_auto_backlog_card(monkeypatch, tmp_path):
+    from agent_takkub import backlog
+    from agent_takkub.orchestrator import Orchestrator
+
+    monkeypatch.setattr(backlog, "RUNTIME_DIR", tmp_path / "runtime")
+    monkeypatch.setattr(
+        Orchestrator, "_resolve_project", staticmethod(lambda project=None: project or "p")
+    )
+    orch = Orchestrator()
+    orch.shutdown_timers()
+    task = "Set refund threshold to 14 days"
+    linked, _, card_id = orch.backlog_for_assign("p", "backend", task)
+    assert linked and backlog.get_item("p", card_id)["status"] == "doing"
+    monkeypatch.setattr(orch, "_confirm_task_discipline", lambda *_args: False)
+    ok, _ = orch.assign("backend", None, task, project="p")
+    assert not ok
+    assert backlog.get_item("p", card_id) is None
+
+
 def test_cockpit_confirmation_slot_returns_the_users_button_choice(monkeypatch):
+    from PyQt6.QtWidgets import QDialog, QDialogButtonBox, QPlainTextEdit
+
     from agent_takkub import main_window
 
-    class FakeMessageBox:
-        class Icon:
-            Question = 1
-            Warning = 2
-
-        class ButtonRole:
-            AcceptRole = 1
-            RejectRole = 2
-
-        clicked = None
-
-        def __init__(self, _parent):
-            self.buttons = []
-
-        def setIcon(self, _value):
-            pass
-
-        def setWindowTitle(self, _value):
-            pass
-
-        def setText(self, _value):
-            pass
-
-        def setInformativeText(self, value):
-            self.task = value
-
-        def setDetailedText(self, _value):
-            pass
-
-        def addButton(self, label, _role):
-            button = object()
-            self.buttons.append((label, button))
-            return button
-
-        def setDefaultButton(self, _button):
-            pass
-
-        def exec(self):
-            self.clicked = self.buttons[0][1] if self.accept else self.buttons[1][1]
-
-        def clickedButton(self):
-            return self.clicked
+    app = main_window.QApplication.instance() or main_window.QApplication([])
+    long_task = "Set tax to 7%\n" + "รายละเอียดงานยาวมาก\n" * 80
 
     accepted = []
     for choice in (True, False):
-        FakeMessageBox.accept = choice
-        monkeypatch.setattr(main_window, "QMessageBox", FakeMessageBox)
+
+        def fake_exec(dialog, _choice=choice):
+            body = dialog.findChild(QPlainTextEdit, "taskConfirmationText")
+            buttons = dialog.findChild(QDialogButtonBox)
+            assert body is not None and body.isReadOnly()
+            assert body.toPlainText() == long_task
+            assert buttons is not None and len(buttons.buttons()) == 2
+            assert dialog.maximumHeight() <= app.primaryScreen().availableGeometry().height() - 32
+            dialog.show()
+            app.processEvents()
+            assert body.verticalScrollBar().maximum() > 0
+            assert buttons.geometry().bottom() <= dialog.contentsRect().bottom()
+            dialog.hide()
+            return QDialog.DialogCode.Accepted if _choice else QDialog.DialogCode.Rejected
+
+        monkeypatch.setattr(main_window.QDialog, "exec", fake_exec)
         request = {
             "kind": "spec",
             "role": "backend",
             "project": "test-project",
-            "task": "Set tax to 7%",
+            "task": long_task,
             "digest": "digest",
             "done": threading.Event(),
             "confirmed": False,

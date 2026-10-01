@@ -281,6 +281,8 @@ class TestAsyncSpawnDispatch:
             _auth({"cmd": "assign", "role": "backend", "task": "tax 7%", "mode": "pane"}),
         )
         assert _replies(sock)[0]["ok"] is True
+        assert "รอผู้ใช้ยืนยัน spec" in _replies(sock)[0]["msg"]
+        assert "task queued" not in _replies(sock)[0]["msg"]
         assert orch.notices == []
 
         qapp.processEvents()
@@ -292,6 +294,12 @@ class TestAsyncSpawnDispatch:
         assert refusal in message
         assert next_step in message and "assign" in message
         assert metadata["kind"] == "assign-rejected"
+        retry = _FakeSock()
+        srv._dispatch(
+            retry,
+            _auth({"cmd": "assign", "role": "backend", "task": "tax 7%", "mode": "pane"}),
+        )
+        assert "คำขอเดิมยังรออยู่" not in _replies(retry)[0]["msg"]
 
     def test_fix_loop_ceiling_refusal_reaches_cli_before_ack(self, qapp: QCoreApplication):
         class _CeilingOrch(_FakeOrch):

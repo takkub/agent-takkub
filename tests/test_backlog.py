@@ -9,6 +9,21 @@ import pytest
 from agent_takkub import backlog
 
 
+def test_backlog_list_writes_rows_to_stdout(monkeypatch, capsys) -> None:
+    from agent_takkub import cli
+
+    monkeypatch.setenv("TAKKUB_ROLE", "lead")
+    monkeypatch.setattr(
+        cli,
+        "_request",
+        lambda _req: {"ok": True, "lines": ["[abc12345] รอยืนยัน · งาน"], "done": 0, "total": 1},
+    )
+    assert cli.main(["backlog", "list"]) == 0
+    output = capsys.readouterr()
+    assert "[abc12345] รอยืนยัน · งาน" in output.out
+    assert output.err == ""
+
+
 @pytest.fixture
 def store(tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch) -> pathlib.Path:
     monkeypatch.setattr(backlog, "RUNTIME_DIR", tmp_path / "runtime")

@@ -298,13 +298,16 @@ class AgentPane(QFrame):
 
         self._btn_close = QPushButton("×", header)
         self._btn_close.setFixedSize(22, 22)
-        self._btn_close.setToolTip("Close pane")
+        self._btn_close.setToolTip(
+            "Replace Lead (keep teammate panes running)"
+            if self.role.name == "lead"
+            else "Close pane"
+        )
         self._btn_close.clicked.connect(lambda: self.closeRequested.emit(self.role.name))
         # Always visible — even in empty/exited states the user needs a way
         # to dismiss the pane (e.g. a Shell pane whose spawn just failed,
         # an exited claude session, or an empty preset slot the user never
-        # used). Orchestrator.close() still gates Lead so clicking × on
-        # Lead is a safe no-op.
+        # used). Lead's × asks to replace only Lead while teammates continue.
 
         hl.addWidget(self._dot)
         hl.addWidget(self._title)

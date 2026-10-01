@@ -784,15 +784,16 @@ class TestUsageHistory:
         disk."""
         from agent_takkub import usage_ledger
 
+        recorded_at = _recent_iso()
         usage_ledger.record_turn(
             "claude",
             "default",
-            _recent_iso(),
+            recorded_at,
             "r1",
             "m",
             {"input": 1, "cache_creation": 0, "cache_read": 0, "output": 0},
         )
-        raw = usage_ledger._turn_file("claude", "default", "2026-09")
+        raw = usage_ledger._turn_file("claude", "default", recorded_at[:7])
         daily = usage_ledger._daily_file("claude", "default")
         assert raw.is_file()
         assert not daily.exists()

@@ -1145,6 +1145,35 @@ class TestRerouteOrPark:
             o._reroute_or_park("proj", "codex", ps)
         park.assert_called_once_with("proj", "codex", ps)
 
+    def test_last_provider_hit_parks_after_every_candidate_was_tried(self) -> None:
+        o = _bare_orch()
+        ps = o._ps("proj::lead")
+        ps.quota_provider = "cursor"
+        ps.rate_limited_until = time.time() + 3600
+        ps.quota_reroute_count = auto_resume.MAX_REROUTE_ROUNDS
+        with (
+            patch.object(o, "_pick_reroute_provider", return_value=None) as pick,
+            patch.object(o, "_park_pane_for_limit") as park,
+            patch("agent_takkub.limit_autoresume.QTimer.singleShot"),
+        ):
+            o._reroute_or_park("proj", "lead", ps)
+        pick.assert_called_once()
+        park.assert_called_once_with("proj", "lead", ps)
+
+    def test_fourth_switch_can_reach_last_provider(self) -> None:
+        o = _bare_orch()
+        ps = o._ps("proj::lead")
+        ps.quota_provider = "opencode"
+        ps.rate_limited_until = time.time() + 3600
+        ps.quota_reroute_count = auto_resume.MAX_REROUTE_ROUNDS - 1
+        with (
+            patch.object(o, "_pick_reroute_provider", return_value="cursor"),
+            patch.object(o, "_reroute_pane_to_provider") as reroute,
+            patch("agent_takkub.limit_autoresume.QTimer.singleShot"),
+        ):
+            o._reroute_or_park("proj", "lead", ps)
+        assert reroute.call_args.args[3:5] == ("cursor", "opencode")
+
     def test_no_candidate_and_park_disabled_gives_up_instead(self, monkeypatch) -> None:
         from agent_takkub import auto_resume as ar
 
@@ -1256,8 +1285,8 @@ class TestReroutePaneToProvider:
         assert o.spawn.call_args.kwargs["_from_auto_respawn"] is True
         new_ps = o._ps("proj::backend")
         assert new_ps.provider_override == "codex"
-        assert new_ps.model_override == "claude-sonnet-4"
-        assert new_ps.effort_override == "high"
+        assert new_ps.model_override is None
+        assert new_ps.effort_override is None
         assert new_ps.quota_reroute_from == "claude"
         assert new_ps.quota_reroute_count == 1
         o._send_when_ready.assert_called_once()
@@ -1372,6 +1401,34 @@ class TestReroutePaneToProvider:
         assert o.close.call_args.kwargs["keep_queue"] is True
         assert o._ps("proj::lead").quota_reroute_pending is False
 
+    def test_manual_lead_replace_preserves_teammate_and_hands_off_context(self) -> None:
+        o = self._orch_with_respawn_hooks()
+        ps = o._ps("proj::lead")
+        lead = _pane_alive()
+        lead._session_cwd = "C:/work"
+        lead._transcript_path = "runtime/lead.log"
+        lead.session.display_lines.return_value = ["Waiting for backend", "❯"]
+        teammate = _pane_alive()
+        teammate.state = "working"
+        teammate.model.provider_name = "gemini"
+        o._panes_by_project["proj"] = {"lead": lead, "backend": teammate}
+        with patch(
+            "agent_takkub.limit_autoresume.QTimer.singleShot",
+            side_effect=lambda _ms, cb: cb(),
+        ):
+            o._reroute_pane_to_provider("proj", "lead", ps, "codex", "claude", 0.0, manual=True)
+        assert o.close.call_args.args == ("lead",)
+        assert o.close.call_args.kwargs["force"] is True
+        assert o.close.call_args.kwargs["reason"] == "manual_lead_replace"
+        assert o._panes_by_project["proj"]["backend"] is teammate
+        assert o._ps("proj::lead").provider_override == "codex"
+        assert o._ps("proj::lead").quota_reroute_count == 0
+        brief = o._send_when_ready.call_args.args[1]
+        assert "replaced by the user" in brief
+        assert "Waiting for backend" in brief
+        assert "runtime/lead.log" in brief
+        assert "backend: working (gemini)" in brief
+
     def test_already_running_respawn_stops_instead_of_looping(self) -> None:
         """#699: when the close did not take, the task/brief must NOT be
         pasted into the same pane again — give up loudly."""
@@ -1412,7 +1469,7 @@ class TestReroutePaneToProvider:
             patch.object(o, "_reroute_pane_to_provider") as reroute,
         ):
             o._reroute_or_park("proj", "backend", ps)
-        pick.assert_not_called()
+        pick.assert_called_once()
         reroute.assert_not_called()
         assert ps.limit_park_stopped is True
         assert o._notify_lead.call_args.kwargs["note"] == "reroute_round_cap"

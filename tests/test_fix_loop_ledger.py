@@ -232,6 +232,7 @@ def test_ceiling_refuses_assign_then_ack_passes_and_logs(orch, monkeypatch) -> N
 def test_reassign_without_backlog_flag_keeps_counting(orch) -> None:
     ok, _, cid = _dispatch(orch, "backend", TASK)
     _fail(orch, "backend", FAIL_A)
+    assert backlog.get_item(PROJ, cid)["status"] == "doing"
     # Lead re-assigns with reworded text and NO --backlog: same card, count continues.
     ok, note, cid2 = _dispatch(orch, "backend", TASK + " (retry)")
     assert ok and cid2 == cid and "นับความพยายามต่อ" in note

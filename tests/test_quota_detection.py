@@ -151,6 +151,17 @@ class TestPtySessionQuotaWrappers:
         s._feed_and_log(b"You've hit your usage limit. Resets in 1h24m.")
         assert s.rate_limit_reset_at("codex") is not None
 
+    def test_claude_session_limit_nested_under_tool_result_detected(self) -> None:
+        s = PtySession(cols=100, rows=24)
+        s._feed_and_log(
+            (
+                "  └ You've hit your session limit · resets 11:10am (Asia/Bangkok)\r\n"
+                "    Use your limit reset to reset it now: clau.de/reset"
+            ).encode()
+        )
+        assert s.rate_limit_reset_at("claude") is not None
+        assert s.quota_stall_marker("claude") == "hit your session limit"
+
     def test_current_model_label_gemini(self) -> None:
         s = PtySession(cols=80, rows=24)
         s._feed_and_log(b"> \n? for shortcuts            Gemini 3.5 Flash (Medium)")

@@ -1543,6 +1543,7 @@ def _render_daily_digest(
     when: datetime,
     sessions: list[tuple[str, str, str]],
     decisions: list[dict] | None = None,
+    overdue_reviews: list[dict] | None = None,
 ) -> str:
     """Render one Finish-Job digest section for a project.
 
@@ -1588,6 +1589,13 @@ def _render_daily_digest(
             heading = (d.get("heading") or "").strip()
             if heading:
                 lines.append(f"- `{ts_short}` {heading}")
+        lines.append("")
+    if overdue_reviews:
+        lines.append(f"**Backlog awaiting review (over 24h): {len(overdue_reviews)}**")
+        lines.append("")
+        for item in overdue_reviews:
+            item_id = item.get("id", "?")
+            lines.append(f"- [{item_id}] {item.get('title', '')} — `takkub backlog done {item_id}`")
         lines.append("")
     return "\n".join(lines)
 

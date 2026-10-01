@@ -264,7 +264,8 @@
     {
       "module": "agent_takkub.auto_resume",
       "imports": [
-        "agent_takkub.config"
+        "agent_takkub.config",
+        "agent_takkub.provider_config"
       ],
       "imported_by": [
         "agent_takkub.limit_autoresume",
@@ -272,7 +273,7 @@
         "agent_takkub.usage_meter"
       ],
       "fan_in": 3,
-      "fan_out": 1
+      "fan_out": 2
     },
     {
       "module": "agent_takkub.autoskills_installer",
@@ -296,11 +297,12 @@
         "agent_takkub.backlog_dialog",
         "agent_takkub.cli",
         "agent_takkub.fix_loop",
+        "agent_takkub.lead_inbox",
         "agent_takkub.orchestrator",
         "agent_takkub.pane_guard",
         "agent_takkub.worktree_reuse"
       ],
-      "fan_in": 6,
+      "fan_in": 7,
       "fan_out": 3
     },
     {
@@ -586,6 +588,7 @@
         "agent_takkub.spawn_queue_health",
         "agent_takkub.team_preset",
         "agent_takkub.user_profile",
+        "agent_takkub.work_discipline",
         "agent_takkub.worktree_manager"
       ],
       "imported_by": [
@@ -593,7 +596,7 @@
         "agent_takkub.main_window"
       ],
       "fan_in": 2,
-      "fan_out": 16
+      "fan_out": 17
     },
     {
       "module": "agent_takkub.cli_shim",
@@ -3109,6 +3112,7 @@
       "module": "agent_takkub.lead_inbox",
       "imports": [
         "agent_takkub.agent_pane",
+        "agent_takkub.backlog",
         "agent_takkub.config",
         "agent_takkub.delivery_readiness",
         "agent_takkub.digest_facts",
@@ -3128,7 +3132,7 @@
         "agent_takkub.orchestrator"
       ],
       "fan_in": 2,
-      "fan_out": 14
+      "fan_out": 15
     },
     {
       "module": "agent_takkub.lead_wait",
@@ -3944,6 +3948,7 @@
         "agent_takkub.role_models"
       ],
       "imported_by": [
+        "agent_takkub.auto_resume",
         "agent_takkub.cli",
         "agent_takkub.cli_server",
         "agent_takkub.core.providers.claude_adapter",
@@ -3974,7 +3979,7 @@
         "agent_takkub.user_actions",
         "agent_takkub.user_profile"
       ],
-      "fan_in": 29,
+      "fan_in": 30,
       "fan_out": 10
     },
     {
@@ -5819,9 +5824,10 @@
         "agent_takkub.config"
       ],
       "imported_by": [
+        "agent_takkub.cli_server",
         "agent_takkub.orchestrator"
       ],
-      "fan_in": 1,
+      "fan_in": 2,
       "fan_out": 1
     },
     {

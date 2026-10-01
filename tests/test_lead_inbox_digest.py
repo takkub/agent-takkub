@@ -118,6 +118,30 @@ def test_single_notice_waits_at_most_one_configured_window(
     assert "📬 [Lead Inbox Digest — 1 update]" in _written(lead.session)
 
 
+def test_digest_reminds_lead_about_overdue_backlog_reviews(
+    orch: Orchestrator, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("TAKKUB_INBOX_DIGEST_MS", "125")
+    timers: list[object] = []
+    reviews = [{"id": "abc12345", "title": "ตรวจ settlement"}]
+
+    with (
+        patch(
+            "agent_takkub.lead_inbox.QTimer.singleShot",
+            side_effect=lambda _ms, callback: timers.append(callback),
+        ),
+        patch("agent_takkub.lead_inbox.backlog.review_items", return_value=reviews) as get_reviews,
+    ):
+        orch._notify_lead(PROJECT, "[qa done] Smoke tests passed")
+        timers[0]()
+
+    get_reviews.assert_called_once_with(PROJECT, min_age_s=24 * 60 * 60)
+    written = _written(orch._panes_by_project[PROJECT]["lead"].session)
+    assert "Backlog รอ Lead ยืนยันเกิน 24 ชม.: 1 ใบ" in written
+    assert "[abc12345] ตรวจ settlement" in written
+    assert "takkub backlog done abc12345" in written
+
+
 def test_zero_window_preserves_immediate_legacy_delivery(
     orch: Orchestrator, monkeypatch: pytest.MonkeyPatch
 ) -> None:

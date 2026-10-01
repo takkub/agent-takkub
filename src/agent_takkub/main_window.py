@@ -37,15 +37,20 @@ from PyQt6.QtCore import (
 from PyQt6.QtGui import QIcon
 from PyQt6.QtWidgets import (
     QApplication,
+    QDialog,
+    QDialogButtonBox,
     QDockWidget,
     QHBoxLayout,
     QInputDialog,
+    QLabel,
     QMainWindow,
     QMessageBox,
+    QPlainTextEdit,
     QSizePolicy,
     QSpacerItem,
     QStyle,
     QSystemTrayIcon,
+    QVBoxLayout,
     QWidget,
 )
 
@@ -1220,17 +1225,37 @@ class MainWindow(
                 if kind == "spec"
                 else "This task reached its hard budget. Review the task before resuming:"
             )
-            box = QMessageBox(self)
-            box.setIcon(QMessageBox.Icon.Warning if kind != "spec" else QMessageBox.Icon.Question)
-            box.setWindowTitle(title)
-            box.setText(f"{heading}\n\nProject: {request['project']} · Role: {request['role']}")
-            box.setInformativeText(request["task"])
-            box.setDetailedText(f"Confirmation digest: {request['digest']}")
-            accept = box.addButton("ผู้ใช้ยืนยัน · ดำเนินการ", QMessageBox.ButtonRole.AcceptRole)
-            cancel = box.addButton("ยกเลิก", QMessageBox.ButtonRole.RejectRole)
-            box.setDefaultButton(cancel)
-            box.exec()
-            request["confirmed"] = box.clickedButton() is accept
+            parent = self if isinstance(self, QWidget) else None
+            dialog = QDialog(parent)
+            dialog.setWindowTitle(title)
+            layout = QVBoxLayout(dialog)
+            intro = QLabel(
+                f"{heading}\nProject: {request['project']} · Role: {request['role']}", dialog
+            )
+            intro.setWordWrap(True)
+            layout.addWidget(intro)
+            task_text = QPlainTextEdit(dialog)
+            task_text.setObjectName("taskConfirmationText")
+            task_text.setPlainText(request["task"])
+            task_text.setReadOnly(True)
+            layout.addWidget(task_text, 1)
+            digest = QLabel(f"Confirmation digest: {request['digest']}", dialog)
+            layout.addWidget(digest)
+            buttons = QDialogButtonBox(dialog)
+            buttons.addButton("ผู้ใช้ยืนยัน · ดำเนินการ", QDialogButtonBox.ButtonRole.AcceptRole)
+            cancel = buttons.addButton("ยกเลิก", QDialogButtonBox.ButtonRole.RejectRole)
+            cancel.setDefault(True)
+            buttons.accepted.connect(dialog.accept)
+            buttons.rejected.connect(dialog.reject)
+            layout.addWidget(buttons)
+            screen = parent.screen() if parent is not None else QApplication.primaryScreen()
+            if screen is not None:
+                available = screen.availableGeometry()
+                width_cap = max(1, available.width() - 32)
+                height_cap = max(1, available.height() - 32)
+                dialog.setMaximumSize(width_cap, height_cap)
+                dialog.resize(min(760, width_cap), min(620, height_cap))
+            request["confirmed"] = dialog.exec() == QDialog.DialogCode.Accepted
         finally:
             request["done"].set()
 

@@ -2817,8 +2817,10 @@ class Orchestrator(
         from .work_discipline import confirmation_digest, needs_spec_confirmation
 
         # #762: bind THIS request's backlog card before anything reads it.
+        requested_role_name = role_name
+        assign_backlog_id = ""
         try:
-            self.activate_assign_backlog(project, role_name, task)
+            assign_backlog_id = self.activate_assign_backlog(project, role_name, task)
         except Exception:  # bare test doubles / storage trouble never block an assign
             pass
         if needs_spec_confirmation(task):
@@ -2826,6 +2828,15 @@ class Orchestrator(
             if not self._confirm_task_discipline(
                 "spec", role_name, self._resolve_project(project), task, expected
             ):
+                if assign_backlog_id:
+                    try:
+                        from . import backlog
+
+                        backlog.cancel_unstarted_assign(
+                            self._resolve_project(project), assign_backlog_id, role_name
+                        )
+                    except Exception:
+                        _log_event("backlog_assign_cancel_error", role=role_name)
                 _log_event(
                     "task_spec_confirmation_denied",
                     role=role_name,
@@ -2878,6 +2889,22 @@ class Orchestrator(
                 mode = "pane"
             elif mode not in {"pane", "subagent"}:
                 return False, f"--mode {mode} is only valid for --role reviewer"
+
+        if assign_backlog_id and role_name != requested_role_name:
+            try:
+                from . import backlog
+
+                project_for_backlog = self._resolve_project(project)
+                backlog.retarget_unstarted_link(
+                    project_for_backlog, assign_backlog_id, requested_role_name, role_name
+                )
+                self._stash_assign_backlog(project_for_backlog, role_name, assign_backlog_id, task)
+                self.activate_assign_backlog(project_for_backlog, role_name, task)
+                self.__dict__.get("_pending_assign_backlog", {}).pop(
+                    self._assign_backlog_key(project_for_backlog, requested_role_name), None
+                )
+            except Exception:
+                _log_event("backlog_assign_retarget_error", role=role_name)
 
         # #510: enforce the Settings → Providers & Roles on/off toggle at the
         # single choke point both pane and subagent assigns pass through —
@@ -3898,7 +3925,12 @@ class Orchestrator(
         try:
             from . import backlog as _backlog_bind
 
-            _backlog_bind.bind_task_id(project_ns, role_name, ps_assign.task_id)
+            _backlog_bind.bind_task_id(
+                project_ns,
+                role_name,
+                ps_assign.task_id,
+                item_id=self._peek_assign_backlog(project_ns, role_name) or None,
+            )
         except Exception:
             _log_event("backlog_bind_error", role=role_name, project=project_ns)
         existing_pane = self._project_panes(project_ns).get(role_name)
@@ -6910,6 +6942,26 @@ class Orchestrator(
             QTimer.singleShot(
                 0, lambda: self._resume_after_close(project_ns, role_name, retained, closing_cwd)
             )
+        if role_name != LEAD.name and not preserve_resume and not recovery_close:
+            try:
+                from . import backlog
+
+                reviews = backlog.review_items(project_ns, role=role_name)
+                if reviews:
+                    lines = [f"📋 {role_name} ปิดแล้ว แต่มี backlog รอยืนยัน {len(reviews)} ใบ:"]
+                    lines.extend(
+                        f"- [{it['id']}] {it.get('title', '')} · `takkub backlog done {it['id']}`"
+                        for it in reviews[:5]
+                    )
+                    self._notify_lead(
+                        project_ns,
+                        "\n".join(lines),
+                        from_role=role_name,
+                        note="backlog_review_at_close",
+                        kind="backlog-review",
+                    )
+            except Exception:
+                _log_event("backlog_close_review_notice_error", role=role_name, project=project_ns)
         return True, f"{role_name} closed"
 
     def toggle_provider(self, provider: str, disabled: bool) -> tuple[bool, str]:
@@ -8473,18 +8525,41 @@ class Orchestrator(
             self._last_done_task_ids = {}
         had_task_id = _ps_done.task_id or self._last_done_task_ids.get(key) or f"pane-{id(pane)}"
         self._last_done_task_ids[key] = had_task_id
-        # #684: if this task was fired from a backlog card, flip that item to
-        # `review` (owner confirms) instead of leaving it stuck at `doing`.
-        try:
-            from . import backlog
+        # A successful report moves its card to review. FAILED/blocked reports
+        # leave it active for the fix loop or an owner decision.
+        if not failed and not blocked:
+            try:
+                from . import backlog
 
-            backlog.on_ledger_done(project_ns, had_task_id)
-        except Exception:
-            import logging
+                review_card = backlog.on_ledger_done(
+                    project_ns,
+                    had_task_id,
+                    item_id=_ps_done.backlog_id or None,
+                    role=from_role,
+                )
+            except Exception:
+                import logging
 
-            logging.getLogger(__name__).exception(
-                "backlog.on_ledger_done failed for %s", had_task_id
-            )
+                logging.getLogger(__name__).exception(
+                    "backlog.on_ledger_done failed for %s", had_task_id
+                )
+            else:
+                if review_card and review_card.get("status") == "review":
+                    card_id = review_card["id"]
+                    try:
+                        self._notify_lead(
+                            project_ns,
+                            f"📋 backlog [{card_id}] รอยืนยันหลัง {from_role} done — "
+                            f"ตรวจงานแล้วปิดด้วย `takkub backlog done {card_id}` "
+                            "หรือระบุสถานะอื่นหากงานยังไม่เสร็จ",
+                            from_role=from_role,
+                            note="backlog_review",
+                            kind="backlog-review",
+                        )
+                    except Exception:
+                        _log_event(
+                            "backlog_review_notice_error", role=from_role, project=project_ns
+                        )
         # #244: the issue/task ref shown to Lead must come from the ORIGINAL
         # assign spec Lead itself sent (last_assigned_task), never from the
         # agent's own done() note — an agent has mistyped the issue number
@@ -12019,6 +12094,9 @@ class Orchestrator(
         task = self._compose_backlog_task(item)
         # #714: link first — assign() binds the task id it mints to this link.
         backlog.link_assign(project_ns, item["id"], role)
+        stash = getattr(self, "_stash_assign_backlog", None)
+        if callable(stash):
+            stash(project_ns, role, item["id"], task)
         ok, msg = self.assign(
             role,
             cwd=lead_cwd(project_ns),
@@ -12027,6 +12105,7 @@ class Orchestrator(
             feature="backlog",
         )
         if not ok:
+            backlog.cancel_unstarted_assign(project_ns, item["id"], role)
             return False, msg, {}
         return True, f"assign [{item['id']}] → {role}: {msg}", {"id": item["id"]}
 
@@ -12884,7 +12963,15 @@ class Orchestrator(
             decisions = extract_decisions(project_filter=project, since=start_of_today, limit=10)
         except Exception:
             decisions = []
-        section = _render_daily_digest(project, now, sessions, decisions=decisions)
+        try:
+            from . import backlog
+
+            overdue_reviews = backlog.review_items(project, min_age_s=24 * 60 * 60)
+        except Exception:
+            overdue_reviews = []
+        section = _render_daily_digest(
+            project, now, sessions, decisions=decisions, overdue_reviews=overdue_reviews
+        )
 
         daily_dir = vault / "05-Daily"
         try:
@@ -16870,7 +16957,35 @@ class Orchestrator(
         project_ns = self._project_ns_for_pane(pane) if pane is not None else None
         if project_ns is None:
             project_ns = self._resolve_project(None)
+        if role_name == LEAD.name:
+            pending = self._pane_state.get(f"{project_ns}::{role_name}")
+            if pending is not None and pending.quota_reroute_pending:
+                return
         if not self.confirm_manual_pane_close(pane, role_name, project_ns):
+            return
+        if role_name == LEAD.name:
+            from .provider_config import pick_substitute_provider
+
+            provider = getattr(getattr(pane, "model", None), "provider_name", None) or "claude"
+            candidate = pick_substitute_provider({provider}, after=provider) or provider
+            ps = self._ps(f"{project_ns}::{role_name}")
+            reset_at = ps.rate_limited_until if ps.quota_provider == provider else 0.0
+            if not reset_at and getattr(pane, "session", None) is not None:
+                reset_at = pane.session.rate_limit_reset_at(provider) or 0.0
+            if reset_at <= time.time():
+                reset_at = 0.0
+            if reset_at:
+                from . import provider_state
+
+                provider_state.set_quota_reset_at(provider, reset_at)
+                if candidate == provider:
+                    self.leadUnavailable.emit(
+                        project_ns, "no other provider is available for replacement"
+                    )
+                    return
+            self._reroute_pane_to_provider(
+                project_ns, role_name, ps, candidate, provider, reset_at, manual=True
+            )
             return
         self.close(role_name)
 
@@ -16888,12 +17003,6 @@ class Orchestrator(
         wiring this gate into `close()` itself would hang unattended
         automation waiting for a click that never comes.
         """
-        if role_name == LEAD.name:
-            # close() already no-ops Lead unless force=True (tab teardown) —
-            # a dialog here would just be a confusing extra click on what is
-            # already a guaranteed no-op.
-            return True
-
         from PyQt6.QtWidgets import QMessageBox
 
         from . import cockpit_theme as theme
@@ -16903,7 +17012,13 @@ class Orchestrator(
         role_obj = getattr(pane, "role", None) if pane is not None else None
         label = getattr(role_obj, "label", None) or role_name
 
-        if working:
+        if role_name == LEAD.name:
+            lines = [
+                f"เปลี่ยน Lead ของ '{project_ns}'?",
+                "ระบบจะปิดเฉพาะ Lead แล้วเปิดตัวใหม่ พร้อมส่งต่อบริบทงานที่ค้างอยู่",
+                "pane อื่นในโปรเจกต์จะทำงานต่อ",
+            ]
+        elif working:
             lines = [f"'{label}' กำลังทำงานอยู่ — ปิดตอนนี้จะตัดงานที่กำลังรันทิ้งทันที"]
         else:
             lines = [f"ปิด pane '{label}'?"]

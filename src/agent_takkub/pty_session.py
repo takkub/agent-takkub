@@ -1634,7 +1634,10 @@ def _quota_banner_text(lines) -> str:
     clean = _strip_cockpit_notice_lines(lines).splitlines()
     banner = []
     for line in clean:
-        candidate = line.strip().lstrip("⚠! ").strip()
+        # Claude nests provider errors under a tool result with a tree
+        # connector ("└ You've hit your session limit …"). It is still the
+        # CLI's live quota banner, not an agent quoting the banner in prose.
+        candidate = line.strip().lstrip("⚠! └⎿").strip()
         if candidate.startswith(_QUOTA_BANNER_STARTS):
             banner.append(candidate)
         elif banner and candidate.startswith(("resets ", "reset at ", "continuing automatically")):

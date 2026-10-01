@@ -16,6 +16,7 @@ import pytest
 from PyQt6.QtCore import QCoreApplication
 
 import agent_takkub.main_window as mw_mod
+from agent_takkub import cockpit_theme
 
 
 @pytest.fixture(scope="module")
@@ -55,7 +56,7 @@ class TestNpmChipColour:
             win._refresh_update_button()
         assert "Update available (v1.0.10)" in _text(win)
         # Blue "stands out" palette (same as the git behind-state).
-        assert "#93c5fd" in _style(win)
+        assert f"background: {cockpit_theme.BANNER_INFO_TEXT}" in _style(win)
 
     def test_green_when_up_to_date(self, qapp) -> None:
         win = _make_window_stub()
@@ -63,7 +64,7 @@ class TestNpmChipColour:
         with patch("agent_takkub.config.is_installed_package", return_value=True):
             win._refresh_update_button()
         assert _text(win) == "🔄 Update via npm"
-        assert "#052e16" in _style(win)  # neutral green background
+        assert f"background: {cockpit_theme.BANNER_OK_BG}" in _style(win)
 
     def test_green_before_first_check(self, qapp) -> None:
         win = _make_window_stub()
@@ -71,7 +72,7 @@ class TestNpmChipColour:
         with patch("agent_takkub.config.is_installed_package", return_value=True):
             win._refresh_update_button()
         assert _text(win) == "🔄 Update via npm"
-        assert "#052e16" in _style(win)
+        assert f"background: {cockpit_theme.BANNER_OK_BG}" in _style(win)
 
     def test_green_when_check_failed(self, qapp) -> None:
         # A failed registry check must not false-alarm as "update available".
@@ -80,7 +81,7 @@ class TestNpmChipColour:
         with patch("agent_takkub.config.is_installed_package", return_value=True):
             win._refresh_update_button()
         assert _text(win) == "🔄 Update via npm"
-        assert "#052e16" in _style(win)
+        assert f"background: {cockpit_theme.BANNER_OK_BG}" in _style(win)
 
 
 class TestNpmCheckWiring:

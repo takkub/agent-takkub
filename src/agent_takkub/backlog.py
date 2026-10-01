@@ -207,7 +207,13 @@ def _update(project: str, item_id: str, **fields) -> dict | None:
 def set_status(project: str, item_id: str, status: str, *, reason: str = "") -> dict | None:
     if status not in STATUSES:
         raise ValueError(f"invalid status: {status}")
-    return _update(project, item_id, status=status, reason=(reason or "").strip())
+    return _update(
+        project,
+        item_id,
+        status=status,
+        reason=(reason or "").strip(),
+        review_since=_now() if status == "review" else None,
+    )
 
 
 def mark_done(project: str, item_id: str) -> dict | None:
@@ -228,7 +234,9 @@ def assign_item(project: str, item_id: str, ledger_task_id: str | None) -> dict 
     return _update(project, item_id, status="doing", ledger_task_id=ledger_task_id)
 
 
-def on_ledger_done(project: str, ledger_task_id: str) -> dict | None:
+def on_ledger_done(
+    project: str, ledger_task_id: str, *, item_id: str | None = None, role: str | None = None
+) -> dict | None:
     """When a pane reports done for a task that a backlog item triggered, flip
     the item to `review` (owner confirms) instead of closing it silently.
 
@@ -238,16 +246,51 @@ def on_ledger_done(project: str, ledger_task_id: str) -> dict | None:
         return None
     store = load(project)
     for it in store["items"]:
+        if item_id and it.get("id") != item_id:
+            continue
         if it.get("status") != "doing":
             continue
         links = it.get("links") or []
         hit = next((ln for ln in links if ln.get("task_id") == ledger_task_id), None)
+        if hit is None and item_id and role:
+            # Older queued assigns could bind an id to the newest card for a
+            # role, rather than this pane's card. Its saved backlog_id is the
+            # authoritative link when that pane reports done.
+            hit = next(
+                (ln for ln in reversed(links) if ln.get("role") == role and not ln.get("done")),
+                None,
+            )
+            if hit is None and role in {"qa", "critic"}:
+                hit = next(
+                    (
+                        ln
+                        for ln in reversed(links)
+                        if ln.get("role") == "reviewer" and not ln.get("done")
+                    ),
+                    None,
+                )
+                if hit is not None:
+                    hit["role"] = role
+            if hit is not None:
+                hit["task_id"] = ledger_task_id
         if hit is None and it.get("ledger_task_id") != ledger_task_id:
             continue
         if hit is not None:
             hit["done"] = True
-        if all(ln.get("done") for ln in links if ln.get("role") != "lead"):
+            # A retry can leave older, unbound links for the SAME role. They
+            # never reached a pane, so they must not hold a completed card in
+            # `doing`. A newer unbound link or another role can still run.
+            for link in links:
+                if (
+                    link is not hit
+                    and link.get("role") == hit.get("role")
+                    and not link.get("task_id")
+                    and float(link.get("ts") or 0) <= float(hit.get("ts") or 0)
+                ):
+                    link["superseded"] = True
+        if all(ln.get("done") or ln.get("superseded") for ln in links if ln.get("role") != "lead"):
             it["status"] = "review"
+            it["review_since"] = _now()
         it["updated_ts"] = _now()
         _save(project, store)
         return it
@@ -310,13 +353,58 @@ def link_assign(project: str, item_id: str, role: str) -> dict | None:
     store = load(project)
     for it in store["items"]:
         if it.get("id") == item_id:
+            previous_status = it.get("status", "todo")
             _add_link(it, role)
+            it["links"][-1]["previous_status"] = previous_status
+            it["links"][-1]["previous_reason"] = it.get("reason", "")
             it["status"] = "doing"
             it["reason"] = ""
             it["updated_ts"] = _now()
             _save(project, store)
             return it
     return None
+
+
+def cancel_unstarted_assign(project: str, item_id: str, role: str) -> None:
+    """Undo the newest unbound link when the owner rejects a spec dialog."""
+    store = load(project)
+    for it in store["items"]:
+        if it.get("id") != item_id:
+            continue
+        links = it.get("links") or []
+        for index in range(len(links) - 1, -1, -1):
+            if links[index].get("role") == role and not links[index].get("task_id"):
+                canceled = links.pop(index)
+                if not any(not link.get("done") for link in links):
+                    if it.get("auto_task") is not None:
+                        if not links:
+                            store["items"].remove(it)
+                        else:
+                            it["status"] = canceled.get("previous_status") or "todo"
+                            it["reason"] = canceled.get("previous_reason") or ""
+                            it["updated_ts"] = _now()
+                    else:
+                        it["status"] = canceled.get("previous_status") or "todo"
+                        it["reason"] = canceled.get("previous_reason") or ""
+                        it["updated_ts"] = _now()
+                _save(project, store)
+                return
+        return
+
+
+def retarget_unstarted_link(project: str, item_id: str, old_role: str, new_role: str) -> None:
+    """Carry a reviewer card link to the pane role selected by its mode."""
+    store = load(project)
+    for it in store["items"]:
+        if it.get("id") != item_id:
+            continue
+        for link in reversed(it.get("links") or []):
+            if link.get("role") == old_role and not link.get("task_id"):
+                link["role"] = new_role
+                it["updated_ts"] = _now()
+                _save(project, store)
+                return
+        return
 
 
 def ensure_for_assign(
@@ -367,7 +455,9 @@ def ensure_for_assign(
     return item, True
 
 
-def bind_task_id(project: str, role: str, task_id: str) -> dict | None:
+def bind_task_id(
+    project: str, role: str, task_id: str, *, item_id: str | None = None
+) -> dict | None:
     """Called by orchestrator.assign once it has minted *task_id* for *role*.
     Fills the newest unbound link for that role; with none unbound (a quota
     reroute / queue re-dispatch re-assigning the same work) the newest open
@@ -375,7 +465,11 @@ def bind_task_id(project: str, role: str, task_id: str) -> dict | None:
     if not task_id:
         return None
     store = load(project)
-    doing = [it for it in store["items"] if it.get("status") == "doing"]
+    doing = [
+        it
+        for it in store["items"]
+        if it.get("status") == "doing" and (not item_id or it.get("id") == item_id)
+    ]
     doing.sort(key=lambda it: it.get("updated_ts", 0.0), reverse=True)
     target = None
     for want_unbound in (True, False):
@@ -400,6 +494,17 @@ def bind_task_id(project: str, role: str, task_id: str) -> dict | None:
     it["updated_ts"] = _now()
     _save(project, store)
     return it
+
+
+def review_items(project: str, *, role: str | None = None, min_age_s: float = 0.0) -> list[dict]:
+    """Cards awaiting owner confirmation, optionally scoped to a role/age."""
+    now = _now()
+    return [
+        it
+        for it in list_items(project, status="review")
+        if (role is None or any(ln.get("role") == role for ln in it.get("links") or []))
+        and now - float(it.get("review_since") or it.get("updated_ts") or now) >= min_age_s
+    ]
 
 
 def start_lead_work(project: str, *, item_id: str = "", title: str = "") -> tuple[dict, bool]:

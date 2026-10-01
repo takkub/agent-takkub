@@ -125,3 +125,14 @@ class TestRenderDailyDigest:
         assert "Decisions today" in body
         bullets = [line for line in body.splitlines() if line.startswith("- ") and "`" in line]
         assert bullets == []
+
+    def test_overdue_backlog_reviews_have_a_close_action(self) -> None:
+        body = _render_daily_digest(
+            "p",
+            datetime.now(),
+            [],
+            overdue_reviews=[{"id": "abc12345", "title": "ตรวจ settlement"}],
+        )
+        assert "Backlog awaiting review (over 24h): 1" in body
+        assert "ตรวจ settlement" in body
+        assert "takkub backlog done abc12345" in body

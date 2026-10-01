@@ -44,6 +44,7 @@ from datetime import datetime
 
 from PyQt6.QtCore import QProcess, QTimer
 
+from . import backlog
 from .agent_pane import AgentPane
 from .config import RUNTIME_DIR as _RUNTIME_DIR_DEFAULT
 from .config import ensure_runtime as _ensure_runtime_default
@@ -4337,6 +4338,18 @@ class LeadInboxMixin:
                 *lines,
             ]
         )
+        try:
+            overdue_reviews = backlog.review_items(project_ns, min_age_s=24 * 60 * 60)
+        except Exception:
+            _log_event("backlog_digest_review_error", project=project_ns)
+            overdue_reviews = []
+        if overdue_reviews:
+            reminders = [f"📋 Backlog รอ Lead ยืนยันเกิน 24 ชม.: {len(overdue_reviews)} ใบ"]
+            reminders.extend(
+                f"- [{item['id']}] {item.get('title', '')} · `takkub backlog done {item['id']}`"
+                for item in overdue_reviews[:5]
+            )
+            digest = f"{digest}\n\n" + "\n".join(reminders)
         if trailing_body:
             # Auto-chain uses this path: the actionable handoff follows the
             # digest in the same payload/turn, so Lead sees the prerequisite

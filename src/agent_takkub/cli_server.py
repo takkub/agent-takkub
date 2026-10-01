@@ -125,6 +125,7 @@ class CliServer(QObject):
         # _ASSIGN_DEDUP_WINDOW_S is acked without a second dispatch. Pruned
         # alongside the idle-connection reaper (same 1s tick).
         self._recent_assign_fingerprints: dict[tuple[str, str, str, str], float] = {}
+        self._pending_spec_assigns: set[tuple[str, str, str, str]] = set()
         # Reap idle (no newline received) connections once per second.
         self._reaper = QTimer(self)
         self._reaper.setInterval(1_000)
@@ -433,9 +434,23 @@ class CliServer(QObject):
         caller cannot receive ``assign()``'s eventual ``(False, message)``.
         Keep all async assign paths on this one notice route.
         """
-        result = self._orch.assign(role, **kwargs)
+        project_for_fp = kwargs.get("project")
+        resolve_for_fp = getattr(self._orch, "_resolve_project", None)
+        if callable(resolve_for_fp):
+            project_for_fp = resolve_for_fp(project_for_fp)
+        project_for_fp = project_for_fp or "default"
+        fp = self._assign_fingerprint(
+            project_for_fp, role, kwargs.get("task", ""), kwargs.get("mode", "pane")
+        )
+        try:
+            result = self._orch.assign(role, **kwargs)
+        finally:
+            self._pending_spec_assigns.discard(fp)
         if not isinstance(result, tuple) or len(result) < 2 or result[0] is not False:
             return
+        # A rejected confirmation must be retryable immediately. The dedup
+        # fingerprint was recorded when the request was first acknowledged.
+        self._recent_assign_fingerprints.pop(fp, None)
         notify = getattr(self._orch, "_notify_lead", None)
         if not callable(notify):
             return
@@ -968,6 +983,11 @@ class CliServer(QObject):
                         else (from_project or "default")
                     )
                     fp = self._assign_fingerprint(project_ns_fp, role, req.get("task", ""), mode)
+                    from .work_discipline import needs_spec_confirmation
+
+                    awaiting_spec = cmd == "assign" and needs_spec_confirmation(
+                        str(req.get("task", "") or "")
+                    )
                     now_fp = time.time()
                     last_seen = self._recent_assign_fingerprints.get(fp)
                     self._recent_assign_fingerprints[fp] = now_fp
@@ -976,7 +996,10 @@ class CliServer(QObject):
                             sock,
                             ok=True,
                             msg=(
-                                f"task already queued for {role} moments ago "
+                                f"รอผู้ใช้ยืนยัน spec ในหน้าต่าง cockpit สำหรับ {role} "
+                                "(คำขอเดิมยังรออยู่ ไม่ส่งซ้ำ)"
+                                if awaiting_spec and fp in self._pending_spec_assigns
+                                else f"task already queued for {role} moments ago "
                                 "(deduped — safe retry, not re-dispatched)"
                             ),
                         )
@@ -1066,6 +1089,8 @@ class CliServer(QObject):
                     )
                     self._reply(sock, ok=True, msg=f"spawning {role} (async, +{delay}ms)")
                 else:
+                    if awaiting_spec:
+                        self._pending_spec_assigns.add(fp)
                     # #497: stamp the just-accepted assign BEFORE the actual
                     # dispatch below (staggered off the QTimer, may not run
                     # for `delay`ms) so a `takkub wait` issued in the same
@@ -1149,7 +1174,11 @@ class CliServer(QObject):
                                 _role, _kw
                             ),
                         )
-                    ack_msg = f"task queued for {role} (spawning async, +{delay}ms)"
+                    ack_msg = (
+                        f"รอผู้ใช้ยืนยัน spec ในหน้าต่าง cockpit ก่อนส่งงานให้ {role}"
+                        if awaiting_spec
+                        else f"task queued for {role} (spawning async, +{delay}ms)"
+                    )
                     if (role or "").strip().lower() == "reviewer" and mode in {"code", "e2e", "ui"}:
                         from .routing_planner import _MODE_TO_LEGACY_ROLE
 

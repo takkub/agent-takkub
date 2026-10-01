@@ -78,6 +78,73 @@ class TestEnsureForAssign:
 
 
 class TestTaskBinding:
+    def test_done_ignores_older_unbound_retries_for_the_same_role(self, runtime) -> None:
+        card, _ = backlog.ensure_for_assign("p", "backend", "แก้ JOKER")
+        backlog.ensure_for_assign("p", "backend", "แก้ JOKER", card["id"])
+        backlog.ensure_for_assign("p", "backend", "แก้ JOKER", card["id"])
+        backlog.bind_task_id("p", "backend", "completed-task", item_id=card["id"])
+        changed = backlog.on_ledger_done("p", "completed-task", item_id=card["id"], role="backend")
+        assert changed["status"] == "review"
+        assert all(link.get("superseded") for link in changed["links"][:2])
+
+    def test_done_keeps_newer_unbound_work_open(self, runtime) -> None:
+        card, _ = backlog.ensure_for_assign("p", "backend", "งาน")
+        backlog.bind_task_id("p", "backend", "first-task", item_id=card["id"])
+        backlog.ensure_for_assign("p", "backend", "งานต่อ", card["id"])
+        changed = backlog.on_ledger_done("p", "first-task", item_id=card["id"], role="backend")
+        assert changed["status"] == "doing"
+        assert not changed["links"][-1].get("superseded")
+
+    def test_reviewer_alias_keeps_its_card_when_dispatched_to_qa(self, runtime) -> None:
+        card, _ = backlog.ensure_for_assign("p", "reviewer", "ตรวจงาน")
+        backlog.retarget_unstarted_link("p", card["id"], "reviewer", "qa")
+        backlog.bind_task_id("p", "qa", "task-qa", item_id=card["id"])
+        changed = backlog.on_ledger_done("p", "task-qa", item_id=card["id"], role="qa")
+        assert changed["status"] == "review"
+
+    def test_old_reviewer_card_is_repaired_when_qa_reports_done(self, runtime) -> None:
+        card, _ = backlog.ensure_for_assign("p", "reviewer", "ตรวจงานเก่า")
+        changed = backlog.on_ledger_done("p", "task-qa", item_id=card["id"], role="qa")
+        assert changed["status"] == "review"
+        assert changed["links"][0]["role"] == "qa"
+
+    def test_rejected_spec_does_not_leave_an_auto_card_doing(self, runtime) -> None:
+        auto, _ = backlog.ensure_for_assign("p", "backend", "ค่าคอม 2.5%")
+        backlog.cancel_unstarted_assign("p", auto["id"], "backend")
+        assert backlog.get_item("p", auto["id"]) is None
+        explicit = backlog.add_item("p", "งานจากเจ้าของ")
+        backlog.ensure_for_assign("p", "backend", "ค่าคอม 2.5%", explicit["id"])
+        backlog.cancel_unstarted_assign("p", explicit["id"], "backend")
+        assert backlog.get_item("p", explicit["id"])["status"] == "todo"
+        backlog.set_status("p", explicit["id"], "review")
+        backlog.ensure_for_assign("p", "backend", "ค่าคอม 2.5%", explicit["id"])
+        backlog.cancel_unstarted_assign("p", explicit["id"], "backend")
+        assert backlog.get_item("p", explicit["id"])["status"] == "review"
+
+    def test_concurrent_same_role_assigns_bind_their_own_cards(self, runtime) -> None:
+        first, _ = backlog.ensure_for_assign("p", "backend", "งานแรก")
+        second, _ = backlog.ensure_for_assign("p", "backend", "งานที่สอง")
+        backlog.bind_task_id("p", "backend", "task-first", item_id=first["id"])
+        backlog.bind_task_id("p", "backend", "task-second", item_id=second["id"])
+        backlog.on_ledger_done("p", "task-first", item_id=first["id"], role="backend")
+        assert backlog.get_item("p", first["id"])["status"] == "review"
+        assert backlog.get_item("p", second["id"])["status"] == "doing"
+
+    def test_done_repairs_an_old_card_with_a_missing_task_binding(self, runtime) -> None:
+        card, _ = backlog.ensure_for_assign("p", "backend", "งานค้าง")
+        changed = backlog.on_ledger_done("p", "actual-task", item_id=card["id"], role="backend")
+        assert changed["status"] == "review"
+        assert changed["links"][0]["task_id"] == "actual-task"
+
+    def test_review_age_is_measured_from_completion(self, runtime, monkeypatch) -> None:
+        card, _ = backlog.ensure_for_assign("p", "backend", "งาน")
+        backlog.bind_task_id("p", "backend", "task", item_id=card["id"])
+        backlog.on_ledger_done("p", "task", item_id=card["id"], role="backend")
+        assert backlog.review_items("p", min_age_s=24 * 3600) == []
+        later = time.time() + 25 * 3600
+        monkeypatch.setattr(backlog, "_now", lambda: later)
+        assert [it["id"] for it in backlog.review_items("p", min_age_s=24 * 3600)] == [card["id"]]
+
     def test_bind_then_done_flips_review(self, runtime) -> None:
         item, _ = backlog.ensure_for_assign("p", "backend", "งาน")
         backlog.bind_task_id("p", "backend", "t1")

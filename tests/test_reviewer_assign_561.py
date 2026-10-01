@@ -16,7 +16,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 from PyQt6.QtCore import QCoreApplication
 
-from agent_takkub import cli, orchestrator, routing_planner, team_preset
+from agent_takkub import backlog, cli, orchestrator, routing_planner, team_preset
 
 
 @pytest.fixture(scope="module")
@@ -129,6 +129,29 @@ class TestReviewerCliAssign:
 
 
 class TestReviewerOrchestratorDispatch:
+    def test_reviewer_e2e_keeps_its_backlog_card_on_qa(
+        self, mock_orch: orchestrator.Orchestrator, monkeypatch, tmp_path
+    ) -> None:
+        monkeypatch.setattr(backlog, "RUNTIME_DIR", tmp_path / "runtime")
+        team_preset.set_current("full", "test-proj")
+        task = "test login flow"
+        linked, _, card_id = mock_orch.backlog_for_assign("test-proj", "reviewer", task)
+        assert linked
+        with (
+            patch.object(mock_orch, "spawn", return_value=(True, "spawned")),
+            patch.object(mock_orch, "_send_when_ready"),
+        ):
+            ok, _ = mock_orch.assign(
+                role_name="reviewer", cwd="/web", task=task, mode="e2e", project="test-proj"
+            )
+        assert ok
+        state = mock_orch._ps("test-proj::qa")
+        assert state.backlog_id == card_id
+        card = backlog.get_item("test-proj", card_id)
+        assert any(
+            link["role"] == "qa" and link["task_id"] == state.task_id for link in card["links"]
+        )
+
     def test_reviewer_e2e_dispatches_to_qa(self, mock_orch: orchestrator.Orchestrator):
         dispatched_roles = []
         with patch.object(
