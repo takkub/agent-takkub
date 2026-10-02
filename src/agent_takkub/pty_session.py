@@ -110,6 +110,36 @@ def _transcript_event(event: str, **details) -> None:
         pass
 
 
+_CUP_OR_ED_RE = re.compile(rb"(\x1b\[(\d+);(\d+)[Hf]|\x1b\[[23]J)")
+
+
+def _normalize_pty_transcript_chunk(data: bytes, last_row: list[int]) -> bytes:
+    """Normalize raw PTY stream by injecting newlines on cursor repositioning (#801).
+
+    Full-screen TUI apps (e.g. Codex) repaint via absolute cursor moves
+    (ESC [ row; col H) without emitting \\n or \\r\\n. This causes PowerShell
+    Get-Content -Tail to hang trying to read an entire 1MB single-line stream.
+    Injecting newlines between row transitions ensures standard lines while preserving
+    identical terminal emulator rendering.
+    """
+    if b"\n" in data or b"\x1b[" not in data:
+        return data
+
+    def _repl(m: re.Match) -> bytes:
+        seq = m.group(0)
+        if b"J" in seq:
+            last_row[0] = 0
+            return b"\n" + seq
+        r = int(m.group(2))
+        if r != last_row[0] and last_row[0] != 0:
+            last_row[0] = r
+            return b"\n" + seq
+        last_row[0] = r
+        return seq
+
+    return _CUP_OR_ED_RE.sub(_repl, data)
+
+
 def _safe_screen_display(screen: pyte.Screen) -> list[str]:
     """``pyte.Screen.display`` rendered defensively against orphaned wide-char stubs.
 
@@ -2413,8 +2443,11 @@ class PtySession(QObject):
                             # it), only the persisted transcript skips the repeat.
                             data = b""
                         elif data:
-                            self._transcript.write(data)
-                            bytes_written += len(data)
+                            transcript_data = _normalize_pty_transcript_chunk(
+                                data, self.__dict__.setdefault("_transcript_last_row", [0])
+                            )
+                            self._transcript.write(transcript_data)
+                            bytes_written += len(transcript_data)
                             self.__dict__["_transcript_bytes_written"] = bytes_written
                             self.__dict__["_transcript_last_data"] = data
                             window = (last_data, *window)[:_TRANSCRIPT_DEDUP_FRAMES]
@@ -3524,6 +3557,18 @@ class PtySession(QObject):
             if _PERMISSION_MENU_OPTION1_RE.search(line):
                 return line.strip() or "permission prompt detected"
         return "permission prompt detected"
+
+    def is_blocked_on_ownership_lock(self) -> str | None:
+        """Return the lock notice line if the pane is sitting on Codex's session
+        ownership lock modal ("This conversation is open in another app"); else None (#787)."""
+        with self._screen_lock:
+            lines = self._display_lines_locked()
+        if not lines:
+            return None
+        joined = "\n".join(lines[-20:]).lower()
+        if "open in another app" in joined or "press r to continue" in joined:
+            return "session ownership lock detected"
+        return None
 
     def has_typed_done_text(self) -> str | None:
         """#435: the line if the pane printed ``takkub done`` as plain TEXT

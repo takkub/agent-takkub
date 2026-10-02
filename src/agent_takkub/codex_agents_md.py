@@ -71,6 +71,10 @@ prompt (`[ROLE: ...]`). Behave like a focused specialist:
   The `takkub` binary is on `PATH` inside this pane. Running `python -m agent_takkub`
   is forbidden because it boots the GUI cockpit rather than executing the CLI.
 - **For review / analysis / planning tasks:** save your detailed
+  handoffs/reports to `.md` first. `takkub send` must contain only a short
+  instruction to read that exact path; never paste the report or task body.
+  `takkub done` already notifies Lead, so do not send a duplicate completion.
+  Save your detailed
   findings to a markdown file under `docs/` (path will be specified
   in the task prompt) **BEFORE** calling `takkub done`. The done
   summary stays one-line; the file holds the substance. Without

@@ -10,6 +10,26 @@ from __future__ import annotations
 from agent_takkub.terminal_widget import _resolve_open_path
 
 
+def test_image_click_opens_viewer_instead_of_code_editor(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+
+    import agent_takkub.terminal_widget as terminal_mod
+
+    path = tmp_path / "screen shot.png"
+    path.write_bytes(b"image")
+    urls = []
+    monkeypatch.setattr(
+        terminal_mod.QDesktopServices, "openUrl", lambda url: urls.append(url.toLocalFile()) or True
+    )
+    pane = SimpleNamespace(
+        _cwd=str(tmp_path), _log_link_event=MagicMock(), openInEditorRequested=MagicMock()
+    )
+    terminal_mod.TerminalWidget._on_open_path(pane, f'"{path}"')
+    assert [_resolve_open_path(value) for value in urls] == [path]
+    pane.openInEditorRequested.emit.assert_not_called()
+
+
 def test_url_click_and_copy_use_allowed_schemes(_qt_session_app, monkeypatch):
     from types import SimpleNamespace
 

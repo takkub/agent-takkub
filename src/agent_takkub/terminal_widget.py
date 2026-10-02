@@ -1111,12 +1111,12 @@ class TerminalWidget(QWidget):
         self._log_link_event("copy_url", u)
 
     def _on_open_path(self, raw: str) -> None:
-        """Handle a clicked file path (html→browser for exec-flagged files
-        via reveal, everything else → the built-in editor). Relative paths
+        """Open clicked images in the viewer and text in the built-in editor;
+        executable files reveal their containing folder. Relative paths
         resolve against the pane cwd first, then the cockpit repo root."""
-        from .config import REPO_ROOT
+        from .config import REPO_ROOT, RUNTIME_DIR
 
-        bases = (str(REPO_ROOT),)
+        bases = (str(REPO_ROOT), str(RUNTIME_DIR))
         resolved = _resolve_open_path(raw, self._cwd, bases)
         if resolved is None:
             self._log_link_event("open_path_miss", raw)
@@ -1131,6 +1131,13 @@ class TerminalWidget(QWidget):
         if _is_exec_path(resolved):
             QDesktopServices.openUrl(QUrl.fromLocalFile(str(resolved.parent)))
             self._log_link_event("open_path_exec_revealed", str(resolved))
+            return
+        if resolved.suffix.lower() in {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".ico"}:
+            if QDesktopServices.openUrl(QUrl.fromLocalFile(str(resolved))):
+                self._log_link_event("open_image", str(resolved))
+            else:
+                self._log_link_event("open_image_failed", str(resolved))
+                QMessageBox.warning(self, "เปิดรูปไม่ได้", f"โปรแกรมดูรูปเปิดไฟล์นี้ไม่ได้:\n{resolved}")
             return
         # #365 phase 2: "Open in Takkub" — a clicked path opens in the
         # built-in Monaco editor (routed via AgentPane → orchestrator →

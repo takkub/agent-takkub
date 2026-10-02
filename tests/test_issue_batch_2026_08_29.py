@@ -633,6 +633,63 @@ class TestKillPaneChildren:
         ok, msg = orch.kill_pane_children("devops", project="proj", pid=4242)
         assert not ok and "refusing" in msg
 
+    def test_kill_pid_terminates_full_descendant_tree_797(self, orch, monkeypatch):
+        monkeypatch.setattr(orch, "_resolve_project", lambda p: "proj", raising=False)
+        pane = MagicMock()
+        pane.session._pid = 1000
+        monkeypatch.setattr(orch, "_project_panes", lambda ns: {"devops": pane}, raising=False)
+
+        proc_pwsh = MagicMock()
+        proc_pwsh.pid = 10560
+        proc_pwsh.name.return_value = "pwsh.exe"
+        proc_pwsh.parents.return_value = [pane.session._pid]
+
+        proc_docker = MagicMock()
+        proc_docker.pid = 19712
+        proc_docker.name.return_value = "docker.exe"
+        proc_docker.parents.return_value = [proc_pwsh, pane.session._pid]
+
+        proc_pwsh.children.return_value = [proc_docker]
+
+        fake_psutil = MagicMock()
+        fake_psutil.Process.return_value.children.return_value = [proc_pwsh, proc_docker]
+        monkeypatch.setitem(sys.modules, "psutil", fake_psutil)
+
+        ok, msg = orch.kill_pane_children("devops", project="proj", pid=10560)
+        assert ok is True
+        assert "pwsh.exe(10560)" in msg
+        assert "docker.exe(19712)" in msg
+        assert proc_pwsh.kill.called
+        assert proc_docker.kill.called
+
+    def test_kill_orphan_after_parent_gone_797(self, orch, monkeypatch):
+        monkeypatch.setattr(orch, "_resolve_project", lambda p: "proj", raising=False)
+        pane = MagicMock()
+        pane.session._pid = 1000
+        monkeypatch.setattr(orch, "_project_panes", lambda ns: {"devops": pane}, raising=False)
+
+        # Populate seen_set
+        seen = orch.__dict__.setdefault("_pane_child_pids", {}).setdefault("proj::devops", set())
+        seen.add(19712)
+
+        proc_docker = MagicMock()
+        proc_docker.pid = 19712
+        proc_docker.name.return_value = "docker.exe"
+        proc_docker.parents.return_value = []
+        proc_docker.children.return_value = []
+
+        fake_psutil = MagicMock()
+        # root process no longer has docker as a direct descendant (orphan)
+        fake_psutil.Process.side_effect = lambda pid: (
+            proc_docker if pid == 19712 else MagicMock(children=lambda **kw: [])
+        )
+        monkeypatch.setitem(sys.modules, "psutil", fake_psutil)
+
+        ok, msg = orch.kill_pane_children("devops", project="proj", pid=19712)
+        assert ok is True
+        assert "docker.exe(19712)" in msg
+        assert proc_docker.kill.called
+
 
 # ── #429 ───────────────────────────────────────────────────────────────────
 class TestSpawnService:
@@ -725,3 +782,533 @@ class TestSpawnService:
         assert seen["cmd"] == "spawn-service"
         assert seen["argv"] == ["docker", "desktop"]
         assert seen["name"] == "docker"
+
+
+# ── #794 ───────────────────────────────────────────────────────────────────
+class TestCliPositionalRole794:
+    def test_close_supports_positional_and_flag(self):
+        parser = cli.build_parser()
+
+        # Positional
+        args = parser.parse_args(["close", "backend"])
+        role, err = cli._resolve_role_arg(args)
+        assert role == "backend" and err is None
+
+        # Named flag
+        args = parser.parse_args(["close", "--role", "backend"])
+        role, err = cli._resolve_role_arg(args)
+        assert role == "backend" and err is None
+
+        # Missing role
+        args = parser.parse_args(["close"])
+        role, err = cli._resolve_role_arg(args)
+        assert role is None and "role is required" in err
+
+        # Conflicting roles
+        args = parser.parse_args(["close", "backend", "--role", "frontend"])
+        role, err = cli._resolve_role_arg(args)
+        assert role is None and "conflicting roles" in err
+
+    def test_tail_supports_positional_and_flag(self):
+        parser = cli.build_parser()
+
+        args = parser.parse_args(["tail", "codex", "-n", "35"])
+        role, err = cli._resolve_role_arg(args)
+        assert role == "codex" and err is None
+        assert args.lines == 35
+
+        args = parser.parse_args(["tail", "--role", "codex"])
+        role, err = cli._resolve_role_arg(args)
+        assert role == "codex" and err is None
+
+    def test_kill_supports_positional_and_flag(self):
+        parser = cli.build_parser()
+
+        args = parser.parse_args(["kill", "qa", "--pid", "5432"])
+        role, err = cli._resolve_role_arg(args)
+        assert role == "qa" and err is None
+        assert args.pid == 5432
+
+        args = parser.parse_args(["kill", "--role", "qa"])
+        role, err = cli._resolve_role_arg(args)
+        assert role == "qa" and err is None
+
+    def test_cmd_dispatch_positional(self, monkeypatch):
+        parser = cli.build_parser()
+        recorded = []
+        monkeypatch.setattr(
+            cli, "_request", lambda p, **k: recorded.append(p) or {"ok": True, "msg": "done"}
+        )
+        monkeypatch.setattr(cli, "_from_role", lambda: "lead")
+
+        # close
+        args = parser.parse_args(["close", "backend"])
+        res = args.func(args)
+        assert res["ok"] is True
+        assert recorded[-1]["cmd"] == "close"
+        assert recorded[-1]["role"] == "backend"
+
+        # kill
+        args = parser.parse_args(["kill", "devops", "--pid", "99"])
+        res = args.func(args)
+        assert res["ok"] is True
+        assert recorded[-1]["cmd"] == "kill"
+        assert recorded[-1]["role"] == "devops"
+        assert recorded[-1]["pid"] == 99
+
+        # tail
+        args = parser.parse_args(["tail", "reviewer", "-n", "10"])
+        res = args.func(args)
+        assert res["ok"] is True
+        assert recorded[-1]["cmd"] == "tail"
+        assert recorded[-1]["role"] == "reviewer"
+        assert recorded[-1]["lines"] == 10
+
+
+# ── #795 ───────────────────────────────────────────────────────────────────
+class TestBoundTaskIdQueue795:
+    def test_extract_cited_task_ids(self):
+        from agent_takkub.orchestrator_text import extract_cited_task_ids
+
+        text = "PASS [ใบงานใหม่ · task 1234abcd] verified and tests pass"
+        assert extract_cited_task_ids(text) == {"1234abcd"}
+
+        text2 = "[task feedbeef] ok\nOther note: task: cafe0001"
+        assert extract_cited_task_ids(text2) == {"feedbeef", "cafe0001"}
+
+    def test_qa_zero_files_not_stale(self):
+        from agent_takkub.orchestrator_text import stale_done_reasons
+
+        reasons = stale_done_reasons(
+            "All 45 tests pass without regressions",
+            task_id="task1",
+            files_touched=0,
+            elapsed_s=120,
+            implementation=False,  # qa / review role
+        )
+        assert not any("files" in r for r in reasons)
+
+    def test_task_show_info_with_pending_respawn_and_queue(self):
+        from unittest.mock import MagicMock
+
+        from agent_takkub.orchestrator import Orchestrator
+
+        orch = MagicMock(spec=Orchestrator)
+        orch.resolve_pane_role = lambda r, p: r
+        orch._resolve_project = lambda p: "proj"
+        orch._pane_state = {}
+        orch._pending_respawn_tasks = {"proj::qa": {"task": "Pending Task B", "task_file": None}}
+        orch._pending_assignments = {}
+
+        # 1. Shows pending respawn task
+        ok, tag, data = Orchestrator.task_show_info(orch, "qa", "proj")
+        assert ok is True
+        assert data["task"] == "Pending Task B"
+
+        # 2. When no pending respawn, shows queued task
+        orch._pending_respawn_tasks.clear()
+        orch._pending_assignments = {"proj::qa": [{"task": "Queued Task C"}]}
+        ok, tag, data = Orchestrator.task_show_info(orch, "qa", "proj")
+        assert ok is True
+        assert tag == "queued task"
+        assert data["task"] == "Queued Task C"
+
+    def test_done_cites_older_task_leaves_active_task_intact(self, tmp_path):
+        from unittest.mock import MagicMock
+
+        from agent_takkub.orchestrator import Orchestrator
+        from agent_takkub.spawn_engine import PaneState
+
+        orch = MagicMock(spec=Orchestrator)
+        orch.resolve_pane_role = lambda r, p: r
+        orch._resolve_project = lambda p: "proj"
+        orch._notices = []
+        orch._notify_lead = lambda proj, msg, **k: orch._notices.append(msg)
+        orch._save_decision_note = MagicMock(return_value="/tmp/note.md")
+        orch._evidence_dedup_gate = MagicMock(return_value=None)
+        orch._last_evidence_dedup_warning = None
+        orch._pane_reports_undelivered_task = MagicMock(return_value=False)
+        orch._current_pane_identity = MagicMock(return_value="tok")
+
+        ps = PaneState()
+        ps.task_id = "feedbeef"
+        ps.task_delivered = True
+        ps.last_assigned_task = "Task B"
+        orch._pane_state = {"proj::qa": ps}
+        orch._ps = lambda k: orch._pane_state.setdefault(k, PaneState())
+        pane = MagicMock()
+        pane.state = "running"
+        pane.session = MagicMock()
+        pane.session.is_alive = True
+        orch._project_panes = lambda proj: {"qa": pane}
+
+        # Call done with note citing older task cafe0001
+        ok, _msg = Orchestrator.done(
+            orch,
+            "qa",
+            "PASS [task cafe0001] previous task completed",
+            project="proj",
+        )
+        assert ok is True
+        # Check active feedbeef is still active and pane is NOT set to done
+        assert ps.task_id == "feedbeef"
+        assert pane.set_state.call_count == 0
+        assert any("cafe0001" in n for n in orch._notices)
+
+    def test_queue_dispatch_during_post_done_respawn(self):
+        from unittest.mock import MagicMock
+
+        from agent_takkub.orchestrator import Orchestrator
+
+        orch = MagicMock(spec=Orchestrator)
+        orch.resolve_pane_role = lambda r, p: r
+        orch._resolve_project = lambda p: "proj"
+        orch._pane_state = {}
+        pane = MagicMock()
+        pane.state = "done"
+        pane.session = MagicMock()
+        pane.session.is_alive = True
+        orch._project_panes = lambda p: {"qa": pane}
+        orch._pending_assignments = {}
+        orch._pending_respawn_tasks = {}
+        orch._notify_lead = MagicMock()
+        orch.close = MagicMock()
+
+        # Mock _assign_dispatch to call real _assign_dispatch or simulate the post_done_respawn branch
+        orch._assign_dispatch = lambda **kwargs: Orchestrator._assign_dispatch(orch, **kwargs)
+        orch._pane_idle_for_reassign = MagicMock(return_value=False)
+
+        item = {
+            "role_name": "qa",
+            "cwd": "/some/cwd",
+            "task": "Task B payload",
+            "_queued_task_id": "bbbb0002",
+            "project": "proj",
+        }
+        orch._pending_assignments["proj::qa"] = [item]
+
+        res = Orchestrator._dispatch_next_assignment(orch, "proj", "qa")
+        assert res is True
+        assert "proj::qa" in orch._pending_respawn_tasks
+        assert orch._pending_respawn_tasks["proj::qa"]["task"] == "Task B payload"
+
+        # task_show_info returns Task B!
+        ok, _tag, data = Orchestrator.task_show_info(orch, "qa", "proj")
+        assert ok is True
+        assert data["task"] == "Task B payload"
+
+
+# ── #791 & #798: Quota Policy, Exclude Providers & Low-Quota Check ─────────
+class TestQuotaPolicyAndExclude791_798:
+    def test_quota_policy_and_exclude_persistence(self, tmp_path, monkeypatch):
+        from agent_takkub import auto_resume
+
+        monkeypatch.setattr(
+            auto_resume, "_quota_policy_path", lambda: tmp_path / "quota-policy.json"
+        )
+
+        # Default policy is reroute
+        assert auto_resume.quota_policy() == auto_resume.QUOTA_POLICY_REROUTE
+
+        # Set to park
+        auto_resume.set_quota_policy(auto_resume.QUOTA_POLICY_PARK)
+        assert auto_resume.quota_policy() == auto_resume.QUOTA_POLICY_PARK
+
+        # Exclude providers
+        assert auto_resume.quota_exclude_providers() == set()
+        auto_resume.set_quota_exclude_providers(["codex", "cursor"])
+        assert auto_resume.quota_exclude_providers() == {"codex", "cursor"}
+
+    def test_reroute_or_park_parks_when_policy_is_park(self, monkeypatch):
+        from unittest.mock import MagicMock
+
+        from agent_takkub import auto_resume
+        from agent_takkub.limit_autoresume import AutoResumeMixin
+        from agent_takkub.spawn_engine import PaneState
+
+        mixin = MagicMock(spec=AutoResumeMixin)
+        ps = PaneState()
+        ps.quota_provider = "claude"
+        ps.rate_limited_until = 123456789.0
+
+        monkeypatch.setattr(
+            auto_resume, "effective_quota_policy", lambda proj: auto_resume.QUOTA_POLICY_PARK
+        )
+
+        AutoResumeMixin._reroute_or_park(mixin, "proj", "qa", ps)
+        # Should call _park_pane_for_limit and NEVER call _pick_reroute_provider
+        mixin._park_pane_for_limit.assert_called_once_with("proj", "qa", ps)
+        assert mixin._pick_reroute_provider.call_count == 0
+
+    def test_pick_reroute_provider_respects_exclude_and_skips_low_quota(self, monkeypatch):
+        from unittest.mock import MagicMock
+
+        from agent_takkub import auto_resume
+        from agent_takkub.limit_autoresume import AutoResumeMixin
+        from agent_takkub.spawn_engine import PaneState
+
+        mixin = MagicMock(spec=AutoResumeMixin)
+        ps = PaneState()
+        ps.distinct_from = None
+
+        # Exclude codex
+        monkeypatch.setattr(
+            auto_resume, "effective_quota_exclude_providers", lambda proj: {"codex"}
+        )
+        monkeypatch.setattr(
+            "agent_takkub.limit_autoresume.confirm_verdict_for_provider",
+            lambda prov, cfg: (
+                "confirmed" if prov == "opencode" else "denied",
+                95.0 if prov == "opencode" else 10.0,
+            ),
+        )
+
+        cand = AutoResumeMixin._pick_reroute_provider(
+            mixin, "proj", "qa", ps, hit_provider="claude"
+        )
+        # Should NOT pick codex (excluded) or opencode (low quota/confirmed limit)
+        assert cand != "codex"
+        assert cand != "opencode"
+
+
+# ── #799: Subprocess Reaper False Alarm on Close ───────────────────────────
+class TestReaperCloseCleanDone799:
+    def test_reaper_warns_only_when_pane_not_done(self):
+        from unittest.mock import MagicMock
+
+        from agent_takkub.orchestrator import Orchestrator
+
+        orch = MagicMock(spec=Orchestrator)
+        orch._live_non_scaffolding_children = MagicMock(return_value=["chrome.exe", "bash.exe"])
+        notices = []
+        orch._notify_lead = lambda proj, msg, **k: notices.append((msg, k.get("kind")))
+
+        # Case 1: Pane state is 'done' (successful done report)
+        pane_done = MagicMock()
+        pane_done.state = "done"
+        orch._project_panes = lambda proj: {"qa": pane_done}
+
+        Orchestrator._warn_if_live_children(orch, "proj", "qa", MagicMock())
+        assert len(notices) == 1
+        msg, kind = notices[0]
+        assert "Cleaned up" in msg
+        assert "if the work wasn't actually finished" not in msg
+        assert kind == "subprocess-cleanup"
+
+        # Case 2: Pane state is 'running' (aborted mid-run)
+        notices.clear()
+        pane_running = MagicMock()
+        pane_running.state = "running"
+        orch._project_panes = lambda proj: {"qa": pane_running}
+
+        Orchestrator._warn_if_live_children(orch, "proj", "qa", MagicMock())
+        assert len(notices) == 1
+        msg, kind = notices[0]
+        assert "if the work wasn't actually finished" in msg
+        assert kind == "subprocess-kill-warning"
+
+
+# ── #793: Stale Backlog Notice Revalidation ───────────────────────────────
+class TestStaleBacklogNotice793:
+    def test_revalidate_drops_notice_when_cards_done(self, monkeypatch):
+        from unittest.mock import MagicMock
+
+        from agent_takkub import backlog
+        from agent_takkub.lead_inbox import LeadInboxMixin
+
+        inbox = MagicMock(spec=LeadInboxMixin)
+        inbox.list_status = MagicMock(return_value={})
+
+        body = "📋 qa ปิดแล้ว แต่มี backlog รอยืนยัน 1 ใบ:\n- [card-42] Fix login bug · `takkub backlog done card-42`"
+
+        # Case 1: Card is still in 'review' status -> keep notice
+        monkeypatch.setattr(backlog, "get_item", lambda proj, cid: {"id": cid, "status": "review"})
+        res = LeadInboxMixin._revalidate_system_notice(inbox, "proj", body)
+        assert "card-42" in res
+
+        # Case 2: Card is already 'done' -> drop notice
+        monkeypatch.setattr(backlog, "get_item", lambda proj, cid: {"id": cid, "status": "done"})
+        res = LeadInboxMixin._revalidate_system_notice(inbox, "proj", body)
+        assert res == ""
+
+
+# ── #792: Subagent Browser Capability Guard ────────────────────────────────
+class TestSubagentBrowserGuard792:
+    def test_is_browser_task_detection(self):
+        from agent_takkub.orchestrator_text import is_browser_task
+
+        assert is_browser_task("Run playwright e2e tests against auth flow") is True
+        assert is_browser_task("Check responsive layout with cypress browser") is True
+        assert is_browser_task("Refactor backend models and add unit tests") is False
+        assert is_browser_task("Analyze memory leaks in rust daemon") is False
+
+    def test_assign_subagent_refuses_browser_task(self):
+        from unittest.mock import MagicMock
+
+        from agent_takkub.orchestrator import Orchestrator
+
+        orch = MagicMock(spec=Orchestrator)
+        orch._resolve_project = lambda p: "proj"
+        orch._is_valid_role = lambda r: True
+        orch._project_panes = lambda p: {}
+        orch.resolve_pane_role = lambda r, p: r
+
+        ok, msg = Orchestrator.assign(
+            orch,
+            "reviewer",
+            None,
+            "Run browser e2e testing with Playwright",
+            mode="subagent",
+            project="proj",
+        )
+        assert ok is False
+        assert "lacks browser/e2e capability" in msg
+        assert "--mode subagent" in msg
+
+
+# ── #801: Windows PTY Transcript Newline Normalization ─────────────────────
+class TestPtyTranscriptNewlineNormalization801:
+    def test_normalize_pty_transcript_chunk_injects_newlines(self):
+        from agent_takkub.pty_session import _normalize_pty_transcript_chunk
+
+        # TUI with cursor repositioning but 0 \n
+        data = b"\x1b[1;1HHeader\x1b[2;1HMenu items\x1b[3;1HPrompt > "
+        state = [0]
+        res = _normalize_pty_transcript_chunk(data, state)
+        assert b"\n" in res
+        lines = res.split(b"\n")
+        assert len(lines) == 3
+
+    def test_normalize_pty_skips_when_newline_present(self):
+        from agent_takkub.pty_session import _normalize_pty_transcript_chunk
+
+        data = b"Line 1\nLine 2\nLine 3"
+        state = [0]
+        res = _normalize_pty_transcript_chunk(data, state)
+        assert res == data
+
+
+# ── #800: Multi-Repo Project Sub-Paths Awareness ───────────────────────────
+class TestMultiRepoSubPaths800:
+    def test_worktree_falls_back_to_subpath_git_root(self, monkeypatch):
+        from unittest.mock import MagicMock
+
+        from agent_takkub.orchestrator import Orchestrator
+
+        orch = MagicMock(spec=Orchestrator)
+        orch._resolve_project = lambda p: "multi_proj"
+        orch._worktree_bare_role_collision = lambda r, p: False
+        orch._pane_state = {}
+
+        # base_cwd has no .git, but paths.api has .git
+        proj_paths = {"root": "/workspace/multi", "api": "/workspace/multi/api"}
+        monkeypatch.setattr(
+            "agent_takkub.config._project_dict",
+            lambda p: {"paths": proj_paths},
+        )
+        monkeypatch.setattr(
+            "agent_takkub.worktree_manager.WorktreeManager.git_root",
+            lambda self, p: p if p == "/workspace/multi/api" else None,
+        )
+
+        res = Orchestrator.worktree_assign_inputs(orch, "backend", "/workspace/multi", "multi_proj")
+        assert res is not None
+        assert res["base_cwd"] == "/workspace/multi/api"
+
+
+# ── #787: Codex Session Ownership Lock Detection ──────────────────────────
+class TestCodexOwnershipLock787:
+    def test_ownership_lock_detected_in_pty_session(self):
+        from agent_takkub.pty_session import PtySession
+
+        sess = PtySession.__new__(PtySession)
+        sess._screen_lock = MagicMock()
+        sess._display_lines_locked = lambda: [
+            "Resuming session...",
+            "This conversation is open in another app.",
+            "Close it there and press R to continue here.",
+        ]
+
+        assert sess.is_blocked_on_ownership_lock() is not None
+
+    def test_prompt_block_reason_returns_ownership_lock(self):
+        from agent_takkub.lead_inbox import _prompt_block_reason
+
+        sess = MagicMock()
+        sess.is_at_trust_prompt.return_value = False
+        sess.is_at_feedback_prompt.return_value = False
+        sess.is_blocked_on_permission_prompt.return_value = None
+        sess.is_blocked_on_tty_prompt.return_value = None
+        sess.is_blocked_on_ownership_lock.return_value = "session ownership lock detected"
+
+        assert _prompt_block_reason(sess) == "ownership_lock"
+
+
+# ── #788: Reassign After Close & Worktree Close Notice ────────────────────
+class TestCloseEmptyReassignAndNoCommitNotice788:
+    def test_empty_pane_with_dead_session_is_idle_for_reassign(self):
+        from agent_takkub.orchestrator import Orchestrator
+
+        orch = MagicMock(spec=Orchestrator)
+        orch._IDLE_PANE_STATES = frozenset({"done", "empty", "exited", "active", "error"})
+
+        pane = MagicMock()
+        pane.state = "empty"
+        pane.session = MagicMock()
+        pane.session.is_alive = False
+
+        # Must return True so assigning again doesn't block with "มี pane อยู่แล้ว"
+        assert Orchestrator._pane_idle_for_reassign(orch, pane) is True
+
+    def test_worktree_bare_role_collision_none_for_empty_pane(self):
+        from agent_takkub.orchestrator import Orchestrator
+
+        orch = MagicMock(spec=Orchestrator)
+        orch._IDLE_PANE_STATES = frozenset({"done", "empty", "exited", "active", "error"})
+        orch._resolve_project = lambda p: "proj"
+
+        pane = MagicMock()
+        pane.state = "empty"
+        pane.session = None  # closed pane has no session
+        orch._project_panes = lambda p: {"backend": pane}
+        orch._pane_idle_for_reassign = lambda p: Orchestrator._pane_idle_for_reassign(orch, p)
+
+        # No collision!
+        res = Orchestrator._worktree_bare_role_collision(orch, "backend", "proj")
+        assert res is None
+
+    def test_worktree_no_commit_notice_reflects_closed_and_never_delivered(self):
+        from agent_takkub.orchestrator import Orchestrator
+
+        orch = MagicMock(spec=Orchestrator)
+        orch._resolve_project = lambda p: "proj"
+        notices = []
+        orch._notify_lead = lambda p, msg, **k: notices.append(msg)
+
+        info = MagicMock()
+        info.branch = "wt/backend-1"
+        info.path = "/fake/wt"
+        info.git_root = "/fake/root"
+        info.base_sha = "abc"
+
+        mgr = MagicMock()
+        mgr.commit_count.return_value = 0
+        mgr.real_dirty.return_value = False
+        mgr.head_sha.return_value = "abc"
+        mgr.branch_merged_into_base.return_value = False
+
+        with patch("agent_takkub.worktree_manager.WorktreeManager", return_value=mgr):
+            with patch("agent_takkub.worktree_manager.WorktreeInfo.from_dict", return_value=info):
+                # Case 1: normal close -> "ปิด pane"
+                Orchestrator._finalize_worktree(orch, "proj", "backend", {}, note="close")
+                assert len(notices) == 1
+                assert "ปิด pane แต่ไม่มี commit" in notices[0]
+
+                # Case 2: task never delivered -> "ปิด pane ก่อนงานส่งถึง (task never delivered)"
+                notices.clear()
+                Orchestrator._finalize_worktree(
+                    orch, "proj", "backend", {"never_delivered": True}, note="close"
+                )
+                assert len(notices) == 1
+                assert "ปิด pane ก่อนงานส่งถึง (task never delivered) แต่ไม่มี commit" in notices[0]
+                assert "done แต่ไม่มี commit" not in notices[0]

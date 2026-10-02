@@ -647,6 +647,24 @@ class EditorHost(QObject):
         if not roots:
             self.fileOpenFailed.emit(abs_path, "no configured roots for project")
             return
+        if Path(abs_path).suffix.lower() in {
+            ".png",
+            ".jpg",
+            ".jpeg",
+            ".webp",
+            ".gif",
+            ".bmp",
+            ".ico",
+        }:
+            try:
+                image_path = resolve_and_contain(Path(abs_path), roots)
+                if not image_path.is_file():
+                    raise OSError("image file not found")
+                if not QDesktopServices.openUrl(QUrl.fromLocalFile(str(image_path))):
+                    raise OSError("image viewer could not open the file")
+            except (PathEscapesRootsError, OSError) as exc:
+                self.fileOpenFailed.emit(abs_path, str(exc))
+            return
         open_key = self._buffered_open_key(abs_path, roots)
         if open_key is not None:
             self._reactivate(project_name, open_key, show_diff)

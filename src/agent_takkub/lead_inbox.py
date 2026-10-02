@@ -61,6 +61,7 @@ from .orchestrator_text import (
     _enter_delay_ms,
     _exit_key,
     _log_event,
+    _message_handoff_pointer,
     _notice_fingerprint,
     _paste_payload,
     _sanitize_pane_text,
@@ -275,6 +276,13 @@ def _prompt_block_reason(session) -> str | None:
         _blocked_tty = session.is_blocked_on_tty_prompt()
         if isinstance(_blocked_tty, str) and _blocked_tty:
             return "tty"
+        _at_lock = getattr(session, "is_blocked_on_ownership_lock", None)
+        if callable(_at_lock):
+            _lock_res = _at_lock()
+            if (isinstance(_lock_res, str) and _lock_res) or (
+                isinstance(_lock_res, bool) and _lock_res
+            ):
+                return "ownership_lock"
     except Exception:
         pass
     return None
@@ -1443,6 +1451,17 @@ class LeadInboxMixin:
         pane = self._project_panes(project).get(role_name)
         if pane is None:
             return
+        if role_name.split("#", 1)[0] != "shell":
+            try:
+                task = _message_handoff_pointer(task, self._resolve_project(project), role_name)
+            except OSError:
+                self._notify_lead(
+                    self._resolve_project(project),
+                    f"[delivery-failed] {role_name}: บันทึก .md สำหรับส่งงานไม่ได้ — ยังไม่ได้ส่งเข้า pane",
+                    from_role="system",
+                    kind="handoff-write-failed",
+                )
+                return
         # #404: extra continuous-ready polls the ready-streak gate below must
         # accumulate before the FIRST delivery on a fresh spawn/respawn is
         # allowed to paste — see ProviderSpec.post_boot_settle_s's docstring.
@@ -2911,6 +2930,7 @@ class LeadInboxMixin:
             "permission": "tool-permission approval dialog",
             "account_pending": "account-pending gate",
             "feedback": "CLI survey/feedback prompt",
+            "ownership_lock": "session ownership lock (open in another app)",
         }.get(reason, "interactive shell prompt")
         msg = (
             f"⚠️ [delivery-blocked-ceiling] {role_name} pane ยังติดอยู่ที่ {kind} "
@@ -4523,6 +4543,36 @@ class LeadInboxMixin:
         Lead a real spawn failure had "resolved itself" purely because the
         pane it was reporting the absence of was, indeed, absent.
         """
+        # #793: Revalidate backlog review items. If cards are already done, drop notice
+        if "backlog" in body and (
+            "รอยืนยัน" in body or "backlog-review" in body or "backlog_review" in body
+        ):
+            try:
+                import re
+
+                from . import backlog
+
+                card_ids = re.findall(r"\[([a-zA-Z0-9_#-]+)\]", body)
+                if card_ids:
+                    real_cards = [
+                        cid
+                        for cid in card_ids
+                        if not cid.endswith(" done")
+                        and not cid.startswith("system")
+                        and cid not in ("คลี่คลายแล้ว",)
+                    ]
+                    if real_cards:
+                        still_pending = []
+                        for cid in real_cards:
+                            it = backlog.get_item(project_ns, cid)
+                            if it and it.get("status") == "review":
+                                still_pending.append(it)
+                        if not still_pending:
+                            # All cards are already marked done or resolved!
+                            return ""
+            except Exception:
+                pass
+
         parts = _system_marker_parts(body)
         if parts is None:
             return body
@@ -4943,6 +4993,11 @@ class LeadInboxMixin:
         # (the queue can sit for minutes between enqueue and this point).
         # No-op for every other notice shape (plain done/CC/FAILED bodies).
         raw_body = self._revalidate_system_notice(project_ns, raw_body)
+        if not raw_body or not raw_body.strip():
+            queue.pop(0)
+            if queue:
+                QTimer.singleShot(50, lambda: self._pump_lead_notify(project_ns))
+            return
         item_role = _notice_role_tag(raw_body)
         if self._provenance_stale(project_ns, item_role, item_pane_token, queued_ts=item_ts):
             raw_body = f"{_STALE_ORIGIN_BANNER.format(role=item_role)}\n{raw_body}"
@@ -4952,11 +5007,11 @@ class LeadInboxMixin:
         raw_body = f"{_occurred_stamp(item_ts)}{raw_body}"
         body = _sanitize_pane_text(raw_body)
         _notify_sess = lead.session
-        payload = _paste_payload(body)
         notice_expires_at = time.time() + float(
             os.environ.get("TAKKUB_TASK_DELIVERY_TTL_SEC", "30")
         )
         try:
+            payload = _paste_payload(_message_handoff_pointer(body, project_ns, "lead"))
             wrote = _safe_session_write(
                 _notify_sess,
                 payload,
@@ -5263,6 +5318,8 @@ class LeadInboxMixin:
             # durable through _DONE_NOTICE_STALE_S (60s) of a not-ready
             # Lead, so it's at LEAST as likely to be carrying stale claims.
             item_body = self._revalidate_system_notice(project_ns, item.get("body", ""))
+            if not item_body or not item_body.strip():
+                return ""
             role = _notice_role_tag(item_body)
             if self._provenance_stale(
                 project_ns, role, item.get("pane_token"), queued_ts=item.get("queued_ts")
@@ -5271,13 +5328,17 @@ class LeadInboxMixin:
             item_body = f"{_occurred_stamp(item.get('queued_ts'))}{item_body}"
             return _sanitize_pane_text(item_body)
 
-        body = "\n\n".join(_flagged(item) for item in valid)
+        flagged_items = [_flagged(item) for item in valid]
+        active_items = [f for f in flagged_items if f.strip()]
+        if not active_items:
+            return
+        body = "\n\n".join(active_items)
         sess = lead.session
-        payload = _paste_payload(body)
         notice_expires_at = time.time() + float(
             os.environ.get("TAKKUB_TASK_DELIVERY_TTL_SEC", "30")
         )
         try:
+            payload = _paste_payload(_message_handoff_pointer(body, project_ns, "lead"))
             wrote = _safe_session_write(
                 sess,
                 payload,

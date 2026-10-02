@@ -428,10 +428,23 @@ _EVIDENCE_DEDUP_MAX_BYTES = 8 * 1024 * 1024
 # warn-role note gets tagged.
 _EVIDENCE_CITE_RE = re.compile(
     r"(?:docs/|runtime/|tests/|\$TAKKUB_ARTIFACTS_DIR|\$SHOT_DIR"
-    r"|\.(?:md|png|jpe?g|log|json|txt)\b"
-    r"|\b\d+\s+passed\b|\bexit\s*0\b)",
+    r"|\.(?:md|png|jpe?g|log|json|txt|py|ts|tsx|js|html)\b"
+    r"|\b\d+\s+(?:\w+\s+)?passed\b|\b(?:all\s+)?tests?\s+passed\b|\bexit\s*(?:code\s*)?0\b"
+    r"|https?://\S+)",
     re.IGNORECASE,
 )
+
+
+def _is_info_message(body: str) -> bool:
+    if not body:
+        return False
+    stripped = body.strip()
+    if re.match(r"^https?://\S+$", stripped):
+        return True
+    if re.match(r"^(?:info:|\[info\])", stripped, re.IGNORECASE):
+        return True
+    return False
+
 
 # Windows Open-With dialog tripwire (issue #104): a shell one-liner that
 # mangles a bare file path into command position gets ShellExecute'd by
@@ -3192,6 +3205,13 @@ class Orchestrator(
                 return False, "plan mode is not supported in subagent mode"
             if distinct_from:
                 return False, "--distinct-from is not supported in subagent mode"
+            from .orchestrator_text import is_browser_task
+
+            if is_browser_task(task, role_name):
+                return False, (
+                    f"subagent mode lacks browser/e2e capability for '{role_name}' "
+                    "(subagents cannot drive Playwright MCP). Assign without '--mode subagent' to use a dedicated pane."
+                )
             return self._register_subagent(
                 role_name,
                 cwd,
@@ -3639,11 +3659,11 @@ class Orchestrator(
         in-flight turn: finished/idle by state (`_IDLE_PANE_STATES`) or
         declared working but genuinely parked at its prompt (#664: finished
         with `progress`, or died mid-response)."""
+        if getattr(pane, "state", None) in self._IDLE_PANE_STATES:
+            return True
         session = getattr(pane, "session", None)
         if session is None or getattr(session, "is_alive", False) is not True:
             return False
-        if getattr(pane, "state", None) in self._IDLE_PANE_STATES:
-            return True
         return self._pane_idle_at_prompt(pane)
 
     def _spawn_failure_provider_hop(
@@ -3769,16 +3789,19 @@ class Orchestrator(
         current_state = self._ps(key)
         # Keep the active task's identity, delivery and done metadata intact.
         # A starting pane also owns its assignment before its first ready prompt.
-        # #664: `last_assigned_task` is never cleared by done() and nothing
-        # demotes `pane.state` from "working", so a pane that finished with
-        # `takkub progress` (or died mid-response) used to read busy forever
-        # and every new assign queued behind it — a queue that only drained
-        # on done()/close(). A pane genuinely parked at its ready prompt is
-        # delivered to directly (the task supersedes), never queued.
-        if (
+        # #664 / #795: Keep active task intact. An active task (task_id assigned and
+        # not yet done) must never be silently clobbered by a new assign even if the
+        # pane is at ready prompt between CLI commands.
+        has_active_task = bool(
+            current_state.task_id
+            and current_state.last_assigned_task
+            and current_pane is not None
+            and getattr(current_pane, "state", None) not in ("done", "empty", "exited")
+        )
+        if has_active_task or (
             current_state.last_assigned_task
             and current_pane is not None
-            and current_pane.state not in ("done", "empty", "exited")
+            and getattr(current_pane, "state", None) not in ("done", "empty", "exited")
             and not self._pane_idle_at_prompt(current_pane)
         ):
             if not hasattr(self, "_pending_assignments"):
@@ -3851,6 +3874,14 @@ class Orchestrator(
             # suppress_pipeline + keep_queue=False: done() already settled the
             # pipeline hop, and neither drops nor re-fires `_pending_assignments`
             # (a later queued item stays behind this one, in order).
+            if not hasattr(self, "_pending_respawn_tasks"):
+                self._pending_respawn_tasks = {}
+            self._pending_respawn_tasks[key] = {
+                "role_name": role_name,
+                "cwd": cwd,
+                "task": task,
+                "_queued_task_id": _queued_task_id,
+            }
             self.close(
                 role_name,
                 project=project_ns,
@@ -3883,6 +3914,7 @@ class Orchestrator(
                 True,
                 f"{role_name}: pane just reported done — closing, respawning for the new task",
             )
+        getattr(self, "_pending_respawn_tasks", {}).pop(key, None)
         # Task Ledger (A7) records what the caller asked for, not delivery
         # mechanics added below.
         raw_task_for_ledger = task
@@ -4213,20 +4245,25 @@ class Orchestrator(
         # the full task to its per-spawn system-prompt file; the pointer remains
         # the fallback and is still the delivery path for a running pane and
         # providers without a confirmed file-backed equivalent.
-        # #273: gated on the EFFECTIVE provider's own file-read capability —
-        # a provider whose agent tool set has no structured file-read (only
-        # codex, confirmed) never gets the pointer at all, regardless of
-        # task length; see `_task_handoff_pointer`'s docstring.
+        # Every provider can read the Markdown through its available tools,
+        # including shell readers. Do not paste long tasks into Codex merely
+        # because its harness has no separate structured file-read tool.
         paste_text, task_file = _task_handoff_pointer(
             delivery_task,
             project_ns,
             role_name,
-            supports_file_read=PROVIDER_REGISTRY[effective_provider].supports_agent_file_read,
+            supports_file_read=True,
             scope=scope,
+            force=True,
         )
+        if task_file is None:
+            message = "บันทึกไฟล์ .md สำหรับส่งงานไม่ได้ — ยังไม่ได้ส่งข้อความเข้า pane"
+            self._warn_lead_spawn_failed(role_name, project, message)
+            return False, message
         if _new_task_header and task_file:
             # The pointer replaced the text — the header still leads the paste.
-            paste_text = _new_task_header + paste_text
+            tid = ps_assign.task_id[:8]
+            paste_text = f"[ใบงานใหม่ · task {tid}] {paste_text} · takkub done: [task {tid}]"
         if model and pane_is_running and model != ps_assign.model_override:
             # #587 C3: same "only actually-different requests" rule as the
             # provider check above.
@@ -4450,6 +4487,15 @@ class Orchestrator(
                 def _compute_baseline(cwd=_snap_cwd):
                     _snap_mgr = _WorktreeManagerSnap()
                     base_sha, git_root, dirty = _snap_mgr.shared_tree_baseline(cwd)
+                    if git_root is None:
+                        # #800: check multi-repo project paths if root is not a git repo
+                        from .config import _project_dict
+
+                        for p_path in _project_dict(project_ns).get("paths", {}).values():
+                            if _snap_mgr.git_root(p_path):
+                                b_sha, g_root, d_snap = _snap_mgr.shared_tree_baseline(p_path)
+                                if g_root:
+                                    return b_sha, g_root, d_snap, False
                     # #560: classify a missing baseline ONCE, here, not on every
                     # done() — a plain `rev-parse --show-toplevel` failure means
                     # cwd isn't a git repo at all (a static project fact), unlike
@@ -4665,6 +4711,17 @@ class Orchestrator(
         base_cwd = cwd or default_cwd_for_role(base_role, project=project_ns)
         if not base_cwd:
             return None
+        from .worktree_manager import WorktreeManager
+
+        wt_mgr = WorktreeManager()
+        if wt_mgr.git_root(base_cwd) is None:
+            # #800: multi-repo fallback: find sub-path in project that is a git repo
+            from .config import _project_dict
+
+            for p_path in _project_dict(project_ns).get("paths", {}).values():
+                if wt_mgr.git_root(p_path):
+                    base_cwd = p_path
+                    break
         reuse = None
         if not base_ref:
             from . import worktree_reuse
@@ -4968,7 +5025,14 @@ class Orchestrator(
         except Exception:
             _log_event("posted_callable_error")
 
-    def _close_worktree_git(self, project_ns: str, role_name: str, worktree: dict) -> None:
+    def _close_worktree_git(
+        self,
+        project_ns: str,
+        role_name: str,
+        worktree: dict,
+        *,
+        never_delivered: bool = False,
+    ) -> None:
         """#640: `close()`'s worktree wrap-up — the dirty snapshot (#573),
         then the merge-proposal / keep-worktree decision — off the Qt thread.
 
@@ -4983,7 +5047,9 @@ class Orchestrator(
         def _work() -> None:
             self._snapshot_dirty_worktree_if_needed(project_ns, role_name, worktree, "close")
             try:
-                self._finalize_worktree(project_ns, role_name, worktree)
+                if never_delivered:
+                    worktree["never_delivered"] = True
+                self._finalize_worktree(project_ns, role_name, worktree, note="close")
             except Exception as exc:
                 _log_event(
                     "close_worktree_finalize_error",
@@ -5252,9 +5318,15 @@ class Orchestrator(
                 state_note = "มี uncommitted changes ในนั้น — ยังกู้ได้"
             else:
                 state_note = "working tree clean ด้วย — เช็คให้ชัวร์ว่างานหายไปจริงหรือแค่ลืม commit"
+            if worktree.get("never_delivered"):
+                action_label = "ปิด pane ก่อนงานส่งถึง (task never delivered)"
+            elif note == "close":
+                action_label = "ปิด pane"
+            else:
+                action_label = "done"
             self._notify_lead(
                 project_ns,
-                f"⚠️ [{from_role}] done แต่ไม่มี commit ใน worktree `{info.branch}` — "
+                f"⚠️ [{from_role}] {action_label} แต่ไม่มี commit ใน worktree `{info.branch}` — "
                 f"เก็บไว้ไม่ลบอัตโนมัติ ({state_note}) · path: {info.path} · "
                 f"ตรวจสอบแล้วค่อยลบเองด้วย `takkub worktree clean`",
                 from_role=from_role,
@@ -5306,7 +5378,12 @@ class Orchestrator(
         return hint
 
     def _queue_message_for_unspawned_role(
-        self, to_role: str, msg: str, from_role: str | None, project_ns: str
+        self,
+        to_role: str,
+        msg: str,
+        from_role: str | None,
+        project_ns: str,
+        kind: str = "instruction",
     ) -> tuple[bool, str]:
         """`takkub send --to <r>` when `<r>` is a known role with no pane
         open right now (#303 item 3) — used to fail outright
@@ -5328,7 +5405,7 @@ class Orchestrator(
         from . import role_messages
 
         role_messages.append_queued_no_pane(
-            RUNTIME_DIR, project_ns, to_role=to_role, from_role=from_role, body=msg
+            RUNTIME_DIR, project_ns, to_role=to_role, from_role=from_role, body=msg, kind=kind
         )
         _log_event("send_queued_no_pane", project=project_ns, to=to_role, from_role=from_role)
         return True, (
@@ -5443,6 +5520,7 @@ class Orchestrator(
         msg: str,
         from_role: str | None = None,
         project: str | None = None,
+        kind: str = "instruction",
     ) -> tuple[bool, str]:
         to_role = self.resolve_pane_role(to_role, project)
         try:
@@ -5453,10 +5531,19 @@ class Orchestrator(
         # #441: a pane that just `cat`-ed an env file forwards the values
         # verbatim in its message — scrub at the cockpit hop, every provider.
         msg = self._redact_forwarded_text(msg, project_ns, hop="send", from_role=from_role)
+        if _split_shard(to_role)[0] != "shell" and from_role != "remote":
+            from .orchestrator_text import _message_handoff_pointer
+
+            try:
+                msg = _message_handoff_pointer(msg, project_ns, to_role)
+            except OSError as exc:
+                return False, str(exc)
         project_panes = self._project_panes(project_ns)
         pane = project_panes.get(to_role)
         if pane is None:
-            return self._queue_message_for_unspawned_role(to_role, msg, from_role, project_ns)
+            return self._queue_message_for_unspawned_role(
+                to_role, msg, from_role, project_ns, kind=kind
+            )
         if pane.session is None or not pane.session.is_alive:
             return False, f"{to_role} is not running (spawn it first)"
 
@@ -5613,7 +5700,12 @@ class Orchestrator(
         # that this message was written into a session that no longer exists.
         send_generation = int(getattr(pane, "_session_generation", 0))
         message_id = self._record_role_message(
-            project_ns, to_role=to_role, from_role=from_role, body=body, generation=send_generation
+            project_ns,
+            to_role=to_role,
+            from_role=from_role,
+            body=body,
+            generation=send_generation,
+            kind=kind,
         )
         # #499: baseline captured right before the write, same as task
         # delivery's own `_on_settled` (#359) — a target that answers FAST
@@ -5900,7 +5992,14 @@ class Orchestrator(
     # ------------------------------------------------------------------
 
     def _record_role_message(
-        self, project_ns: str, *, to_role: str, from_role: str | None, body: str, generation: int
+        self,
+        project_ns: str,
+        *,
+        to_role: str,
+        from_role: str | None,
+        body: str,
+        generation: int,
+        kind: str = "instruction",
     ) -> str:
         """Append one `takkub send` to the durable log; returns its id (empty
         string if the store is unwritable — a broken audit log must never stop
@@ -5915,6 +6014,7 @@ class Orchestrator(
                 from_role=from_role,
                 body=body,
                 generation=generation,
+                kind=kind,
             )
         except Exception as exc:
             _log_event("role_message_record_failed", project=project_ns, error=str(exc)[:200])
@@ -6142,10 +6242,13 @@ class Orchestrator(
         root_pid = getattr(pane.session, "_pid", None)
         if not root_pid:
             return False, f"'{role_name}' pane has no process id yet"
+        pane_key = f"{project_ns}::{role_name}"
+        seen_set = self.__dict__.setdefault("_pane_child_pids", {}).setdefault(pane_key, set())
         try:
             import psutil
 
             children = psutil.Process(root_pid).children(recursive=True)
+            seen_set.update(c.pid for c in children)
         except Exception as exc:
             return False, f"could not enumerate processes under '{role_name}': {exc}"
         if pid not in (None, ""):
@@ -6153,16 +6256,43 @@ class Orchestrator(
                 want = int(pid)
             except (TypeError, ValueError):
                 return False, f"--pid must be an integer, got {pid!r}"
-            children = [c for c in children if c.pid == want]
-            if not children:
+            target = next((c for c in children if c.pid == want), None)
+            if target is not None:
+                # Capture target and ALL its descendant processes so child trees
+                # (e.g. pwsh -> docker.exe) are completely terminated (#797).
+                try:
+                    descendants = target.children(recursive=True)
+                except Exception:
+                    descendants = []
+                seen_set.update(d.pid for d in descendants)
+                children = [target, *descendants]
+            elif want in seen_set:
+                # Target was an observed child of this pane that may have been reparented (#797).
+                try:
+                    orphan_proc = psutil.Process(want)
+                    try:
+                        orphan_desc = orphan_proc.children(recursive=True)
+                    except Exception:
+                        orphan_desc = []
+                    children = [orphan_proc, *orphan_desc]
+                except Exception:
+                    return False, f"pid {want} is not running under '{role_name}'s pane"
+            else:
                 return False, (
                     f"pid {want} is not running under '{role_name}'s pane — refusing "
                     "(only processes inside that pane's tree can be killed this way)"
                 )
         killed: list[str] = []
         failed: list[str] = []
+
+        def _depth(c):
+            try:
+                return len(c.parents()) if (hasattr(c, "is_running") and c.is_running()) else 0
+            except Exception:
+                return 0
+
         # Deepest first so a parent never respawns a child we already killed.
-        for child in sorted(children, key=lambda c: -len(c.parents()) if c.is_running() else 0):
+        for child in sorted(children, key=lambda c: -_depth(c)):
             try:
                 label = f"{child.name()}({child.pid})"
             except Exception:
@@ -6170,6 +6300,7 @@ class Orchestrator(
             try:
                 child.kill()
                 killed.append(label)
+                seen_set.discard(child.pid)
             except Exception:
                 failed.append(label)
         _log_event(
@@ -6464,21 +6595,33 @@ class Orchestrator(
         if not names:
             return
         detail = f" ({', '.join(names[:5])}{'…' if len(names) > 5 else ''})" if names else ""
-        self._notify_lead(
-            project_ns,
-            f"⚠️ [{role_name} closing] {len(names)} subprocess(es) still running under this "
-            f"pane are about to be killed{detail} — if the work wasn't actually finished, use "
-            f"`takkub progress` next time instead of `done` until it is.",
-            from_role=role_name,
-            note="subprocess_kill_warning",
-            kind="subprocess-kill-warning",
-        )
+        pane = self._project_panes(project_ns).get(role_name)
+        is_done = pane is not None and getattr(pane, "state", None) == "done"
+        if is_done:
+            self._notify_lead(
+                project_ns,
+                f"🧹 [{role_name} closing] Cleaned up {len(names)} child subprocess(es){detail} after completion.",
+                from_role=role_name,
+                note="subprocess_cleanup",
+                kind="subprocess-cleanup",
+            )
+        else:
+            self._notify_lead(
+                project_ns,
+                f"⚠️ [{role_name} closing] {len(names)} subprocess(es) still running under this "
+                f"pane are about to be killed{detail} — if the work wasn't actually finished, use "
+                f"`takkub progress` next time instead of `done` until it is.",
+                from_role=role_name,
+                note="subprocess_kill_warning",
+                kind="subprocess-kill-warning",
+            )
         _log_event(
             "close_kills_live_children",
             role=role_name,
             project=project_ns,
             count=len(names),
             names=names[:10],
+            is_done=is_done,
         )
 
     def close(
@@ -6883,7 +7026,12 @@ class Orchestrator(
         getattr(self, "_last_done_task_ids", {}).pop(key, None)
 
         if had_worktree_close and not recovery_close:
-            self._close_worktree_git(project_ns, role_name, had_worktree_close)
+            self._close_worktree_git(
+                project_ns,
+                role_name,
+                had_worktree_close,
+                never_delivered=_task_undelivered_close,
+            )
         # Revoke the pane's capability token so stale done/send requests from
         # the closing pane are rejected after it terminates.
         self._revoke_session_tokens(project_ns, role_name, closing_session)
@@ -8525,6 +8673,50 @@ class Orchestrator(
             self._last_done_task_ids = {}
         had_task_id = _ps_done.task_id or self._last_done_task_ids.get(key) or f"pane-{id(pane)}"
         self._last_done_task_ids[key] = had_task_id
+        from .orchestrator_text import extract_cited_task_ids
+
+        cited_ids = extract_cited_task_ids(note)
+        cur_tid = (had_task_id or "")[:8].lower()
+        if (
+            cited_ids
+            and re.fullmatch(r"[0-9a-f]{8}", cur_tid)
+            and cur_tid not in cited_ids
+            and getattr(_ps_done, "task_id", None)
+            and getattr(_ps_done, "task_delivered", False)
+        ):
+            older_id = sorted(cited_ids)[0]
+            _log_event(
+                "done_ignored_for_active_task",
+                role=from_role,
+                project=project_ns,
+                active_task_id=had_task_id,
+                cited_task_id=older_id,
+            )
+            self._notify_lead(
+                project_ns,
+                f"⚠️ [{from_role}] ได้รับรายงาน done สำหรับ task เก่า ({older_id}) "
+                f"ขณะที่ task {cur_tid} กำลัง active อยู่ — รายงานนี้จะไม่ปิด task {cur_tid}",
+                from_role=from_role,
+                note="done_older_task_ignored",
+                kind="done-older-task",
+            )
+            note_project = _decision_note_project_label(
+                project_ns, getattr(pane, "_session_cwd", None), from_role
+            )
+            now = datetime.now()
+            transcript_path = getattr(pane, "_transcript_path", None)
+            self._save_decision_note(
+                note_project,
+                from_role,
+                note,
+                now=now,
+                transcript_path=transcript_path,
+                failed=failed,
+            )
+            return (
+                True,
+                f"{from_role} reported done for previous task {older_id}; active task {cur_tid} retained",
+            )
         # A successful report moves its card to review. FAILED/blocked reports
         # leave it active for the fix loop or an owner decision.
         if not failed and not blocked:
@@ -8897,12 +9089,16 @@ class Orchestrator(
                 from .digest_facts import detect_investigate_task as _detect_inv_only
                 from .orchestrator_text import stale_done_reasons
 
+                base_role_eval, _ = _split_shard(from_role)
+                is_eval_role = base_role_eval in ("qa", "reviewer", "critic", "designer")
                 _stale_reasons = stale_done_reasons(
                     raw_note,
                     task_id=had_task_id,
                     files_touched=getattr(digest_facts, "files_touched", None),
                     elapsed_s=(time.time() - had_assign_ts) if had_assign_ts else None,
-                    implementation=not (ops_task or _detect_inv_only(_assigned_task_text)),
+                    implementation=not (
+                        ops_task or is_eval_role or _detect_inv_only(_assigned_task_text)
+                    ),
                 )
             except Exception:
                 _stale_reasons = []
@@ -8980,6 +9176,8 @@ class Orchestrator(
                     if rec.get("from") == "lead"
                     and rec.get("state") in ("sent", "delivered")
                     and rec.get("ts", 0) >= had_assign_ts
+                    and rec.get("kind", "instruction") != "info"
+                    and not _is_info_message(rec.get("body", ""))
                 ]
                 if followups:
                     ids = ", ".join(str(rec.get("id", "")) for rec in followups)
@@ -9205,6 +9403,8 @@ class Orchestrator(
         session_state.provider_override = getattr(_ps_done, "provider_override", None)
         session_state.model_override = getattr(_ps_done, "model_override", None)
         session_state.effort_override = getattr(_ps_done, "effort_override", None)
+        session_state.task_id = None
+        session_state.task_delivered = False
         _done_uuid_cand = (
             getattr(_ps_done, "session_uuid", None)
             or self._session_uuid_for(key)
@@ -12292,6 +12492,16 @@ class Orchestrator(
         key = _exit_key(project_ns, role)
         ps = self._pane_state.get(key)
         if ps is None or not ps.last_assigned_task:
+            pending_respawn = getattr(self, "_pending_respawn_tasks", {}).get(key)
+            if pending_respawn and pending_respawn.get("task"):
+                return (
+                    True,
+                    "task",
+                    {
+                        "task": pending_respawn["task"],
+                        "task_file": pending_respawn.get("task_file"),
+                    },
+                )
             queue = getattr(self, "_pending_assignments", {}).get(key, [])
             if queue:
                 return True, "queued task", {"task": queue[0]["task"], "task_file": None}

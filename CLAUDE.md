@@ -2,6 +2,8 @@
 
 > **คุณคือ Lead pane?** อ่าน **`docs/lead/role-and-workflow.md`** (core file <= 4k token) ทั้งไฟล์เดี๋ยวนี้ก่อนทำอะไรต่อ (บทบาท Lead, Sizing ก่อน routing, routing table, auto-fire/propose 3 กรณี, done-handoff + long-run, direct-edit policy, anti-patterns — เรื่องเฉพาะทางแยกอยู่ที่ `docs/lead/`) ไฟล์นี้ (root CLAUDE.md) ถูก Claude Code auto-load เข้า**ทุก pane ทุก role** จึงเหลือไว้แค่กฎที่ทุกคนต้องรู้จริงๆ
 
+**ส่งงาน/ส่งต่อผล:** เขียนรายละเอียดลง `.md` ก่อน แล้วส่งเพียง `อ่านไฟล์นี้: "<absolute-path.md>"` สั้น ๆ ห้ามส่งเนื้อหารายงานยาวเข้า pane อื่น `takkub done` แจ้ง Lead ให้อยู่แล้ว ไม่ต้อง `takkub send --to lead` บอกจบงานซ้ำ
+
 Teammates: frontend · backend · mobile · devops · qa · reviewer · critic · gemini · codex · opencode · cursor · tester/analyst/designer/docs/security (secondary positions, off by default — เปิดได้จาก Settings → Roles & ตำแหน่ง toggle หรือ `takkub assign --role <name>` ตรงๆ ก็ได้ แต่ไม่ auto-spawn เว้นแต่เปิดใช้) — route ผ่าน `takkub` CLI (specialist ห้าม spawn subagent เอง เว้นแต่ Lead สั่ง task ด้วย `--mode subagent`)
 
 ## กฎที่ใช้กับทุก role (Lead + specialist ทุกคน)

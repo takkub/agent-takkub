@@ -523,6 +523,17 @@ class AutoResumeMixin:
             provider_state.set_quota_reset_at(hit_provider, reset_at)
             self._schedule_provider_quota_reset_notice(project, hit_provider, reset_at)
 
+        policy = auto_resume.effective_quota_policy(project)
+        if policy == auto_resume.QUOTA_POLICY_PARK:
+            _log_event(
+                "pane_quota_policy_park",
+                role=role,
+                project=project,
+                hit_provider=hit_provider,
+            )
+            self._park_pane_for_limit(project, role, ps)
+            return
+
         candidate = self._pick_reroute_provider(project, role, ps, hit_provider)
         if candidate is not None and ps.quota_reroute_count >= auto_resume.MAX_REROUTE_ROUNDS:
             # #699: bounded like park rounds — a task that keeps hitting a
@@ -559,7 +570,7 @@ class AutoResumeMixin:
         no other provider it could legitimately run as. Every other role
         (lead, backend, frontend, qa, reviewer, critic, custom roles, ...)
         can move to any registered provider that's actually usable."""
-        from .provider_config import FORCED_ROLES, pick_substitute_provider
+        from .provider_config import FORCED_ROLES, PROVIDER_RING, pick_substitute_provider
 
         base_role = role.split("#", 1)[0].strip().lower()
         if base_role in FORCED_ROLES:
@@ -578,7 +589,32 @@ class AutoResumeMixin:
                 counterpart_provider = effective_provider_for(ps.distinct_from, project)
             exclude.add(counterpart_provider)
 
-        return pick_substitute_provider(exclude, after=hit_provider)
+        # Exclude configured providers (#791)
+        exclude.update(auto_resume.effective_quota_exclude_providers(project))
+
+        # #798: Find next substitute provider that is neither excluded nor critically low on quota
+        ring = list(PROVIDER_RING)
+        if hit_provider in ring:
+            start = ring.index(hit_provider) + 1
+            ordered_candidates = ring[start:] + ring[:start]
+        else:
+            ordered_candidates = ring
+
+        for _ in range(len(ordered_candidates)):
+            cand = pick_substitute_provider(exclude, after=hit_provider)
+            if cand is None:
+                break
+            # Check if candidate has <10% quota remaining or is confirmed quota-hit (#798)
+            try:
+                verdict, pct = confirm_verdict_for_provider(cand, None)
+                if verdict == "confirmed" or pct >= 90.0:
+                    _log_event("reroute_candidate_low_quota", provider=cand, util=pct)
+                    exclude.add(cand)
+                    continue
+            except Exception:
+                pass
+            return cand
+        return None
 
     def _reroute_pane_to_provider(
         self,

@@ -24,6 +24,8 @@ Never kill a process by image/process name (`taskkill /IM ...`, `pkill`, `killal
 ## ⚠️ Never run pip install -e / --editable (required, #202)
 Never run `pip install -e .` (or any `--editable` path) — it rewrites the shared venv's `__editable__*.pth` for every pane machine-wide (#202); deleting this worktree later breaks it for everyone. Need to test your own code? Just run `pytest` normally. Detail: `docs/roles/common.md#no-editable-installs`.
 
+Handoffs: write the full task/report to `.md` first. Send only `อ่านไฟล์นี้: "<absolute-path.md>"` through `takkub send`; never paste the full body. Finish with one short `takkub done` pointing to the report; do not also send a completion to Lead.
+
 ## ⚠️ ห้ามเปลี่ยน network ของเครื่อง host (required, #400)
 ห้ามแตะ network ของเครื่องโดยเด็ดขาด (`netsh`, `ipconfig /release`/`/renew`, `networksetup`, `ifconfig <if> up`/`down`, `route add`/`delete`) — เป็นของ user ไม่ใช่ sandbox ของ pane ต้องการเทสผ่านเน็ตเส้นอื่น → ขอ user ต่อ**มือถือ**/อุปกรณ์ที่สองแทน รายละเอียดเต็ม: `docs/roles/common.md#no-host-network-changes`.
 

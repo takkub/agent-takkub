@@ -423,6 +423,18 @@ def _stub_project_roots(monkeypatch, tmp_path):
 
 
 class TestLazyCreateAndSingleInstance:
+    def test_image_from_explorer_opens_viewer(self, container, stub_factory, tmp_path, monkeypatch):
+        path = tmp_path / "shot.png"
+        path.write_bytes(b"image")
+        opened = []
+        monkeypatch.setattr(
+            ew.QDesktopServices, "openUrl", lambda url: opened.append(url.toLocalFile()) or True
+        )
+        host = EditorHost(container, view_factory=stub_factory)
+        host.open_file("proj", str(path))
+        assert [Path(value) for value in opened] == [path]
+        assert host.has_view() is False
+
     def test_no_view_until_first_open(self, container, stub_factory) -> None:
         host = EditorHost(container, view_factory=stub_factory)
         assert host.has_view() is False

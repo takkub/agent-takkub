@@ -129,22 +129,7 @@ def _severity_alias(raw: str) -> str:
 
 
 def _warn_deprecated_role(raw: str | list[str] | None) -> None:
-    """Warn when a deprecated role alias (qa, critic) is specified (#513/#561)."""
-    if not raw:
-        return
-    items = [raw] if isinstance(raw, str) else raw
-    for item in items:
-        for part in str(item).split(","):
-            part = part.strip()
-            base_r = part.split("#", 1)[0].lower()
-            if base_r in ("qa", "critic"):
-                from .routing_planner import REVIEWER_MODE_ALIASES
-
-                alias_mode = REVIEWER_MODE_ALIASES[base_r]
-                print(
-                    f"warn: --role {base_r} is deprecated (#513/#561); use --role reviewer --mode {alias_mode} instead",
-                    file=sys.stderr,
-                )
+    """Compatibility hook: QA and Critic are supported independent roles."""
 
 
 def _request_with_retry(payload: dict) -> dict:
@@ -799,7 +784,6 @@ def cmd_assign(args: argparse.Namespace) -> dict:
     print(f"scope: {scope} ({scope_reason})")
 
     mode_requested = getattr(args, "mode", None)
-    deprecated_alias_note = ""
     if base_role == "reviewer":
         if mode_requested is None:
             mode_requested = "code"
@@ -812,26 +796,10 @@ def cmd_assign(args: argparse.Namespace) -> dict:
         from .routing_planner import REVIEWER_MODE_ALIASES
 
         if base_role in REVIEWER_MODE_ALIASES:
-            # #613: qa/critic ARE reviewer --mode e2e/ui under the hood
-            # (#513) — the matching mode is a no-op, not a conflict.
-            # Printing both an error AND a "use reviewer --mode e2e instead"
-            # warn for the exact same `--role qa --mode e2e` combo was
-            # #613 itself. Only a genuinely different mode is an error now,
-            # and only a bare role (no --mode at all) gets the deprecation
-            # nudge, since that's the only case still leaving the mode to
-            # the (deprecated) default instead of stating it explicitly.
+            # Accept direct QA/Critic commands and compatible reviewer modes.
+            # Matching modes are a no-op; conflicting modes fail.
             alias_mode = REVIEWER_MODE_ALIASES[base_role]
             if mode_requested is None:
-                _warn_deprecated_role(base_role)
-                # #654: the stderr warn above never reached the Lead that
-                # actually typed `--role qa` (assign was the ONE path with no
-                # visible notice, while `messages`/`close` showed theirs), so
-                # it kept using the deprecated alias for three rounds. Carry
-                # it in the ack body too, where nothing can filter it out.
-                deprecated_alias_note = (
-                    f"\n[#513] --role {base_role} เป็น alias เก่า — ใช้ "
-                    f"`--role reviewer --mode {alias_mode}` แทน (pane ยังชื่อ {base_role} เหมือนเดิม)"
-                )
                 mode_requested = alias_mode
             elif mode_requested == alias_mode:
                 pass
@@ -1081,7 +1049,6 @@ def cmd_assign(args: argparse.Namespace) -> dict:
                 str(resp.get("msg", ""))
                 + _browser_shard_warning(args.role, shards, mode=mode_requested)
                 + _self_commit_isolation_warning(args.task, "shared")
-                + deprecated_alias_note
             )
         return resp
     if shards > 1:
@@ -1213,7 +1180,7 @@ def cmd_assign(args: argparse.Namespace) -> dict:
         detail = ("\n" + "\n".join(resource_blocked)) if resource_blocked else ""
         return {
             "ok": ok_count == shards,
-            "msg": f"queued {ok_count}/{shards} shards{warn}{detail}{deprecated_alias_note}",
+            "msg": f"queued {ok_count}/{shards} shards{warn}{detail}",
         }
     resp = _request(
         _with_project(
@@ -1244,10 +1211,8 @@ def cmd_assign(args: argparse.Namespace) -> dict:
         )
     )
     if resp.get("ok"):
-        resp["msg"] = (
-            str(resp.get("msg", ""))
-            + _self_commit_isolation_warning(args.task, isolation)
-            + deprecated_alias_note
+        resp["msg"] = str(resp.get("msg", "")) + _self_commit_isolation_warning(
+            args.task, isolation
         )
     return resp
 
@@ -1660,14 +1625,37 @@ def cmd_send(args: argparse.Namespace) -> dict:
     if not (args.msg or "").strip():
         return {"ok": False, "msg": "send requires a message (or --to user --file <path>)"}
     _warn_deprecated_role(getattr(args, "to", None))
+    kind = getattr(args, "kind", "instruction") or "instruction"
     return _request(
-        _with_project({"cmd": "send", "to": args.to, "msg": args.msg, "from": _from_role()})
+        _with_project(
+            {
+                "cmd": "send",
+                "to": args.to,
+                "msg": args.msg,
+                "from": _from_role(),
+                "kind": kind,
+            }
+        )
     )
 
 
+def _resolve_role_arg(args: argparse.Namespace) -> tuple[str | None, str | None]:
+    role = getattr(args, "role", None)
+    pos = getattr(args, "role_pos", None)
+    if role and pos and role != pos:
+        return None, f"err: conflicting roles specified: {pos!r} vs --role {role!r}"
+    resolved = role or pos
+    if not resolved:
+        return None, "err: role is required (specify role positionally or via --role)"
+    return resolved, None
+
+
 def cmd_close(args: argparse.Namespace) -> dict:
-    _warn_deprecated_role(getattr(args, "role", None))
-    return _request(_with_project({"cmd": "close", "role": args.role, "from": _from_role()}))
+    role, err = _resolve_role_arg(args)
+    if err:
+        return {"ok": False, "msg": err}
+    _warn_deprecated_role(role)
+    return _request(_with_project({"cmd": "close", "role": role, "from": _from_role()}))
 
 
 def cmd_close_all(_: argparse.Namespace) -> dict:
@@ -1790,11 +1778,14 @@ def cmd_kill(args: argparse.Namespace) -> dict:
     """(lead) kill the processes running under another pane (#430) without
     hunting the PID chain by hand. `--pid` narrows to one process that must
     belong to that pane's tree; omitted = every live child of the pane."""
+    role, err = _resolve_role_arg(args)
+    if err:
+        return {"ok": False, "msg": err}
     return _request(
         _with_project(
             {
                 "cmd": "kill",
-                "role": args.role,
+                "role": role,
                 "pid": getattr(args, "pid", None),
                 "from": _from_role(),
             }
@@ -2975,13 +2966,16 @@ def cmd_status(args: argparse.Namespace) -> dict:
 def cmd_tail(args: argparse.Namespace) -> dict:
     """`takkub tail --role <r> [--lines N]` — read recent PTY output/transcript
     of a role, including exited panes (#541)."""
-    _warn_deprecated_role(getattr(args, "role", None))
+    role, err = _resolve_role_arg(args)
+    if err:
+        return {"ok": False, "msg": err, "exit_code": 1}
+    _warn_deprecated_role(role)
     lines_n = getattr(args, "lines", 20) or 20
     resp = _request(
         _with_project(
             {
                 "cmd": "tail",
-                "role": args.role,
+                "role": role,
                 "lines": int(lines_n),
                 "from": _from_role(),
             }
@@ -2992,9 +2986,9 @@ def cmd_tail(args: argparse.Namespace) -> dict:
     path = resp.get("path")
     lines = resp.get("lines") or []
     if path:
-        print(f"[{args.role}] {path}")
+        print(f"[{role}] {path}")
     if not lines:
-        print(f"[{args.role}] (transcript is empty)")
+        print(f"[{role}] (transcript is empty)")
     else:
         for line in lines:
             _utf8_print(line)
@@ -5887,10 +5881,17 @@ def build_parser() -> argparse.ArgumentParser:
         help="with --to user --file: force Content-Disposition: attachment (see "
         "`report publish --attachment`)",
     )
+    ss.add_argument(
+        "--kind",
+        choices=["instruction", "info"],
+        default="instruction",
+        help="message kind: instruction (default, requires follow-up review if unverified) or info (informational, does not trigger follow-up warning on done)",
+    )
     ss.set_defaults(func=cmd_send)
 
     sc = sub.add_parser("close", help="close a running pane")
-    sc.add_argument("--role", required=True)
+    sc.add_argument("role_pos", nargs="?", default=None, metavar="ROLE", help="role name to close")
+    sc.add_argument("--role", default=None, help="role name to close")
     sc.set_defaults(func=cmd_close)
 
     sca = sub.add_parser("close-all", help="close every teammate (keeps Lead)")
@@ -6436,7 +6437,10 @@ def build_parser() -> argparse.ArgumentParser:
         "tail",
         help="(lead) read recent PTY output/transcript of a role (including exited panes) — #541",
     )
-    stail.add_argument("--role", required=True, help="role to inspect (e.g. codex, qa)")
+    stail.add_argument(
+        "role_pos", nargs="?", default=None, metavar="ROLE", help="role to inspect (e.g. codex, qa)"
+    )
+    stail.add_argument("--role", default=None, help="role to inspect (e.g. codex, qa)")
     stail.add_argument(
         "-n", "--lines", type=int, default=20, help="number of lines to show (default 20)"
     )
@@ -6516,7 +6520,14 @@ def build_parser() -> argparse.ArgumentParser:
         "kill",
         help="(lead) kill the processes running under a pane — no PID hunting (#430)",
     )
-    skl.add_argument("--role", required=True, help="pane whose child processes to kill")
+    skl.add_argument(
+        "role_pos",
+        nargs="?",
+        default=None,
+        metavar="ROLE",
+        help="pane whose child processes to kill",
+    )
+    skl.add_argument("--role", default=None, help="pane whose child processes to kill")
     skl.add_argument("--pid", type=int, default=None, help="only this PID (must be under the pane)")
     skl.set_defaults(func=cmd_kill)
 

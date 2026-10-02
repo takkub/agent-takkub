@@ -33,6 +33,23 @@ def _isolate_remote_json(monkeypatch, tmp_path):
 
 
 class TestRefreshRemoteChip:
+    def test_disable_with_shared_reports_does_not_message_agents(self, monkeypatch, tmp_path):
+        import agent_takkub.remote.reports as reports
+
+        _isolate_remote_json(monkeypatch, tmp_path)
+        monkeypatch.setattr(ua_mod, "list_project_names", lambda: ["proj"])
+        monkeypatch.setattr(reports, "list_shares", lambda name: [object()])
+        monkeypatch.setattr(reports, "is_active", lambda share: True)
+        stub = _Stub()
+        stub._remote = MagicMock()
+        old = stub._remote
+        ok, _, _ = stub._apply_remote_config(RemoteConfig(), False)
+        assert ok
+        old.stop.assert_called_once()
+        assert RemoteConfig.load().enabled is False
+        stub.orch._notify_lead.assert_not_called()
+        stub.orch.send.assert_not_called()
+
     def test_hides_chip_when_no_chip_attr(self):
         stub = _Stub()
         del stub._chip_remote

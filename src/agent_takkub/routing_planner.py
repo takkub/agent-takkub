@@ -321,11 +321,11 @@ def pane_role_resolution_chain(role: str) -> list[str]:
 
 
 def _deprecation_note(old_role: str, mode: str) -> str:
-    """Reason fragment for a routing decision that resolved a deprecated
-    ``qa``/``critic`` role name through the #513 alias. The role FILE
-    (``.claude/agents/qa.md`` / ``critic.md``) still works standalone —
-    this only flags that the canonical target is now ``reviewer --mode``."""
-    return f"'{old_role}' รวมเข้า 'reviewer' แล้ว (#513) — ใช้ --role reviewer --mode {mode} แทน"
+    """Explain the compatible reviewer syntax without deprecating a role."""
+    return (
+        f"'{old_role}' ใช้ค่าตำแหน่งตัวเอง — เรียกด้วย --role reviewer --mode {mode} "
+        "ได้เช่นกัน (#513 compatibility)"
+    )
 
 
 # Routing table: (pattern, primary_role_or_None, cross_check_list_or_None, mode)

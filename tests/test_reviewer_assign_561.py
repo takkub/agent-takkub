@@ -2,7 +2,7 @@
 - Add --mode code|e2e|ui to takkub assign (cli.py -> cli_server -> orchestrator.assign)
 - Default mode is code for reviewer; reject --mode on other roles (unless pane/subagent)
 - Dispatch reviewer --mode e2e onto qa runtime path and --mode ui onto critic runtime path
-- Keep qa/critic working as deprecated aliases with CLI warning
+- Keep QA/Critic working independently without a deprecation warning
 - team_preset can_spawn regression test through assign
 - Codex diff comparison routed to reviewer on codex
 """
@@ -84,7 +84,7 @@ class TestReviewerCliAssign:
             payload = mock_req.call_args[0][0]
             assert payload["mode"] == "code"
 
-    def test_qa_deprecation_warning_on_cli(self, capsys):
+    def test_qa_is_supported_without_deprecation_warning(self, capsys):
         args = argparse.Namespace(
             role="qa",
             mode=None,
@@ -96,12 +96,9 @@ class TestReviewerCliAssign:
         with patch("agent_takkub.cli._request", return_value={"ok": True}):
             cli.cmd_assign(args)
         captured = capsys.readouterr()
-        assert (
-            "warn: --role qa is deprecated (#513/#561); use --role reviewer --mode e2e instead"
-            in captured.err
-        )
+        assert captured.err == ""
 
-    def test_critic_deprecation_warning_on_cli(self, capsys):
+    def test_critic_is_supported_without_deprecation_warning(self, capsys):
         args = argparse.Namespace(
             role="critic",
             mode=None,
@@ -113,10 +110,7 @@ class TestReviewerCliAssign:
         with patch("agent_takkub.cli._request", return_value={"ok": True}):
             cli.cmd_assign(args)
         captured = capsys.readouterr()
-        assert (
-            "warn: --role critic is deprecated (#513/#561); use --role reviewer --mode ui instead"
-            in captured.err
-        )
+        assert captured.err == ""
 
     def test_browser_shard_warning_for_reviewer_e2e(self):
         # reviewer with mode=e2e triggers browser shard warning
@@ -419,7 +413,7 @@ class TestQaCriticSpawnResolvesReviewerSettingsRole590:
                 ctx.__exit__(None, None, None)
         return seen_roles
 
-    def test_qa_pane_resolves_against_reviewer_row_under_full_preset(
+    def test_qa_pane_resolves_against_own_row_under_full_preset(
         self, mock_orch: orchestrator.Orchestrator, tmp_path: Path
     ) -> None:
         team_preset.set_current("full", "test-proj")
@@ -431,10 +425,9 @@ class TestQaCriticSpawnResolvesReviewerSettingsRole590:
             provider_side_effect=lambda role: "codex" if role == "reviewer" else "gemini",
         )
 
-        assert "reviewer" in seen
-        assert "qa" not in seen
+        assert seen == ["qa"]
 
-    def test_critic_pane_resolves_against_reviewer_row(
+    def test_critic_pane_resolves_against_own_row(
         self, mock_orch: orchestrator.Orchestrator, tmp_path: Path
     ) -> None:
         team_preset.set_current("full", "test-proj")
@@ -446,8 +439,7 @@ class TestQaCriticSpawnResolvesReviewerSettingsRole590:
             provider_side_effect=lambda role: "codex" if role == "reviewer" else "gemini",
         )
 
-        assert "reviewer" in seen
-        assert "critic" not in seen
+        assert seen == ["critic"]
 
     def test_qa_pane_keeps_own_row_when_custom_checker_is_qa(
         self, mock_orch: orchestrator.Orchestrator, tmp_path: Path
@@ -467,7 +459,7 @@ class TestQaCriticSpawnResolvesReviewerSettingsRole590:
 
         assert seen == ["qa"]
 
-    def test_assign_result_line_and_event_report_reviewer_row_source(
+    def test_reviewer_e2e_command_uses_qa_settings_and_reports_own_row(
         self, mock_orch: orchestrator.Orchestrator
     ) -> None:
         """#590 item D: `takkub assign --role reviewer --mode e2e` (qa's
@@ -500,14 +492,14 @@ class TestQaCriticSpawnResolvesReviewerSettingsRole590:
             )
 
         assert ok is True
-        assert "qa = reviewer --mode e2e" in msg
-        assert "provider codex" in msg
-        assert "ตามแถว Reviewer" in msg
+        assert "qa · provider" in msg
+        assert "provider gemini" in msg
+        assert "ตามแถว QA" in msg
 
         assign_events = [fields for name, fields in events if name == "assign"]
         assert len(assign_events) == 1
-        assert assign_events[0]["provider_source"] == "reviewer_row"
-        assert assign_events[0]["effective_provider"] == "codex"
+        assert assign_events[0]["provider_source"] == "own_row"
+        assert assign_events[0]["effective_provider"] == "gemini"
 
     def test_assign_result_line_reports_own_row_when_checker_is_qa(
         self, mock_orch: orchestrator.Orchestrator

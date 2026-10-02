@@ -765,12 +765,11 @@ class UserActionsMixin:
         timer.start()
 
     def _warn_reports_need_relink(self) -> None:
-        """#451: Disable is the one place `secret_path` is actually cleared
-        (see the comment above this call) — every previously-published
-        Remote Report link is dead from this instant, silently, until
-        someone runs `takkub report relink`. Best-effort and never raises:
-        a failure here must never turn a successful Disable into a reported
-        error. Counts only, never logs/notifies `secret_path` itself."""
+        """Record affected report links when Remote is disabled.
+
+        Disabling Remote must not inject notices into running agents.
+        Counts only; never logs the pairing secret.
+        """
         try:
             import importlib
 
@@ -786,23 +785,6 @@ class UserActionsMixin:
         if not affected:
             return
         _log_event("remote_secret_rotated", reports_affected=affected)
-        try:
-            project_ns, _ = active_project()
-        except Exception:
-            project_ns = None
-        if project_ns:
-            # (#674) This notice fires at the exact moment Remote goes OFF —
-            # a bare "run relink" here told the user to run a command that
-            # cannot mint a single URL in this state. Name the prerequisite.
-            self.orch._notify_lead(
-                project_ns,
-                f"⚠ ปิด Remote รีเซ็ต secret แล้ว — Report link เก่า {affected} ฉบับตายหมด "
-                "เมื่อจะใช้ลิงก์อีกครั้ง: เปิด Remote ก่อน (Settings → Remote) "
-                "แล้วค่อยรัน `takkub report relink` เพื่อออกลิงก์ใหม่ "
-                "(รันตอน Remote ยังปิดจะออกลิงก์ไม่ได้)",
-                from_role="system",
-                note="remote_secret_rotated",
-            )
 
     def _apply_remote_config(self, config, enable: bool) -> tuple[bool, str, str]:
         """Enable/disable the live remote-control server. Injected into

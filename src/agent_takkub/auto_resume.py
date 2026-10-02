@@ -147,3 +147,143 @@ def set_park_fallback_enabled(flag: bool) -> None:
     tmp = path.with_suffix(path.suffix + ".tmp")
     tmp.write_text(json.dumps({"enabled": bool(flag)}, indent=2) + "\n", encoding="utf-8")
     tmp.replace(path)
+
+
+# ── Quota policy & provider exclusions (#791, #798) ─────────────────────────
+QUOTA_POLICY_REROUTE = "reroute"
+QUOTA_POLICY_PARK = "park"
+
+
+def _quota_policy_path() -> Path:
+    from .config import SETTINGS_HOME
+
+    return SETTINGS_HOME / "quota-policy.json"
+
+
+def quota_policy(project: str | None = None) -> str:
+    """Return 'reroute' (auto-switch provider) or 'park' (wait for token reset).
+    Checks per-project settings first, then global settings. Defaults to 'reroute'."""
+    if project:
+        try:
+            from .config import _project_dict
+
+            proj = _project_dict(project)
+            p_cfg = proj.get("quota_reroute", {})
+            if isinstance(p_cfg, dict) and p_cfg.get("policy") in (
+                QUOTA_POLICY_REROUTE,
+                QUOTA_POLICY_PARK,
+            ):
+                return p_cfg["policy"]
+        except Exception:
+            pass
+    path = _quota_policy_path()
+    if path.exists():
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(data, dict) and data.get("policy") in (
+                QUOTA_POLICY_REROUTE,
+                QUOTA_POLICY_PARK,
+            ):
+                return data["policy"]
+        except (OSError, json.JSONDecodeError):
+            pass
+    return QUOTA_POLICY_REROUTE
+
+
+def set_quota_policy(policy: str, project: str | None = None) -> None:
+    """Persist quota policy ('reroute' or 'park')."""
+    if policy not in (QUOTA_POLICY_REROUTE, QUOTA_POLICY_PARK):
+        policy = QUOTA_POLICY_REROUTE
+    if project:
+        try:
+            from .config import load_projects, save_projects
+
+            data = load_projects()
+            p = data.get("projects", {}).setdefault(project, {})
+            q = p.setdefault("quota_reroute", {})
+            q["policy"] = policy
+            save_projects(data)
+            return
+        except Exception:
+            pass
+    path = _quota_policy_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    existing = {}
+    if path.exists():
+        try:
+            existing = json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(existing, dict):
+                existing = {}
+        except Exception:
+            existing = {}
+    existing["policy"] = policy
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(json.dumps(existing, indent=2) + "\n", encoding="utf-8")
+    tmp.replace(path)
+
+
+def quota_exclude_providers(project: str | None = None) -> set[str]:
+    """Return set of providers excluded from quota reroute."""
+    excluded: set[str] = set()
+    if project:
+        try:
+            from .config import _project_dict
+
+            proj = _project_dict(project)
+            p_cfg = proj.get("quota_reroute", {})
+            if isinstance(p_cfg, dict):
+                raw = p_cfg.get("exclude_providers") or []
+                excluded.update(str(x).strip().lower() for x in raw if str(x).strip())
+        except Exception:
+            pass
+    path = _quota_policy_path()
+    if path.exists():
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                raw = data.get("exclude_providers") or []
+                excluded.update(str(x).strip().lower() for x in raw if str(x).strip())
+        except Exception:
+            pass
+    return excluded
+
+
+def set_quota_exclude_providers(
+    providers: list[str] | set[str], project: str | None = None
+) -> None:
+    """Persist excluded providers list."""
+    p_list = sorted(list({str(x).strip().lower() for x in providers if str(x).strip()}))
+    if project:
+        try:
+            from .config import load_projects, save_projects
+
+            data = load_projects()
+            p = data.get("projects", {}).setdefault(project, {})
+            q = p.setdefault("quota_reroute", {})
+            q["exclude_providers"] = p_list
+            save_projects(data)
+            return
+        except Exception:
+            pass
+    path = _quota_policy_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    existing = {}
+    if path.exists():
+        try:
+            existing = json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(existing, dict):
+                existing = {}
+        except Exception:
+            existing = {}
+    existing["exclude_providers"] = p_list
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(json.dumps(existing, indent=2) + "\n", encoding="utf-8")
+    tmp.replace(path)
+
+
+def effective_quota_policy(project: str | None = None) -> str:
+    return quota_policy(project)
+
+
+def effective_quota_exclude_providers(project: str | None = None) -> set[str]:
+    return quota_exclude_providers(project)

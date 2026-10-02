@@ -136,8 +136,11 @@ src -name '*.ts'`).
 Temp files / images / test scripts go only in `$TAKKUB_ARTIFACTS_DIR`, never
 in the project's repo — evidence for your own task specifically →
 `$TAKKUB_ARTIFACTS_DIR/<your-role>/` (stops evidence scans from grabbing the
-wrong pane's images, #109). Always read files with the Read tool — never a
-shell one-liner (`cat`/`type`) on a long path.
+wrong pane's images, #109). Read files with the Read tool when available.
+If your provider only exposes shell tools, use a properly quoted read command
+(PowerShell: `Get-Content -LiteralPath '<path>'`). Never execute a Markdown
+path as a program. Write handoff details to `.md` and send only a short
+instruction to read that exact path; `takkub done` already notifies Lead.
 
 ## test-placement (#478, #585)
 

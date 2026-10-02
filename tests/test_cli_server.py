@@ -549,14 +549,14 @@ class TestAsyncSpawnDispatch:
 
 class TestAssignResolutionLineAck:
     """#590 item D: `orchestrator.assign()` runs staggered off a QTimer and
-    its return value (which carries the "qa = reviewer --mode e2e ·
+    its return value (which carries the "qa ·
     provider ... (ตามแถว Reviewer)" resolution banner, #590 item B) is never
     relayed back to this socket — the synchronous ack must build the same
     banner itself, via `team_preset.assign_resolution_line`, so a caller
     isn't left guessing which Settings row backed the spawn until the pane
     shows up."""
 
-    def test_qa_assign_ack_shows_reviewer_row_resolution(
+    def test_qa_assign_ack_shows_own_row_resolution(
         self, qapp: QCoreApplication, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setattr("agent_takkub.team_preset.can_spawn", lambda *_a, **_kw: (True, ""))
@@ -576,9 +576,7 @@ class TestAssignResolutionLineAck:
 
         reply = _replies(sock)[0]
         assert reply["ok"] is True
-        assert reply["msg"].startswith(
-            "qa = reviewer --mode e2e · provider codex / gpt-5-codex (ตามแถว Reviewer)\n"
-        )
+        assert reply["msg"].startswith("qa · provider gemini / gpt-5-codex (ตามแถว QA)\n")
 
     def test_reviewer_e2e_assign_ack_shows_provider_override_source(
         self, qapp: QCoreApplication, monkeypatch: pytest.MonkeyPatch
@@ -614,9 +612,7 @@ class TestAssignResolutionLineAck:
 
         reply = _replies(sock)[0]
         assert reply["ok"] is True
-        assert reply["msg"].startswith(
-            "qa = reviewer --mode e2e · provider codex (ตาม --provider ที่ระบุ)\n"
-        )
+        assert reply["msg"].startswith("qa · provider codex (ตาม --provider ที่ระบุ)\n")
 
     def test_plain_backend_assign_ack_has_no_resolution_line(self, qapp: QCoreApplication) -> None:
         orch = _FakeOrch()

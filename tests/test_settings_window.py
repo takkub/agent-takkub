@@ -93,6 +93,21 @@ def _isolate_settings_paths(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
 
 
 class TestSettingsWindowStructure:
+    def test_review_roles_have_independent_editable_settings(self):
+        dlg = settings_window.SettingsWindow(project="proj-a")
+        for role in ("reviewer", "qa", "critic"):
+            assert role in dlg._role_provider_combos
+            assert role in dlg._role_model_combos
+            assert role in dlg._role_effort_combos
+            assert role not in dlg._role_defer_labels
+        for role, model in (("reviewer", "sonnet"), ("qa", "haiku"), ("critic", "opus")):
+            dlg._role_model_combos[role].setCurrentText(model)
+        dlg._on_save_apply_clicked()
+        assert role_models.model_for("reviewer", "claude", "proj-a") == "sonnet"
+        assert role_models.model_for("qa", "claude", "proj-a") == "haiku"
+        assert role_models.model_for("critic", "claude", "proj-a") == "opus"
+        dlg.deleteLater()
+
     def test_has_seventeen_stacked_slots_eight_nav_visible(self) -> None:
         # #515 settings diet: 8 nav-visible pages (ทั่วไป/ทีม & ตำแหน่ง/
         # Pipeline/Tools/Skills/Knowledge/Accounts/Usage across 4 sections —
@@ -1561,16 +1576,14 @@ class TestPipelineBuilderView:
         with the "Reviewer · e2e/ui" label instead of the bare legacy name."""
         from PyQt6.QtWidgets import QPushButton
 
-        assert settings_window._hop_role_label("qa") == "Reviewer · e2e (QA)"
-        assert settings_window._hop_role_label("critic") == "Reviewer · ui (Critic)"
+        assert settings_window._hop_role_label("qa") == "QA"
+        assert settings_window._hop_role_label("critic") == "Design Critic"
         dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_PIPELINE_BUILDER)
         texts = [
-            w.text()
-            for w in dlg.findChildren(QPushButton)
-            if w.text() in ("Reviewer · e2e (QA)", "Reviewer · ui (Critic)")
+            w.text() for w in dlg.findChildren(QPushButton) if w.text() in ("QA", "Design Critic")
         ]
-        assert "Reviewer · e2e (QA)" in texts
-        assert "Reviewer · ui (Critic)" in texts
+        assert "QA" in texts
+        assert "Design Critic" in texts
         dlg.deleteLater()
 
     def test_hop_add_role_dropdown_is_sectioned(self) -> None:
@@ -1581,10 +1594,10 @@ class TestPipelineBuilderView:
         combo = dlg._build_hop_add_role_combo(dlg, used=set())
         texts = [combo.itemText(i) for i in range(combo.count())]
         assert "── ตำแหน่ง ──" in texts
-        assert "── โหมด Reviewer ──" in texts
+        assert "── ตรวจสอบคุณภาพ ──" in texts
         assert "── สมองเสริม (ความเห็นที่สอง) ──" in texts
         assert "── ปิดอยู่ ──" in texts
-        header_idx = texts.index("── โหมด Reviewer ──")
+        header_idx = texts.index("── ตรวจสอบคุณภาพ ──")
         assert not (
             combo.model().item(header_idx).flags() & settings_window.Qt.ItemFlag.ItemIsSelectable
         )
@@ -1649,7 +1662,7 @@ class TestPipelineBuilderView:
         dlg._load_pb_hops("feature")
         text = dlg._pb_summary_label.text()
         assert "hop 1: Frontend" in text
-        assert "hop 3: QA → ใช้ค่า Reviewer (codex)" in text
+        assert "hop 3: QA (claude)" in text
         dlg.deleteLater()
 
     def test_empty_template_hides_summary(self) -> None:

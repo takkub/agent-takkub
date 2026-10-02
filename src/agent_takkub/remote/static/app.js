@@ -949,7 +949,8 @@
   var IMAGE_EXT_RE = /\.(?:png|jpe?g|webp|gif)$/i;
   var IMAGE_QUOTED_RE = /["'`]([^"'`\n]{3,400}?\.(?:png|jpe?g|webp|gif))["'`]/gi;
   var IMAGE_BARE_RE = /(?:^|[\s(])((?:[A-Za-z]:[\\\/]|\.{0,2}[\\\/]|[\w.-]+[\\\/])[^\s"'`<>()\[\]]{0,400}?\.(?:png|jpe?g|webp|gif))(?=$|[\s).,;:!?\]])/gim;
-  var IMAGE_CARDS_PER_MESSAGE = 6;
+  var IMAGE_MARKDOWN_RE = /!?\[[^\]\n]*\]\(<?([^\n<>]+?\.(?:png|jpe?g|webp|gif))(?:>\s*|\s+(?:"[^"\n]*"|'[^'\n]*'))?\)/gi;
+  var IMAGE_FILENAME_RE = /(?:^|\s)([\w.-]+\.(?:png|jpe?g|webp|gif))(?=$|[\s).,;:!?])/gim;
   var imageBlobCache = {}; // "project|path" → objectURL (kept for the page's life)
 
   function extractImagePaths(text) {
@@ -960,20 +961,34 @@
       var pth = String(raw || "").trim();
       if (!pth || !IMAGE_EXT_RE.test(pth)) return;
       if (/^(?:data|https?|blob):/i.test(pth)) return;
-      if (seen[pth]) return;
-      seen[pth] = true;
+      var key = pth;
+      try { key = decodeURIComponent(key); } catch (_) { /* literal filename */ }
+      if (seen[key]) return;
+      seen[key] = true;
       found.push(pth);
     }
     var m;
+    IMAGE_MARKDOWN_RE.lastIndex = 0;
+    while ((m = IMAGE_MARKDOWN_RE.exec(text)) !== null) {
+      var path = m[1];
+      try { path = decodeURIComponent(path); } catch (_) { /* keep literal path */ }
+      if (/^file:\/\//i.test(path)) {
+        path = path.replace(/^file:\/\/(?:localhost)?/i, "");
+        if (/^\/[A-Za-z]:\//.test(path)) path = path.slice(1);
+      }
+      add(path);
+    }
     IMAGE_QUOTED_RE.lastIndex = 0;
     while ((m = IMAGE_QUOTED_RE.exec(text)) !== null) add(m[1]);
     IMAGE_BARE_RE.lastIndex = 0;
     while ((m = IMAGE_BARE_RE.exec(text)) !== null) add(m[1]);
-    return found.slice(0, IMAGE_CARDS_PER_MESSAGE);
+    IMAGE_FILENAME_RE.lastIndex = 0;
+    while ((m = IMAGE_FILENAME_RE.exec(text)) !== null) add(m[1]);
+    return found;
   }
 
   function imageBaseName(pth) {
-    var parts = pth.split(/[\\\/]/);
+    var parts = pth.split("?")[0].split(/[\\\/]/);
     return parts[parts.length - 1] || pth;
   }
 
@@ -984,7 +999,10 @@
     if (project) q += "&project=" + encodeURIComponent(project);
     // allow404: a missing/unservable image is a per-card miss, never proof
     // the token died (#445) — apiFetch must not forgetToken() on it.
-    return apiFetch(q, { allow404: true }).then(function (res) {
+    var request = /^https?:\/\//i.test(pth)
+      ? fetch(pth, { credentials: "same-origin" })
+      : apiFetch(q, { allow404: true });
+    return request.then(function (res) {
       if (!res.ok) throw new Error("image_" + res.status);
       return res.blob();
     }).then(function (blob) {
@@ -998,6 +1016,16 @@
   function hydrateImages(bodyEl, rawText) {
     if (!bodyEl) return;
     var paths = extractImagePaths(rawText);
+    // Published screenshots use a same-origin, share-token report URL.
+    // Render those links as images too without loading arbitrary remote hosts.
+    var reportRoot = new URL("./r/", location.href);
+    bodyEl.querySelectorAll("a[href]").forEach(function (link) {
+      try {
+        var url = new URL(link.getAttribute("href"), location.href);
+        if (url.origin === reportRoot.origin && url.pathname.indexOf(reportRoot.pathname) === 0 &&
+            IMAGE_EXT_RE.test(url.pathname) && paths.indexOf(url.href) < 0) paths.push(url.href);
+      } catch (_) { /* malformed link */ }
+    });
     if (!paths.length) return;
     var project = visibleProject();
     var strip = bodyEl.querySelector(":scope > .img-strip");
@@ -1020,9 +1048,9 @@
       card.appendChild(cap);
       strip.appendChild(card);
       fetchImageBlob(project, pth).then(function (url) {
-        img.src = url;
         img.onload = function () { card.classList.remove("loading"); };
         img.onerror = function () { card.remove(); if (!strip.children.length) strip.remove(); };
+        img.src = url;
         card.addEventListener("click", function () { openLightbox(url, imageBaseName(pth)); });
       }).catch(function () {
         // Not an image the cockpit can serve (outside a project root, a
@@ -1453,7 +1481,7 @@
     body.className = "msg-body";
     body.innerHTML = kind === "lead" ? renderMarkdown(text) : mdInline(text);
     div.appendChild(body);
-    if (kind === "lead") hydrateImages(body, text);
+    hydrateImages(body, text);
 
     log.appendChild(div);
     if (!skipScroll) {
@@ -2249,6 +2277,18 @@
     es.addEventListener("done", function (evt) {
       setProjectWorking(project, false, null, true);
       appendProjectMessage(project, "done", parseSseData(evt.data, project), parseSseTs(evt.data));
+    });
+    es.addEventListener("report", function (evt) {
+      try {
+        var payload = JSON.parse(evt.data);
+        var report = payload.data || payload;
+        if (typeof report.url !== "string") return;
+        var url = new URL(report.url, location.href);
+        var root = new URL("./r/", location.href);
+        if (url.origin !== root.origin || url.pathname.indexOf(root.pathname) !== 0) return;
+        var label = String(report.label || report.name || "ไฟล์แนบ").replace(/[\[\]\r\n]/g, " ");
+        appendProjectMessage(project, "lead", "[" + label + "](" + url.href + ")", parseSseTs(evt.data));
+      } catch (_) { /* malformed report event */ }
     });
     // A session was resumed/replaced on the desktop while this project's SSE
     // remained connected. Invalidate only this project's history request and

@@ -1515,5 +1515,5 @@ class TestCliServerPipelineRoute:
         msg = written[0]["msg"]
         assert "starting" in msg
         assert "hop 2: DevOps ปิดอยู่ จะถูกข้าม" in msg
-        assert "hop 3: QA → ใช้ค่า Reviewer (codex)" in msg
+        assert "hop 3: QA (claude)" in msg
         finalize()

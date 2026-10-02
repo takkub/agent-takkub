@@ -103,9 +103,9 @@
     // to Python, which resolves it against the pane cwd and opens it with
     // the OS default app (html→browser, md→editor, png→viewer).
     //
-    //   group 1: Windows absolute  C:\... or C:/...
-    //   group 2: path with a separator ending in a .ext (rel or POSIX-abs)
-    const PATH_RE = /[A-Za-z]:[\\/][^\s"'<>|]+|(?:\.{0,2}[\\/])?(?:[\w.@~+-]+[\\/])+[\w.@~+-]+\.[A-Za-z0-9]{1,8}/g;
+    //   groups 1/2: quote + path (including spaces); other alternatives
+    //   cover absolute/relative paths and plain raster image filenames.
+    const PATH_RE = /(["'`<])([^"'`<>\r\n]+?\.[A-Za-z0-9]{1,8})["'`>]|[A-Za-z]:[\\/][^\s"'<>|]+|(?:\.{0,2}[\\/])?(?:[\w.@~+-]+[\\/])+[\w.@~+-]+\.[A-Za-z0-9]{1,8}|\b[\w.@~+-]+\.(?:png|jpe?g|webp|gif|bmp|ico)\b/gi;
     term.registerLinkProvider({
       provideLinks(lineNumber, callback) {
         const ln = term.buffer.active.getLine(lineNumber - 1);
@@ -115,15 +115,16 @@
         let m;
         PATH_RE.lastIndex = 0;
         while ((m = PATH_RE.exec(text)) !== null) {
-          let raw = m[0];
+          let raw = m[2] || m[0];
           if (/^[a-z][a-z0-9+.-]*:\/\//i.test(raw)) continue;  // a URL — addon owns it
           // drop trailing sentence punctuation from the linkified span
           const tail = raw.match(/[.,;:!?)\]}>'"`]+$/);
           let len = raw.length - (tail ? tail[0].length : 0);
           if (len <= 0) continue;
           raw = raw.slice(0, len);
-          const startX = m.index + 1;          // xterm cols are 1-based
-          const endX = m.index + len;           // inclusive end col
+          const offset = m[2] ? 1 : 0;
+          const startX = m.index + offset + 1;  // xterm cols are 1-based
+          const endX = m.index + offset + len;  // inclusive end col
           links.push({
             text: raw,
             range: { start: { x: startX, y: lineNumber }, end: { x: endX, y: lineNumber } },

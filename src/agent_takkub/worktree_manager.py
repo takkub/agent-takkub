@@ -1055,11 +1055,13 @@ def remove_worktree_tree(path: Path) -> tuple[bool, str, str]:
       already picks up any unregistered dir under the managed worktree root,
       which is exactly where the staged sibling lives).
     """
+    sweep_link_points(path)
     staged, err = _stage_for_delete(path)
     if staged is None:
         return False, f"ลบไม่ได้ ({err})", ""
     if staged == path:
         return True, "", ""  # nothing was there to begin with
+    sweep_link_points(staged)
     ok, rm_err = _rmtree_long_path_safe(staged)
     if ok:
         return True, "", ""
@@ -1257,9 +1259,15 @@ class WorktreeManager:
         return linked, warns
 
     def _unlink_links(self, info: WorktreeInfo) -> None:
-        """Remove every recorded link point before any worktree removal."""
+        """Remove every recorded link point before any worktree removal.
+
+        Also sweeps the entire worktree for any untracked reparse points /
+        junctions (#796) before removal so untracked links cannot follow into
+        the main tree.
+        """
         for rel in info.links:
             _remove_link(Path(info.path) / rel)
+        sweep_link_points(Path(info.path))
 
     # -- inspect ------------------------------------------------------------
 

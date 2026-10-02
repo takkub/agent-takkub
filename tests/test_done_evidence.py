@@ -1522,3 +1522,83 @@ class TestEvidenceDedupGate:
 
         assert "shot.png" in result
         assert re.search(r"#[0-9a-f]{8}\b", result), result
+
+    def test_done_report_warnings_heading_qualifiers_and_empty_evidence_790(self):
+        from agent_takkub.orchestrator_text import done_report_warnings
+
+        # Heading with qualifiers and bullet evidence
+        note_valid = (
+            "CHANGED (backend):\n"
+            "- updated auth logic\n"
+            "\n"
+            "EVIDENCE (pytest):\n"
+            "- 12 tests passed in 0.4s\n"
+            "\n"
+            "REMOVED (deprecated):\n"
+            "- removed old helper\n"
+        )
+        assert not done_report_warnings(note_valid)
+
+        # Missing / empty evidence
+        note_empty_evidence = (
+            "CHANGED (backend):\n- updated auth logic\n\nEVIDENCE:\n\nREMOVED:\n- none\n"
+        )
+        warnings = done_report_warnings(note_empty_evidence)
+        assert any("missing EVIDENCE" in w for w in warnings)
+
+    def test_done_followup_warning_distinguishes_info_and_instruction_790(self, orch, monkeypatch):
+        from agent_takkub import role_messages
+        from agent_takkub.orchestrator import LEAD, PaneState
+
+        proj = "proj"
+        _register_pane(orch, LEAD.name, proj, _make_alive_session())
+        _register_pane(orch, "backend", proj, _make_alive_session())
+
+        assign_ts = time.time() - 30
+        orch._pane_state[f"{proj}::backend"] = PaneState(assign_ts=assign_ts)
+        _mock_done(orch)
+        call_count = [0]
+        orch._save_decision_note = lambda *a, **k: (
+            f"note_{call_count.append(1) or len(call_count)}.md"
+        )
+
+        # 1. Informational URL message -> no follow-up warning
+        fake_msgs = [
+            {
+                "id": "msg-1",
+                "ts": assign_ts + 5,
+                "from": "lead",
+                "to": "backend",
+                "state": "delivered",
+                "kind": "info",
+                "body": "https://example.com/spec",
+            }
+        ]
+        monkeypatch.setattr(role_messages, "read", lambda *a, **k: fake_msgs)
+
+        captured = []
+        monkeypatch.setattr(orch, "_notify_lead", lambda ns, notice, **kw: captured.append(notice))
+
+        orch.done(
+            "backend", note="CHANGED: code.py\nEVIDENCE: 10 passed\nREMOVED: none", project=proj
+        )
+        assert captured
+        assert "Lead follow-ups require review" not in captured[0]
+
+        # 2. Instruction message -> follow-up warning included
+        captured.clear()
+        orch._pane_state[f"{proj}::backend"] = PaneState(assign_ts=assign_ts)
+        fake_msgs[0] = {
+            "id": "msg-2",
+            "ts": assign_ts + 5,
+            "from": "lead",
+            "to": "backend",
+            "state": "delivered",
+            "kind": "instruction",
+            "body": "change password algorithm to argon2",
+        }
+        orch.done(
+            "backend", note="CHANGED: code2.py\nEVIDENCE: 10 passed\nREMOVED: none", project=proj
+        )
+        assert captured
+        assert "Lead follow-ups require review" in captured[0]

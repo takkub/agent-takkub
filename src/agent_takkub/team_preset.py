@@ -528,10 +528,8 @@ def can_spawn(role: str, project: str | None = None) -> tuple[bool, str]:
 # belongs.
 # ─────────────────────────────────────────────────────────────────────
 
-#: The three review dispatch targets folded into `reviewer --mode` by #513/
-#: #561 — always rendered as their own roster rows now (previously only
-#: whichever one happened to be the active `checker` got a row at all, so
-#: e.g. qa/critic could be fully enabled yet invisible on the Roles page).
+#: Independent review roles. Keep the historical constant/bucket names for
+#: callers that also support the `reviewer --mode e2e/ui` CLI aliases.
 REVIEWER_MODE_ROLES: tuple[str, ...] = ("reviewer", "qa", "critic")
 
 #: Provider panes with no roster row of their own — never preset-governed
@@ -539,13 +537,11 @@ REVIEWER_MODE_ROLES: tuple[str, ...] = ("reviewer", "qa", "critic")
 #: a read-only "second opinion" glance instead (`_build_secondary_brains_panel`).
 SECONDARY_BRAIN_ROLES: tuple[str, ...] = ("codex", "gemini", "opencode", "cursor")
 
-#: Human labels for the reviewer-mode rows — qa/critic are #513's legacy
-#: dispatch names, not separate CLI concepts, so the Roles/Pipeline UI names
-#: them by what they actually run (`reviewer --mode e2e`/`--mode ui`).
+#: Human labels shared by Roles and Pipeline; each role has its own settings.
 REVIEWER_MODE_LABELS: dict[str, str] = {
     "reviewer": "Reviewer",
-    "qa": "Reviewer · e2e (QA)",
-    "critic": "Reviewer · ui (Critic)",
+    "qa": "QA",
+    "critic": "Design Critic",
 }
 
 
@@ -591,54 +587,17 @@ def role_groups(project: str | None = None) -> dict[str, tuple[str, ...]]:
 
 
 def settings_role_for(role: str, project: str | None = None) -> str:
-    """The role whose Settings -> Providers & Roles row actually governs
-    *role*'s provider/model/effort at spawn time (#590).
+    """Use each role's own provider/model/effort settings.
 
-    ``qa``/``critic`` are #513's legacy dispatch targets for ``reviewer
-    --mode e2e``/``--mode ui`` (see `routing_planner.resolve_role_alias`),
-    but the roster only ever renders a settings row for the active preset
-    checker — ``reviewer`` on every built-in preset since #513, or an
-    explicit ``custom`` choice of ``checker="qa"`` — never for ``critic``
-    (`CHECKER_ROLES` has no ``critic`` entry, so no preset can ever point
-    the roster at it). A ``qa``/``critic`` pane resolving its own bare
-    config key therefore silently ran on a provider/model/effort a user
-    could see in ``routing.json``/``role-models.json`` but had no roster
-    row left to edit or even notice.
-
-    Returns *role* unchanged for ``reviewer`` itself and for any role
-    outside this alias pair. Also unchanged when *role*'s own alias IS the
-    active checker (custom ``checker="qa"``) — that's the one case the
-    roster does show a settings row for the alias itself.
+    Reviewer, QA and Design Critic have independent editable rows. The
+    compatible ``reviewer --mode e2e/ui`` commands still dispatch to QA /
+    Critic, and therefore use the destination role's settings too.
     """
-    from .routing_planner import resolve_role_alias
-
-    base = (role or "").strip().lower()
-    canonical, _mode = resolve_role_alias(base)
-    if canonical != "reviewer" or base == "reviewer":
-        return role
-    if current(project).get("checker") == base:
-        return role
-    return "reviewer"
+    return role
 
 
 def pane_display_label(role: str, base_label: str, project: str | None = None) -> str:
-    """The pane tab/header label for *role* (#590 item A, #747): ``"QA ·
-    e2e"``/``"Critic · ui"`` for a qa/critic pane whose provider/model/
-    effort defers to reviewer's Settings row (see `settings_role_for`),
-    else *base_label* unchanged — e.g. a custom preset with
-    ``checker="qa"`` keeps qa's own ``"QA"`` label since Settings shows it
-    its own row in that case. Shard suffixes are the caller's job; this
-    only decides the base text. Internal role identity is never touched —
-    display only.
-    """
-    base = (role or "").strip().lower()
-    if base in {"qa", "critic"} and settings_role_for(base, project) == "reviewer":
-        from .routing_planner import resolve_role_alias
-
-        _, alias_mode = resolve_role_alias(base)
-        # #747: show the role the user asked for ("QA · e2e"), not the
-        # internal reviewer alias it resolves to.
-        return f"{'QA' if base == 'qa' else 'Critic'} · {alias_mode}"
+    """Keep the role's own label; shard suffixes are the caller's job."""
     return base_label
 
 
@@ -650,28 +609,14 @@ def assign_resolution_line(
     provider_override: str | None = None,
     model_override: str | None = None,
 ) -> str:
-    """The one-line ``"qa = reviewer --mode e2e · provider codex (ตามแถว
-    Reviewer)\\n"`` banner explaining which Settings row actually backed a
-    qa/critic (or ``reviewer --mode e2e``/``ui``) assign's provider/model
-    (#590 item D). Shared by `orchestrator.assign()`'s deferred dispatch
-    (recomputed right before spawn, base_role already normalized) and
-    `cli_server`'s synchronous ack (computed from the raw CLI ``role``/
-    ``mode`` before the deferred assign has even run) so the two copies
-    can't drift out of sync — the ack used to have no way to show this at
-    all, since `orchestrator.assign()` runs staggered off a QTimer and its
-    return value is never relayed back to the socket.
+    """Name the destination role and its actual provider/model Settings row.
 
-    *role*/*mode* are the pre-normalization values (as `takkub assign`
-    receives them: ``role="qa"``/``"critic"`` with no mode, or
-    ``role="reviewer"`` with ``mode="e2e"``/``"ui"``) — this mirrors the
-    mapping `orchestrator.assign()` itself does at the top of the method.
-    Returns ``""`` for anything outside that alias pair (plain reviewer
-    ``code``/``pane``, ``subagent`` mode, or any other role) since there's
-    no Settings-row substitution to explain.
+    Shared by deferred dispatch and the synchronous CLI acknowledgement.
+    Compatible reviewer e2e/ui commands name QA/Critic as the destination.
     """
     from .core.routing import effective_model_for_v2 as _effective_model_for_v2
     from .provider_config import effective_provider_for
-    from .routing_planner import _MODE_TO_LEGACY_ROLE, resolve_role_alias
+    from .routing_planner import _MODE_TO_LEGACY_ROLE
 
     role = role or ""
     base_role = role.split("#", 1)[0].strip().lower()
@@ -687,7 +632,6 @@ def assign_resolution_line(
 
     role_name = f"{base_role}{shard_suffix}"
     settings_role = settings_role_for(base_role, project)
-    _, alias_mode = resolve_role_alias(base_role)
     provider_override = (provider_override or "").strip().lower()
     provider_source = (
         "override"
@@ -704,10 +648,7 @@ def assign_resolution_line(
         "own_row": f"ตามแถว {base_role.upper()}",
     }[provider_source]
     model_part = f" / {resolved_model}" if resolved_model else ""
-    return (
-        f"{role_name} = reviewer --mode {alias_mode} · provider {effective_provider}"
-        f"{model_part} ({source_label})\n"
-    )
+    return f"{role_name} · provider {effective_provider}{model_part} ({source_label})\n"
 
 
 def pipeline_hop_summary_lines(

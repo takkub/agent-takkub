@@ -55,8 +55,12 @@ class TestGeneration:
             assert str(py).encode() in cmd
             assert b"MZ" in cmd
             assert b"\r\n" in cmd  # cmd.exe wants CRLF
+            ps1 = (bin_dir / "takkub.ps1").read_text(encoding="utf-8")
+            assert str(py) in ps1
+            assert "@args" in ps1
         else:
             assert not (bin_dir / "takkub.cmd").exists()
+            assert not (bin_dir / "takkub.ps1").exists()
 
     def test_idempotent_rewrites_only_on_change(self, tmp_path: Path) -> None:
         py = _fake_python(tmp_path, healthy=True)
@@ -140,6 +144,31 @@ class TestShimRefusesBrokenInterpreter:
             timeout=120,
         )
         assert r.returncode == 0, r.stderr
+        assert "usage: takkub" in (r.stdout or "")
+
+    @pytest.mark.skipif(not _WIN, reason="PowerShell shim on Windows")
+    def test_ps1_shim_preserves_pipe_metacharacters_789(self, tmp_path: Path) -> None:
+        py = Path(sys.executable).with_name("python.exe")
+        if not py.exists():
+            pytest.skip("no console python.exe next to sys.executable")
+        bin_dir = cli_shim.ensure_cli_shims(tmp_path / "bin", py)
+        # Verify that powershell executes takkub.ps1 with pipe argument without pipe syntax error (#789)
+        task_arg = 'ตรวจ: grep "a|b" src'
+        r = subprocess.run(
+            [
+                "powershell",
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-Command",
+                f"$t = '{task_arg}'; & '{bin_dir / 'takkub.ps1'}' status --help $t; $LASTEXITCODE",
+            ],
+            capture_output=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=60,
+        )
+        assert r.returncode == 0
         assert "usage: takkub" in (r.stdout or "")
 
 

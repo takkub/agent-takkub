@@ -375,6 +375,39 @@ class TestResumePickerOneShotSpawnFilter:
 
 
 class TestPwaWiring:
+    def test_image_paths_in_markdown_and_plain_text_are_detected(self):
+        import shutil
+        import subprocess
+
+        node = shutil.which("node")
+        if not node:
+            pytest.skip("Node is required to exercise the PWA path parser")
+        js = (_STATIC / "app.js").read_text(encoding="utf-8")
+        parser = js[js.index("  var IMAGE_EXT_RE") : js.index("  function imageBaseName")]
+        cases = [
+            ("![screen](<C:/Project Folder/ภาพ.png>)", ["C:/Project Folder/ภาพ.png"]),
+            ("[screen](docs/screen%20shot.png)", ["docs/screen shot.png"]),
+            ("![screen](file:///C:/shots/login.png)", ["C:/shots/login.png"]),
+            ("shot.png", ["shot.png"]),
+            ('"docs/a.png" docs/a.png', ["docs/a.png"]),
+            ("![unsafe](https://example.com/tracker.png)", []),
+            (" ".join(f"docs/{i}.png" for i in range(8)), [f"docs/{i}.png" for i in range(8)]),
+        ]
+        script = (
+            parser
+            + "\nconst cases = JSON.parse(require('fs').readFileSync(0, 'utf8'));\nprocess.stdout.write(JSON.stringify(cases.map(c => extractImagePaths(c[0]))));"
+        )
+        result = subprocess.run(
+            [node, "-e", script],
+            input=json.dumps(cases),
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            timeout=15,
+            check=True,
+        )
+        assert json.loads(result.stdout) == [expected for _, expected in cases]
+
     def test_image_404_never_logs_the_phone_out(self):
         # #445: `/api/image` answers a bare 404 for any unservable path
         # (outside a project root, file gone, a pasted screenshot in the

@@ -3,12 +3,13 @@
 Covers the pure helper in orchestrator_text.py (`_task_handoff_pointer` /
 `_task_handoff_dir`) and its integration into `Orchestrator._assign_dispatch`:
 
-  1. short composed task (< threshold) pastes directly, no file written
+  1. the pure helper allows short messages through; production assignments
+     force a Markdown file even for short tasks
   2. long composed task (>= threshold) writes a handoff file and returns a
      short pointer instead
   3. the handoff file's content is byte-identical to the full task
   4. the pointer always uses forward slashes, even on Windows
-  5. a write failure degrades to pasting the full task inline (no crash)
+  5. write failures are reported without delivering a full inline fallback
   6. `_assign_dispatch` stores the FULL task in last_assigned_task regardless
      of pointer/inline, and remembers the handoff file path (or None) on
      PaneState
@@ -25,6 +26,7 @@ from PyQt6.QtCore import QCoreApplication
 from agent_takkub.orchestrator import Orchestrator, _exit_key
 from agent_takkub.orchestrator_text import (
     TASK_HANDOFF_THRESHOLD,
+    _message_handoff_pointer,
     _task_handoff_pointer,
 )
 from tests import extract_task_body
@@ -53,6 +55,23 @@ def orch(qapp: QCoreApplication, monkeypatch: pytest.MonkeyPatch) -> Orchestrato
 
 
 class TestTaskHandoffPointer:
+    def test_peer_report_is_saved_intact_and_only_pointer_is_delivered(self):
+        report = "CHANGED: fixed the login flow\n" + "Evidence details\n" * 100
+        pointer = _message_handoff_pointer(report, TEST_PROJECT, "lead")
+        assert report not in pointer
+        path = pointer.split('"')[1]
+        assert pathlib.Path(path).read_text(encoding="utf-8") == report
+        assert len(pointer) < len(report)
+        assert "takkub done" not in pointer
+
+    def test_peer_report_write_failure_does_not_paste_inline(self, monkeypatch):
+        monkeypatch.setattr(
+            "agent_takkub.orchestrator_text._task_handoff_pointer",
+            lambda *a, **kw: (a[0], None),
+        )
+        with pytest.raises(OSError, match="message was not sent"):
+            _message_handoff_pointer("full report " * 100, TEST_PROJECT, "lead")
+
     def test_short_task_pastes_directly(self) -> None:
         task = "[ROLE: backend] add a health check endpoint"
         assert len(task) < TASK_HANDOFF_THRESHOLD
@@ -67,7 +86,7 @@ class TestTaskHandoffPointer:
         assert paste_text != task
         assert "[ROLE: backend]" in paste_text
         assert "file-read tool" in paste_text
-        assert "ห้ามรัน path เป็นคำสั่ง shell" in paste_text
+        assert "ห้ามรันไฟล์เป็นโปรแกรม" in paste_text
         assert "takkub done" in paste_text
         assert task_file in paste_text
 
@@ -108,9 +127,8 @@ class TestTaskHandoffPointer:
         assert pathlib.Path(task_file).exists()
 
     def test_supports_file_read_false_always_pastes_inline(self) -> None:
-        # Issue #273: a provider whose agent tool set has no structured
-        # file-read tool (confirmed: codex) must never get the pointer,
-        # regardless of task length — no file is written at all.
+        # Legacy adapters can explicitly opt out when they lack filesystem
+        # access. Production Codex uses its shell reader instead.
         task = "[ROLE: frontend] " + ("x" * TASK_HANDOFF_THRESHOLD * 3)
         paste_text, task_file = _task_handoff_pointer(
             task, TEST_PROJECT, "frontend", supports_file_read=False
@@ -143,8 +161,9 @@ class TestAssignDispatchHandoff:
         ps = orch._pane_state[ekey]
         # #585: the task now carries a budget block prefix — compare the body.
         assert extract_task_body(ps.last_assigned_task) == task
-        assert ps.last_assigned_task_file is None
-        assert extract_task_body(mock_send.call_args.args[1]) == task
+        assert ps.last_assigned_task_file is not None
+        assert ps.last_assigned_task_file in mock_send.call_args.args[1]
+        assert task not in mock_send.call_args.args[1]
 
     def test_long_task_stored_full_but_pasted_as_pointer(self, orch: Orchestrator) -> None:
         ekey = _exit_key(TEST_PROJECT, "backend")
@@ -170,13 +189,11 @@ class TestAssignDispatchHandoff:
         assert pasted != task
         assert ps.last_assigned_task_file in pasted
 
-    def test_codex_role_never_gets_pointer_even_for_long_task(
+    def test_codex_role_reads_long_task_from_markdown(
         self, orch: Orchestrator, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        # Issue #273: codex's ProviderSpec.supports_agent_file_read=False —
-        # a long task assigned to a codex-backed role must paste inline in
-        # full, never the "open this file yourself" pointer that a codex
-        # pane can't act on (confirmed live incident: instant [FAILED]).
+        # Codex can read Markdown with a shell command even though it has no
+        # separate structured file-read tool. Never paste the full task.
         from agent_takkub.provider_config import CODEX
 
         monkeypatch.setattr(
@@ -196,10 +213,11 @@ class TestAssignDispatchHandoff:
         # (_rewrite_task_for_codex) — the ORIGINAL task text must still be
         # in there somewhere, just not pointer-ized.
         assert task in ps.last_assigned_task
-        assert ps.last_assigned_task_file is None
+        assert ps.last_assigned_task_file is not None
         pasted = mock_send.call_args.args[1]
-        assert task in pasted
-        assert "file-read tool" not in pasted
+        assert task not in pasted
+        assert ps.last_assigned_task_file in pasted
+        assert "คำสั่งอ่านไฟล์ได้" in pasted
 
     def test_fresh_assign_clears_stale_task_file(self, orch: Orchestrator) -> None:
         """A pane's second assign() must not carry over a stale task_file
@@ -214,6 +232,9 @@ class TestAssignDispatchHandoff:
         ):
             orch.assign("backend", cwd="/api", task=long_task, project=TEST_PROJECT)
             assert orch._pane_state[ekey].last_assigned_task_file is not None
+            old_file = orch._pane_state[ekey].last_assigned_task_file
             orch.assign("backend", cwd="/api", task=short_task, project=TEST_PROJECT)
 
-        assert orch._pane_state[ekey].last_assigned_task_file is None
+        new_file = orch._pane_state[ekey].last_assigned_task_file
+        assert new_file and new_file != old_file
+        assert short_task in pathlib.Path(new_file).read_text(encoding="utf-8")

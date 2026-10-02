@@ -1494,23 +1494,30 @@ _CODEX_ITEM_KINDS = {"AgentMessage": "lead", "UserMessage": "me"}
 def _codex_item_text(item: dict) -> str:
     """Join the text blocks of a Codex >= 0.147 message item.
 
-    Non-text blocks (`local_image`, …) are dropped — the phone mirrors prose
-    only. Block-type casing differs per item (`Text` on agent messages,
+    Local image blocks become Markdown paths for the phone's inline preview.
+    Block-type casing differs per item (`Text` on agent messages,
     `text` on user ones), so the comparison is case-insensitive.
     """
     blocks = item.get("content")
     if not isinstance(blocks, list):
         return ""
     parts: list[str] = []
+    images: list[str] = []
     for block in blocks:
         if not isinstance(block, dict):
             continue
-        if str(block.get("type") or "").strip().lower() != "text":
+        block_type = str(block.get("type") or "").strip().lower()
+        if block_type == "local_image":
+            path = block.get("path")
+            if isinstance(path, str) and path.strip():
+                images.append(f"![รูปแนบ](<{path.strip()}>)")
+            continue
+        if block_type != "text":
             continue
         text = block.get("text")
         if isinstance(text, str) and text.strip():
             parts.append(text.strip())
-    return "\n".join(parts)
+    return "\n".join([*parts, *images])
 
 
 def _codex_record_message(rec: object) -> tuple[str, str] | None:

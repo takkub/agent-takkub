@@ -20,9 +20,11 @@ from agent_takkub.worktree_manager import (
     UnsafePathError,
     WorktreeInfo,
     WorktreeManager,
+    _make_link,
     branch_name,
     build_merge_proposal,
     changed_dirty_paths,
+    remove_worktree_tree,
     repair_editable_pth_if_stale,
     sanitize_ref_component,
     snapshot_porcelain_paths,
@@ -3433,3 +3435,30 @@ class TestWorktreeCreatedTs:
         (wt / ".git").mkdir(parents=True)
         absurd = 4_000_000_000
         assert worktree_created_ts(f"wt/codex-{absurd}", wt) is None
+
+
+class TestUntrackedJunctionSweepSafety796:
+    def test_remove_worktree_tree_sweeps_untracked_links_without_wiping_target(self, tmp_path):
+        main_repo = tmp_path / "main_repo"
+        target_dir = main_repo / "node_modules" / "packages" / "ui"
+        target_dir.mkdir(parents=True)
+        payload = target_dir / "index.js"
+        payload.write_text("console.log('precious main repo file');", encoding="utf-8")
+
+        wt = tmp_path / "wt"
+        wt.mkdir(parents=True)
+        (wt / "apps" / "api").mkdir(parents=True)
+
+        # Create untracked link points (NTFS junction on Windows, symlink on POSIX) pointing to main repo
+        err1 = _make_link(main_repo / "node_modules", wt / "node_modules")
+        err2 = _make_link(main_repo / "node_modules", wt / "apps" / "api" / "node_modules")
+        assert err1 is None, f"failed to make link 1: {err1}"
+        assert err2 is None, f"failed to make link 2: {err2}"
+
+        removed, _msg, _leftover = remove_worktree_tree(wt)
+        assert removed is True
+        # Crucial check: main repo file must NOT be deleted!
+        assert payload.is_file(), (
+            "data loss: main repo files were wiped through untracked junction!"
+        )
+        assert payload.read_text(encoding="utf-8") == "console.log('precious main repo file');"

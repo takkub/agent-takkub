@@ -1220,6 +1220,7 @@ class CliServer(QObject):
                     msg=req.get("msg", ""),
                     from_role=req.get("from"),
                     project=from_project,
+                    kind=req.get("kind", "instruction"),
                 )
             elif cmd == "report-send":
                 # `project` (an explicit `--project` on the CLI) wins over

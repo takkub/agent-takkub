@@ -192,8 +192,9 @@ class TestAutoRespawnReplay:
         # #273: pasted verbatim in full, not pointer-ized — codex has no
         # file-read tool to act on a pointer with.
         sent_task = mock_send.call_args.args[1]
-        assert sent_task == cached
-        assert orch._pane_state[ekey].last_assigned_task_file is None
+        task_file = orch._pane_state[ekey].last_assigned_task_file
+        assert task_file and task_file in sent_task
+        assert sent_task != cached
 
     def test_assign_does_not_rewrite_non_codex_task(self, orch: Orchestrator, monkeypatch) -> None:
         """Non-codex roles must NOT receive the codex-specific override

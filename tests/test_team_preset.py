@@ -341,21 +341,19 @@ class TestSettingsRoleFor:
     """#590: qa/critic must resolve provider/model/effort through whichever
     role the Settings roster actually renders a row for."""
 
-    def test_qa_defers_to_reviewer_under_default_full_preset(self):
+    def test_qa_keeps_own_settings_under_default_full_preset(self):
         team_preset.set_current("full", "proj")
-        assert team_preset.settings_role_for("qa", "proj") == "reviewer"
+        assert team_preset.settings_role_for("qa", "proj") == "qa"
 
-    def test_critic_always_defers_to_reviewer(self):
-        # critic has no CHECKER_ROLES entry — no preset can ever point the
-        # roster at it, so it always defers regardless of checker choice.
+    def test_critic_keeps_own_settings_regardless_of_checker(self):
         team_preset.set_current("full", "proj")
-        assert team_preset.settings_role_for("critic", "proj") == "reviewer"
+        assert team_preset.settings_role_for("critic", "proj") == "critic"
         team_preset.set_current(
             "custom",
             "proj",
             custom={"roles": dict.fromkeys(team_preset.CORE_POSITION_ROLES, True), "checker": "qa"},
         )
-        assert team_preset.settings_role_for("critic", "proj") == "reviewer"
+        assert team_preset.settings_role_for("critic", "proj") == "critic"
 
     def test_qa_keeps_own_row_when_checker_is_explicitly_qa(self):
         team_preset.set_current(
@@ -371,13 +369,11 @@ class TestSettingsRoleFor:
         assert team_preset.settings_role_for("backend", "proj") == "backend"
         assert team_preset.settings_role_for("lead", "proj") == "lead"
 
-    def test_defers_under_auto_and_solo_lead_presets_too(self):
-        # "auto" resolves checker="reviewer" (see _resolve); solo-lead has no
-        # checker at all — neither equals "qa", so both defer to reviewer.
+    def test_own_settings_under_auto_and_solo_lead_presets_too(self):
         team_preset.set_current("auto", "proj")
-        assert team_preset.settings_role_for("qa", "proj") == "reviewer"
+        assert team_preset.settings_role_for("qa", "proj") == "qa"
         team_preset.set_current("solo-lead", "proj")
-        assert team_preset.settings_role_for("qa", "proj") == "reviewer"
+        assert team_preset.settings_role_for("qa", "proj") == "qa"
 
 
 class TestPaneDisplayLabel:
@@ -387,11 +383,11 @@ class TestPaneDisplayLabel:
 
     def test_qa_labels_as_reviewer_e2e_under_default_checker(self):
         team_preset.set_current("full", "proj")
-        assert team_preset.pane_display_label("qa", "QA", "proj") == "QA · e2e"
+        assert team_preset.pane_display_label("qa", "QA", "proj") == "QA"
 
     def test_critic_labels_as_reviewer_ui_regardless_of_checker(self):
         team_preset.set_current("full", "proj")
-        assert team_preset.pane_display_label("critic", "Design Critic", "proj") == "Critic · ui"
+        assert team_preset.pane_display_label("critic", "Design Critic", "proj") == "Design Critic"
 
     def test_qa_keeps_own_label_when_checker_is_explicitly_qa(self):
         team_preset.set_current(
@@ -419,7 +415,8 @@ class TestStaleLegacyRoleConfigs:
 
         stale = team_preset.stale_legacy_role_configs("proj")
 
-        assert {"role": "qa", "provider": "gemini", "model": ""} in stale
+        assert stale == []
+        assert team_preset.settings_role_for("qa", "proj") == "qa"
 
     def test_project_override_wins_over_global_entry(self):
         from agent_takkub import provider_config, role_models
@@ -432,7 +429,8 @@ class TestStaleLegacyRoleConfigs:
 
         stale = team_preset.stale_legacy_role_configs("proj")
 
-        assert {"role": "qa", "provider": "opencode", "model": ""} in stale
+        assert stale == []
+        assert provider_config.provider_for("qa", "proj") == "opencode"
 
     def test_nothing_stale_when_no_legacy_entry_exists(self):
         team_preset.set_current("full", "proj")
@@ -464,7 +462,8 @@ class TestStaleLegacyRoleConfigs:
 
         stale = team_preset.stale_legacy_role_configs("proj")
 
-        assert {"role": "critic", "provider": "gemini", "model": ""} in stale
+        assert stale == []
+        assert team_preset.settings_role_for("critic", "proj") == "critic"
 
 
 class TestRoleGroups:
@@ -553,7 +552,7 @@ class TestPipelineHopSummaryLines:
         lines = team_preset.pipeline_hop_summary_lines([[{"role": "backend"}]], "proj")
         assert lines == ["hop 1: Backend ปิดอยู่ จะถูกข้าม"]
 
-    def test_qa_shows_reviewer_substitution_with_its_provider(self, monkeypatch):
+    def test_qa_shows_its_own_provider(self, monkeypatch):
         from agent_takkub import pipeline_config, provider_config, role_models
 
         # codex isn't installed on CI runners; stub availability like
@@ -561,13 +560,14 @@ class TestPipelineHopSummaryLines:
         monkeypatch.setattr(provider_config, "_provider_available", lambda p: True)
         team_preset.set_current("full", "proj")
         role_models.set_provider("reviewer", "codex")
+        role_models.set_provider("qa", "gemini")
         pipeline_config.save({"rolesEnabled": {"tester": False}}, "proj")
 
         lines = team_preset.pipeline_hop_summary_lines(
             [[{"role": "qa"}, {"role": "tester"}]], "proj"
         )
 
-        assert lines == ["hop 1: QA → ใช้ค่า Reviewer (codex) · Tester ปิดอยู่ จะถูกข้าม"]
+        assert lines == ["hop 1: QA (gemini) · Tester ปิดอยู่ จะถูกข้าม"]
 
     def test_hop_numbering_is_one_based(self):
         team_preset.set_current("full", "proj")

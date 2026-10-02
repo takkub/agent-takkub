@@ -54,13 +54,33 @@ def done_note_preview(body: str, *, transcript_path=None, max_lines: int = 5) ->
     return "\n".join(lines[:max_lines])
 
 
+def _has_section_content(
+    note: str, label: str, all_labels: tuple[str, ...] = ("CHANGED", "EVIDENCE", "REMOVED")
+) -> bool:
+    if not note:
+        return False
+    other_labels = [lbl for lbl in all_labels if lbl != label]
+    other_pat = "|".join(other_labels)
+    head_pattern = (
+        rf"(?:^|[\r\n;])\s*(?:#+\s*|[-*]\s*)?\b{label}(?:\s*\([^)]*\))?\s*(?::|\s*-|\n|$)"
+    )
+    match = re.search(head_pattern, note, re.I)
+    if not match:
+        return False
+    rest = note[match.end() :]
+    next_head_pattern = rf"(?:^|[\r\n;])\s*(?:#+\s*|[-*]\s*)?(?:{other_pat})\b"
+    next_match = re.search(next_head_pattern, rest, re.I)
+    body = rest[: next_match.start()] if next_match else rest
+    return bool(body.strip())
+
+
 def done_report_warnings(note: str) -> list[str]:
     """Provider-independent quality flags; never turn an incomplete note into PASS evidence."""
     warnings = []
     missing = [
         label
         for label in ("CHANGED", "EVIDENCE", "REMOVED")
-        if not re.search(rf"\b{label}\s*:\s*\S", note or "", re.I)
+        if not _has_section_content(note or "", label)
     ]
     if missing:
         warnings.append("note incomplete: missing " + ", ".join(missing))
@@ -187,6 +207,19 @@ UI_NO_UI_MARKER = "[no-ui]"
 
 def screenshot_paths_in_note(note: str) -> list[str]:
     return [m.group(0).strip("\"'`.,;:") for m in _SCREENSHOT_PATH_RE.finditer(note or "")]
+
+
+_BROWSER_TASK_RE = re.compile(
+    r"\b(?:browser|playwright|puppeteer|cypress|selenium|e2e|smoke\s*test|ui\s*(?:check|test)|web\s*test)\b",
+    re.IGNORECASE,
+)
+
+
+def is_browser_task(task: str, role: str = "") -> bool:
+    """True if task requires browser automation or end-to-end UI testing (#792)."""
+    if not task:
+        return False
+    return bool(_BROWSER_TASK_RE.search(task))
 
 
 _STYLE_OR_TEXT_EXTENSIONS = (
@@ -1282,38 +1315,18 @@ def _task_handoff_pointer(
     *,
     supports_file_read: bool = True,
     scope: str | None = None,
+    force: bool = False,
 ) -> tuple[str, str | None]:
-    """Write *task* to a handoff file when it's long, returning what to paste.
+    """Persist a task and return ``(short_pointer, file_path)``.
 
-    Returns ``(paste_text, task_file_path)``. For a short composed task
-    (< ``TASK_HANDOFF_THRESHOLD`` chars) this is a no-op: ``paste_text is
-    task`` and ``task_file_path is None``, so pasting behaves exactly as
-    before the handoff mechanism existed. For a long task, the full text is
-    written to ``RUNTIME_DIR/tasks/<project>/<date>/<HHMMSS>-<role>.md`` and
-    a short pointer instructing the pane to ``Read`` it is returned instead —
-    this is the only thing that gets pasted into the pane's PTY, so it can't
-    hit the paste-swallow bug family (#22/#26) the way a multi-KB task can.
+    ``force=True`` persists short assignments too. Without it, a short
+    body passes through. ``supports_file_read=False`` is retained for
+    adapters with no filesystem access; production providers can use a
+    structured reader or a quoted shell read command.
 
-    ``supports_file_read`` — issue #273: pass the effective provider's
-    ``ProviderSpec.supports_agent_file_read``. When False, the pointer is
-    NEVER used regardless of length — a pane whose only file access is a
-    disallowed shell tool cannot act on "read this file yourself" at all,
-    so the handoff would just hand it a dead-end instruction and burn the
-    whole assign as an instant, un-analyzable [FAILED] before any real work
-    starts (confirmed live incident, #273). Falls back to the pre-#1 plain
-    inline paste unconditionally for that provider instead — no chunking
-    yet (``ponytail``: PTY paste already scales its enter-delay by content
-    size via ``ProviderSpec.enter_delay_per_kb_ms``, so this is a return to
-    a previously-working path, not a new risk; upgrade to chunked delivery
-    if a provider without file-read AND with paste-swallow trouble shows up).
-
-    The caller MUST still store the full, untouched *task* (not the pointer)
-    in ``PaneState.last_assigned_task`` — that field is the crash-replay unit
-    (``spawn_engine._auto_respawn``) and must keep working even if the
-    handoff file is later deleted/moved.
-
-    On a write failure (disk full, permissions) this degrades to returning
-    the full task unchanged rather than losing the assignment.
+    Keep the original task in PaneState for recovery. On a write failure,
+    return ``(task, None)`` so callers can reject delivery; production must
+    never use that fallback to paste the full task inline.
     """
     if not supports_file_read:
         return task, None
@@ -1322,7 +1335,10 @@ def _task_handoff_pointer(
     # Measure the task BODY, not the injected budget block (#585): the block is
     # scaffolding, and counting it flipped every short task onto the pointer path.
     # #739: nor the new-task header, same reason.
-    if len(task_scope.strip_budget(strip_new_task_header(task))) < TASK_HANDOFF_THRESHOLD:
+    if (
+        not force
+        and len(task_scope.strip_budget(strip_new_task_header(task))) < TASK_HANDOFF_THRESHOLD
+    ):
         return task, None
     day = _task_handoff_dir(project_ns)
     # #587 A5: two assigns to the same role within one second (e.g. Lead
@@ -1349,19 +1365,26 @@ def _task_handoff_pointer(
             return task, None
     forward_path = str(path).replace(os.sep, "/")
     pointer = (
-        f"[ROLE: {role_name}] อ่าน task spec เต็มจากไฟล์: {forward_path} "
-        "เปิดอ่านไฟล์นี้ด้วยเครื่องมืออ่านไฟล์ของคุณ (file-read tool) — ห้ามรัน path "
-        "เป็นคำสั่ง shell (#104) แล้วทำตามทั้งหมด · "
-        "รายงาน takkub done เมื่อเสร็จ"
+        f'[ROLE: {role_name}] อ่านไฟล์นี้: "{forward_path}" แล้วทำตาม '
+        "(ใช้ file-read tool หรือคำสั่งอ่านไฟล์ได้; ห้ามรันไฟล์เป็นโปรแกรม) · เสร็จแล้ว takkub done"
     )
     if scope:
-        from . import task_scope
-
-        # #739: trails the pointer, same order as `task_scope.inject_budget`.
-        pointer = (
-            f"{pointer}\n\n{task_scope.BUDGET_TRAILER_HEADER}\n{task_scope.budget_block(scope)}"
-        )
+        pointer += f" · scope={scope}"
     return pointer, forward_path
+
+
+def _message_handoff_pointer(message: str, project_ns: str, role_name: str) -> str:
+    """Keep long agent-to-agent payloads in Markdown, including shell-reader CLIs.
+
+    A failed file write must never silently revert to a huge inline paste.
+    Callers retain their durable queue or report a delivery failure instead.
+    """
+    if len(message) < TASK_HANDOFF_THRESHOLD:
+        return message
+    _, path = _task_handoff_pointer(message, project_ns, role_name, force=True)
+    if path is None:
+        raise OSError("could not save Markdown handoff; message was not sent")
+    return f'[ข้อความถึง {role_name}] อ่านไฟล์นี้: "{path}" (file-read tool หรือคำสั่งอ่านไฟล์)'
 
 
 # #739/#740: a new assignment that lands in a session which may still hold an
@@ -1372,7 +1395,24 @@ def _task_handoff_pointer(
 # header naming the new task id; done() checks the id back (`[task <id8>]`).
 NEW_TASK_HEADER_PREFIX = "[ใบงานใหม่ · task "
 _NEW_TASK_HEADER_RE = re.compile(r"^\[ใบงานใหม่ · task [0-9a-f]{8}\][^\n]*\n+")
-TASK_ID_TAG_RE = re.compile(r"\[task ([0-9a-f]{8})\]", re.IGNORECASE)
+TASK_ID_TAG_RE = re.compile(
+    r"(?:\[(?:ใบงานใหม่\s*·\s*)?task\s+([0-9a-f]{8,32})\]|\btask\s*[:=-]?\s*([0-9a-f]{8,32})\b)",
+    re.IGNORECASE,
+)
+
+
+def extract_cited_task_ids(text: str) -> set[str]:
+    """Extract cited 8-hex task ids from text (supports `[task <id>]`,
+    `[ใบงานใหม่ · task <id>]`, `task <id>`, `task: <id>`)."""
+    if not text:
+        return set()
+    found = set()
+    for m in TASK_ID_TAG_RE.finditer(text):
+        g1, g2 = m.groups()
+        cand = (g1 or g2 or "")[:8].lower()
+        if re.fullmatch(r"[0-9a-f]{8}", cand):
+            found.add(cand)
+    return found
 
 
 def new_task_header(task_id: str, prev_task_id: str | None = None) -> str:
@@ -1413,7 +1453,7 @@ def stale_done_reasons(
     the report, it just stops it from closing the task silently."""
     reasons: list[str] = []
     tid = (task_id or "")[:8].lower()
-    cited = {m.lower() for m in TASK_ID_TAG_RE.findall(note or "")}
+    cited = extract_cited_task_ids(note or "")
     if re.fullmatch(r"[0-9a-f]{8}", tid) and cited and tid not in cited:
         reasons.append(f"โน้ตอ้าง task {', '.join(sorted(cited))} ไม่ใช่ {tid}")
     if implementation and files_touched == 0:
@@ -1462,12 +1502,9 @@ def is_delivery_pointer_failure(note: str, task_file: str | None, elapsed_sec: f
         ``DELIVERY_POINTER_FAILURE_WINDOW_SEC`` of the assign;
       - textual: the note echoes the pointer's own "file-read tool" wording.
 
-    Root cause is fixed separately (`_task_handoff_pointer`'s
-    ``supports_file_read`` gate skips the pointer entirely for a provider
-    without one) — this is the belt-and-suspenders net for any pane that
-    still hits an equivalent wall (a future provider, a mis-set capability
-    flag, ...), so Lead is never sent chasing a "root cause" for work that
-    never began.
+    Production pointers explicitly allow structured readers and shell read
+    commands. This check still distinguishes an unreadable handoff from
+    failure of the assigned work, so Lead can diagnose delivery first.
     """
     if not task_file:
         return False
@@ -1520,6 +1557,7 @@ def _append_worktree_hint(
         "(#385 — worktree ของคุณเท่านั้น) · push ได้เฉพาะ branch นี้แบบระบุชื่อ "
         f"(`git push -u origin {branch}` — ห้าม force, #438) เมื่อ task ต้องให้ CI ตรวจก่อน done · "
         "ห้าม switch branch/rebase · "
+        "ห้ามสร้าง symlink หรือ NTFS junction เองเด็ดขาด (#796) — หากต้องการ dependency ให้แจ้ง Lead หรือรัน setup · "
         "Lead จะ review + merge กลับ base "
         "หลังคุณ `takkub done`" + setup
     )

@@ -131,6 +131,7 @@ def _append_record(
     body: str,
     generation: int,
     state: str,
+    kind: str = "instruction",
 ) -> str:
     msg_id = uuid.uuid4().hex[:12]
     records = read(runtime_dir, project_ns)
@@ -144,6 +145,7 @@ def _append_record(
             "generation": int(generation),
             "state": state,
             "replays": 0,
+            "kind": kind,
         }
     )
     per_role: dict[str, int] = {}
@@ -165,6 +167,7 @@ def append(
     from_role: str | None,
     body: str,
     generation: int,
+    kind: str = "instruction",
 ) -> str:
     """Record one outgoing message; returns its id.
 
@@ -180,6 +183,7 @@ def append(
         body=body,
         generation=generation,
         state="sent",
+        kind=kind,
     )
 
 
@@ -190,6 +194,7 @@ def append_queued_no_pane(
     to_role: str,
     from_role: str | None,
     body: str,
+    kind: str = "instruction",
 ) -> str:
     """Record a `takkub send` aimed at a role with no pane open yet (#303
     item 3) — `to_role` is a known role, but nothing to write the bytes
@@ -205,6 +210,7 @@ def append_queued_no_pane(
         body=body,
         generation=-1,
         state="queued_no_pane",
+        kind=kind,
     )
 
 

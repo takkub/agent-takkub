@@ -2012,7 +2012,7 @@ class TestCodexRemoteHistory:
         )
 
         assert notify_mod.read_recent_lead_messages(path, provider="codex") == [
-            {"text": "hello", "kind": "me", "ts": None},
+            {"text": "hello\n![รูปแนบ](</tmp/pasted.png>)", "kind": "me", "ts": None},
             {"text": "working update", "kind": "lead", "ts": None},
             {"text": "final answer", "kind": "lead", "ts": None},
         ]

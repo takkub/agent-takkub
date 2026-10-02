@@ -107,6 +107,7 @@ from PyQt6.QtWidgets import (
     QMessageBox,
     QPlainTextEdit,
     QPushButton,
+    QRadioButton,
     QScrollArea,
     QSpinBox,
     QStackedWidget,
@@ -717,7 +718,7 @@ def _hop_add_role_sections(project: str | None = None) -> tuple[tuple[str, tuple
     groups = _team_preset.role_groups(project)
     return (
         ("ตำแหน่ง", groups["positions"]),
-        ("โหมด Reviewer", groups["reviewer_modes"]),
+        ("ตรวจสอบคุณภาพ", groups["reviewer_modes"]),
         ("สมองเสริม (ความเห็นที่สอง)", groups["secondary_brains"]),
         ("ปิดอยู่", groups["extra_positions"]),
     )
@@ -1995,14 +1996,81 @@ class SettingsWindow(
         park_lay = QVBoxLayout(park_panel)
         park_lay.setContentsMargins(16, 16, 16, 16)
         park_lay.setSpacing(8)
+
+        park_title = QLabel("นโยบายเมื่อชนโควตา / Token Limit (Auto-Resume)", park_panel)
+        park_title.setStyleSheet("font-weight: 600; font-size: 13px;")
+        park_lay.addWidget(park_title)
+
+        self._quota_reroute_rb = QRadioButton(
+            "สลับ provider ต่องานต่อเนื่องอัตโนมัติ (Auto-reroute to substitute provider)",
+            park_panel,
+        )
+        self._quota_park_rb = QRadioButton(
+            "หยุดรอจนกว่า token reset (Park & wait for cooldown)",
+            park_panel,
+        )
+
+        current_policy = auto_resume.quota_policy()
+        if current_policy == auto_resume.QUOTA_POLICY_PARK:
+            self._quota_park_rb.setChecked(True)
+        else:
+            self._quota_reroute_rb.setChecked(True)
+
+        def _on_quota_policy_changed():
+            pol = (
+                auto_resume.QUOTA_POLICY_PARK
+                if self._quota_park_rb.isChecked()
+                else auto_resume.QUOTA_POLICY_REROUTE
+            )
+            auto_resume.set_quota_policy(pol)
+
+        self._quota_reroute_rb.toggled.connect(_on_quota_policy_changed)
+        self._quota_park_rb.toggled.connect(_on_quota_policy_changed)
+        park_lay.addWidget(self._quota_reroute_rb)
+        park_lay.addWidget(self._quota_park_rb)
+
         self._park_fallback_chk = QCheckBox("เมื่อ reroute ไม่ได้ → park รอ reset", park_panel)
         self._park_fallback_chk.setChecked(auto_resume.park_fallback_enabled())
         self._park_fallback_chk.toggled.connect(auto_resume.set_park_fallback_enabled)
         park_lay.addWidget(self._park_fallback_chk)
+
+        exclude_label = QLabel(
+            "ยกเว้น provider เหล่านี้ไม่ให้สลับไปหา (Exclude providers from reroute):",
+            park_panel,
+        )
+        exclude_label.setStyleSheet("margin-top: 6px; font-weight: 500;")
+        park_lay.addWidget(exclude_label)
+
+        exclude_box = QHBoxLayout()
+        exclude_box.setSpacing(12)
+        current_excluded = auto_resume.quota_exclude_providers()
+        self._exclude_provider_chks = {}
+        for prov in ("codex", "gemini", "opencode", "claude", "cursor"):
+            chk = QCheckBox(prov, park_panel)
+            chk.setChecked(prov in current_excluded)
+
+            def _make_excl_handler(p=prov, c=chk):
+                def _handler(checked):
+                    cur = auto_resume.quota_exclude_providers()
+                    if checked:
+                        cur.add(p)
+                    else:
+                        cur.discard(p)
+                    auto_resume.set_quota_exclude_providers(cur)
+
+                return _handler
+
+            chk.toggled.connect(_make_excl_handler(prov, chk))
+            self._exclude_provider_chks[prov] = chk
+            exclude_box.addWidget(chk)
+        exclude_box.addStretch()
+        park_lay.addLayout(exclude_box)
+
         park_hint = QLabel(
-            "เมื่อ quota หมด จะลองย้ายงานไป provider อื่นก่อนเสมอ · "
-            "เปิด: ถ้าย้ายไม่ได้ให้พักรอ quota reset · ปิด: หยุดงานและแจ้ง Lead · "
-            "บันทึกทันที มีผลเมื่อ quota หมดครั้งถัดไป",
+            "กำหนดพฤติกรรมเมื่อใช้งานจนชน limit ของ provider · "
+            "สลับ provider: จะย้ายงานไป provider อื่นที่โควตายังเหลือและไม่ถูก exclude · "
+            "หยุดรอ: จะคง session/browser เดิมไว้ และปลุกอัตโนมัติเมื่อครบเวลาคูลดาวน์ · "
+            "บันทึกทันที มีผลเมื่อชน limit ครั้งถัดไป",
             park_panel,
         )
         park_hint.setObjectName("panelHint")
@@ -2553,12 +2621,8 @@ class SettingsWindow(
         """(Re)builds the Roles page's role groups for
         `self._selected_team_preset_id` (#592 item 1): "ตำแหน่งในทีม" (team
         positions, always expanded — CORE_POSITION_ROLES + custom roles),
-        then 3 collapsed-by-default groups so every `pipeline_config.
-        valid_roles()` member still gets a row somewhere — "โหมด Reviewer"
-        (reviewer/qa/critic — #513/#561 folded qa/critic's dispatch into
-        `reviewer --mode`, but each keeps its own toggleable row here now,
-        fixing the "enabled but invisible" gap #590/#592's investigation
-        found) and "ตำแหน่งเสริม" (tester/analyst/designer/docs/security).
+        followed by expanded independent review roles and collapsed extra
+        positions/secondary brains. Every valid role remains visible.
         Called on first build AND every team-size card click (preview, no
         disk write — see `_build_team_size_panel`)."""
         from . import team_preset as _team_preset
@@ -2707,17 +2771,17 @@ class SettingsWindow(
 
         outer.addWidget(role_panel)
 
-        # โหมด Reviewer — reviewer (code) / qa (e2e) / critic (ui): #513/#561
-        # folded qa/critic's dispatch into `reviewer --mode`, but each still
-        # gets its own real row now instead of only whichever one happened
-        # to be the active checker (#590/#592: the other two could be fully
-        # enabled yet invisible here, which read as a bug on its own).
+        # Reviewer, QA and Critic each edit their own provider/model/effort.
         reviewer_group, reviewer_body = self._build_collapsible_group(
-            "REVIEW", "โหมด Reviewer", f"{len(reviewer_mode_roles)} โหมด", self._roster_panel
+            "REVIEW",
+            "ตรวจสอบคุณภาพ",
+            f"{len(reviewer_mode_roles)} ตำแหน่ง",
+            self._roster_panel,
+            collapsed=False,
         )
         reviewer_hint = QLabel(
-            "3 โหมดของ Reviewer เดียวกัน — ตรวจโค้ด (code) · ทดสอบหน้าเว็บ (e2e, เดิมชื่อ QA) · "
-            "ตรวจ UI/ภาพหน้าจอ (ui, เดิมชื่อ Design Critic)",
+            "แยกหน้าที่และตั้งค่าแต่ละตำแหน่งได้อิสระ — Reviewer ตรวจโค้ด · QA ทดสอบการใช้งาน · "
+            "Design Critic ตรวจ UI/ภาพหน้าจอ",
             reviewer_group,
         )
         reviewer_hint.setObjectName("panelHint")
@@ -2729,72 +2793,24 @@ class SettingsWindow(
                 role, r.color if r else cockpit_theme.ROLE_COLOR_FALLBACK
             )
             role_label = _team_preset.REVIEWER_MODE_LABELS.get(role, role.capitalize())
-            # #592 round-2 item 1: qa/critic's OWN provider/model/effort combos
-            # here used to silently do nothing — spawn always reads whichever
-            # row `settings_role_for` names (Reviewer, on every built-in
-            # preset). Render those two as a plain resolved-text row instead
-            # of a second, unused set of controls; only a `custom` preset
-            # explicitly choosing checker="qa" keeps qa's own real row.
-            settings_role = _team_preset.settings_role_for(role, self._project)
-            if settings_role != role:
-                row = self._build_deferred_role_row(
-                    role,
-                    role_label,
-                    color,
-                    reviewer_group,
-                    settings_role=settings_role,
-                    enabled=self._row_enabled_now(role, cfg),
-                )
-            else:
-                row = self._build_role_row(
-                    role,
-                    role_label,
-                    color,
-                    "",
-                    reviewer_group,
-                    locked=False,
-                    enabled=self._row_enabled_now(role, cfg),
-                    current_provider=role_providers.get(role, provider_config.CLAUDE),
-                    deletable=False,
-                    show_enable_toggle=True,
-                )
-                if role == "reviewer":
-                    # Live-refresh every qa/critic deferred label whenever
-                    # Reviewer's own row changes — before Save & Apply, not
-                    # just after (same live-preview spirit as #592 item 3's
-                    # "(default → ...)" labels).
-                    self._role_provider_combos[role].currentIndexChanged.connect(
-                        self._refresh_deferred_role_labels
-                    )
-                    self._role_model_combos[role].currentTextChanged.connect(
-                        self._refresh_deferred_role_labels
-                    )
-                    self._role_effort_combos[role].currentIndexChanged.connect(
-                        self._refresh_deferred_role_labels
-                    )
-            reviewer_body.addWidget(row)
-
-        # #590 follow-up, round-2 item 1: qa/critic entries still sitting in
-        # routing.json/role-models.json that settings_role_for no longer
-        # consults (configured but silently unused since the roster stopped
-        # rendering a row for them) — surfaced here, right under the rows
-        # that now explain what actually runs instead.
-        stale_entries = _team_preset.stale_legacy_role_configs(self._project)
-        if stale_entries:
-            stale_lines = "\n".join(
-                f"- {_team_preset.REVIEWER_MODE_LABELS.get(e['role'], e['role'])}: "
-                f"provider={e['provider']}" + (f" model={e['model']}" if e["model"] else "")
-                for e in stale_entries
-            )
-            stale_lbl = QLabel(
-                "พบค่าเก่าที่เคยตั้งไว้แต่ตอนนี้ไม่ถูกใช้แล้ว (แถวด้านบนใช้ค่า Reviewer แทน):\n" + stale_lines,
+            description = {
+                "reviewer": "ตรวจโค้ดและหาข้อผิดพลาด",
+                "qa": "ทดสอบหน้าเว็บและการใช้งานจริง (e2e)",
+                "critic": "ตรวจความสวยงามและความชัดเจนของ UI/ภาพหน้าจอ",
+            }[role]
+            row = self._build_role_row(
+                role,
+                role_label,
+                color,
+                description,
                 reviewer_group,
+                locked=False,
+                enabled=self._row_enabled_now(role, cfg),
+                current_provider=role_providers.get(role, provider_config.CLAUDE),
+                deletable=False,
+                show_enable_toggle=True,
             )
-            stale_lbl.setObjectName("panelHint")
-            stale_lbl.setWordWrap(True)
-            reviewer_body.addWidget(stale_lbl)
-
-        self._refresh_deferred_role_labels()
+            reviewer_body.addWidget(row)
         outer.addWidget(reviewer_group)
 
         # ตำแหน่งเสริม (ปิดอยู่โดยดีฟอลต์) — tester/analyst/designer/docs/
@@ -5152,7 +5168,7 @@ class SettingsWindow(
 
     def _build_hop_add_role_combo(self, parent: QWidget, used: set[str]) -> QComboBox:
         """The per-hop "+ add role" dropdown, sectioned by `role_groups()`
-        bucket (#592 item 4: ตำแหน่ง / โหมด Reviewer / สมองเสริม (ความเห็น
+        bucket (#592 item 4: ตำแหน่ง / ตรวจสอบคุณภาพ / สมองเสริม (ความเห็น
         ที่สอง) / ปิดอยู่) — a section header is a non-selectable row so it
         can't be picked as a role by mistake. Roles already in the hop
         (*used*) are left out of every section, same as the flat list this

@@ -153,6 +153,20 @@ def test_zero_window_preserves_immediate_legacy_delivery(
 
     written = _written(lead.session)
     assert "[backend done] legacy" in written
+
+
+def test_long_failed_handoff_delivers_only_markdown_pointer(orch, monkeypatch):
+    from pathlib import Path
+
+    monkeypatch.setenv("TAKKUB_INBOX_DIGEST_MS", "0")
+    body = "[backend FAILED] " + "failure evidence and fix instructions\n" * 100
+    with patch("agent_takkub.lead_inbox.QTimer.singleShot"):
+        orch._notify_lead(PROJECT, body)
+    written = _written(orch._panes_by_project[PROJECT]["lead"].session)
+    assert body not in written
+    assert "อ่านไฟล์นี้" in written
+    path = written.split('"')[1]
+    assert body in Path(path).read_text(encoding="utf-8")
     assert "Lead Inbox Digest" not in written
 
 
