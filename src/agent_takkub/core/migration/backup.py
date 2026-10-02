@@ -55,6 +55,13 @@ class BackupManager:
         else:
             dest.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(backup_path, dest)
+        # copy2 restores the backup's OLD mtime, so a stat-cached read taken
+        # after the step wrote *dest* (no longer "recent") would keep serving
+        # the step's value for up to _STAT_TTL_S — in-process writers must
+        # invalidate (cached_read contract).
+        from agent_takkub import cached_read
+
+        cached_read.invalidate(None if backup_path.is_dir() else dest)
 
     def latest_backup(self, step_id: str, name: str) -> Path | None:
         step_dir = self._root / step_id

@@ -17,6 +17,8 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 - Codex: ตรวจเจอหน้าต่าง "session ถูก lock โดยแอปอื่น" ไม่ส่งงานแบบไม่รู้ตัว (#787) · assign เข้า pane ที่ปิด/ว่างได้ไม่ชนชื่อ role (#788) · `takkub.ps1` เลี่ยง cmd ตัดอักขระ `|` (#789) · ตัวตรวจ done-note รับหัวข้อมี qualifier และ evidence แบบ bullet (#790)
 - กันงาน browser/e2e ไม่ให้ใช้ `--mode subagent` (#792) · ทิ้ง notice backlog ที่ปิดแล้วตอนส่ง (#793) · `takkub close|kill|tail <role>` แบบ positional (#794) · คิวผูก task id ไม่ให้ pane รันงานเก่าแทน (#795)
 - worktree: กัน junction ที่ไม่ได้ track ลบ repo หลัก (#796) · `kill --pid` ปิด process ลูกทั้งต้นไม้ (#797) · reaper ไม่เตือนผิดเมื่อ pane done แล้ว (#799) · multi-repo หา git repo ย่อยในโฟลเดอร์ที่ไม่ใช่ git (#800) · Windows PTY transcript ขึ้นบรรทัดใหม่ถูกต้อง (#801)
+- migration rollback: คืนไฟล์จาก backup แล้วล้าง read cache ด้วย — เดิมอาจอ่านได้ค่าที่ step เขียนทับไว้ต่ออีก ~3 วินาที (CI Windows แดงเป็นพักๆ)
+- อัปเดต `virtualenv` 21.7.13 ปิด Dependabot alert 4 ใบ (#802)
 
 ## [v2.2.0] - 2026-10-01
 

@@ -142,6 +142,28 @@ def test_readonly_registries_rollback_restores_prior_v2_value(v1_homes, journal_
     assert read_json(layout.models / "registry.json")["data"] == {"prior": True}
 
 
+def test_backup_restore_invalidates_stat_cache(tmp_path):
+    """Windows CI flake (1520b2fd): the step's write was read once it was no
+    longer "recent", then copy2 restored the backup's old mtime and the
+    stat-cached read kept serving the step's value."""
+    import os
+    import time
+
+    target = tmp_path / "registry.json"
+    target.write_text(json.dumps({"data": {"prior": True}}), encoding="utf-8")
+    backups = BackupManager(root=tmp_path / "bk")
+    backup = backups.backup("s", target)
+    old = time.time() - 60
+    os.utime(backup, (old, old))
+    target.write_text(json.dumps({"data": {"new": True}}), encoding="utf-8")
+    stale = time.time() - 10
+    os.utime(target, (stale, stale))
+    assert read_json(target)["data"] == {"new": True}
+
+    backups.restore(backup, target)
+    assert read_json(target)["data"] == {"prior": True}
+
+
 # ---------------------------------------------------------------------------
 # Step 3 — capability
 # ---------------------------------------------------------------------------

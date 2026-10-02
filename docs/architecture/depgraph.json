@@ -444,6 +444,7 @@
       "imported_by": [
         "agent_takkub.backlog",
         "agent_takkub.config",
+        "agent_takkub.core.migration.backup",
         "agent_takkub.core.migration.registry_copy_step",
         "agent_takkub.core.storage.legacy_reader",
         "agent_takkub.core.storage.v2_target",
@@ -456,7 +457,7 @@
         "agent_takkub.usage_ledger",
         "agent_takkub.user_profile"
       ],
-      "fan_in": 13,
+      "fan_in": 14,
       "fan_out": 0
     },
     {
@@ -1660,6 +1661,7 @@
     {
       "module": "agent_takkub.core.migration.backup",
       "imports": [
+        "agent_takkub.cached_read",
         "agent_takkub.core.storage.paths"
       ],
       "imported_by": [
@@ -1672,7 +1674,7 @@
         "agent_takkub.doctor"
       ],
       "fan_in": 7,
-      "fan_out": 1
+      "fan_out": 2
     },
     {
       "module": "agent_takkub.core.migration.engine",
