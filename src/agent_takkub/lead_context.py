@@ -810,6 +810,16 @@ User เปิด **Multi mode** — เมื่อ request มี **หลา�
     if post_compact_brief:
         suffix += post_compact_brief
 
+    # Skill Learning (2c6cb77c): the learned-skill index + last run's result,
+    # so Lead knows what the team already learned before routing.
+    if project is not None:
+        try:
+            from .skill_learning.index import render as _render_learned_index
+
+            suffix += _render_learned_index(project, "lead", for_lead=True)
+        except Exception:
+            _log_event("skill_learning_index_error", project=project, target="lead")
+
     return base + suffix
 
 

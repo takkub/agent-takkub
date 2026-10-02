@@ -201,6 +201,14 @@ def measure_role_appendix(base_role: str, project_ns: str) -> list[CategoryMeasu
         skill_appendix = ""
     out.append(_cat("skill_matrix_appendix", skill_appendix))
 
+    try:
+        from .skill_learning.index import render as _render_learned_index
+
+        learned_index = _render_learned_index(project_ns, "claude") if project_ns else ""
+    except Exception:
+        learned_index = ""
+    out.append(_cat("learned_skill_index", learned_index))
+
     guard_text = BIG_FILE_GUARD
     if role_needs_stale_file_guard(base_role):
         guard_text += STALE_FILE_GUARD

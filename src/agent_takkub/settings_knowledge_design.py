@@ -269,6 +269,7 @@ class KnowledgeDesignSettingsMixin:
         lay.setSpacing(14)
 
         lay.addWidget(self._build_context_strategy_panel(view))
+        lay.addWidget(self._build_skill_learning_panel(view))
 
         panel = QWidget(view)
         panel.setObjectName("panel")
@@ -569,6 +570,86 @@ class KnowledgeDesignSettingsMixin:
         for v, btn in self._kd_ctx_strategy_buttons.items():
             btn.setChecked(v == value)
 
+    # ──────────────────────────────────────────────────────────
+    # Skill Learning (2c6cb77c) — write-through like Context Strategy
+    # ──────────────────────────────────────────────────────────
+
+    def _build_skill_learning_panel(self, parent: QWidget) -> QWidget:
+        from .skill_learning import settings as sl_settings
+
+        panel = QWidget(parent)
+        panel.setObjectName("panel")
+        lay = QVBoxLayout(panel)
+        lay.setContentsMargins(14, 12, 14, 12)
+        lay.setSpacing(8)
+        lay.addWidget(self._build_card_header("SKILL LEARNING", "เรียนรู้ skill จากงานจริง", "", panel))
+
+        current = sl_settings.load()
+        env_mode = os.environ.get(sl_settings.ENV_MODE, "").strip().lower()
+        env_active = env_mode in sl_settings.MODES
+        if env_active:
+            banner = QLabel(
+                f"{sl_settings.ENV_MODE}={env_mode} (env) — โหมดด้านล่างถูกปิดไว้ชั่วคราว", panel
+            )
+            banner.setObjectName("infoBanner")
+            lay.addWidget(banner)
+
+        self._kd_sl_buttons: dict[str, dict[str, QPushButton]] = {"mode": {}, "provider": {}}
+        rows = (
+            ("mode", "โหมด:", _SKILL_LEARNING_MODES, current.mode, not env_active),
+            (
+                "provider",
+                "ผู้กลั่น:",
+                [("auto", "Auto")] + [(p, p) for p in sl_settings.REFLECTOR_PROVIDERS],
+                current.provider,
+                True,
+            ),
+        )
+        for key, title, choices, value_now, enabled in rows:
+            row = QHBoxLayout()
+            row.addWidget(QLabel(title, panel))
+            group = QButtonGroup(panel)
+            group.setExclusive(True)
+            for value, label in choices:
+                btn = QPushButton(label, panel)
+                btn.setObjectName("secondaryButton")
+                btn.setCursor(Qt.CursorShape.PointingHandCursor)
+                btn.setCheckable(True)
+                btn.setChecked(value == value_now)
+                btn.setEnabled(enabled)
+                btn.clicked.connect(
+                    lambda _c, k=key, v=value: self._on_kd_skill_learning_clicked(k, v)
+                )
+                group.addButton(btn)
+                self._kd_sl_buttons[key][value] = btn
+                row.addWidget(btn)
+            row.addStretch(1)
+            lay.addLayout(row)
+            setattr(self, f"_kd_sl_group_{key}", group)
+
+        self._kd_sl_status = QLabel(_skill_learning_status_text(), panel)
+        self._kd_sl_status.setObjectName("panelHint")
+        self._kd_sl_status.setWordWrap(True)
+        lay.addWidget(self._kd_sl_status)
+        hint = QLabel(
+            "ทุกครั้งที่ pane รายงาน done ระบบจะอ่านงานนั้น (ทุก provider) แล้วกลั่นบทเรียนที่ใช้ซ้ำได้เป็น skill "
+            "· Auto = ตรวจผ่านแล้วบันทึกเลย · Propose = รอ `takkub skills learned approve` · Off = หยุดกลั่น "
+            "· skill ที่ไม่มีใครใช้จะถูก archive เอง (ไม่ลบ) · ดูรายการ: `takkub skills learned list`",
+            panel,
+        )
+        hint.setObjectName("panelHint")
+        hint.setWordWrap(True)
+        lay.addWidget(hint)
+        return panel
+
+    def _on_kd_skill_learning_clicked(self, key: str, value: str) -> None:
+        from .skill_learning import settings as sl_settings
+
+        sl_settings.update(**{key: value})
+        for v, btn in self._kd_sl_buttons[key].items():
+            btn.setChecked(v == value)
+        self._kd_sl_status.setText(_skill_learning_status_text())
+
     # view: Context Debug — REMOVED in the #515 settings diet: it duplicated
     # `takkub doctor`'s own context-trace section (`core.context_sources.
     # doctor_section`, wired to the same `load_last_trace()` this tab used
@@ -586,6 +667,25 @@ class KnowledgeDesignSettingsMixin:
 # module-level status helpers — run entirely off the Qt thread inside
 # `_CallableThread`, so they must not touch any Qt object.
 # ──────────────────────────────────────────────────────────────
+
+
+_SKILL_LEARNING_MODES = [("auto", "Auto"), ("propose", "Propose"), ("off", "Off")]
+
+
+def _skill_learning_status_text() -> str:
+    """One status line for the Skill Learning panel — a handful of small
+    JSON/frontmatter reads for the active project, never a provider call."""
+    try:
+        from . import config
+        from .skill_learning import store
+
+        project = config.active_project()[0]
+        live = len(store.list_skills(project)) if project else 0
+        last = store.read_json(store.state_dir(project) / "last_run.json", {}) if project else {}
+        tail = f" · รอบล่าสุด: {last['summary']}" if last.get("summary") else ""
+        return f"โปรเจกต์ {project or '-'}: skill ที่เรียนรู้แล้ว {live} ตัว{tail}"
+    except Exception:
+        return "สถานะ Skill Learning: อ่านไม่ได้ (ดู `takkub skills learned status`)"
 
 
 def _collect_knowledge_status(project: str | None) -> dict[str, tuple[bool | None, str]]:

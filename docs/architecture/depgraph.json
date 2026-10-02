@@ -1,6 +1,6 @@
 {
   "generated_by": "grimp 3.14",
-  "module_count": 360,
+  "module_count": 371,
   "modules": [
     {
       "module": "agent_takkub",
@@ -101,6 +101,7 @@
         "agent_takkub.services",
         "agent_takkub.settings_management.pages.skills_page",
         "agent_takkub.shared_dev_tools",
+        "agent_takkub.skill_learning.reflector",
         "agent_takkub.skill_scan",
         "agent_takkub.smoke_gate",
         "agent_takkub.status_header",
@@ -113,7 +114,7 @@
         "agent_takkub.verify",
         "agent_takkub.worktree_manager"
       ],
-      "fan_in": 50,
+      "fan_in": 51,
       "fan_out": 0
     },
     {
@@ -358,6 +359,7 @@
         "agent_takkub.provider_spec",
         "agent_takkub.role_memory",
         "agent_takkub.shared_dev_tools",
+        "agent_takkub.skill_learning.index",
         "agent_takkub.skill_policy",
         "agent_takkub.skill_scan",
         "agent_takkub.token_estimate",
@@ -367,7 +369,7 @@
         "agent_takkub.doctor"
       ],
       "fan_in": 1,
-      "fan_out": 13
+      "fan_out": 14
     },
     {
       "module": "agent_takkub.boot_flow",
@@ -556,6 +558,7 @@
         "agent_takkub.shard_fanout",
         "agent_takkub.shared_dev_tools",
         "agent_takkub.skill_audit",
+        "agent_takkub.skill_learning.cli_commands",
         "agent_takkub.skill_policy",
         "agent_takkub.skill_scan",
         "agent_takkub.task_ledger",
@@ -569,7 +572,7 @@
         "agent_takkub.__main__"
       ],
       "fan_in": 1,
-      "fan_out": 58
+      "fan_out": 59
     },
     {
       "module": "agent_takkub.cli_server",
@@ -685,11 +688,12 @@
         "agent_takkub.provider_spec",
         "agent_takkub.provider_usage",
         "agent_takkub.remote.notify",
+        "agent_takkub.skill_learning.reflector",
         "agent_takkub.spawn_engine",
         "agent_takkub.token_meter",
         "agent_takkub.usage_ledger"
       ],
-      "fan_in": 13,
+      "fan_in": 14,
       "fan_out": 2
     },
     {
@@ -791,12 +795,17 @@
         "agent_takkub.response_language",
         "agent_takkub.role_memory",
         "agent_takkub.rtk_helper",
+        "agent_takkub.settings_knowledge_design",
         "agent_takkub.settings_management.__main__",
         "agent_takkub.settings_management.repositories.skills",
         "agent_takkub.settings_management.services.cleanup",
         "agent_takkub.settings_window",
         "agent_takkub.shared_dev_tools",
         "agent_takkub.skill_audit",
+        "agent_takkub.skill_learning.cli_commands",
+        "agent_takkub.skill_learning.reflector",
+        "agent_takkub.skill_learning.settings",
+        "agent_takkub.skill_learning.store",
         "agent_takkub.skill_scan",
         "agent_takkub.spawn_engine",
         "agent_takkub.status_header",
@@ -818,7 +827,7 @@
         "agent_takkub.worktree_manager",
         "agent_takkub.worktree_reuse"
       ],
-      "fan_in": 118,
+      "fan_in": 123,
       "fan_out": 2
     },
     {
@@ -1508,9 +1517,10 @@
         "agent_takkub.core.models.conversation"
       ],
       "imported_by": [
-        "agent_takkub.core.conversation.facade"
+        "agent_takkub.core.conversation.facade",
+        "agent_takkub.skill_learning.episode"
       ],
-      "fan_in": 1,
+      "fan_in": 2,
       "fan_out": 8
     },
     {
@@ -2627,9 +2637,10 @@
       "imported_by": [
         "agent_takkub.core.conversation.ingest.cursor_adapter",
         "agent_takkub.remote.notify",
+        "agent_takkub.skill_learning.reflector",
         "agent_takkub.token_meter"
       ],
-      "fan_in": 3,
+      "fan_in": 4,
       "fan_out": 1
     },
     {
@@ -3078,6 +3089,7 @@
         "agent_takkub.provider_config",
         "agent_takkub.provider_state",
         "agent_takkub.response_language",
+        "agent_takkub.skill_learning.index",
         "agent_takkub.team_preset",
         "agent_takkub.user_profile",
         "agent_takkub.vault_mirror"
@@ -3098,7 +3110,7 @@
         "agent_takkub.user_profile"
       ],
       "fan_in": 13,
-      "fan_out": 14
+      "fan_out": 15
     },
     {
       "module": "agent_takkub.lead_draft_state",
@@ -3323,9 +3335,10 @@
       ],
       "imported_by": [
         "agent_takkub.cli",
+        "agent_takkub.skill_scan",
         "agent_takkub.spawn_engine"
       ],
-      "fan_in": 2,
+      "fan_in": 3,
       "fan_out": 4
     },
     {
@@ -3396,11 +3409,12 @@
         "agent_takkub.core.versioning.probe",
         "agent_takkub.provider_spec",
         "agent_takkub.remote.notify",
+        "agent_takkub.skill_learning.reflector",
         "agent_takkub.spawn_engine",
         "agent_takkub.token_meter",
         "agent_takkub.usage_ledger"
       ],
-      "fan_in": 7,
+      "fan_in": 8,
       "fan_out": 2
     },
     {
@@ -3472,6 +3486,7 @@
         "agent_takkub.secret_redact",
         "agent_takkub.shard_fanout",
         "agent_takkub.shared_dev_tools",
+        "agent_takkub.skill_learning_mixin",
         "agent_takkub.spawn_engine",
         "agent_takkub.task_delivery",
         "agent_takkub.task_ledger",
@@ -3494,7 +3509,7 @@
         "agent_takkub.user_actions"
       ],
       "fan_in": 6,
-      "fan_out": 67
+      "fan_out": 68
     },
     {
       "module": "agent_takkub.orchestrator_text",
@@ -3534,9 +3549,10 @@
         "agent_takkub.pty_session",
         "agent_takkub.remote.notify",
         "agent_takkub.settings_window",
+        "agent_takkub.skill_learning.episode",
         "agent_takkub.spawn_engine"
       ],
-      "fan_in": 23,
+      "fan_in": 24,
       "fan_out": 11
     },
     {
@@ -3552,9 +3568,10 @@
         "agent_takkub.mcp_bridge",
         "agent_takkub.native_skills",
         "agent_takkub.orchestrator",
+        "agent_takkub.skill_learning.reflector",
         "agent_takkub.spawn_engine"
       ],
-      "fan_in": 5,
+      "fan_in": 6,
       "fan_out": 4
     },
     {
@@ -4099,11 +4116,12 @@
         "agent_takkub.settings_management.repositories.providers",
         "agent_takkub.settings_window",
         "agent_takkub.shard_fanout",
+        "agent_takkub.skill_learning.index",
         "agent_takkub.spawn_engine",
         "agent_takkub.status_header",
         "agent_takkub.user_actions"
       ],
-      "fan_in": 34,
+      "fan_in": 35,
       "fan_out": 4
     },
     {
@@ -4124,9 +4142,10 @@
         "agent_takkub.provider_update",
         "agent_takkub.settings_management.repositories.providers",
         "agent_takkub.settings_window",
+        "agent_takkub.skill_learning.reflector",
         "agent_takkub.user_actions"
       ],
-      "fan_in": 9,
+      "fan_in": 10,
       "fan_out": 5
     },
     {
@@ -4598,9 +4617,12 @@
       "imports": [],
       "imported_by": [
         "agent_takkub.orchestrator",
-        "agent_takkub.remote.notify"
+        "agent_takkub.remote.notify",
+        "agent_takkub.skill_learning.episode",
+        "agent_takkub.skill_learning.promoter",
+        "agent_takkub.skill_learning.reflector"
       ],
-      "fan_in": 2,
+      "fan_in": 5,
       "fan_out": 0
     },
     {
@@ -4652,6 +4674,7 @@
       "module": "agent_takkub.settings_knowledge_design",
       "imports": [
         "agent_takkub.cockpit_theme",
+        "agent_takkub.config",
         "agent_takkub.core.brain.store",
         "agent_takkub.core.capabilities.design_clients",
         "agent_takkub.core.capabilities.design_integrations",
@@ -4660,14 +4683,16 @@
         "agent_takkub.doctor",
         "agent_takkub.lead_context",
         "agent_takkub.pane_tools_policy",
-        "agent_takkub.settings_window"
+        "agent_takkub.settings_window",
+        "agent_takkub.skill_learning.settings",
+        "agent_takkub.skill_learning.store"
       ],
       "imported_by": [
         "agent_takkub.settings_usage",
         "agent_takkub.settings_window"
       ],
       "fan_in": 2,
-      "fan_out": 10
+      "fan_out": 13
     },
     {
       "module": "agent_takkub.settings_management",
@@ -5238,6 +5263,177 @@
       "fan_out": 1
     },
     {
+      "module": "agent_takkub.skill_learning",
+      "imports": [],
+      "imported_by": [
+        "agent_takkub.skill_learning.store"
+      ],
+      "fan_in": 1,
+      "fan_out": 0
+    },
+    {
+      "module": "agent_takkub.skill_learning.cli_commands",
+      "imports": [
+        "agent_takkub.config",
+        "agent_takkub.skill_learning.lifecycle",
+        "agent_takkub.skill_learning.pipeline",
+        "agent_takkub.skill_learning.reflector",
+        "agent_takkub.skill_learning.settings",
+        "agent_takkub.skill_learning.store"
+      ],
+      "imported_by": [
+        "agent_takkub.cli"
+      ],
+      "fan_in": 1,
+      "fan_out": 6
+    },
+    {
+      "module": "agent_takkub.skill_learning.episode",
+      "imports": [
+        "agent_takkub.core.conversation.ingest",
+        "agent_takkub.orchestrator_text",
+        "agent_takkub.secret_redact"
+      ],
+      "imported_by": [
+        "agent_takkub.skill_learning.pipeline",
+        "agent_takkub.skill_learning.promoter",
+        "agent_takkub.skill_learning.reflector",
+        "agent_takkub.skill_learning_mixin"
+      ],
+      "fan_in": 4,
+      "fan_out": 3
+    },
+    {
+      "module": "agent_takkub.skill_learning.index",
+      "imports": [
+        "agent_takkub.provider_spec",
+        "agent_takkub.skill_learning.settings",
+        "agent_takkub.skill_learning.store"
+      ],
+      "imported_by": [
+        "agent_takkub.boot_context",
+        "agent_takkub.lead_context",
+        "agent_takkub.spawn_engine"
+      ],
+      "fan_in": 3,
+      "fan_out": 3
+    },
+    {
+      "module": "agent_takkub.skill_learning.lifecycle",
+      "imports": [
+        "agent_takkub.skill_learning.settings",
+        "agent_takkub.skill_learning.store"
+      ],
+      "imported_by": [
+        "agent_takkub.skill_learning.cli_commands",
+        "agent_takkub.skill_learning.pipeline"
+      ],
+      "fan_in": 2,
+      "fan_out": 2
+    },
+    {
+      "module": "agent_takkub.skill_learning.pipeline",
+      "imports": [
+        "agent_takkub.skill_learning.episode",
+        "agent_takkub.skill_learning.lifecycle",
+        "agent_takkub.skill_learning.promoter",
+        "agent_takkub.skill_learning.reflector",
+        "agent_takkub.skill_learning.settings",
+        "agent_takkub.skill_learning.store"
+      ],
+      "imported_by": [
+        "agent_takkub.skill_learning.cli_commands",
+        "agent_takkub.skill_learning_mixin"
+      ],
+      "fan_in": 2,
+      "fan_out": 6
+    },
+    {
+      "module": "agent_takkub.skill_learning.promoter",
+      "imports": [
+        "agent_takkub.secret_redact",
+        "agent_takkub.skill_learning.episode",
+        "agent_takkub.skill_learning.reflector",
+        "agent_takkub.skill_learning.store"
+      ],
+      "imported_by": [
+        "agent_takkub.skill_learning.pipeline"
+      ],
+      "fan_in": 1,
+      "fan_out": 4
+    },
+    {
+      "module": "agent_takkub.skill_learning.reflector",
+      "imports": [
+        "agent_takkub._win_console",
+        "agent_takkub.codex_helper",
+        "agent_takkub.config",
+        "agent_takkub.cursor_helper",
+        "agent_takkub.opencode_helper",
+        "agent_takkub.pane_env",
+        "agent_takkub.provider_state",
+        "agent_takkub.secret_redact",
+        "agent_takkub.skill_learning.episode",
+        "agent_takkub.skill_learning.settings",
+        "agent_takkub.skill_learning.store"
+      ],
+      "imported_by": [
+        "agent_takkub.skill_learning.cli_commands",
+        "agent_takkub.skill_learning.pipeline",
+        "agent_takkub.skill_learning.promoter",
+        "agent_takkub.skill_learning_mixin"
+      ],
+      "fan_in": 4,
+      "fan_out": 11
+    },
+    {
+      "module": "agent_takkub.skill_learning.settings",
+      "imports": [
+        "agent_takkub.config"
+      ],
+      "imported_by": [
+        "agent_takkub.settings_knowledge_design",
+        "agent_takkub.skill_learning.cli_commands",
+        "agent_takkub.skill_learning.index",
+        "agent_takkub.skill_learning.lifecycle",
+        "agent_takkub.skill_learning.pipeline",
+        "agent_takkub.skill_learning.reflector"
+      ],
+      "fan_in": 6,
+      "fan_out": 1
+    },
+    {
+      "module": "agent_takkub.skill_learning.store",
+      "imports": [
+        "agent_takkub.config",
+        "agent_takkub.skill_learning"
+      ],
+      "imported_by": [
+        "agent_takkub.settings_knowledge_design",
+        "agent_takkub.skill_learning.cli_commands",
+        "agent_takkub.skill_learning.index",
+        "agent_takkub.skill_learning.lifecycle",
+        "agent_takkub.skill_learning.pipeline",
+        "agent_takkub.skill_learning.promoter",
+        "agent_takkub.skill_learning.reflector"
+      ],
+      "fan_in": 7,
+      "fan_out": 2
+    },
+    {
+      "module": "agent_takkub.skill_learning_mixin",
+      "imports": [
+        "agent_takkub.skill_learning.episode",
+        "agent_takkub.skill_learning.pipeline",
+        "agent_takkub.skill_learning.reflector"
+      ],
+      "imported_by": [
+        "agent_takkub.orchestrator"
+      ],
+      "fan_in": 1,
+      "fan_out": 3
+    },
+    {
       "module": "agent_takkub.skill_policy",
       "imports": [
         "agent_takkub.core.migration.registry_copy_step",
@@ -5268,6 +5464,7 @@
       "imports": [
         "agent_takkub._win_console",
         "agent_takkub.config",
+        "agent_takkub.native_skills",
         "agent_takkub.token_estimate",
         "agent_takkub.worktree_manager"
       ],
@@ -5284,7 +5481,7 @@
         "agent_takkub.user_profile"
       ],
       "fan_in": 10,
-      "fan_out": 4
+      "fan_out": 5
     },
     {
       "module": "agent_takkub.smoke_gate",
@@ -5341,6 +5538,7 @@
         "agent_takkub.rtk_helper",
         "agent_takkub.shard_fanout",
         "agent_takkub.shared_dev_tools",
+        "agent_takkub.skill_learning.index",
         "agent_takkub.skill_policy",
         "agent_takkub.skill_scan",
         "agent_takkub.spawn_gate",
@@ -5356,7 +5554,7 @@
         "agent_takkub.remote.api"
       ],
       "fan_in": 3,
-      "fan_out": 48
+      "fan_out": 49
     },
     {
       "module": "agent_takkub.spawn_gate",

@@ -82,7 +82,15 @@ takkub report list [--project p]                       # ดูรายกา�
 takkub report revoke <name> [--project p] [--delete]    # ตัดลิงก์ (token ตาย) — ไฟล์ยังอยู่เว้นแต่ใส่ --delete
 takkub report rotate <name> [--project p]               # ออก token ใหม่ — ลิงก์เก่าตายทันที ลิงก์ใหม่ใช้ได้
 takkub report relink [--project p]                      # (#451) พิมพ์ลิงก์ปัจจุบัน (secret_path ตอนนี้) ของทุก report ที่ยัง active — ใช้เมื่อ Remote ถูก Disable/re-pair แล้ว secret เปลี่ยน
+takkub skills learned status|list|runs [--project p]    # Skill Learning: skill ที่ระบบกลั่นเองจากทุก done (ทุก provider) + usage/รอบล่าสุด
+takkub skills learned show <name> | show-run <run_id>   # body + ledger ของ skill / สิ่งที่รอบนั้นเสนอ-land-ถูกปฏิเสธพร้อมเหตุผล
+takkub skills learned reflect --role <r> [--note "…"]   # (lead only) กลั่นงานล่าสุดของ role นั้นทันที (ข้าม gate คุ้ม/cooldown) — ผลมาเป็น Lead notice
+takkub skills learned mode auto|propose|off             # auto=ตรวจผ่านแล้ว land · propose=รอ approve/reject <run_id> · off=หยุดกลั่น (env TAKKUB_SKILL_LEARNING ทับได้)
+takkub skills learned provider auto|claude|codex|opencode|cursor  # ผู้กลั่น — auto ลองตามลำดับจนกว่าจะได้ (gemini ไม่เป็นผู้กลั่น: agy -p ต้องมี TTY)
+takkub skills learned archive|revive <name> · archived · curate  # archive = ย้าย ไม่ลบ · curate = รวม skill ซ้ำทั้งห้องสมุดเดี๋ยวนี้
 ```
+
+**Skill Learning** (design: `docs/architecture/skill-learning.md`): pane ที่ทำตาม skill ที่เรียนรู้ไว้ต้องใส่ `[skill: <name>]` ใน done note — เป็นสัญญาณเดียวที่นับว่า skill มีประโยชน์ (index ใน boot context บอก pane ให้อยู่แล้ว) · skill ที่ไม่มีใครใช้/เปิดอ่านเลยหลังครบ probation ถูก archive เอง
 
 **ข้อจำกัดสำคัญของ `takkub report`:** ลิงก์เปิดจากนอกเครื่องได้ **เฉพาะตอน Remote เปิดอยู่จริง** (Settings → Remote enabled + tunnel connect ขึ้น) — ปิด Remote อยู่ = publish/list ยังทำงาน (เขียนไฟล์ + คืน token ปกติ) แต่ลิงก์ที่ได้ยังเปิดจากนอกไม่ได้ ทุกครั้งที่ `publish`/`list`/`rotate` จะพิมพ์บรรทัดสถานะ Remote ให้ชัดเสมอ (`Remote: เปิดอยู่ (tunnel up) → URL ใช้ได้` หรือ `Remote: ปิดอยู่ → ...`) — คำสั่งนี้**ไม่เปิด Remote ให้อัตโนมัติ**, ต้องไปเปิดเองที่ Settings → Remote ก่อน (ยังไม่มีคำสั่ง CLI สำหรับเปิด/ปิด Remote)
 

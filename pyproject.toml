@@ -1,6 +1,6 @@
 [project]
 name = "agent-takkub"
-version = "2.2.1"
+version = "2.2.2"
 description = "Desktop cockpit for orchestrating Claude Code dev teammates on Windows"
 requires-python = ">=3.11"
 license = { text = "MIT" }
@@ -241,6 +241,20 @@ forbidden_modules = [
     "agent_takkub.provider_state",
     "agent_takkub.claude_auth_config",
     "agent_takkub.usage_ledger",
+]
+
+[[tool.importlinter.contracts]]
+name = "skill-learning-layer"
+type = "forbidden"
+# Skill Learning (2c6cb77c) is Qt-free and runs on its own worker thread: it
+# reports back through a callback the orchestrator turns into a signal, so it
+# must never reach up into the orchestrator / UI / CLI layers.
+source_modules = ["agent_takkub.skill_learning"]
+forbidden_modules = [
+    "agent_takkub.orchestrator",
+    "agent_takkub.main_window",
+    "agent_takkub.app",
+    "agent_takkub.cli",
 ]
 
 [[tool.importlinter.contracts]]

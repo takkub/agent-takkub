@@ -4,6 +4,16 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 
 ## [vNEXT]
 
+## [v2.2.2] - 2026-10-02
+
+### Added (เพิ่ม)
+
+- **Skill Learning — cockpit เรียนรู้ skill เองจากงานจริง ทุก provider:** ทุกครั้งที่ pane รายงาน done ระบบอ่านงานนั้น (transcript ของ claude/codex/gemini/opencode/cursor หรือ terminal transcript) แล้วกลั่นบทเรียนที่ใช้ซ้ำได้เป็น skill ลง skill store กลาง — ตรวจก่อนบันทึก (หลักฐานต้องเป็นข้อความจริงในงาน, ไม่มี secret, บอกว่าใช้เมื่อไหร่), รวม skill ซ้ำแทนการสร้างใหม่, archive skill ที่ไม่มีใครใช้เอง (ย้าย ไม่ลบ), ไม่แตะ skill ที่ user เขียนเอง · ทุก pane เห็น index ใน boot context และใส่ `[skill: <name>]` ใน done note เมื่อทำตาม · ตัวกลั่นเลือก provider ที่ใช้ได้บนเครื่องนั้นเอง (ลองตามลำดับ, ตัวที่ล้มพักไว้ 30 นาที) และใช้ env/บัญชีเดียวกับ pane จริง · ตั้งค่าที่ Settings → Knowledge หรือ `takkub skills learned mode auto|propose|off` · คำสั่ง `takkub skills learned status|list|show|runs|reflect|archive|revive|curate` (แรงบันดาลใจจาก tigerless-labs/autoharness, design: `docs/architecture/skill-learning.md`)
+
+### Fixed (แก้)
+
+- skill store: ไม่ link โฟลเดอร์ภายใน (`.archive`, `.tmp-*`) เข้า `.claude/skills/` ของโปรเจกต์ และลบ link ที่ปลายทางหายไปแล้ว — เดิม junction บน Windows ที่ค้างไว้ลบไม่ได้
+
 ## [v2.2.1] - 2026-10-02
 
 ### Added (เพิ่ม)

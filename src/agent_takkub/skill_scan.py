@@ -157,6 +157,42 @@ def _link_skill_into_project(
     return _make_link(central, dst)
 
 
+def _prune_dangling_store_links(project_root: Path) -> None:
+    """Drop links in `<project_root>/.claude/skills/` whose central target is
+    gone (a skill archived/deleted in the store — Skill Learning archives by
+    moving the folder). Only dangling links that pointed into a central store
+    are touched; real folders and live/foreign links are left alone."""
+    from .native_skills import _is_link
+
+    skills = project_root / ".claude" / "skills"
+    if not skills.is_dir():
+        return
+    stores = (
+        os.path.realpath(str(config.PROJECT_SKILLS_HOME)),
+        os.path.realpath(str(config.global_skills_dir())),
+    )
+    for entry in skills.iterdir():
+        if not _is_link(entry) or entry.exists():
+            continue
+        try:
+            target = os.readlink(str(entry))
+        except OSError:
+            continue
+        if target.startswith("\\\\?\\"):
+            target = target[4:]
+        target = os.path.realpath(target)
+        if any(target == s or target.startswith(s + os.sep) for s in stores):
+            # `_remove_link` can't see a DANGLING junction (is_dir() is False
+            # once the target is gone) — rmdir removes the reparse point
+            # itself; unlink covers a dangling POSIX symlink.
+            for remove in (os.rmdir, os.unlink):  # junction/dir-symlink, then file symlink
+                try:
+                    remove(entry)
+                    break
+                except OSError:
+                    continue
+
+
 def ensure_project_skill_links(project_root: str | Path, project_ns: str) -> list[str]:
     """(Re)create the junction/symlink for every central skill of
     `project_ns` into `<project_root>/.claude/skills/`. Idempotent — safe to
@@ -173,9 +209,12 @@ def ensure_project_skill_links(project_root: str | Path, project_ns: str) -> lis
         central = config.project_skills_dir(project_ns)
     except ValueError:
         return []
+    _prune_dangling_store_links(project_root)
     if central.is_dir():
         for skill_dir in sorted(central.iterdir()):
-            if not skill_dir.is_dir():
+            # Dot dirs are store internals (Skill Learning's `.archive/`,
+            # half-built `.tmp-*`) — never a skill to link.
+            if skill_dir.name.startswith(".") or not skill_dir.is_dir():
                 continue
             err = _link_skill_into_project(project_root, project_ns, skill_dir.name)
             if err:

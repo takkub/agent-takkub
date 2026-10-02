@@ -91,6 +91,9 @@ _LEAD_ONLY_CMDS = frozenset(
         # does) — enforced here too so a raw TCP client bypassing cli.py's
         # gate can't push into the mobile feed either.
         "report-send",
+        # Skill Learning (2c6cb77c): forces a reflection = a model call on
+        # the user's quota — Lead decides, not a teammate shell.
+        "skill-learn",
     }
 )
 
@@ -1255,6 +1258,12 @@ class CliServer(QObject):
                 )
             elif cmd in ("spawn-service", "service-list", "service-stop"):
                 ok, msg = self._service_command(cmd, req, from_project)
+            elif cmd == "skill-learn":
+                ok, msg = self._orch.skill_learn_now(
+                    str(req.get("role") or ""),
+                    project=from_project,
+                    note=str(req.get("note") or ""),
+                )
             elif cmd == "restart":
                 # Full cockpit restart (persist state → relaunch). The
                 # orchestrator emits deferred so this reply flushes first.

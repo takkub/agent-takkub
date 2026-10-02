@@ -3487,6 +3487,13 @@ def cmd_skills(args: argparse.Namespace) -> dict:
     appendix) so a role on codex/gemini is never assumed to get what a claude
     role gets."""
 
+    if args.skills_cmd == "learned":
+        from .skill_learning.cli_commands import run as _learned_run
+
+        return _learned_run(
+            args, lambda req: _request(_with_project({**req, "from": _from_role()}))
+        )
+
     from . import config, skill_policy, skill_scan
     from .lead_context import _allowed_project_roots
 
@@ -6636,6 +6643,9 @@ def build_parser() -> argparse.ArgumentParser:
     sske.add_argument(
         "--provider", default=None, help="override provider (default: resolved for the role)"
     )
+    from .skill_learning.cli_commands import add_parser as _add_learned_parser
+
+    _add_learned_parser(ssk_sub)
     ssk.set_defaults(func=cmd_skills)
 
     sms = sub.add_parser(

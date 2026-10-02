@@ -75,6 +75,10 @@ os.environ.setdefault("TAKKUB_SKIP_ORPHAN_WORKTREE_PRUNE", "1")
 # Browser-role spawn tests mock the PTY and must never launch a real Chrome.
 # NativeChromeManager itself is tested directly with subprocess/CDP mocks.
 os.environ.setdefault("TAKKUB_SKIP_NATIVE_CHROME", "1")
+# Skill Learning: every real done() would otherwise queue a reflection that
+# execs a real provider CLI and writes the real central skill store. Tests of
+# the feature call skill_learning directly with a fake runner + tmp stores.
+os.environ.setdefault("TAKKUB_SKIP_SKILL_LEARNING", "1")
 # app.py installs sys.excepthook at import time, so any pytest process that
 # imports it (directly or transitively) routes its own unhandled exceptions
 # into auto_issue_capture.capture_cockpit_crash — which files a real GitHub

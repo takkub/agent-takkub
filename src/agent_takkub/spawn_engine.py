@@ -500,6 +500,20 @@ def _skill_roots_for_project(project_ns: str) -> list[pathlib.Path]:
     return roots
 
 
+def _learned_skill_index(project_ns: str, provider: str) -> str:
+    """Skill Learning index for a teammate's boot context (any provider).
+    "" when nothing was learned yet or on any failure — never blocks a spawn."""
+    if not project_ns:
+        return ""
+    try:
+        from .skill_learning.index import render
+
+        return render(project_ns, provider)
+    except Exception:
+        _log.exception("could not render learned-skill index; spawning without it")
+        return ""
+
+
 def _resume_uuid_matches_cwd(
     project_ns: str, session_uuid: str, cwd: str, base_role: str | None = None
 ) -> bool:
@@ -2837,6 +2851,7 @@ class SpawnEngineMixin:
                     # Keep the shared task contract even when native global
                     # skills made their appendix redundant.
                     _skill_extra = _TASK_EXECUTION_CONTEXT + _skill_extra
+                    _skill_extra += _learned_skill_index(project_ns, spec.name)
                     if _skill_extra:
                         # #422 item 2: this role HAS Skill Matrix skills and
                         # this provider only gets them as instruction text
@@ -3450,6 +3465,7 @@ class SpawnEngineMixin:
                         _skill_roots_for_project(project_ns),
                         PROVIDER_REGISTRY["claude"].context_strategy,
                     )
+                    _appendix += _learned_skill_index(project_ns, "claude")
                 except Exception:
                     _log.exception(
                         "could not render skill role context for %s; spawning without it",

@@ -165,6 +165,7 @@ from .resource_governor import (
 )
 from .roles import LEAD
 from .roles import by_name as _role_by_name
+from .skill_learning_mixin import SkillLearningMixin  # Skill Learning (2c6cb77c)
 from .spawn_engine import (  # re-exported for backward compat; mixin provides methods
     _PANE_COLS,
     _PANE_ROWS,
@@ -1542,7 +1543,13 @@ def _session_has_draft(sess) -> bool:
 
 
 class Orchestrator(
-    PipelineMixin, LeadInboxMixin, LeadWaitMixin, SpawnEngineMixin, AutoResumeMixin, QObject
+    PipelineMixin,
+    LeadInboxMixin,
+    LeadWaitMixin,
+    SpawnEngineMixin,
+    AutoResumeMixin,
+    SkillLearningMixin,
+    QObject,
 ):
     """Owns the pane registry and routes commands.
 
@@ -1580,6 +1587,9 @@ class Orchestrator(
     # #663: (provider, probed reset_at, verdict, new_reset_at) from the
     # background quota re-probe thread → Qt thread (`_on_quota_reprobed`).
     quotaReprobed = pyqtSignal(str, float, str, float)
+    # Skill Learning (2c6cb77c): the learning worker thread → Qt thread, so
+    # the one-line Lead notice is queued from the right thread. (project_ns, line)
+    skillLearningReport = pyqtSignal(str, str)
     # Work-discipline prompts are displayed by MainWindow and answered only
     # by an explicit user click; CLI-provided digest strings are not proof.
     taskDisciplineConfirmation = pyqtSignal(object)
@@ -2043,6 +2053,7 @@ class Orchestrator(
         self.limitUsageConfirmed.connect(self._on_limit_usage_confirmed)
         self.limitUsageDenied.connect(self._on_limit_usage_denied)
         self.quotaReprobed.connect(self._on_quota_reprobed)
+        self.skillLearningReport.connect(self._on_skill_learning_report)
 
         # Periodic snapshot of cockpit state to `<vault>/hot.md`. Skipped
         # silently when no vault is configured (see `_resolve_vault_dir`).
@@ -9627,6 +9638,23 @@ class Orchestrator(
             project=project_ns,
             session_uuid=self._session_uuid_for(_exit_key(project_ns, from_role)),
         )
+        # Skill Learning (2c6cb77c): queue the learning pass — a queue append,
+        # the reflection itself runs on its own worker. getattr: test doubles
+        # that borrow done() don't carry the mixin.
+        _sl_hook = getattr(self, "_skill_learning_on_done", None)
+        if callable(_sl_hook):
+            _sl_hook(
+                project_ns,
+                from_role,
+                task=getattr(_ps_done, "last_assigned_task", "") or "",
+                note=note,
+                failed=failed,
+                provider=_done_prov,
+                cwd=_done_cwd,
+                session_id=_done_uuid or "",
+                pty_transcript=getattr(pane, "_transcript_path", None) or "",
+                assigned_at=had_assign_ts or 0.0,
+            )
         # `now`/`transcript_path`/the actual _save_decision_note write already
         # happened above, ahead of the notice — see the comment there. Reuse
         # the same `now` so this stamp can't disagree with the written file.
