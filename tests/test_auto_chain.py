@@ -18,6 +18,7 @@ Covers:
 from __future__ import annotations
 
 import pathlib
+import re
 import time
 from unittest.mock import MagicMock
 
@@ -27,6 +28,23 @@ from PyQt6.QtCore import QCoreApplication
 from agent_takkub import config, team_preset
 from agent_takkub import orchestrator as orch_mod
 from agent_takkub.orchestrator import Orchestrator, PaneState
+
+
+def _writes(session) -> list[str]:
+    """Each PTY write to *session*, with a Markdown handoff pointer expanded.
+
+    Long Lead notices are saved to ``.md`` and only the pointer is pasted
+    (open-issues review 2026-10-02) — read the file so assertions still see
+    the notice body.
+    """
+    out = []
+    for call in session.write.call_args_list:
+        text = str(call.args[0])
+        m = re.search(r'อ่านไฟล์นี้: "([^"]+)"', text)
+        if m:
+            text += "\n" + pathlib.Path(m.group(1)).read_text(encoding="utf-8")
+        out.append(text)
+    return out
 
 
 @pytest.fixture(scope="module")
@@ -169,7 +187,7 @@ class TestInjectAutoChainHandoff:
     ) -> None:
         orch, panes = _make_orch_with_fake_panes("proj_a", ["lead", "frontend"])
         orch._inject_auto_chain_handoff("proj_a")
-        lead_writes = [c.args[0] for c in panes["lead"].session.write.call_args_list]
+        lead_writes = _writes(panes["lead"].session)
         assert any("auto-chain handoff" in str(w) for w in lead_writes)
 
     def test_writes_queue_when_lead_absent(
@@ -197,7 +215,7 @@ class TestInjectAutoChainHandoff:
         blocks_qa_gate below for the still-supported opt-in qa path)."""
         orch, panes = _make_orch_with_fake_panes("proj_a", ["lead", "frontend"])
         orch._inject_auto_chain_handoff("proj_a")
-        body = str(panes["lead"].session.write.call_args_list[0].args[0])
+        body = _writes(panes["lead"].session)[0]
         assert "takkub assign --role reviewer" in body
         assert "DISABLED" not in body
 
@@ -219,7 +237,7 @@ class TestInjectAutoChainHandoff:
 
         orch, panes = _make_orch_with_fake_panes("proj_a", ["lead", "frontend"])
         orch._inject_auto_chain_handoff("proj_a")
-        body = str(panes["lead"].session.write.call_args_list[0].args[0])
+        body = _writes(panes["lead"].session)[0]
         assert "reviewer (this project's checker) is disabled" in body
         assert "SKIP the verify gate" in body
         assert "no automatic verify gate" in body
@@ -240,7 +258,7 @@ class TestInjectAutoChainHandoff:
 
         orch, panes = _make_orch_with_fake_panes("proj_a", ["lead", "frontend"])
         orch._inject_auto_chain_handoff("proj_a")
-        body = str(panes["lead"].session.write.call_args_list[0].args[0])
+        body = _writes(panes["lead"].session)[0]
         assert "takkub assign --role reviewer" in body
         assert "takkub assign --role qa" not in body
         assert "reviewer = at PR time" not in body
@@ -257,7 +275,7 @@ class TestInjectAutoChainHandoff:
 
         orch, panes = _make_orch_with_fake_panes("proj_a", ["lead", "frontend"])
         orch._inject_auto_chain_handoff("proj_a")
-        body = str(panes["lead"].session.write.call_args_list[0].args[0])
+        body = _writes(panes["lead"].session)[0]
         assert "takkub assign --role qa" not in body
         assert "takkub assign --role reviewer" not in body
         assert "self" in body.lower()
@@ -286,7 +304,7 @@ class TestInjectAutoChainHandoff:
 
         orch, panes = _make_orch_with_fake_panes("proj_a", ["lead", "frontend"])
         orch._inject_auto_chain_handoff("proj_a")
-        body = str(panes["lead"].session.write.call_args_list[0].args[0])
+        body = _writes(panes["lead"].session)[0]
         assert "takkub assign --role qa" in body
         assert "DISABLED" not in body
 
@@ -313,7 +331,7 @@ class TestInjectAutoChainHandoff:
 
         orch, panes = _make_orch_with_fake_panes("proj_a", ["lead", "frontend"])
         orch._inject_auto_chain_handoff("proj_a")
-        body = str(panes["lead"].session.write.call_args_list[0].args[0])
+        body = _writes(panes["lead"].session)[0]
         assert "fire devops FIRST" not in body
         assert "devops is disabled" in body
         assert "do NOT `takkub assign --role devops`" in body
@@ -335,7 +353,7 @@ class TestDoneAutoChainTrigger:
 
         orch.done("frontend", note="UI shipped", project="proj_a")
 
-        lead_writes = [c.args[0] for c in panes["lead"].session.write.call_args_list]
+        lead_writes = _writes(panes["lead"].session)
         assert any("[frontend done]" in str(w) for w in lead_writes)
         assert any("auto-chain handoff" in str(w) for w in lead_writes)
 
@@ -355,7 +373,7 @@ class TestDoneAutoChainTrigger:
 
         orch.done("frontend", note="UI shipped", project="proj_a")
 
-        lead_writes = [c.args[0] for c in panes["lead"].session.write.call_args_list]
+        lead_writes = _writes(panes["lead"].session)
         assert any("[frontend done]" in str(w) for w in lead_writes)
         assert not any("auto-chain handoff" in str(w) for w in lead_writes)
 
@@ -374,7 +392,7 @@ class TestDoneAutoChainTrigger:
 
         orch.done("frontend", note="just a scout", project="proj_a")
 
-        lead_writes = [c.args[0] for c in panes["lead"].session.write.call_args_list]
+        lead_writes = _writes(panes["lead"].session)
         assert any("[frontend done]" in str(w) for w in lead_writes)
         assert not any("auto-chain handoff" in str(w) for w in lead_writes)
 
@@ -416,9 +434,9 @@ class TestDoneAutoChainTrigger:
 
         orch.done("frontend", note="proj_a UI", project="proj_a")
 
-        a_writes = [c.args[0] for c in panes_a["lead"].session.write.call_args_list]
+        a_writes = _writes(panes_a["lead"].session)
         assert any("auto-chain handoff" in str(w) for w in a_writes)
-        b_writes = [c.args[0] for c in lead_b.session.write.call_args_list]
+        b_writes = _writes(lead_b.session)
         assert not any("auto-chain handoff" in str(w) for w in b_writes)
         assert (orch._pane_state.get("proj_b::backend") or PaneState()).auto_chain
 
@@ -482,7 +500,7 @@ class TestCappedPaneReleasesAutoChain:
 
         orch._on_session_exit("backend", "/tmp", "proj_a")
 
-        lead_writes = [c.args[0] for c in panes["lead"].session.write.call_args_list]
+        lead_writes = _writes(panes["lead"].session)
         assert any("auto-chain handoff" in str(w) for w in lead_writes)
 
 

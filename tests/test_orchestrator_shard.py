@@ -28,6 +28,7 @@ from agent_takkub.orchestrator import (
     _exit_key,
     _split_shard,
 )
+from tests import expand_handoff
 
 TEST_PROJECT = "shardtest"
 
@@ -952,7 +953,7 @@ class TestCloseAutoChain:
 
         orch.close("frontend", project=TEST_PROJECT, force=True)
 
-        written = _written_str(lead.session)
+        written = expand_handoff(_written_str(lead.session))
         assert "auto-chain handoff" in written
 
     def test_close_non_auto_chain_pane_no_handoff(self, orch: Orchestrator) -> None:

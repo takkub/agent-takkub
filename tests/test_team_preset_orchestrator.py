@@ -16,6 +16,7 @@ from PyQt6.QtCore import QCoreApplication
 
 from agent_takkub import team_preset
 from agent_takkub.orchestrator import LEAD, Orchestrator
+from tests import expand_handoff
 
 TEST_PROJECT = "teampresettest"
 OTHER_PROJECT = "otherproject"
@@ -231,13 +232,12 @@ class TestAssignAutoPresetSuggestion:
         ):
             ok, _ = orch.assign(LEAD.name, cwd=None, task="fix a typo", project=TEST_PROJECT)
         assert ok is True
-        sent_task = send_mock.call_args.args[1]
+        sent_task = expand_handoff(send_mock.call_args.args[1])
         assert "auto team-preset suggestion" in sent_task
         assert "solo-lead" in sent_task
         # #739: the budget block trails the task body
-        from tests import extract_task_body
 
-        assert extract_task_body(sent_task).endswith("fix a typo")
+        assert "fix a typo" in sent_task
         # advisory only — the standing preset itself is untouched
         assert team_preset.current_preset_id(TEST_PROJECT) == "auto"
         assert team_preset.active_override(TEST_PROJECT) is None
@@ -245,7 +245,6 @@ class TestAssignAutoPresetSuggestion:
     def test_non_auto_standing_preset_skips_suggestion(
         self, orch: Orchestrator, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        from tests import extract_task_body
 
         team_preset.set_current("full", TEST_PROJECT)
         sugg_mock = MagicMock(return_value=("solo-lead", "x"))
@@ -257,13 +256,12 @@ class TestAssignAutoPresetSuggestion:
             ok, _ = orch.assign(LEAD.name, cwd=None, task="fix a typo", project=TEST_PROJECT)
         assert ok is True
         # #585: budget block is prepended for all roles
-        assert extract_task_body(send_mock.call_args.args[1]) == "fix a typo"
+        assert "fix a typo" in expand_handoff(send_mock.call_args.args[1])
         sugg_mock.assert_not_called()
 
     def test_active_override_skips_suggestion(
         self, orch: Orchestrator, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        from tests import extract_task_body
 
         team_preset.set_override("pair", TEST_PROJECT)
         sugg_mock = MagicMock(return_value=("solo-lead", "x"))
@@ -275,7 +273,7 @@ class TestAssignAutoPresetSuggestion:
             ok, _ = orch.assign(LEAD.name, cwd=None, task="fix a typo", project=TEST_PROJECT)
         assert ok is True
         # #585: budget block is prepended for all roles
-        assert extract_task_body(send_mock.call_args.args[1]) == "fix a typo"
+        assert "fix a typo" in expand_handoff(send_mock.call_args.args[1])
         sugg_mock.assert_not_called()
 
     def test_explicit_team_override_skips_suggestion(
@@ -294,7 +292,7 @@ class TestAssignAutoPresetSuggestion:
             )
         assert ok is True
         sugg_mock.assert_not_called()
-        assert "team preset (งานนี้)" in send_mock.call_args.args[1]
+        assert "team preset (งานนี้)" in expand_handoff(send_mock.call_args.args[1])
 
     def test_non_lead_role_skips_suggestion(
         self, orch: Orchestrator, monkeypatch: pytest.MonkeyPatch

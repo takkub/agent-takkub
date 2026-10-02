@@ -68,3 +68,21 @@ def extract_task_body(task: str) -> str:
         text = text.replace(_CODEX_TASK_NOTICE, "").lstrip("\r\n")
 
     return text
+
+
+def expand_handoff(text: object) -> str:
+    """Return *text* with every Markdown handoff pointer's file content appended.
+
+    Assignments and long Lead notices are saved to ``.md`` and only a short
+    ``อ่านไฟล์นี้: "<path>"`` pointer is pasted (open-issues review
+    2026-10-02). Tests asserting on what a pane/Lead receives read through it.
+    """
+    import pathlib
+    import re
+
+    out = str(text)
+    for path in re.findall(r'อ่านไฟล์นี้: "([^"]+)"', out):
+        p = pathlib.Path(path)
+        if p.is_file():
+            out += "\n" + p.read_text(encoding="utf-8")
+    return out

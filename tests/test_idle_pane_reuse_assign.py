@@ -27,6 +27,7 @@ from PyQt6.QtCore import QCoreApplication
 from agent_takkub import config
 from agent_takkub import orchestrator as orch_mod
 from agent_takkub.orchestrator import Orchestrator
+from tests import expand_handoff
 
 _PROJECT = "default"
 
@@ -89,7 +90,7 @@ class TestAliveDonePaneReusedByAssign:
         # The new task was delivered via the paste path into the SAME pane.
         mock_send.assert_called_once()
         sent_role = mock_send.call_args[0][0]
-        sent_text = mock_send.call_args[0][1]
+        sent_text = expand_handoff(mock_send.call_args[0][1])
         assert sent_role == role
         assert "review the follow-up PR" in sent_text
 

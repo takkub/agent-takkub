@@ -581,7 +581,10 @@ class TestRunningPaneModelOverride:
                 "agent_takkub.provider_config.effective_provider_for",
                 return_value=CLAUDE,
             ),
-            patch("agent_takkub.orchestrator._task_handoff_pointer", return_value=("task", None)),
+            patch(
+                "agent_takkub.orchestrator._task_handoff_pointer",
+                return_value=("task", "handoff/task.md"),
+            ),
             patch("agent_takkub.task_ledger.create_assignment", return_value=None),
             patch.object(orchestrator, "_notify_lead") as notify,
             patch.object(orchestrator, "_send_when_ready"),
@@ -621,7 +624,10 @@ class TestRunningPaneEffortOverride:
                 "agent_takkub.provider_config.effective_provider_for",
                 return_value=CLAUDE,
             ),
-            patch("agent_takkub.orchestrator._task_handoff_pointer", return_value=("task", None)),
+            patch(
+                "agent_takkub.orchestrator._task_handoff_pointer",
+                return_value=("task", "handoff/task.md"),
+            ),
             patch("agent_takkub.task_ledger.create_assignment", return_value=None),
             patch.object(orchestrator, "_notify_lead") as notify,
             patch.object(orchestrator, "_send_when_ready"),

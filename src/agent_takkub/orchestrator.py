@@ -4252,9 +4252,14 @@ class Orchestrator(
             delivery_task,
             project_ns,
             role_name,
-            supports_file_read=PROVIDER_REGISTRY[effective_provider].supports_agent_file_read,
+            supports_file_read=True,
             scope=scope,
+            force=True,
         )
+        if task_file is None:
+            message = "บันทึกไฟล์ .md สำหรับส่งงานไม่ได้ — ยังไม่ได้ส่งข้อความเข้า pane"
+            self._warn_lead_spawn_failed(role_name, project, message)
+            return False, message
         if _new_task_header and task_file:
             # The pointer replaced the text — the header still leads the paste.
             paste_text = _new_task_header + paste_text

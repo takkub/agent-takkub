@@ -22,6 +22,7 @@ import pytest
 from PyQt6.QtCore import QCoreApplication
 
 from agent_takkub.orchestrator import Orchestrator, PaneState, _exit_key
+from tests import expand_handoff
 
 TEST_PROJECT = "testproj"
 
@@ -140,7 +141,7 @@ def test_followup_survives_done_and_stale_close(orch, monkeypatch, tmp_path, pro
         assert "second task" in orch._ps(key).last_assigned_task
         assert orch._ps(key).task_id != "first-id"
         assert len(send.call_args_list) == 1
-        assert "second task" in send.call_args.args[1]
+        assert "second task" in expand_handoff(send.call_args.args[1])
 
 
 def test_close_drops_pending_assignment_by_default(orch, monkeypatch, tmp_path):

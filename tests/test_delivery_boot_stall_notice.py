@@ -19,6 +19,7 @@ from PyQt6.QtCore import QCoreApplication, QObject
 
 from agent_takkub import orchestrator as orch_mod
 from agent_takkub.orchestrator import Orchestrator
+from tests import expand_handoff
 
 
 @pytest.fixture(autouse=True)
@@ -105,7 +106,7 @@ class TestBootStallNotice:
         with patch("agent_takkub.lead_inbox._log_event"):
             orch._send_when_ready("codex", "run smoke", max_wait_ms=300, project="P")
 
-        warnings = _written_strings(lead.session)
+        warnings = [expand_handoff(m) for m in _written_strings(lead.session)]
         boot_stall_warnings = [m for m in warnings if "[delivery-boot-stall]" in m]
         assert len(boot_stall_warnings) == 1, "must warn exactly once per delivery, not per poll"
         assert "codex" in boot_stall_warnings[0]
@@ -128,7 +129,7 @@ class TestBootStallNotice:
         with patch("agent_takkub.lead_inbox._log_event"):
             orch._send_when_ready("reviewer", "run smoke", max_wait_ms=300, project="P")
 
-        warnings = _written_strings(lead.session)
+        warnings = [expand_handoff(m) for m in _written_strings(lead.session)]
         assert not any("[delivery-boot-stall]" in m for m in warnings)
         assert any("[delivery-busy-wait]" in m for m in warnings)
 
@@ -150,7 +151,7 @@ class TestBootStallNotice:
         with patch("agent_takkub.lead_inbox._log_event"):
             orch._send_when_ready("codex", "run smoke", max_wait_ms=300, project="P")
 
-        warnings = _written_strings(lead.session)
+        warnings = [expand_handoff(m) for m in _written_strings(lead.session)]
         assert not any("[delivery-boot-stall]" in m for m in warnings)
 
     def test_unconfigured_mock_session_never_falsely_trips(
@@ -175,7 +176,7 @@ class TestBootStallNotice:
         with patch("agent_takkub.lead_inbox._log_event"):
             orch._send_when_ready("reviewer", "run smoke", max_wait_ms=1000, project="P")
 
-        warnings = _written_strings(lead.session)
+        warnings = [expand_handoff(m) for m in _written_strings(lead.session)]
         assert not any("[delivery-boot-stall]" in m for m in warnings)
 
 
@@ -185,7 +186,7 @@ class TestWarnLeadDeliveryBootStallDirect:
         orch._panes_by_project["P"] = {"lead": lead, "codex": _pane(_live_session())}
         with patch("agent_takkub.lead_inbox._log_event"):
             orch._warn_lead_delivery_boot_stall("codex", "P", 120.0)
-        msg = lead.session.write.call_args[0][0]
+        msg = expand_handoff(lead.session.write.call_args[0][0])
         assert "[delivery-boot-stall]" in msg
         assert "codex" in msg
         assert "#254" in msg

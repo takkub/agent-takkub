@@ -4,6 +4,20 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 
 ## [vNEXT]
 
+## [v2.2.1] - 2026-10-02
+
+### Added (เพิ่ม)
+
+- **นโยบายเมื่อโควตาหมด (#791 #798):** เลือกได้ว่าจะสลับ provider อัตโนมัติหรือพักรอจน reset (ตั้งต่อโปรเจกต์/ทั้งระบบ) และกำหนด provider ที่ห้ามสลับไปได้
+- **Settings:** Reviewer, QA และ Design Critic ตั้ง provider/model/effort แยกกันได้; PWA แสดงรูปในข้อความครบทุกภาพ
+
+### Fixed (แก้)
+
+- **ส่งงานผ่านไฟล์ `.md` เสมอ:** ใบงานทุกความยาวรวมถึง Codex และ notice ยาวที่ส่งถึง Lead จะถูกบันทึกเป็น `.md` แล้วส่งแค่ path; ถ้าเขียนไฟล์ไม่ได้จะรายงาน failure แทนการ paste เนื้อหาเต็ม
+- Codex: ตรวจเจอหน้าต่าง "session ถูก lock โดยแอปอื่น" ไม่ส่งงานแบบไม่รู้ตัว (#787) · assign เข้า pane ที่ปิด/ว่างได้ไม่ชนชื่อ role (#788) · `takkub.ps1` เลี่ยง cmd ตัดอักขระ `|` (#789) · ตัวตรวจ done-note รับหัวข้อมี qualifier และ evidence แบบ bullet (#790)
+- กันงาน browser/e2e ไม่ให้ใช้ `--mode subagent` (#792) · ทิ้ง notice backlog ที่ปิดแล้วตอนส่ง (#793) · `takkub close|kill|tail <role>` แบบ positional (#794) · คิวผูก task id ไม่ให้ pane รันงานเก่าแทน (#795)
+- worktree: กัน junction ที่ไม่ได้ track ลบ repo หลัก (#796) · `kill --pid` ปิด process ลูกทั้งต้นไม้ (#797) · reaper ไม่เตือนผิดเมื่อ pane done แล้ว (#799) · multi-repo หา git repo ย่อยในโฟลเดอร์ที่ไม่ใช่ git (#800) · Windows PTY transcript ขึ้นบรรทัดใหม่ถูกต้อง (#801)
+
 ## [v2.2.0] - 2026-10-01
 
 ### Added (เพิ่ม)

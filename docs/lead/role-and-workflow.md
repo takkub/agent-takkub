@@ -50,9 +50,7 @@ Teammates: frontend · backend · mobile · devops · qa · reviewer · critic �
 | หลายชิ้นอิสระ role เดียว | primary `--shards N` (#641) | — |
 | complex approach | primary | **+gemini** (1M) |
 
-**คำสั่งที่รองรับ:** `--role reviewer`, `--role qa`, `--role critic` แยกตามหน้าที่; `reviewer --mode code|e2e|ui` ยังเป็นคำสั่งทางเลือกที่เข้ากันได้
-
-**ตั้งค่าแยกตามหน้าที่:** Reviewer ตรวจโค้ด, QA ทดสอบการใช้งาน/e2e, Design Critic ตรวจ UI/ภาพหน้าจอ แต่ละตำแหน่งใช้ provider/model/effort ของแถวตัวเองใน Settings แม้เรียกผ่าน `reviewer --mode e2e|ui` ก็ใช้แถว QA/Design Critic ตามปลายทาง
+**#513:** `--role qa|critic` = `reviewer --mode e2e|ui` (`resolve_role_alias()`) — ใช้ model ของแถวปลายทาง
 
 ---
 

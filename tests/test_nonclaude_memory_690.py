@@ -19,6 +19,7 @@ from PyQt6.QtCore import QCoreApplication
 # first import inside spawn() would write into this checkout's real runtime/.
 from agent_takkub import memory_prompt, role_memory  # noqa: F401
 from agent_takkub.orchestrator import Orchestrator
+from tests import expand_handoff
 
 PROJECT = "memory690test"
 
@@ -182,6 +183,7 @@ def test_user_owned_agents_md_carries_memory_through_the_paste(qapp, monkeypatch
         via_assign=True,
     )
     assert paste is not None
+    paste = expand_handoff(paste)
     assert "#690" in paste
     assert "Task execution and report contract" in paste
     assert "Never claim an unrun check passed." in paste

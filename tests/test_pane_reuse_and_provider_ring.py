@@ -20,6 +20,7 @@ from PyQt6.QtCore import QCoreApplication
 from agent_takkub import orchestrator as orch_mod
 from agent_takkub import provider_config
 from agent_takkub.orchestrator import Orchestrator, _exit_key
+from tests import expand_handoff
 
 TEST_PROJECT = "reuseproj"
 
@@ -82,7 +83,7 @@ class TestAssignIntoIdlePane:
         assert "queued after current task" not in msg
         assert not getattr(orch, "_pending_assignments", {}).get(key)
         send.assert_called_once()
-        assert "new task" in send.call_args.args[1]
+        assert "new task" in expand_handoff(send.call_args.args[1])
         assert "new task" in (orch._ps(key).last_assigned_task or "")
 
     def test_busy_pane_still_queues_and_lead_is_told_once(self, orch, tmp_path) -> None:
