@@ -4252,18 +4252,12 @@ class Orchestrator(
             delivery_task,
             project_ns,
             role_name,
-            supports_file_read=True,
+            supports_file_read=PROVIDER_REGISTRY[effective_provider].supports_agent_file_read,
             scope=scope,
-            force=True,
         )
-        if task_file is None:
-            message = "บันทึกไฟล์ .md สำหรับส่งงานไม่ได้ — ยังไม่ได้ส่งข้อความเข้า pane"
-            self._warn_lead_spawn_failed(role_name, project, message)
-            return False, message
         if _new_task_header and task_file:
             # The pointer replaced the text — the header still leads the paste.
-            tid = ps_assign.task_id[:8]
-            paste_text = f"[ใบงานใหม่ · task {tid}] {paste_text} · takkub done: [task {tid}]"
+            paste_text = _new_task_header + paste_text
         if model and pane_is_running and model != ps_assign.model_override:
             # #587 C3: same "only actually-different requests" rule as the
             # provider check above.
@@ -5049,7 +5043,7 @@ class Orchestrator(
             try:
                 if never_delivered:
                     worktree["never_delivered"] = True
-                self._finalize_worktree(project_ns, role_name, worktree, note="close")
+                self._finalize_worktree(project_ns, role_name, worktree)
             except Exception as exc:
                 _log_event(
                     "close_worktree_finalize_error",
@@ -5531,6 +5525,7 @@ class Orchestrator(
         # #441: a pane that just `cat`-ed an env file forwards the values
         # verbatim in its message — scrub at the cockpit hop, every provider.
         msg = self._redact_forwarded_text(msg, project_ns, hop="send", from_role=from_role)
+        raw_msg = msg
         if _split_shard(to_role)[0] != "shell" and from_role != "remote":
             from .orchestrator_text import _message_handoff_pointer
 
@@ -5834,7 +5829,7 @@ class Orchestrator(
             "send",
             to=to_role,
             from_=from_role,
-            body=msg[:_MAX_LOG_BODY] + ("…" if len(msg) > _MAX_LOG_BODY else ""),
+            body=raw_msg[:_MAX_LOG_BODY] + ("…" if len(raw_msg) > _MAX_LOG_BODY else ""),
             message_id=message_id,
         )
         # #277: no longer claims receipt. Writing to the PTY is all that has

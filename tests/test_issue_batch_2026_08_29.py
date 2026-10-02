@@ -975,7 +975,9 @@ class TestBoundTaskIdQueue795:
         orch.close = MagicMock()
 
         # Mock _assign_dispatch to call real _assign_dispatch or simulate the post_done_respawn branch
-        orch._assign_dispatch = lambda **kwargs: Orchestrator._assign_dispatch(orch, **kwargs)
+        orch._assign_dispatch = lambda *args, **kwargs: Orchestrator._assign_dispatch(
+            orch, *args, **kwargs
+        )
         orch._pane_idle_for_reassign = MagicMock(return_value=False)
 
         item = {

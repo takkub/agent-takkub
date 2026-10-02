@@ -61,7 +61,6 @@ from .orchestrator_text import (
     _enter_delay_ms,
     _exit_key,
     _log_event,
-    _message_handoff_pointer,
     _notice_fingerprint,
     _paste_payload,
     _sanitize_pane_text,
@@ -1451,17 +1450,6 @@ class LeadInboxMixin:
         pane = self._project_panes(project).get(role_name)
         if pane is None:
             return
-        if role_name.split("#", 1)[0] != "shell":
-            try:
-                task = _message_handoff_pointer(task, self._resolve_project(project), role_name)
-            except OSError:
-                self._notify_lead(
-                    self._resolve_project(project),
-                    f"[delivery-failed] {role_name}: บันทึก .md สำหรับส่งงานไม่ได้ — ยังไม่ได้ส่งเข้า pane",
-                    from_role="system",
-                    kind="handoff-write-failed",
-                )
-                return
         # #404: extra continuous-ready polls the ready-streak gate below must
         # accumulate before the FIRST delivery on a fresh spawn/respawn is
         # allowed to paste — see ProviderSpec.post_boot_settle_s's docstring.
@@ -5011,7 +4999,7 @@ class LeadInboxMixin:
             os.environ.get("TAKKUB_TASK_DELIVERY_TTL_SEC", "30")
         )
         try:
-            payload = _paste_payload(_message_handoff_pointer(body, project_ns, "lead"))
+            payload = _paste_payload(body)
             wrote = _safe_session_write(
                 _notify_sess,
                 payload,
@@ -5338,7 +5326,7 @@ class LeadInboxMixin:
             os.environ.get("TAKKUB_TASK_DELIVERY_TTL_SEC", "30")
         )
         try:
-            payload = _paste_payload(_message_handoff_pointer(body, project_ns, "lead"))
+            payload = _paste_payload(body)
             wrote = _safe_session_write(
                 sess,
                 payload,
