@@ -720,6 +720,55 @@ def _extract_transcript_lines(raw: bytes, max_lines: int = 5) -> list[str]:
     return clean_lines[-max_lines:] if max_lines > 0 else clean_lines
 
 
+_MARK_SCREEN_CLS = None
+
+
+def _mark_keeping_screen_cls():
+    """`pyte.HistoryScreen` whose `draw` keeps zero-width marks (#804).
+
+    Stock `Screen.draw` only attaches a zero-width char when
+    `unicodedata.combining()` is non-zero, and on any other zero-width char
+    it `break`s — dropping the REST of the chunk. Thai above-vowels/tone
+    marks (ั ิ ี ึ ื ์ …) have combining class 0, so `ไฟล์ settings ที่ map`
+    rendered as `ไฟล` and everything after it vanished. Here a mark (Unicode
+    category M*) joins the previous cell; other zero-width/unprintable chars
+    (ZWSP, ZWJ, variation selectors) are skipped without losing the rest."""
+    global _MARK_SCREEN_CLS
+    if _MARK_SCREEN_CLS is not None:
+        return _MARK_SCREEN_CLS
+    import unicodedata
+
+    import pyte
+    from wcwidth import wcwidth
+
+    class _MarkKeepingScreen(pyte.HistoryScreen):
+        def _attach_mark(self, mark: str) -> None:
+            if self.cursor.x:
+                line, x = self.buffer[self.cursor.y], self.cursor.x - 1
+            elif self.cursor.y:
+                line, x = self.buffer[self.cursor.y - 1], self.columns - 1
+            else:
+                return
+            last = line[x]
+            line[x] = last._replace(data=unicodedata.normalize("NFC", last.data + mark))
+
+        def draw(self, data: str) -> None:
+            start = 0
+            for i, ch in enumerate(data):
+                if wcwidth(ch) > 0:
+                    continue
+                if start < i:
+                    super().draw(data[start:i])
+                if unicodedata.category(ch).startswith("M"):
+                    self._attach_mark(ch)
+                start = i + 1
+            if start < len(data):
+                super().draw(data[start:])
+
+    _MARK_SCREEN_CLS = _MarkKeepingScreen
+    return _MARK_SCREEN_CLS
+
+
 def _render_pty_tail(raw: bytes, max_lines: int = 20, cols: int = 160) -> list[str]:
     """Render raw PTY transcript bytes through a scrollback-keeping terminal
     emulator and return the last *max_lines* non-blank rows (#708).
@@ -740,7 +789,7 @@ def _render_pty_tail(raw: bytes, max_lines: int = 20, cols: int = 160) -> list[s
         import pyte
 
         rows = max(24, min(200, max_lines * 4))
-        screen = pyte.HistoryScreen(cols, rows, history=max(200, max_lines * 20))
+        screen = _mark_keeping_screen_cls()(cols, rows, history=max(200, max_lines * 20))
         # LNM: a bare "\n" (plain-text transcripts, provider stderr) also
         # returns the carriage, as a terminal in newline mode would —
         # otherwise each line renders staggered by the previous line's width.

@@ -589,3 +589,125 @@ def test_reflector_child_env_disables_hook(monkeypatch):
     monkeypatch.setenv(reflector.CHILD_ENV, "1")
     assert mix._disabled()
     assert os.environ[reflector.CHILD_ENV] == "1"
+
+
+# ── #803: fallback honours the quota policy, failure names every provider ──
+
+
+def test_candidates_honour_park_and_excluded_providers(monkeypatch):
+    monkeypatch.setattr(reflector, "provider_ready", lambda p: True)
+    s = settings.LearningSettings()
+    monkeypatch.setattr(reflector, "_switch_policy", lambda ns: (False, {"codex"}))
+    assert reflector.candidates(s, prefer="claude") == ["claude", "opencode", "cursor"]
+    monkeypatch.setattr(reflector, "_switch_policy", lambda ns: (True, set()))
+    assert reflector.candidates(s, prefer="claude") == ["claude"]
+    assert reflector.candidates(s, prefer="opencode") == ["opencode"]
+    assert reflector.candidates(s, prefer="gemini") == ["claude"]  # no own reflector → claude
+    # park + the pane's own provider excluded → nothing, never a forbidden one
+    monkeypatch.setattr(reflector, "_switch_policy", lambda ns: (True, {"claude"}))
+    assert reflector.candidates(s, prefer="claude") == []
+    # pinned = explicit user choice, policy doesn't apply
+    assert reflector.candidates(settings.LearningSettings(provider="codex")) == ["codex"]
+
+
+def test_switch_policy_reads_quota_policy_file(tmp_path):
+    (tmp_path / "settings").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "settings" / "quota-policy.json").write_text(
+        json.dumps({"policy": "park", "exclude_providers": ["Codex"]}), encoding="utf-8"
+    )
+    assert reflector._switch_policy("") == (True, {"codex"})
+
+
+def test_failed_run_summary_names_every_provider_tried(monkeypatch):
+    monkeypatch.setattr(reflector, "provider_ready", lambda p: p in ("claude", "codex"))
+    monkeypatch.setattr(reflector, "_switch_policy", lambda ns: (False, set()))
+    monkeypatch.setattr(reflector, "_binary", lambda p: f"{p}-bin")
+    monkeypatch.setattr(episode, "_from_ingest", lambda ev: ([("user", ev.task)], "ingest:claude"))
+    errors = {
+        "claude-bin": '[claude-code:unrecognized_model] {"model":"ocg/deepseek-v4-pro"}',
+        "codex-bin": "You've hit your usage limit. Try again Oct 4.",
+    }
+    s = settings.LearningSettings(min_worth=0, min_interval_s=0)
+    rec = pipeline.on_done(_event(), runner=lambda a, c, t, e, i: (False, errors[a[0]]), settings=s)
+    assert rec.status == "failed"
+    assert rec.summary == "reflector failed (claude: unrecognized_model · codex: quota)"
+
+
+# ── #804: claude JSONL is found in the pane's own config/project dir ──────
+
+
+def test_claude_adapter_resolves_cockpit_project_dir(tmp_path):
+    from agent_takkub.core.conversation.ingest import claude_adapter
+
+    cfg = tmp_path / "profile"
+    proj = cfg / "projects" / "takkub-project-proj"
+    proj.mkdir(parents=True)
+    (proj / "abc-123.jsonl").write_text("{}\n", encoding="utf-8")
+    got = claude_adapter.resolve_source(
+        "/w", "abc-123", config_dir=str(cfg), project_dir_name="takkub-project-proj"
+    )
+    assert got == str(proj / "abc-123.jsonl")
+
+
+def test_episode_passes_pane_claude_dirs_and_prefers_exact_session(monkeypatch):
+    import agent_takkub.core.conversation.ingest as ingest
+    from agent_takkub.core.conversation.ingest.base import IngestBatch, IngestedMessage
+    from agent_takkub.core.models.conversation import MessageRole
+
+    calls = []
+
+    def resolve(cwd, sid, *, config_dir=None, project_dir_name=None):
+        calls.append((config_dir, project_dir_name))
+        # first location only has a sibling's newer file; the exact one is in the 2nd
+        return "/x/other.jsonl" if len(calls) == 1 else f"/y/{sid}.jsonl"
+
+    fake = SimpleNamespace(
+        resolve_source=resolve,
+        read_new=lambda src, cur: IngestBatch(
+            src, [IngestedMessage(MessageRole.USER, f"from {src}", None)], "1"
+        ),
+    )
+    monkeypatch.setattr(ingest, "adapter_for", lambda p: fake)
+    ev = episode.DoneEvent(
+        NS,
+        "lead",
+        "claude",
+        cwd="/w",
+        session_id="sess-1",
+        claude_config_dir="/cfg",
+        claude_project_dir_name="takkub-project-proj",
+    )
+    ep = episode.build(ev)
+    assert calls[0] == ("/cfg", "takkub-project-proj")
+    assert ep.source == "ingest:claude" and "/y/sess-1.jsonl" in ep.transcript
+
+
+def test_pty_fallback_keeps_thai_marks_and_drops_spinner(tmp_path, monkeypatch):
+    import agent_takkub.core.conversation.ingest as ingest
+
+    monkeypatch.setattr(ingest, "adapter_for", lambda p: None)
+    log = tmp_path / "lead-101010.transcript.log"
+    log.write_bytes(
+        "เจอแล้วว่าไฟล์ settings ของ Claude map ไปที่ gateway\n"
+        "✻ Contemplating… (12s · esc to interrupt)\n"
+        "  ? for shortcuts    ← for agents\n".encode()
+    )
+    ep = episode.build(episode.DoneEvent(NS, "lead", "claude", pty_transcript=str(log)))
+    assert "เจอแล้วว่าไฟล์ settings ของ Claude map ไปที่ gateway" in ep.transcript
+    assert "Contemplating" not in ep.transcript and "for shortcuts" not in ep.transcript
+
+
+def test_hook_carries_pane_claude_dirs(monkeypatch):
+    from agent_takkub import skill_learning_mixin as mix
+
+    pane = SimpleNamespace(
+        session=SimpleNamespace(_claude_config_dir="/cfg", _claude_project_dir_name="takkub-p")
+    )
+    assert mix.claude_session_dirs(pane) == {
+        "claude_config_dir": "/cfg",
+        "claude_project_dir_name": "takkub-p",
+    }
+    assert mix.claude_session_dirs(SimpleNamespace(session=None)) == {
+        "claude_config_dir": "",
+        "claude_project_dir_name": "",
+    }

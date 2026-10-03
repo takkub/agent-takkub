@@ -20,11 +20,24 @@ provider_id = "claude"
 
 
 def resolve_source(
-    cwd: str, session_id: str | None, *, config_dir: str | None = None
+    cwd: str,
+    session_id: str | None,
+    *,
+    config_dir: str | None = None,
+    project_dir_name: str | None = None,
 ) -> str | None:
-    path = find_session_by_uuid(cwd, session_id, config_dir) if session_id else None
+    """`config_dir` / `project_dir_name` are the pane's own
+    `CLAUDE_CONFIG_DIR` / `CLAUDE_CODE_PROJECT_DIR_NAME` (`PtySession` keeps
+    both). A cockpit pane writes `<config_dir>/projects/takkub-project-<ns>/`,
+    not `~/.claude/projects/<encoded cwd>/` — without them nothing resolves
+    (#804: Lead reflection silently fell back to the PTY screen)."""
+    path = (
+        find_session_by_uuid(cwd, session_id, config_dir, project_dir_name=project_dir_name)
+        if session_id
+        else None
+    )
     if path is None:
-        path = find_latest_session(cwd, config_dir=config_dir)
+        path = find_latest_session(cwd, config_dir=config_dir, project_dir_name=project_dir_name)
     return str(path) if path is not None else None
 
 

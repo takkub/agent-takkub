@@ -4,6 +4,14 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 
 ## [vNEXT]
 
+## [v2.2.3] - 2026-10-03
+
+### Fixed (แก้)
+
+- **Skill Learning: reflect Lead/pane ได้ transcript จริงแทนหน้าจอ terminal ที่เพี้ยน (#804):** ตัวหา session ของ claude ไม่ได้มองไปที่ `CLAUDE_CONFIG_DIR` + โฟลเดอร์ `takkub-project-<ns>` ของ pane เลยหา JSONL ไม่เจอแล้วตกไปใช้ PTY เงียบๆ (worth 0 ทุกครั้ง) — ตอนนี้ใช้ dir ที่ pane ถูก spawn จริง (หรือคำนวณจาก profile ถ้า pane ปิดไปแล้ว) และเลือกไฟล์ที่ session id ตรงก่อนไฟล์ใหม่สุด · PTY fallback ตัดแถว spinner/status ออก
+- **PTY render ทิ้งข้อความหลังสระบน/วรรณยุกต์ไทย (#804):** pyte `break` เมื่อเจอ zero-width char ที่ combining class = 0 (ั ิ ี ์ …) ทำให้ `ไฟล์ settings ที่ map` เหลือ `ไฟล` — แก้ใน `_render_pty_tail` (ใช้ทั้ง `takkub tail`/`status` และ Skill Learning)
+- **Skill Learning: reflector fallback เคารพ quota policy (#803):** โหมด auto ไม่ลอง provider ที่อยู่ใน `exclude_providers` และถ้า policy = `park` ใช้แค่ provider ของ pane เอง · ถ้าล้ม summary บอกทุกตัวที่ลองพร้อมเหตุผล (`claude: unrecognized_model · codex: quota`) · `status` แสดงลำดับที่จะลองจริงทั้งหมด
+
 ## [v2.2.2] - 2026-10-02
 
 ### Added (เพิ่ม)

@@ -9643,6 +9643,8 @@ class Orchestrator(
         # that borrow done() don't carry the mixin.
         _sl_hook = getattr(self, "_skill_learning_on_done", None)
         if callable(_sl_hook):
+            from .skill_learning_mixin import claude_session_dirs
+
             _sl_hook(
                 project_ns,
                 from_role,
@@ -9654,6 +9656,7 @@ class Orchestrator(
                 session_id=_done_uuid or "",
                 pty_transcript=getattr(pane, "_transcript_path", None) or "",
                 assigned_at=had_assign_ts or 0.0,
+                **claude_session_dirs(pane),
             )
         # `now`/`transcript_path`/the actual _save_decision_note write already
         # happened above, ahead of the notice — see the comment there. Reuse

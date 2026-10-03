@@ -184,24 +184,71 @@ def _cooling(provider: str) -> bool:
     return time.monotonic() < _failed_until.get(provider, 0.0)
 
 
-def candidates(s: LearningSettings, *, prefer: str = "") -> list[str]:
-    """Providers to try, in order. Pinned → just that one. Auto → the pane's
-    own provider first (its account is in use and warm), then the fixed
-    order; providers that just failed are tried last, not dropped — on a
-    machine where only they work, a stale failure must not block learning."""
+def _switch_policy(project_ns: str) -> tuple[bool, set[str]]:
+    """(park, excluded) from the owner's quota-reroute policy (#791/#798).
+    `park` = work must not move to another provider; `excluded` = providers
+    the owner never wants work routed to. Unreadable policy = no limits."""
+    try:
+        from .. import auto_resume
+
+        project = project_ns or None
+        park = auto_resume.effective_quota_policy(project) == auto_resume.QUOTA_POLICY_PARK
+        return park, set(auto_resume.effective_quota_exclude_providers(project))
+    except Exception:
+        return False, set()
+
+
+def candidates(s: LearningSettings, *, prefer: str = "", project_ns: str = "") -> list[str]:
+    """Providers to try, in order. Pinned → just that one (the user chose it
+    explicitly). Auto → the pane's own provider first (its account is in use
+    and warm), then the fixed order — minus what the owner's quota policy
+    forbids (#803): an excluded provider is never tried, and under `park`
+    nothing beyond the pane's own provider is (claude when there is none).
+    Providers that just failed are tried last, not dropped — on a machine
+    where only they work, a stale failure must not block learning."""
     if s.provider != "auto":
         return [s.provider] if provider_ready(s.provider) else []
+    park, excluded = _switch_policy(project_ns)
     order = list(REFLECTOR_PROVIDERS)
     if prefer in order:
         order.remove(prefer)
         order.insert(0, prefer)
+    order = [p for p in order if p not in excluded]
+    if park:
+        home = prefer if prefer in REFLECTOR_PROVIDERS else REFLECTOR_PROVIDERS[0]
+        order = [p for p in order if p == home]
     ready = [p for p in order if provider_ready(p)]
     return [p for p in ready if not _cooling(p)] + [p for p in ready if _cooling(p)]
 
 
-def choose_provider(s: LearningSettings, *, prefer: str = "") -> str | None:
-    found = candidates(s, prefer=prefer)
+def choose_provider(s: LearningSettings, *, prefer: str = "", project_ns: str = "") -> str | None:
+    found = candidates(s, prefer=prefer, project_ns=project_ns)
     return found[0] if found else None
+
+
+_REASONS: tuple[tuple[str, str], ...] = (
+    (
+        r"unrecognized_model|model[^\n]{0,40}(not found|not exist|invalid|unknown)",
+        "unrecognized_model",
+    ),
+    (r"usage limit|quota|rate.?limit|429|too many requests|credit balance", "quota"),
+    (r"timed out", "timeout"),
+    (r"could not start", "not started"),
+    (r"econnrefused|connection refused|enotfound|getaddrinfo|network", "connection"),
+    (r"401|403|unauthori[sz]ed|not logged in|/login|authenticat|api key", "auth"),
+    (r"reply had no JSON intents", "no JSON"),
+)
+
+
+def short_reason(error: str) -> str:
+    """One word for why a reflector run failed — the notice names every
+    provider tried (`claude: unrecognized_model · codex: quota`), not just
+    the last one (#803)."""
+    for pattern, label in _REASONS:
+        if re.search(pattern, error or "", re.IGNORECASE):
+            return label
+    tail = " ".join((error or "").split())
+    return tail[-60:] or "error"
 
 
 def build_argv(provider: str, binary: str, prompt: str, model: str) -> list[str]:
@@ -325,10 +372,12 @@ def run(
     """Write the bundle, then try each candidate provider until one returns
     parseable intents — a machine where claude points at a dead proxy (or
     codex's login expired) still learns through whatever else works there.
-    Returns (provider, intents_or_None, raw_or_error)."""
-    order = candidates(s, prefer=prefer)
+    Returns (provider, intents_or_None, raw_or_error); on failure *provider*
+    is every provider tried with a short reason each
+    (`claude: unrecognized_model · codex: quota`)."""
+    order = candidates(s, prefer=prefer, project_ns=project_ns)
     if not order:
-        return None, None, "no reflector provider is installed, enabled and within quota"
+        return None, None, "no reflector provider is installed, enabled, allowed and within quota"
     run_dir.mkdir(parents=True, exist_ok=True)
     bundle_path = run_dir / "episode.md"
     store.atomic_write_text(bundle_path, bundle)
@@ -341,6 +390,7 @@ def run(
         "ห้ามแก้ไฟล์ใดๆ ห้ามรันคำสั่ง"
     )
     errors: list[str] = []
+    tried: list[str] = []
     for provider in order:
         # A model name is provider-specific: only honoured when pinned.
         model = s.model if s.provider == provider else ""
@@ -360,4 +410,5 @@ def run(
         _failed_until[provider] = time.monotonic() + _FAIL_COOLDOWN_S
         why = (out or "").strip()[-300:] if not ok else "reply had no JSON intents"
         errors.append(f"{provider}: {why}")
-    return order[-1], None, " | ".join(errors)
+        tried.append(f"{provider}: {short_reason(why)}")
+    return " · ".join(tried), None, " | ".join(errors)

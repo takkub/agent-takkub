@@ -145,13 +145,23 @@ def _list(ns: str) -> dict:
 
 
 def _status(ns: str) -> dict:
-    from .reflector import choose_provider
+    from .reflector import _switch_policy, candidates
 
     s = load()
     last = store.read_json(store.state_dir(ns) / "last_run.json", {})
+    # Every provider a run may try, in order — not just the first (#803:
+    # "auto → claude" while the run actually ended on codex).
+    order = candidates(s, project_ns=ns)
+    park, excluded = _switch_policy(ns) if s.provider == "auto" else (False, set())
+    limits = ", ".join(
+        x
+        for x in ("park" if park else "", f"ห้าม {'/'.join(sorted(excluded))}" if excluded else "")
+        if x
+    )
     lines = [
         f"mode            : {s.mode}",
-        f"reflector       : {s.provider} → {choose_provider(s) or 'ไม่มีตัวที่พร้อม'}"
+        f"reflector       : {s.provider} → {' → '.join(order) or 'ไม่มีตัวที่พร้อม'}"
+        + (f" ({limits})" if limits else "")
         + (f" (model {s.model})" if s.model else ""),
         f"learned skills  : {len(store.list_skills(ns))} live · {len(store.list_archived(ns))} archived",
         f"requests        : project {store.requests(ns)} · global {store.requests(None)}",

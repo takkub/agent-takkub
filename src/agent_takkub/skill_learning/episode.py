@@ -21,6 +21,16 @@ from pathlib import Path
 _MSG_CAP = 4_000  # chars per message
 _WINDOW_CAP = 60_000  # chars per episode transcript
 _PTY_TAIL_BYTES = 600_000
+# TUI chrome in a rendered PTY screen — spinner/status/footer rows that carry
+# no work content (#804: "Contemplating… · esc to interrupt · ← for agents").
+_PTY_CHROME_RE = re.compile(
+    r"esc to (interrupt|stop|cancel)|ctrl[+-]c to|\? for shortcuts|← for agents"
+    r"|shift\+tab to cycle|bypass permissions|auto-accept edits|^\s*[─━═]{8,}\s*$"
+    # spinner glyph + one word + "…" ("✻ Contemplating…"); not ⏺/● — those
+    # prefix real assistant messages.
+    r"|^\s*[✻✶✳✢·*◐◓◑◒⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]\s*\w+…",
+    re.IGNORECASE,
+)
 # A user turn that pushes back — the strongest "a lesson was learned here" cue.
 _CORRECTION_RE = re.compile(
     r"\b(no|wrong|don't|stop|actually|instead|not what)\b|ไม่ใช่|ผิด|อย่า|ห้าม|แก้ใหม่|ไม่ได้|ทำไม",
@@ -39,6 +49,10 @@ class DoneEvent:
     cwd: str = ""
     session_id: str = ""
     pty_transcript: str = ""
+    # The pane's own CLAUDE_CONFIG_DIR / CLAUDE_CODE_PROJECT_DIR_NAME (#804) —
+    # where a claude pane's session JSONL actually lives.
+    claude_config_dir: str = ""
+    claude_project_dir_name: str = ""
     assigned_at: float = 0.0
     ts: float = field(default_factory=time.time)
 
@@ -74,6 +88,43 @@ def _clip(text: str, cap: int) -> str:
     return text if len(text) <= cap else text[: cap - 20] + "\n…[ตัดทอน]"
 
 
+def _claude_locations(ev: DoneEvent) -> list[tuple[str | None, str | None]]:
+    """(config_dir, project_dir_name) pairs to try for a claude pane: what
+    the live session was spawned with first, then what a pane of this
+    project/role would be spawned with now (the pane may be gone already)."""
+    out: list[tuple[str | None, str | None]] = []
+    if ev.claude_config_dir or ev.claude_project_dir_name:
+        out.append((ev.claude_config_dir or None, ev.claude_project_dir_name or None))
+    try:
+        from .. import pane_env
+
+        env: dict[str, str] = {}
+        pane_env.inject_user_profile_env(env, ev.project_ns)
+        name = pane_env.claude_project_dir_name(ev.project_ns, ev.role.split("#", 1)[0])
+        out.append((env.get("CLAUDE_CONFIG_DIR"), name))
+    except Exception:
+        pass
+    out.append((None, None))
+    return out
+
+
+def _resolve_source(adapter, ev: DoneEvent) -> str | None:
+    if ev.provider != "claude":
+        return adapter.resolve_source(ev.cwd, ev.session_id or None)
+    # Two passes: the exact `<session_id>.jsonl` in ANY location beats the
+    # adapter's newest-file guess in an earlier one.
+    found_any: list[str] = []
+    for config_dir, dir_name in _claude_locations(ev):
+        found = adapter.resolve_source(
+            ev.cwd, ev.session_id or None, config_dir=config_dir, project_dir_name=dir_name
+        )
+        if found and (not ev.session_id or Path(found).stem == ev.session_id):
+            return found
+        if found:
+            found_any.append(found)
+    return found_any[0] if found_any else None
+
+
 def _from_ingest(ev: DoneEvent) -> tuple[list[tuple[str, str]], str] | None:
     from ..core.conversation.ingest import adapter_for
 
@@ -81,7 +132,7 @@ def _from_ingest(ev: DoneEvent) -> tuple[list[tuple[str, str]], str] | None:
     if adapter is None or not ev.cwd:
         return None
     try:
-        source = adapter.resolve_source(ev.cwd, ev.session_id or None)
+        source = _resolve_source(adapter, ev)
         if not source:
             return None
         batch = adapter.read_new(source, None)
@@ -113,9 +164,10 @@ def _from_pty(ev: DoneEvent) -> str:
     try:
         from ..orchestrator_text import _render_pty_tail
 
-        return "\n".join(_render_pty_tail(raw, max_lines=800))
+        lines = _render_pty_tail(raw, max_lines=800)
     except Exception:
         return raw.decode("utf-8", errors="replace")
+    return "\n".join(ln for ln in lines if not _PTY_CHROME_RE.search(ln))
 
 
 def render_turns(turns: list[tuple[str, str]]) -> str:

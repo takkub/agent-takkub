@@ -19,6 +19,20 @@ def _log_event(event: str, **details) -> None:
         orch._log_event(event, **details)
 
 
+def _str(value) -> str:
+    return value if isinstance(value, str) else ""
+
+
+def claude_session_dirs(pane) -> dict[str, str]:
+    """Where *pane*'s claude session JSONL lives — the CLAUDE_CONFIG_DIR /
+    CLAUDE_CODE_PROJECT_DIR_NAME its PtySession was spawned with (#804)."""
+    session = getattr(pane, "session", None)
+    return {
+        "claude_config_dir": _str(getattr(session, "_claude_config_dir", "")),
+        "claude_project_dir_name": _str(getattr(session, "_claude_project_dir_name", "")),
+    }
+
+
 def _disabled() -> bool:
     return bool(os.environ.get(SKIP_ENV) or os.environ.get(CHILD_ENV))
 
@@ -37,6 +51,8 @@ class SkillLearningMixin:
         session_id: str,
         pty_transcript: str,
         assigned_at: float,
+        claude_config_dir: str = "",
+        claude_project_dir_name: str = "",
     ) -> None:
         """Queue the learning pass for one done. Never raises, never blocks."""
         if _disabled():
@@ -56,6 +72,8 @@ class SkillLearningMixin:
                 session_id=session_id if isinstance(session_id, str) else "",
                 pty_transcript=str(pty_transcript) if pty_transcript else "",
                 assigned_at=float(assigned_at) if isinstance(assigned_at, int | float) else 0.0,
+                claude_config_dir=_str(claude_config_dir),
+                claude_project_dir_name=_str(claude_project_dir_name),
             )
             self.__dict__.setdefault("_skill_learning_last", {})[(project_ns, role)] = ev
             pipeline.submit(ev, notify=self.skillLearningReport.emit)
@@ -105,6 +123,7 @@ class SkillLearningMixin:
                     cwd=str(getattr(pane, "_session_cwd", "") or ""),
                     session_id=str(self._session_uuid_for(f"{project_ns}::{role}") or ""),
                     pty_transcript=str(getattr(pane, "_transcript_path", "") or ""),
+                    **claude_session_dirs(pane),
                 )
             if note:
                 ev.note = (ev.note + "\n\n" + note).strip()
