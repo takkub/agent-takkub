@@ -298,7 +298,11 @@ def test_second_waiter_queues_then_acquires_after_release_and_announces(tmp_path
 
     t = threading.Thread(target=waiter)
     t.start()
-    time.sleep(0.2)
+    # Release only once the waiter has really queued and announced — a fixed
+    # 0.2s sleep was not always enough on a loaded macOS runner (CI 2026-10-06).
+    deadline = time.monotonic() + 10
+    while not announcements and time.monotonic() < deadline:
+        time.sleep(0.02)
     assert result.get("handle") is None  # still queued — holder hasn't released
     holder.release()
 
