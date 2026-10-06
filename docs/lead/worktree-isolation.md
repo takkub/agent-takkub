@@ -6,7 +6,7 @@
 **Execution mode** (always PARALLEL / Multi mode):
 - Request มีหลาย feature อิสระ → แตกเป็น K features → **`takkub assign --role <r> --shards K` ใบเดียว** (#641: pane เดียว + native subagent K ตัว) · **ยิง `role#1..#K` แยก pane เองไม่ได้แล้ว — assign/spawn จะถูกปฏิเสธ** ต้องใส่ `--shards K --fanout pane` หรือ `--isolation worktree` ถ้าต้องการ pane/branch แยกจริงๆ · **หลาย pane แก้ repo เดียวกัน → `--isolation worktree` ทุกตัว** (#81) — done → merge proposal, Lead review diff + merge ทีละอัน · งานจำนวนมากจัดเป็น waves กันเครื่องค้าง · งาน depend กันยัง sequential
 
-**worktree แตกจากไหน (#544/#813):** default = HEAD ของ checkout หลัก (ซึ่งอาจเป็น branch อื่นอยู่) · flow ที่บังคับ feature แตกจาก `origin/main` → `--base origin/main` ต่อใบ หรือตั้งครั้งเดียวที่ `<repo>/.takkub/worktree.json`: `{"base": "origin/main", "symlinks": ["node_modules"]}` (symlinks = ให้ tsc/jest ใน worktree รันได้ — ไม่ตั้งแล้ว main tree มี node_modules ระบบจะเตือนตอนสร้าง)
+**worktree แตกจากไหน (#544/#813):** default = HEAD ของ checkout หลัก (ซึ่งอาจเป็น branch อื่นอยู่) · flow ที่บังคับ feature แตกจาก `origin/main` → `--base origin/main` ต่อใบ หรือตั้งครั้งเดียวที่ `<repo>/.takkub/worktree.json`: `{"base": "origin/main", "symlinks": ["node_modules"]}` (symlinks = ให้ tsc/jest ใน worktree รันได้ — ไม่ตั้งแล้ว main tree มี node_modules ระบบจะเตือนตอนสร้าง) · **ตั้งชื่อ branch ตาม flow:** `--branch feature/x` (ต้องยังไม่มี branch นี้ · ห้ามคู่กับ `--shards`) → งานลง branch จริงเลย ไม่ต้อง cherry-pick · cleanup ถอดแค่ worktree **ไม่ลบ branch นี้** · pane push เองไม่ได้ (Lead push)
 
 **กฎ verify flow (#585):**
 - **scope=tiny:** **ห้ามเรียก QA/reviewer** — Lead อ่าน diff เองแล้วจบภารกิจได้เลย ไม่ต้องมี verify chain

@@ -377,7 +377,7 @@ class _Orch:
         self.done_calls.append((role, git_facts))
         return True, "done ok"
 
-    def worktree_assign_inputs(self, role, cwd, project, base_ref=None):
+    def worktree_assign_inputs(self, role, cwd, project, base_ref=None, wt_branch=None):
         return {
             "base_cwd": "/repo",
             "project_ns": "proj",
@@ -494,7 +494,16 @@ def test_worktree_assign_creates_off_thread_then_assigns_with_prepared(qapp, mon
     info = _info()
 
     class _FakeMgr:
-        def create(self, base_cwd, project_ns, role, ts, exclude_ports=frozenset(), base_ref=None):
+        def create(
+            self,
+            base_cwd,
+            project_ns,
+            role,
+            ts,
+            exclude_ports=frozenset(),
+            base_ref=None,
+            branch_override=None,
+        ):
             self.last_base_ref = base_ref
             return info, ""
 

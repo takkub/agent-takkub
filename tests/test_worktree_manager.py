@@ -3517,3 +3517,76 @@ class TestUntrackedJunctionSweepSafety796:
             "data loss: main repo files were wiped through untracked junction!"
         )
         assert payload.read_text(encoding="utf-8") == "console.log('precious main repo file');"
+
+
+class TestNamedBranchWorktree813:
+    """#813 `assign --isolation worktree --branch feature/x`: real git, so the
+    branch naming, the duplicate refusal and the never-delete-the-user's-
+    branch teardown rule are proven on an actual repo, not a fake runner."""
+
+    @pytest.fixture(autouse=True)
+    def _repo(self, tmp_path, monkeypatch):
+        import subprocess
+
+        from agent_takkub import worktree_manager as wm
+
+        monkeypatch.setattr(wm, "DATA_HOME", tmp_path / "data-home")
+        repo = tmp_path / "repo"
+        repo.mkdir()
+
+        def git(*args, cwd=repo):
+            return subprocess.run(
+                ["git", *args], cwd=cwd, check=True, capture_output=True, text=True
+            ).stdout.strip()
+
+        git("init", "-q", "-b", "main")
+        git("config", "user.email", "t@example.com")
+        git("config", "user.name", "t")
+        (repo / "a.txt").write_text("a\n", encoding="utf-8")
+        git("add", "a.txt")
+        git("commit", "-q", "-m", "init")
+        self.repo, self.git = repo, git
+
+    def test_named_branch_created_listed_and_kept_on_teardown(self):
+        from agent_takkub.worktree_manager import WorktreeManager, is_cockpit_worktree
+
+        mgr = WorktreeManager()
+        info, warn = mgr.create(
+            str(self.repo), "proj", "frontend", 1, branch_override="feature/recon-export"
+        )
+        assert info is not None, warn
+        assert info.branch == "feature/recon-export"
+        assert self.git("branch", "--show-current", cwd=info.path) == "feature/recon-export"
+        assert is_cockpit_worktree(info.branch, info.path)
+        assert [r["branch"] for r in mgr.list_isolated(str(self.repo))] == ["feature/recon-export"]
+        (Path(info.path) / "b.txt").write_text("b\n", encoding="utf-8")
+        self.git("add", "b.txt", cwd=info.path)
+        self.git("commit", "-q", "-m", "work", cwd=info.path)
+
+        mgr.force_remove(info)
+
+        assert not Path(info.path).exists()
+        # The user's branch — and the work on it — survives teardown.
+        assert self.git("log", "-1", "--format=%s", "feature/recon-export") == "work"
+
+    def test_existing_or_invalid_branch_name_is_refused(self):
+        from agent_takkub.worktree_manager import WorktreeManager
+
+        self.git("branch", "feature/taken")
+        mgr = WorktreeManager()
+        info, reason = mgr.create(str(self.repo), "proj", "qa", 2, branch_override="feature/taken")
+        assert info is None and "มีอยู่แล้ว" in reason
+        info, reason = mgr.create(str(self.repo), "proj", "qa", 3, branch_override="bad..name")
+        assert info is None and "ไม่ใช่ชื่อ branch" in reason
+        info, reason = mgr.create(str(self.repo), "proj", "qa", 4, branch_override="-x")
+        assert info is None and "'-'" in reason
+        assert self.git("worktree", "list").count("\n") == 0  # nothing half-created
+
+    def test_wt_branch_still_deleted_on_teardown(self):
+        from agent_takkub.worktree_manager import WorktreeManager
+
+        mgr = WorktreeManager()
+        info, _ = mgr.create(str(self.repo), "proj", "backend", 5)
+        assert info is not None and info.branch.startswith("wt/")
+        mgr.force_remove(info)
+        assert self.git("branch", "--list", info.branch) == ""

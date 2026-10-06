@@ -441,6 +441,22 @@ def worktree_root(project_ns: str) -> Path:
     return (worktrees_managed_root() / sanitize_ref_component(project_ns)).resolve()
 
 
+def is_cockpit_worktree(branch: str | None, path: str | Path | None) -> bool:
+    """Whether a registered worktree is one the cockpit created: a ``wt/*``
+    branch, OR (#813 ``assign --branch <name>``) a checkout under the managed
+    root whatever its branch is called."""
+    if branch and branch.startswith(f"{_BRANCH_PREFIX}/"):
+        return True
+    if not path:
+        return False
+    try:
+        p = Path(path).resolve()
+    except OSError:
+        return False
+    root = worktrees_managed_root()
+    return p != root and root in p.parents
+
+
 def _log_event(event: str, **details) -> None:
     """Proxy to orchestrator._log_event (lazy import to dodge a cycle — same
     pattern as lead_context._log_event). Best-effort; the real implementation
@@ -687,7 +703,7 @@ def _registered_isolated_worktree_paths(git_root: str, git_run: GitRunner) -> se
     return {
         Path(ent["path"]).resolve()
         for ent in parse_worktree_list(res.stdout)
-        if ent.get("branch") and ent["branch"].startswith(f"{_BRANCH_PREFIX}/")
+        if ent.get("branch") and is_cockpit_worktree(ent["branch"], ent.get("path"))
     }
 
 
@@ -1144,6 +1160,28 @@ class WorktreeManager:
 
     # -- create -------------------------------------------------------------
 
+    def _delete_branch(self, git_root: str, branch: str, flag: str = "-D") -> GitResult:
+        """`git branch -D` — but ONLY for a cockpit-minted ``wt/*`` branch.
+        A `--branch feature/x` worktree (#813) is the user's real branch:
+        teardown removes the checkout and always keeps the branch."""
+        if not branch.startswith(f"{_BRANCH_PREFIX}/"):
+            return GitResult(0, "", "")
+        return self._run(["-C", git_root, "branch", flag, branch], None)
+
+    def _branch_override_error(self, root: str, name: str) -> str:
+        """Why *name* can't be a new branch in *root* ("" = fine)."""
+        if name.startswith("-"):
+            return "ขึ้นต้นด้วย '-' ไม่ได้"
+        fmt = self._run(["-C", root, "check-ref-format", "--branch", name], None)
+        if not fmt.ok:
+            return "ไม่ใช่ชื่อ branch ที่ถูกต้อง"
+        exists = self._run(
+            ["-C", root, "rev-parse", "--verify", "--quiet", f"refs/heads/{name}"], None
+        )
+        if exists.ok and exists.stdout.strip():
+            return "มีอยู่แล้ว (ไม่ทับ branch เดิม — ตั้งชื่อใหม่ หรือ checkout เองใน shared cwd)"
+        return ""
+
     def create(
         self,
         base_cwd: str,
@@ -1152,9 +1190,17 @@ class WorktreeManager:
         ts: int,
         exclude_ports: frozenset[int] | set[int] = frozenset(),
         base_ref: str | None = None,
+        branch_override: str | None = None,
     ) -> tuple[WorktreeInfo | None, str]:
         """Create an isolated worktree+branch off *base_cwd*'s HEAD, or off
         *base_ref* when given (#544 — ``takkub assign --base <ref>``).
+
+        *branch_override* (#813 ``assign --branch <name>``): name the new
+        branch after the project's own flow (``feature/x``) instead of
+        ``wt/<role>-<ts>`` — no cherry-pick onto the real branch afterwards.
+        Must be a valid, NOT yet existing branch name; anything else falls
+        back to the shared cwd with the reason (never reuses or resets an
+        existing branch).
 
         Before #544 the branch always forked from *base_cwd*'s checked-out
         HEAD, so a task needing a different base (e.g. a long-lived release
@@ -1185,6 +1231,10 @@ class WorktreeManager:
             base_sha = self.head_sha(base_cwd)
             if not base_sha:
                 return None, "repo ยังไม่มี commit (HEAD ว่าง) — ใช้ shared cwd แทน"
+        if branch_override:
+            err = self._branch_override_error(root, branch_override)
+            if err:
+                return None, f"--branch '{branch_override}' {err} — ใช้ shared cwd แทน"
 
         attempt_ts = ts
         dest: Path
@@ -1195,7 +1245,7 @@ class WorktreeManager:
                 dest = worktree_dest(project_ns, role, attempt_ts)
             except UnsafePathError as exc:
                 return None, f"path ไม่ปลอดภัย: {exc} — ใช้ shared cwd แทน"
-            branch = branch_name(role, attempt_ts)
+            branch = branch_override or branch_name(role, attempt_ts)
             # Ensure the managed root exists; the dest itself must NOT pre-exist
             # (git refuses "working tree already exists").
             try:
@@ -1664,10 +1714,10 @@ class WorktreeManager:
         mistaken for one.
         """
         branch = self.current_branch(pane_cwd)
-        if not branch or not branch.startswith(f"{_BRANCH_PREFIX}/"):
+        if not branch:
             return None
         worktree_path = self.git_root(pane_cwd)
-        if not worktree_path:
+        if not worktree_path or not is_cockpit_worktree(branch, worktree_path):
             return None
         listed = self._run(["-C", pane_cwd, "worktree", "list", "--porcelain"], None)
         if not listed.ok:
@@ -1888,7 +1938,7 @@ class WorktreeManager:
         # Worktree gone. Delete the branch too ONLY when it added no commits —
         # a branch with work is left for the Lead to merge/inspect.
         if self.commit_count(info) == 0:
-            self._run(["-C", info.git_root, "branch", "-D", info.branch], None)
+            self._delete_branch(info.git_root, info.branch)
         repair_note = repair_editable_pth_if_stale(info.git_root, info.path)
         if leftover:
             note = f"ไฟล์บางส่วนค้างที่ {leftover} ลบเองทีหลังได้"
@@ -1910,7 +1960,7 @@ class WorktreeManager:
         rows: list[dict] = []
         for ent in parse_worktree_list(res.stdout):
             branch = ent.get("branch")
-            if not branch or not branch.startswith(f"{_BRANCH_PREFIX}/"):
+            if not branch or not is_cockpit_worktree(branch, ent.get("path")):
                 continue
             ahead_res = self._run(["-C", git_root, "rev-list", "--count", f"HEAD..{branch}"], None)
             try:
@@ -2205,7 +2255,7 @@ class WorktreeManager:
                 f"merged {branch} — ลบไฟล์ออกจาก {row['path']} แล้ว แต่ git ยังลบ metadata ไม่ได้ "
                 f"({detail}) — รัน `git -C {git_root} worktree prune` เอง"
             )
-        self._run(["-C", git_root, "branch", "-d", branch], None)
+        self._delete_branch(git_root, branch, "-d")
         remote_note = self._delete_pushed_remote_branch(git_root, branch)
         repair_note = repair_editable_pth_if_stale(git_root, row["path"])
         msg = f"merged {branch} + cleanup เรียบร้อย"
@@ -2384,7 +2434,7 @@ class WorktreeManager:
                     "— รัน `worktree prune` เอง (branch ยังอยู่)"
                 )
                 continue
-            branch_rm = self._run(["-C", git_root, "branch", "-D", row["branch"]], None)
+            branch_rm = self._delete_branch(git_root, row["branch"])
             if not branch_rm.ok:
                 # transient ref lock (another `git` process racing this one,
                 # e.g. a sibling `clean`/`merge` touching packed-refs) — retry
@@ -2392,12 +2442,14 @@ class WorktreeManager:
                 # (#411: this call's result used to be discarded entirely, so
                 # a failure here silently left the branch dangling forever
                 # after `--force` had already destroyed its worktree).
-                branch_rm = self._run(["-C", git_root, "branch", "-D", row["branch"]], None)
+                branch_rm = self._delete_branch(git_root, row["branch"])
             remote_note = (
                 self._delete_pushed_remote_branch(git_root, row["branch"]) if branch_rm.ok else ""
             )
             repair_note = repair_editable_pth_if_stale(git_root, row["path"])
             note = f"REMOVED {row['branch']}"
+            if not row["branch"].startswith(f"{_BRANCH_PREFIX}/"):
+                note = f"REMOVED worktree {row['path']} (branch {row['branch']} เก็บไว้ — #813)"
             if discard_stat:
                 note += f" (⚠ discarded uncommitted: {discard_stat})"
             if cherry_picked:
@@ -2427,7 +2479,7 @@ class WorktreeManager:
         removed, disk_msg, leftover = remove_worktree_tree(Path(info.path))
         rm = self._run(["-C", info.git_root, "worktree", "remove", "--force", info.path], None)
         self._run(["-C", info.git_root, "worktree", "prune"], None)
-        self._run(["-C", info.git_root, "branch", "-D", info.branch], None)
+        self._delete_branch(info.git_root, info.branch)
         if not removed:
             return False, disk_msg
         if not rm.ok:

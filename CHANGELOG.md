@@ -4,6 +4,16 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 
 ## [vNEXT]
 
+## [v2.2.5] - 2026-10-06
+
+### Added (เพิ่ม)
+
+- **`takkub assign --isolation worktree --branch <name>` (#813 ต่อ):** ตั้งชื่อ branch ของ worktree ตาม flow ของโปรเจค (เช่น `feature/recon-export` คู่กับ `--base origin/main`) งานลง branch จริงเลย ไม่ต้อง cherry-pick จาก `wt/<role>-<ts>` · ชื่อต้องถูกต้องและยังไม่มีอยู่ (ไม่ทับ branch เดิม) · ใช้คู่ `--shards` ไม่ได้
+
+### Fixed (แก้)
+
+- **cleanup ของ worktree ลบได้เฉพาะ branch `wt/*` ที่ cockpit ตั้งเอง:** `clean --force` / force_remove / finalize ถอดแค่ worktree ของ branch ชื่ออื่น — branch และ commit ของ user อยู่ครบ (ทดสอบกับ git จริง) · worktree ของ cockpit ระบุจาก path ใต้โฟลเดอร์ worktrees ด้วย ไม่ใช่แค่ชื่อ `wt/` (list / merge / หาคืนหลัง restart / แผง git status เห็นครบ)
+
 ## [v2.2.4] - 2026-10-06
 
 ### Fixed (แก้)

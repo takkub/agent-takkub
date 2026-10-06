@@ -1058,6 +1058,7 @@ class CliServer(QObject):
                         mode=mode,
                         team=(str(req.get("team", "") or "").strip().lower() or None),
                         base_ref=(str(req.get("base_ref", "") or "").strip() or None),
+                        wt_branch=(str(req.get("wt_branch", "") or "").strip() or None),
                         distinct_from=(
                             str(req.get("distinct_from", "") or "").strip().lower() or None
                         ),
@@ -1117,6 +1118,7 @@ class CliServer(QObject):
                         effort=(str(req.get("effort", "") or "").strip().lower() or None),
                         team=(str(req.get("team", "") or "").strip().lower() or None),
                         base_ref=(str(req.get("base_ref", "") or "").strip() or None),
+                        wt_branch=(str(req.get("wt_branch", "") or "").strip() or None),
                         distinct_from=(
                             str(req.get("distinct_from", "") or "").strip().lower() or None
                         ),
@@ -1136,7 +1138,11 @@ class CliServer(QObject):
                                 if callable(_act):
                                     _act(_kw["project"], _role, _kw["task"])
                                 inputs = _wt_inputs_fn(
-                                    _role, _kw["cwd"], _kw["project"], _kw.get("base_ref")
+                                    _role,
+                                    _kw["cwd"],
+                                    _kw["project"],
+                                    _kw.get("base_ref"),
+                                    wt_branch=_kw.get("wt_branch"),
                                 )
                             except Exception:
                                 inputs = None
@@ -1156,6 +1162,7 @@ class CliServer(QObject):
                                     _inp["ts"],
                                     exclude_ports=_inp["exclude_ports"],
                                     base_ref=_inp.get("base_ref"),
+                                    branch_override=_inp.get("wt_branch"),
                                 )
 
                             def _dispatch_prepared(prepared, _role=_role, _kw=_kw):

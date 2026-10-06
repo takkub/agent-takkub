@@ -82,7 +82,16 @@ class _FakeMgr:
         self.auto_commit_calls = 0
         self.last_base_ref: str | None = None
 
-    def create(self, base_cwd, project_ns, role, ts, exclude_ports=frozenset(), base_ref=None):
+    def create(
+        self,
+        base_cwd,
+        project_ns,
+        role,
+        ts,
+        exclude_ports=frozenset(),
+        base_ref=None,
+        branch_override=None,
+    ):
         self.last_exclude_ports = set(exclude_ports)
         self.last_base_ref = base_ref
         return self._info, self._reason

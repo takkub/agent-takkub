@@ -2458,6 +2458,7 @@ class Orchestrator(
         project: str | None = None,
         feature: str = "",
         base_ref: str | None = None,
+        wt_branch: str | None = None,
         scope: str = "normal",
     ) -> tuple[bool, str]:
         """Register a native child without opening a cockpit pane (#268).
@@ -2498,6 +2499,7 @@ class Orchestrator(
                     int(time.time()),
                     exclude_ports=set(),
                     base_ref=base_ref,
+                    branch_override=wt_branch,
                 )
             else:
                 info, warning = None, "ไม่มี cwd ให้สร้าง worktree (ระบุ --cwd)"
@@ -2806,6 +2808,7 @@ class Orchestrator(
         _resource_token: ResourceToken | None = None,
         worktree_prepared: tuple | None = None,
         base_ref: str | None = None,
+        wt_branch: str | None = None,
         scope: str = "auto",
         subagent_fanout: int = 0,
         spec_confirmation: str | None = None,
@@ -3240,6 +3243,7 @@ class Orchestrator(
                 project=project,
                 feature=feature,
                 base_ref=base_ref,
+                wt_branch=wt_branch,
                 scope=resolved_scope,
             )
         provider = (provider or "").strip().lower() or None
@@ -3472,6 +3476,7 @@ class Orchestrator(
                 effort,
                 prepared=worktree_prepared,
                 base_ref=base_ref,
+                wt_branch=wt_branch,
                 distinct_from=distinct_from,
                 scope=resolved_scope,
             )
@@ -4720,6 +4725,8 @@ class Orchestrator(
         cwd: str | None,
         project: str | None,
         base_ref: str | None = None,
+        *,
+        wt_branch: str | None = None,
     ) -> dict | None:
         """(#408) The cheap, main-thread half of `--isolation worktree`: the
         arguments `WorktreeManager.create` needs, so `cli_server` can run the
@@ -4755,7 +4762,7 @@ class Orchestrator(
                     base_cwd = p_path
                     break
         reuse = None
-        if not base_ref:
+        if not base_ref and not wt_branch:  # #813: a named branch is always new
             from . import worktree_reuse
 
             found = worktree_reuse.find(
@@ -4778,6 +4785,7 @@ class Orchestrator(
             "ts": int(time.time()),
             "exclude_ports": sibling_ports,
             "base_ref": base_ref,
+            "wt_branch": wt_branch,
             "reuse": reuse,
         }
 
@@ -4827,6 +4835,7 @@ class Orchestrator(
         effort: str | None = None,
         prepared: tuple | None = None,
         base_ref: str | None = None,
+        wt_branch: str | None = None,
         distinct_from: str | None = None,
         scope: str = "normal",
     ) -> tuple[bool, str]:
@@ -4915,7 +4924,9 @@ class Orchestrator(
         # Fix-loop re-assign for the same card: land in that role's own
         # unmerged worktree instead of minting an empty one (--base forces new).
         reusable = (
-            None if base_ref else worktree_reuse.find(project_ns, backlog_wt, base_role_wt, mgr)
+            None
+            if base_ref or wt_branch
+            else worktree_reuse.find(project_ns, backlog_wt, base_role_wt, mgr)
         )
         if prepared is not None:
             # #408: `git worktree add` already ran off the Qt thread
@@ -4931,6 +4942,7 @@ class Orchestrator(
                 int(time.time()),
                 exclude_ports=sibling_ports,
                 base_ref=base_ref,
+                branch_override=wt_branch,
             )
         if info is None:
             return _fallback(reason)

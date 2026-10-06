@@ -969,6 +969,14 @@ def cmd_assign(args: argparse.Namespace) -> dict:
             "ok": False,
             "msg": "--base ใช้ได้เฉพาะกับ --isolation worktree (#544)",
         }
+    wt_branch = (getattr(args, "wt_branch", None) or "").strip() or None
+    if wt_branch and isolation != "worktree":
+        return {"ok": False, "msg": "--branch ใช้ได้เฉพาะกับ --isolation worktree (#813)"}
+    if wt_branch and shards > 1:
+        return {
+            "ok": False,
+            "msg": "--branch ใช้กับ --shards ไม่ได้ (branch เดียวกัน checkout ซ้ำหลาย worktree ไม่ได้)",
+        }
     plan = bool(getattr(args, "plan", False))
     # #641 round 2: a hand-typed `--role frontend#2` is the exact pattern the
     # subagent fan-out replaces — refuse it here, in the Lead's own shell, so
@@ -1081,6 +1089,7 @@ def cmd_assign(args: argparse.Namespace) -> dict:
                         "subagent_fanout": shards,
                         "isolation": isolation,
                         "base_ref": base_ref,
+                        "wt_branch": wt_branch,
                         "model": model,
                         "provider": provider,
                         "effort": effort,
@@ -1132,6 +1141,7 @@ def cmd_assign(args: argparse.Namespace) -> dict:
                         "shard_total": shards,
                         "isolation": isolation,
                         "base_ref": base_ref,
+                        "wt_branch": wt_branch,
                         "model": model,
                         "provider": provider,
                         "effort": effort,
@@ -1194,6 +1204,7 @@ def cmd_assign(args: argparse.Namespace) -> dict:
                 "auto_chain": bool(getattr(args, "auto_chain", False)),
                 "isolation": isolation,
                 "base_ref": base_ref,
+                "wt_branch": wt_branch,
                 "model": model,
                 "provider": provider,
                 "effort": effort,
@@ -5721,6 +5732,16 @@ def build_parser() -> argparse.ArgumentParser:
         "HEAD — no need to `git checkout` a different base in the shared repo "
         "first just to seed one isolated worktree. Falls back to shared cwd + "
         "warns if the ref doesn't resolve.",
+    )
+    sa.add_argument(
+        "--branch",
+        dest="wt_branch",
+        default=None,
+        metavar="NAME",
+        help="(#813, --isolation worktree only) name the new worktree branch "
+        "(e.g. 'feature/recon-export') instead of wt/<role>-<ts>, so the work "
+        "lands on the project's real branch — no cherry-pick afterwards. Must "
+        "not exist yet. Cleanup removes the worktree but never this branch.",
     )
     sa.add_argument(
         "--feature",

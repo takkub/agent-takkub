@@ -165,6 +165,19 @@ def _collect_commits(top: str, limit: int, timeout_s: float) -> list[Commit]:
     return commits
 
 
+def _under_managed_root(path: str) -> bool:
+    """Path is inside the cockpit's worktree root (mirrors
+    `worktree_manager.is_cockpit_worktree`, kept import-free here)."""
+    if not path:
+        return False
+    try:
+        p = Path(path).resolve()
+        root = (Path(config.DATA_HOME) / "worktrees").resolve()
+    except OSError:
+        return False
+    return p != root and root in p.parents
+
+
 def _collect_worktrees(top: str, timeout_s: float) -> list[Worktree]:
     out = _run_git(["worktree", "list", "--porcelain"], top, timeout_s)
     if out is None:
@@ -175,9 +188,9 @@ def _collect_worktrees(top: str, timeout_s: float) -> list[Worktree]:
 
     def _flush() -> None:
         branch = cur.get("branch", "")
-        if not branch.startswith("wt/"):
-            return
         wt_path = cur.get("path", "")
+        if not branch or not (branch.startswith("wt/") or _under_managed_root(wt_path)):
+            return  # #813: a `--branch <name>` worktree is ours by its path
         ahead_out = _run_git(["rev-list", "--count", f"{base}..{branch}"], top, timeout_s)
         try:
             ahead = int((ahead_out or "0").strip() or "0")
