@@ -1581,7 +1581,11 @@ class MainWindow(
                     f"{errored[0].name}: {errored[0].detail}",
                     8_000,
                 )
-            errors = skill_scan.ensure_project_skill_links(roots[0], project_name)
+            errors = [  # #816: every project path, not just the first
+                e
+                for root in roots
+                for e in skill_scan.ensure_project_skill_links(root, project_name)
+            ]
             if errors:
                 self._status.showMessage(
                     f"⚠ skill link repair: {len(errors)} issue(s) — {errors[0]}",

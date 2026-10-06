@@ -107,6 +107,9 @@ class _FakeMgr:
     def crlf_phantom(self, info):
         return False
 
+    def merge_ref(self, info):
+        return info.branch
+
     def merge_conflicts_with_base(self, git_root, branch):
         return self._merge_conflicts
 

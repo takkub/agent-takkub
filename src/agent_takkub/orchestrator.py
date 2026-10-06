@@ -668,6 +668,12 @@ IDLE_AT_PROMPT_PTY_NUDGES = max(0, int(os.environ.get("TAKKUB_IDLE_AT_PROMPT_PTY
 # The Lead-notice shape `_warn_lead_idle_at_prompt` emits and
 # `_pending_system_notice_for_watched` matches back (wakes `takkub wait`).
 _IDLE_AT_PROMPT_NOTICE_RE = re.compile(r"\[idle-at-prompt\]\s+(\S+)", re.IGNORECASE)
+# #815: wording a FAIL note uses for a failure outside the assigned scope.
+_OUT_OF_SCOPE_RE = re.compile(
+    r"นอก\s*scope|นอกขอบเขต|ไม่อยู่ใน\s*(?:scope|ขอบเขต)|out[- ]of[- ]scope|not in (?:the )?scope"
+    r"|ที่\s*user\s*พักไว้|ถูกพักไว้",
+    re.IGNORECASE,
+)
 
 # Fallback that arms the forgot-done reminder even when the watchdog never
 # caught the pane mid-turn. The `seen_working` latch (set when a tick observes
@@ -3809,6 +3815,21 @@ class Orchestrator(
             and current_pane is not None
             and getattr(current_pane, "state", None) not in ("done", "empty", "exited")
         )
+        if (
+            has_active_task
+            and current_state.unmatched_done_ts
+            and self._pane_idle_at_prompt(current_pane)
+        ):
+            # #812: the pane already reported done (citing another task, so
+            # task_id stayed open) and sits idle — queueing behind it would
+            # wait for a done that already happened.
+            _log_event(
+                "assign_supersedes_unmatched_done",
+                role=role_name,
+                project=project_ns,
+                task_id=(current_state.task_id or "")[:8],
+            )
+            has_active_task = False
         if has_active_task or (
             current_state.last_assigned_task
             and current_pane is not None
@@ -3962,6 +3983,7 @@ class Orchestrator(
         if not isinstance(prev_task_id, str) or prev_task_id.startswith("pane-"):
             prev_task_id = None
         ps_assign.task_id = _queued_task_id or _uuid.uuid4().hex
+        ps_assign.unmatched_done_ts = None
         # #714: tie the backlog card this assign runs under (created/linked by
         # cli_server before dispatch) to the task id just minted, so done()
         # can flip it to review.
@@ -5252,7 +5274,7 @@ class Orchestrator(
                     merge_conflicts = (
                         bool(conflict_files)
                         if conflict_files is not None
-                        else mgr.merge_conflicts_with_base(info.git_root, info.branch)
+                        else mgr.merge_conflicts_with_base(info.git_root, mgr.merge_ref(info))
                     )
                     diffstat_text = mgr.diffstat(info)
                 _log_event(
@@ -5776,6 +5798,10 @@ class Orchestrator(
                 )
             ),
             expires_at=message_expires_at,
+            # #809: a message INTO a working teammate is a revision of its
+            # active task — steer the live turn, don't park it until the turn
+            # ends. Messages to the Lead stay queued (informational).
+            steer=to_role != LEAD.name,
         )
 
         # Record delivery time for stall detection: receiving a message counts
@@ -7962,6 +7988,15 @@ class Orchestrator(
                 is_blocked, what = False, ""
             if is_blocked:
                 return Orchestrator._build_blocked_handoff(from_role, body, what)
+        # #815: a failure the reporter itself marks as outside the task's
+        # scope (a feature the user parked) is news for the user, not a fix
+        # to route — no role suggestion, no fix-loop attempt counted.
+        if _OUT_OF_SCOPE_RE.search(body):
+            return (
+                f"[{from_role} FAILED] {body}\n\n"
+                "🚧 โน้ตระบุว่า failure นี้อยู่**นอก scope ของใบงาน** (หรือเป็นของที่ user พักไว้) — "
+                "**ห้าม route ไปแก้** · รายงาน user ว่าเจออะไร แล้วรอ user ตัดสินใจ (#815)"
+            )
         # Tier 2c: signature-based suggestion for which role the fix loop
         # should target. A suggestion only — the Lead proposes, user confirms.
         suggest = ""
@@ -7988,7 +8023,8 @@ class Orchestrator(
             f"{loop_text}"
             "⚠️ verify/QA รายงาน FAIL — เสนอ fix loop (propose-then-fire, ห้าม auto):\n"
             f"{suggest}"
-            "1. อ่าน failure ข้างบน หา root cause\n"
+            "1. อ่าน failure ข้างบน หา root cause · **เช็คก่อนว่าอยู่ใน scope ที่ user สั่งไหม** — "
+            "นอก scope / ของที่ user พักไว้ = รายงาน user ห้าม route แก้ (#815)\n"
             "2. Propose assign role ที่ทำงานนั้นให้แก้ (propose table + cwd + รอ confirm)\n"
             "3. แก้เสร็จ → re-verify (QA ท้ายสุดเสมอ)\n"
             "อย่าเพิ่ง fire — render proposal ให้ user confirm ก่อน"
@@ -8116,7 +8152,7 @@ class Orchestrator(
                 merge_conflicts = (
                     gf.get("merge_conflicts")
                     if gf is not None and gf.get("kind") == "worktree"
-                    else mgr.merge_conflicts_with_base(info.git_root, info.branch)
+                    else mgr.merge_conflicts_with_base(info.git_root, mgr.merge_ref(info))
                 )
                 merge_note = ""
             else:
@@ -8696,6 +8732,7 @@ class Orchestrator(
             and getattr(_ps_done, "task_delivered", False)
         ):
             older_id = sorted(cited_ids)[0]
+            _ps_done.unmatched_done_ts = time.time()
             _log_event(
                 "done_ignored_for_active_task",
                 role=from_role,

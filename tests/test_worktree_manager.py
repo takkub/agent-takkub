@@ -12,6 +12,7 @@ import os
 import sys
 from pathlib import Path
 from typing import ClassVar
+from unittest.mock import patch
 
 import pytest
 
@@ -194,6 +195,49 @@ class TestCreate:
             "HEAD" in call and "--verify" not in call and "^{commit}" not in " ".join(call)
             for call in r.calls
         )
+
+    def test_project_default_base_and_node_modules_warning_813(self, tmp_path):
+        import json as _json
+
+        root = tmp_path / "repo"
+        (root / ".takkub").mkdir(parents=True)
+        (root / "node_modules").mkdir()
+        (root / ".takkub" / "worktree.json").write_text(
+            _json.dumps({"base": "origin/main"}), encoding="utf-8"
+        )
+        r = FakeRunner(
+            [
+                (["rev-parse", "--show-toplevel"], _ok(f"{root}\n")),
+                (["rev-parse", "--verify", "origin/main^{commit}"], _ok("mainsha789\n")),
+                (["rev-parse", "HEAD"], _ok("featuresha\n")),
+            ]
+        )
+        with patch("agent_takkub.worktree_manager.worktree_dest", return_value=tmp_path / "wt"):
+            info, warn = WorktreeManager(r).create(str(root), "proj", "frontend", 7)
+        assert info is not None and info.base_sha == "mainsha789"
+        assert "node_modules" in warn
+        # An explicit --base still wins over the project default.
+        r2 = FakeRunner(
+            [
+                (["rev-parse", "--show-toplevel"], _ok(f"{root}\n")),
+                (["rev-parse", "--verify", "origin/rel^{commit}"], _ok("relsha\n")),
+            ]
+        )
+        with patch("agent_takkub.worktree_manager.worktree_dest", return_value=tmp_path / "wt2"):
+            info2, _ = WorktreeManager(r2).create(str(root), "p", "qa", 8, base_ref="origin/rel")
+        assert info2 is not None and info2.base_sha == "relsha"
+
+    def test_config_rejects_option_like_base_813(self, tmp_path):
+        import json as _json
+
+        from agent_takkub.worktree_manager import load_worktree_config
+
+        (tmp_path / ".takkub").mkdir()
+        (tmp_path / ".takkub" / "worktree.json").write_text(
+            _json.dumps({"base": "--upload-pack=evil"}), encoding="utf-8"
+        )
+        cfg, warn = load_worktree_config(str(tmp_path))
+        assert cfg.base == "" and "base" in warn
 
     def test_create_falls_back_when_base_ref_unresolvable(self):
         r = self._repo_runner(
@@ -379,6 +423,17 @@ class TestInspect:
             ]
         )
         assert WorktreeManager(r).merge_conflicts_with_base("/repo", "wt/x-1") is True
+
+    def test_merge_ref_follows_branch_the_worktree_moved_to_814(self):
+        info = WorktreeInfo(path="/w", branch="wt/frontend-1", base_sha="b", git_root="/repo")
+        r = FakeRunner([(["symbolic-ref"], _ok("feature/recon-export\n"))])
+        assert WorktreeManager(r).merge_ref(info) == "feature/recon-export"
+        detached = FakeRunner(
+            [(["symbolic-ref"], _fail(code=1)), (["rev-parse", "HEAD"], _ok("deadbeef\n"))]
+        )
+        assert WorktreeManager(detached).merge_ref(info) == "deadbeef"
+        broken = FakeRunner([(["symbolic-ref"], _fail()), (["rev-parse"], _fail())])
+        assert WorktreeManager(broken).merge_ref(info) == "wt/frontend-1"
 
     def test_merge_conflicts_with_base_false_when_clean(self):
         r = FakeRunner(

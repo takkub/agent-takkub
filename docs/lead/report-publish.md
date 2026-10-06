@@ -47,7 +47,7 @@ report-content/
 
 ### Mobile check (360/390/768 + dark/light)
 - ต้องผ่านเช็กมือถือ: viewport 360 (เล็ก)/390 (ปกติ)/768 (แท็บเล็ต) → ไม่มี element ล้น viewport, ตารางไม่ต้องเลื่อนข้าง
-- พร้อมใช้งานในโค้ดเป็น `report_builder.check_mobile(html)` (playwright; ถ้าเครื่องไม่มี playwright ข้ามไปก่อน ไม่ถือเป็น error) + สคริปต์อ้างอิง Node/Playwright `assets/report/mobile-check.cjs`, `tables-check.cjs`
+- พร้อมใช้งานในโค้ดเป็น `report_builder.check_mobile(html)` (playwright; ถ้า Python นั้นไม่มี playwright จะคืน `MOBILE_CHECK_SKIPPED` 1 รายการ = **ยังไม่ได้ตรวจ** ห้ามรายงานว่าผ่าน — ไปรัน `mobile-check.cjs` ด้วย Node แทน, #805) + สคริปต์อ้างอิง Node/Playwright `assets/report/mobile-check.cjs`, `tables-check.cjs`
 - template ที่ ship มากันทะลุไว้แล้ว ≤900px → `grid-template-columns:1fr`, `minmax(0,1fr)`, `.shots` เป็น `minmax(min(260px,100%),1fr)`, `pre` → `white-space:pre-wrap`; ≤640px → ถอด `nowrap` จาก `td:first-child`/`.status`, `overflow-wrap:break-word` (**ห้าม `anywhere`** — ตัดคำไทยกลางคำ)
 
 ---

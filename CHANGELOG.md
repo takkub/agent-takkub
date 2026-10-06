@@ -4,6 +4,22 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 
 ## [vNEXT]
 
+## [v2.2.4] - 2026-10-06
+
+### Fixed (แก้)
+
+- **done ที่มี id ข้อมูลโปรเจค ถูกปัดเป็น "task เก่า" (#811):** ตัวจับ task id อ่าน `task 08baf710-…` (UUID ของงาน reconcile) เป็น id ของ cockpit แล้วไม่ปิดใบ — ตอนนี้นับเฉพาะ `[task <id>]` ที่ระบบสั่งให้ขึ้นต้นโน้ต
+- **pane ค้าง busy หลัง done → ใบใหม่เข้าคิวตลอด (#812):** done ที่อ้าง task อื่นถูกจดไว้ · pane ที่ว่างอยู่ที่ prompt หลัง done แบบนั้นรับใบใหม่ทันที (และ drain คิวเดิมได้) ไม่ต้อง `close` แล้ว assign ซ้ำ
+- **Inbox digest เตือน "note incomplete" ผิด (#814):** โน้ตย่อหน้าเดียว `STATUS: … CHANGED: … EVIDENCE: … REMOVED: …` นับว่าครบแล้ว · ป้าย `merge:` วัดจาก branch ที่ HEAD ของ worktree อยู่จริง (ไม่ใช่ `wt/<role>-<ts>` ตอนสร้าง)
+- **fix-loop ชวน route แก้ของนอก scope (#815):** FAIL ที่โน้ตบอกว่านอก scope / ของที่ user พักไว้ → แจ้งให้รายงาน user ไม่เสนอ role และไม่นับรอบ fix-loop · prompt ปกติมีขั้นเช็ค scope ก่อน route
+- **Codex: ข้อความแก้ทิศกลางงานไปรอท้ายคิว (#809):** พิสูจน์บน codex 0.160 — Enter ระหว่างทำงาน = steer (เข้า turn ที่กำลังรันหลัง tool call ถัดไป) ส่วน Tab = รอจบ turn · `takkub send` ถึง teammate กด Enter ก่อน (ถ้าไม่ยืนยันค่อยถอยไป Tab แบบ #721) · notice เข้า Lead ยังเข้าคิว
+- **UI ค้าง 2.7s ตอน spawn gemini (#808):** registry `~/.gemini/config/projects/*.json` cache ต่อไฟล์ด้วย mtime+size ไม่ read/parse ใหม่บน main thread ทุก spawn
+- **Chrome ของ cockpit ซ้อน 9222 กับ CDP Chrome ของ user (#807):** ถ้ามีคนถือ `[::1]:9222` อยู่แล้ว cockpit ไม่ launch ตัวที่สองบน 127.0.0.1 และแจ้ง Lead · tab เริ่มต้นของ Chrome cockpit ตั้งชื่อว่าเป็นของ cockpit (เห็นใน `/json/list`)
+- **skill ที่ learn แล้วเรียกผ่าน Skill tool ไม่ได้ (#816):** link skill เข้า `.claude/skills` ของ**ทุก path** ของโปรเจค (เดิมแค่ path แรก) และ link ทันทีหลัง Skill Learning รายงาน ไม่ต้องรอ spawn ใหม่
+- **worktree แตกจาก HEAD ผิด base + ไม่มี node_modules เงียบๆ (#813):** `.takkub/worktree.json` รับ `"base": "origin/main"` เป็นค่า default ของโปรเจค · เตือนตอนสร้างเมื่อ main tree มี node_modules แต่ worktree ไม่มี
+- **mobile check คืน "ผ่าน" ทั้งที่ไม่ได้ตรวจ (#805):** ไม่มี playwright → คืน `MOBILE_CHECK_SKIPPED` แทน list ว่าง
+- **ใบงานยาว+ไทยเข้า codex ตัวอักษรหาย (#806):** แก้แล้วตั้งแต่ v2.2.1 (ทุก assign ส่งผ่านไฟล์ .md) — prod ที่เจอยังรัน 2.1.47
+
 ## [v2.2.3] - 2026-10-03
 
 ### Fixed (แก้)

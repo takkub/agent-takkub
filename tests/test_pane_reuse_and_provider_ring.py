@@ -103,6 +103,37 @@ class TestAssignIntoIdlePane:
         assert kinds.count("queued-assignment") == 1
         assert "takkub close --role devops" in notify.call_args.args[1]
 
+    def _active_task_pane(self, orch, tmp_path, *, unmatched_done: bool):
+        key = _exit_key(TEST_PROJECT, "qa")
+        pane = _pane("working", str(tmp_path), at_prompt=True)
+        orch._panes_by_project.setdefault(TEST_PROJECT, {})["qa"] = pane
+        ps = orch._ps(key)
+        ps.task_id = "13c947f8" + "0" * 24
+        ps.last_assigned_task = "verify export"
+        ps.task_delivered = True
+        ps.unmatched_done_ts = time.time() if unmatched_done else None
+        return key
+
+    def test_812_active_task_idle_after_unmatched_done_takes_new_task(self, orch, tmp_path):
+        key = self._active_task_pane(orch, tmp_path, unmatched_done=True)
+        with (
+            patch.object(orch, "spawn", return_value=(True, "qa already running")),
+            patch.object(orch, "_send_when_ready") as send,
+            patch.object(orch, "_notify_lead"),
+        ):
+            ok, msg = orch._assign_dispatch("qa", str(tmp_path), "next task", project=TEST_PROJECT)
+        assert ok, msg
+        assert not getattr(orch, "_pending_assignments", {}).get(key)
+        send.assert_called_once()
+        assert orch._ps(key).unmatched_done_ts is None
+
+    def test_812_active_task_without_any_done_still_queues(self, orch, tmp_path):
+        key = self._active_task_pane(orch, tmp_path, unmatched_done=False)
+        with patch.object(orch, "_notify_lead"):
+            ok, msg = orch._assign_dispatch("qa", str(tmp_path), "next task", project=TEST_PROJECT)
+        assert ok and "queued" in msg
+        assert [i["task"] for i in orch._pending_assignments[key]] == ["next task"]
+
     def test_background_work_at_prompt_is_not_idle(self, orch, tmp_path) -> None:
         pane = _pane("working", str(tmp_path), at_prompt=True, background=True)
         assert orch._pane_idle_at_prompt(pane) is False

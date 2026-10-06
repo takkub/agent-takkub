@@ -102,6 +102,32 @@ class TestBusyQueueSubmit:
         assert outcomes[0].queue_submit_used is True
         assert outcomes[0].stuck_in_composer is True
 
+    def test_steer_delivery_presses_enter_first_809(self) -> None:
+        """#809 (codex 0.160 live: Enter mid-turn = steer into the running
+        turn) — a steer delivery submits with Enter, confirmed by the same
+        "Messages to be submitted" marker."""
+        pane, sess = _codex_pane_session()
+
+        outcomes, _resends, queued = _run_inline(pane, sess, provider="codex", steer=True)
+
+        sess.write.assert_called_once_with(b"\r")
+        assert queued == [True]
+        assert outcomes[0].stuck_in_composer is False
+
+    def test_steer_falls_back_to_queue_key_when_enter_does_not_land_809(self) -> None:
+        """Older codex left Enter as a draft (#721): no confirm after the
+        Enter try → every retry uses the queue key."""
+        pane, sess = _codex_pane_session()
+        sess.shows_busy_queue_confirm.side_effect = [False, True]
+
+        outcomes, resends, _queued = _run_inline(
+            pane, sess, provider="codex", steer=True, busy_max_resends=3
+        )
+
+        assert [c.args for c in sess.write.call_args_list] == [(b"\r",), (b"\t",)]
+        assert resends == [3]
+        assert outcomes[0].stuck_in_composer is False
+
     def test_no_busy_queue_provider_keeps_enter_and_not_stuck(self) -> None:
         """A provider without a busy-queue marker (claude/agy/opencode) keeps
         the legacy Enter submit and a clean, non-stuck outcome — the busy-queue

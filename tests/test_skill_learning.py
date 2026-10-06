@@ -556,6 +556,25 @@ def test_project_links_skip_archive_and_prune_dangling(tmp_path):
     assert names == {"keep-me"}  # no `.archive` link, no dangling `gone-soon`
 
 
+def test_learning_report_links_new_skill_into_every_project_path_816(tmp_path, monkeypatch):
+    from agent_takkub import lead_context
+    from agent_takkub import skill_learning_mixin as mix
+
+    api, web = tmp_path / "api", tmp_path / "web"
+    api.mkdir()
+    web.mkdir()
+    monkeypatch.setattr(lead_context, "_allowed_project_roots", lambda _ns: [api, web])
+    _land([_create_intent(name="local-e2e-verify")])
+
+    class _Orch(mix.SkillLearningMixin):
+        def _notify_lead(self, *a, **kw):
+            pass
+
+    _Orch()._on_skill_learning_report(NS, "🧠 Skill Learning (qa): create local-e2e-verify")
+    for root in (api, web):
+        assert (root / ".claude" / "skills" / "local-e2e-verify" / "SKILL.md").is_file()
+
+
 def test_orchestrator_hook_is_inert_under_skip_env(monkeypatch):
     from agent_takkub import skill_learning_mixin as mix
 

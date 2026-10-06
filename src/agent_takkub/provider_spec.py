@@ -968,7 +968,11 @@ codex_spec = ProviderSpec(
     # Tab queues the draft and it submits when the turn ends, then "Queued
     # follow-up inputs" / "Messages to be submitted" appears above the input
     # line. All confirmed live on codex-cli 0.156 (2026-09-24, the #721
-    # incident). The strings below are lowercase because
+    # incident). #809, re-probed live on 0.160 (2026-10-06): Enter mid-turn
+    # now STEERS — "Messages to be submitted after next tool call", applied
+    # inside the running turn — while Tab still waits for the turn to end;
+    # `takkub send` to a teammate uses Enter first (steer=True), notices to
+    # the Lead keep Tab. The strings below are lowercase because
     # PtySession._ready_region() normalizes the screen to lowercase before
     # matching.
     busy_queue_marker="tab to queue message",

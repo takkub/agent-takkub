@@ -55,6 +55,14 @@ def test_done_quality_flags_missing_fields_and_unverified_typecheck():
     assert "typecheck unverified" in done_report_warnings("ยกเว้น tsc ไม่ยืนยัน typecheck")
 
 
+def test_done_quality_accepts_inline_fields_814():
+    inline = "STATUS: PASS (XLSX). CHANGED: None. EVIDENCE: B1 191,194 แถว. REMOVED: None."
+    assert not done_report_warnings(inline)
+    assert done_report_warnings("STATUS: PASS. CHANGED: EVIDENCE: ok. REMOVED: None") == [
+        "note incomplete: missing CHANGED"
+    ]
+
+
 def test_done_preview_handles_both_os_paths_and_rejects_old_session():
     body = "## Note\n\nSTATUS: done\nCHANGED: file.ts\n\n## Transcript\n\nRaw byte stream (with ANSI): `runtime/sessions/frontend-142500.transcript.log`\n"
     assert (

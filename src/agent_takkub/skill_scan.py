@@ -205,6 +205,8 @@ def ensure_project_skill_links(project_root: str | Path, project_ns: str) -> lis
     """
     project_root = Path(project_root)
     errors: list[str] = []
+    if not project_root.is_dir():
+        return []  # a configured path that is gone — never create it
     try:
         central = config.project_skills_dir(project_ns)
     except ValueError:

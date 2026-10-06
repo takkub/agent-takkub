@@ -776,8 +776,16 @@ def _delayed_enter_verified(
     expires_at: float | None = None,
     validator: Callable[[], bool] | None = None,
     provider: str | None = None,
+    steer: bool = False,
 ) -> None:
     """Like `_delayed_enter`, but recovers a submit that was swallowed.
+
+    ``steer`` (#809): in busy-queue mode, submit with Enter first — codex
+    0.160 (proven live 2026-10-06) takes Enter mid-turn as STEER ("Messages
+    to be submitted after next tool call", applied inside the running turn)
+    while its queue key holds the message until the turn ENDS. A revision
+    sent to a working pane must steer; if no confirm shows (older codex
+    left Enter as a draft, #721) the retries fall back to the queue key.
 
     Sends the submitting CR after ``delay_ms`` (same as `_delayed_enter`), then
     ``_SUBMIT_VERIFY_GRACE_MS`` later checks `is_at_ready_prompt()`. If the pane
@@ -909,6 +917,8 @@ def _delayed_enter_verified(
         else 0.0
     ]
 
+    _steer_tried = [False]  # #809: Enter-to-steer is tried once per delivery
+
     def _send_then_verify(remaining: int, busy_remaining: int) -> None:
         if pane.session is not session:
             _settled()
@@ -916,7 +926,16 @@ def _delayed_enter_verified(
         # #721: a busy codex-style pane won't submit with Enter — it needs the
         # provider's busy-queue key (Tab). Pick the key per-write so a pane
         # that transitions busy/marker mid-chain switches key with it.
-        _submit_key = _busy_queue_key_bytes() if _busy_queue_mode_now() else b"\r"
+        # #809: a steer delivery tries Enter once first (steer the live turn).
+        _submit_key = b"\r"
+        if _busy_queue_mode_now():
+            if steer and not _steer_tried[0]:
+                _steer_tried[0] = True
+                _log_verify_decision(
+                    "busy_steer_enter", session=session, payload=payload, is_ready=False
+                )
+            else:
+                _submit_key = _busy_queue_key_bytes()
         _safe_session_write(
             pane.session,
             _submit_key,

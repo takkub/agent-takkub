@@ -873,8 +873,18 @@ class TestBoundTaskIdQueue795:
         text = "PASS [ใบงานใหม่ · task 1234abcd] verified and tests pass"
         assert extract_cited_task_ids(text) == {"1234abcd"}
 
-        text2 = "[task feedbeef] ok\nOther note: task: cafe0001"
+        text2 = "[task feedbeef] ok\nOther note: [task cafe0001]"
         assert extract_cited_task_ids(text2) == {"feedbeef", "cafe0001"}
+
+    def test_bare_project_ids_are_not_task_citations_811(self):
+        from agent_takkub.orchestrator_text import extract_cited_task_ids
+
+        note = (
+            "[task 13c947f8] STATUS: PASS. EVIDENCE (prod, task 08baf710-1c2d-4e5f period), "
+            "task: a9b63290 re-run, task=480fc77f"
+        )
+        assert extract_cited_task_ids(note) == {"13c947f8"}
+        assert extract_cited_task_ids("task 08baf710 (kex-offline) done") == set()
 
     def test_qa_zero_files_not_stale(self):
         from agent_takkub.orchestrator_text import stale_done_reasons

@@ -39,6 +39,23 @@ class TestBlockedHandoff:
         assert "fix loop" in out
         assert "backend" in out
 
+    def test_out_of_scope_failure_is_reported_not_routed_815(self) -> None:
+        calls = []
+        out = Orchestrator._build_verify_fail_handoff(
+            "qa",
+            "STATUS: FAIL. XLSX ผ่าน แต่ PDF export 500 (นอก scope — PDF ที่ user พักไว้)",
+            fix_loop_hook=lambda body: calls.append(body),
+        )
+        assert "นอก scope" in out and "ห้าม route" in out
+        assert "signature ชี้ไปที่" not in out
+        assert calls == []  # never counted as a fix-loop attempt
+
+    def test_in_scope_fix_loop_asks_for_scope_check_815(self) -> None:
+        out = Orchestrator._build_verify_fail_handoff(
+            "qa", "login endpoint returns 401 unauthorized for valid users"
+        )
+        assert "อยู่ใน scope ที่ user สั่งไหม" in out
+
     def test_blank_note_still_gets_the_fix_loop_framing(self) -> None:
         out = Orchestrator._build_verify_fail_handoff("qa", "")
         assert "FAILED" in out

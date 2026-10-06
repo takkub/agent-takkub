@@ -493,7 +493,10 @@ def _skill_roots_for_project(project_ns: str) -> list[pathlib.Path]:
         try:
             from .skill_scan import ensure_project_skill_links
 
-            ensure_project_skill_links(roots[0], project_ns)
+            # #816: every configured path, not just the first — a qa pane
+            # working in the project's second repo saw "Unknown skill".
+            for root in roots:
+                ensure_project_skill_links(root, project_ns)
         except Exception:
             _log.exception("could not repair project skill links; spawning without them")
     roots.append(REPO_ROOT)
@@ -738,6 +741,10 @@ class PaneState:
     # Stable identity for the current assign intent. Completion notification
     # idempotency derives from this instead of terminal text/timing heuristics.
     task_id: str | None = None
+    # #812: ts of a done() that cited a different task and so did NOT close
+    # task_id. The pane did report finishing — a later assign that finds it
+    # idle at the prompt dispatches instead of queueing behind task_id forever.
+    unmatched_done_ts: float | None = None
     # _blocked_on_lead: ts when teammate last sent to Lead (suppresses idle nag)
     blocked_on_lead_ts: float | None = None
     # #463 follow-up: ts of the last Stop hook that passed (turn genuinely
@@ -2632,6 +2639,18 @@ class SpawnEngineMixin:
                 ok=chrome_ok,
                 msg=chrome_msg,
             )
+            from .browser_chrome import CDP_HELD_ELSEWHERE
+
+            if not chrome_ok and chrome_msg.startswith(CDP_HELD_ELSEWHERE):
+                # #807: a pane told to attach to the user's browser must not
+                # find a cockpit Chrome at the same "localhost:9222" instead.
+                self._notify_lead(
+                    project_ns,
+                    f"⚠️ [{role_name}] {chrome_msg}",
+                    from_role=role_name,
+                    note="native_chrome_cdp_conflict",
+                    kind="native-chrome-cdp-conflict",
+                )
 
         # ── shell pane: plain PowerShell, no agent ──────────────────
         # The "Open Shell" status-bar button drops the user into a raw

@@ -61,14 +61,20 @@ def _has_section_content(
         return False
     other_labels = [lbl for lbl in all_labels if lbl != label]
     other_pat = "|".join(other_labels)
+    # #814: a one-paragraph note (`STATUS: … CHANGED: … EVIDENCE: …`) is just
+    # as complete — mid-line, the label counts when a colon follows it.
     head_pattern = (
-        rf"(?:^|[\r\n;])\s*(?:#+\s*|[-*]\s*)?\b{label}(?:\s*\([^)]*\))?\s*(?::|\s*-|\n|$)"
+        rf"(?:(?:^|[\r\n;])\s*(?:#+\s*|[-*]\s*)?\b{label}(?:\s*\([^)]*\))?\s*(?::|\s*-|\n|$)"
+        rf"|\b{label}(?:\s*\([^)]*\))?\s*:)"
     )
     match = re.search(head_pattern, note, re.I)
     if not match:
         return False
     rest = note[match.end() :]
-    next_head_pattern = rf"(?:^|[\r\n;])\s*(?:#+\s*|[-*]\s*)?(?:{other_pat})\b"
+    next_head_pattern = (
+        rf"(?:(?:^|[\r\n;])\s*(?:#+\s*|[-*]\s*)?(?:{other_pat})\b"
+        rf"|\b(?:{other_pat})(?:\s*\([^)]*\))?\s*:)"
+    )
     next_match = re.search(next_head_pattern, rest, re.I)
     body = rest[: next_match.start()] if next_match else rest
     return bool(body.strip())
@@ -1444,21 +1450,24 @@ def _message_handoff_pointer(message: str, project_ns: str, role_name: str) -> s
 # header naming the new task id; done() checks the id back (`[task <id8>]`).
 NEW_TASK_HEADER_PREFIX = "[ใบงานใหม่ · task "
 _NEW_TASK_HEADER_RE = re.compile(r"^\[ใบงานใหม่ · task [0-9a-f]{8}\][^\n]*\n+")
+# #811: only the bracketed tag the header above tells the pane to use counts as
+# a citation. A bare "task 08baf710-…" in a note is the PROJECT's own data
+# (reconcile job ids, UUIDs) — reading it as a cockpit task id dropped real
+# dones as "task เก่า" and left the pane busy with new work queued (#812).
 TASK_ID_TAG_RE = re.compile(
-    r"(?:\[(?:ใบงานใหม่\s*·\s*)?task\s+([0-9a-f]{8,32})\]|\btask\s*[:=-]?\s*([0-9a-f]{8,32})\b)",
+    r"\[(?:ใบงานใหม่\s*·\s*)?task\s+([0-9a-f]{8,32})\]",
     re.IGNORECASE,
 )
 
 
 def extract_cited_task_ids(text: str) -> set[str]:
-    """Extract cited 8-hex task ids from text (supports `[task <id>]`,
-    `[ใบงานใหม่ · task <id>]`, `task <id>`, `task: <id>`)."""
+    """Extract cited 8-hex task ids from text — only the bracketed forms
+    `[task <id>]` / `[ใบงานใหม่ · task <id>]` (#811)."""
     if not text:
         return set()
     found = set()
     for m in TASK_ID_TAG_RE.finditer(text):
-        g1, g2 = m.groups()
-        cand = (g1 or g2 or "")[:8].lower()
+        cand = m.group(1)[:8].lower()
         if re.fullmatch(r"[0-9a-f]{8}", cand):
             found.add(cand)
     return found

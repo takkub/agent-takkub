@@ -158,7 +158,8 @@ class UnsafePathError(Exception):
 #   {
 #     "symlinks":   [".env.local", "node_modules"],   // linked FROM the main tree
 #     "postCreate": ["pnpm install --prefer-offline"], // run in the new worktree
-#     "base_port":  5310                               // dev-server port pool base
+#     "base_port":  5310,                              // dev-server port pool base
+#     "base":       "origin/main"                      // fork ref when no --base (#813)
 #   }
 
 _WORKTREE_CONFIG_RELPATH = Path(".takkub") / "worktree.json"
@@ -177,10 +178,14 @@ class WorktreeConfig:
     symlinks: tuple[str, ...] = ()
     post_create: tuple[str, ...] = ()
     base_port: int = 0  # 0 = no dev-server port allocation
+    # #813: ref new worktrees fork from when assign passes no --base (a flow
+    # that requires features off origin/main, while the main checkout sits
+    # on some other branch).
+    base: str = ""
 
     @property
     def is_empty(self) -> bool:
-        return not (self.symlinks or self.post_create or self.base_port)
+        return not (self.symlinks or self.post_create or self.base_port or self.base)
 
 
 def _safe_rel_entry(entry: object) -> str | None:
@@ -247,8 +252,20 @@ def load_worktree_config(git_root: str) -> tuple[WorktreeConfig, str]:
         warnings.append(f"base_port ต้องเป็น int ช่วง 1024-65000: {base_port!r}")
         base_port = 0
 
-    cfg = WorktreeConfig(symlinks=tuple(links), post_create=tuple(cmds), base_port=base_port)
+    base = raw.get("base", "")
+    if not isinstance(base, str) or (base and not _BASE_REF_RE.fullmatch(base.strip())):
+        warnings.append(f"base ต้องเป็นชื่อ ref เช่น origin/main: {base!r}")
+        base = ""
+
+    cfg = WorktreeConfig(
+        symlinks=tuple(links), post_create=tuple(cmds), base_port=base_port, base=base.strip()
+    )
     return cfg, "; ".join(warnings)
+
+
+# #813: a project-default base ref — plain ref names only (no options, no
+# revision expressions), since it goes straight into `git rev-parse`.
+_BASE_REF_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._/-]{0,199}")
 
 
 # A runner maps (args, cwd) -> GitResult. Injectable so tests never shell out.
@@ -1158,6 +1175,8 @@ class WorktreeManager:
         root = self.git_root(base_cwd)
         if root is None:
             return None, "ไม่ใช่ git repo (worktree isolation ต้องมี .git) — ใช้ shared cwd แทน"
+        cfg, cfg_warn = load_worktree_config(root)
+        base_ref = base_ref or cfg.base or None  # #813: project default base
         if base_ref:
             base_sha = self.resolve_ref(root, base_ref)
             if not base_sha:
@@ -1210,7 +1229,6 @@ class WorktreeManager:
         # P2.2: env propagation per the project's opt-in config. Failures here
         # are NON-fatal — the worktree exists and is usable bare; warnings ride
         # back on the (info, reason) success channel for the Lead notice.
-        cfg, cfg_warn = load_worktree_config(root)
         linked, link_warns = self._apply_links(root, dest, cfg)
         port = allocate_port(cfg.base_port, exclude_ports)
         port_warn = (
@@ -1218,7 +1236,15 @@ class WorktreeManager:
             if cfg.base_port and not port
             else ""
         )
-        warns = "; ".join(w for w in [cfg_warn, *link_warns, port_warn] if w)
+        # #813: a bare worktree of a Node repo has no node_modules — tsc/jest
+        # there fail or (worse) get reported as passing. Say so up front.
+        nm_warn = (
+            "worktree ไม่มี node_modules (main tree มี) — tsc/jest/build ในนี้รันไม่ได้ · "
+            'ใส่ "symlinks": ["node_modules"] ใน .takkub/worktree.json'
+            if (Path(root) / "node_modules").is_dir() and not (dest / "node_modules").exists()
+            else ""
+        )
+        warns = "; ".join(w for w in [cfg_warn, *link_warns, port_warn, nm_warn] if w)
         return (
             WorktreeInfo(
                 path=str(dest),
@@ -1467,6 +1493,18 @@ class WorktreeManager:
         count so "⚠ N ไฟล์ยังไม่ commit" is a real number, not a guess."""
         return self.uncommitted_count_at(info.path)
 
+    def merge_ref(self, info: WorktreeInfo) -> str:
+        """What a merge check should measure for *info*: the branch the
+        worktree's HEAD is on NOW (#814 — a specialist may move off the
+        creation-time `wt/<role>-<ts>` onto the flow's feature branch), its
+        commit when detached, else the recorded branch."""
+        res = self._run(["-C", info.path, "symbolic-ref", "--quiet", "--short", "HEAD"], None)
+        ref = res.stdout.strip() if res.ok else ""
+        if not ref:
+            res = self._run(["-C", info.path, "rev-parse", "--verify", "HEAD"], None)
+            ref = res.stdout.strip() if res.ok else ""
+        return ref or info.branch
+
     def merge_conflicts_with_base(self, git_root: str, branch: str) -> bool | None:
         """Whether a 3-way merge of *branch* against the CURRENT base HEAD
         would conflict (#244 — "merge สะอาดไหม เทียบ base ปัจจุบัน").
@@ -1576,11 +1614,12 @@ class WorktreeManager:
             conflict_files: list[str] | None = None
             merge_conflicts: bool | None = None
             if commits > 0:
-                conflict_files = self.merge_conflict_files(info.git_root, info.branch)
+                ref = self.merge_ref(info)
+                conflict_files = self.merge_conflict_files(info.git_root, ref)
                 merge_conflicts = (
                     bool(conflict_files)
                     if conflict_files is not None
-                    else self.merge_conflicts_with_base(info.git_root, info.branch)
+                    else self.merge_conflicts_with_base(info.git_root, ref)
                 )
             out = {
                 "kind": "worktree",

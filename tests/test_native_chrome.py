@@ -109,18 +109,35 @@ def test_launches_native_headless_chrome_and_waits_for_cdp(tmp_path, monkeypatch
     monkeypatch.setattr(browser_chrome.config, "RUNTIME_DIR", runtime)
     monkeypatch.setattr(browser_chrome, "find_chrome_executable", lambda: str(chrome))
     monkeypatch.setattr(manager, "_cdp_ready", lambda: next(readiness))
+    monkeypatch.setattr(manager, "_port_held_on_ipv6", lambda: False)
     monkeypatch.setattr(browser_chrome.subprocess, "Popen", popen)
 
     ok, msg = manager.ensure_started()
 
     assert ok
     assert "launched" in msg
+    assert browser_chrome.START_URL in popen.call_args.args[0]  # #807 labelled tab
     argv = popen.call_args.args[0]
     assert argv[0] == str(chrome)
     assert "--remote-debugging-port=9222" in argv
     assert "--headless=new" in argv
     assert any(arg.startswith("--user-data-dir=") for arg in argv)
     assert (runtime / "browser-profiles" / "mb-native-chrome").is_dir()
+
+
+def test_user_cdp_chrome_on_ipv6_blocks_a_second_launch_807(monkeypatch) -> None:
+    manager = browser_chrome.NativeChromeManager()
+    popen = MagicMock()
+    monkeypatch.setattr(browser_chrome.sys, "platform", "win32")
+    monkeypatch.setattr(manager, "_cdp_ready", lambda: False)
+    monkeypatch.setattr(manager, "_port_held_on_ipv6", lambda: True)
+    monkeypatch.setattr(browser_chrome.subprocess, "Popen", popen)
+
+    ok, msg = manager.ensure_started()
+
+    assert not ok
+    assert msg.startswith(browser_chrome.CDP_HELD_ELSEWHERE)
+    popen.assert_not_called()
 
 
 def test_close_kills_only_owned_windows_process_tree(monkeypatch) -> None:

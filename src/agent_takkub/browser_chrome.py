@@ -29,6 +29,13 @@ from .pane_guard import BROWSER_ROLES
 MB_CDP_HOST = "127.0.0.1"
 MB_CDP_PORT = 9222
 _START_TIMEOUT_SEC = 8.0
+CDP_HELD_ELSEWHERE = "CDP 9222 held elsewhere"
+# #807: the start tab names its owner, so anything listing
+# http://127.0.0.1:9222/json/list can tell this browser from the user's own.
+START_URL = (
+    "data:text/html,%3Ctitle%3Etakkub-cockpit-mb-browser%20(headless,%20NOT%20the%20user%20Chrome)"
+    "%3C/title%3E"
+)
 
 # Module-level so tests can monkeypatch it for host isolation (real macOS CI
 # runners have Chrome installed here, which would otherwise win over any
@@ -132,12 +139,33 @@ class NativeChromeManager:
         except (OSError, ValueError, json.JSONDecodeError):
             return False
 
+    @staticmethod
+    def _port_held_on_ipv6() -> bool:
+        """Whether something already listens on ``[::1]:9222`` (#807).
+
+        A user's own CDP Chrome commonly lands there; launching ours on
+        127.0.0.1 too gives two browsers behind one "localhost:9222" and a
+        pane that polls the wrong one."""
+        import socket
+
+        try:
+            with socket.create_connection(("::1", MB_CDP_PORT), timeout=0.2):
+                return True
+        except OSError:
+            return False
+
     def ensure_started(self) -> tuple[bool, str]:
         """Launch Windows Chrome when CDP 9222 is absent, otherwise reuse it."""
         if sys.platform != "win32":
             return True, "native Chrome launch is Windows-only"
         if self._cdp_ready():
             return True, "reusing Chrome CDP 9222"
+        if self._port_held_on_ipv6():
+            return False, (
+                f"{CDP_HELD_ELSEWHERE}: another process (likely your own CDP Chrome) listens on "
+                "[::1]:9222 — not launching a second browser on 127.0.0.1:9222; mb needs "
+                "127.0.0.1:9222 (start that Chrome with --remote-debugging-address=127.0.0.1)"
+            )
 
         if self._process is not None and self._process.poll() is not None:
             self._process = None
@@ -164,7 +192,7 @@ class NativeChromeManager:
             f"--user-data-dir={profile_dir}",
             "--no-first-run",
             "--no-default-browser-check",
-            "about:blank",
+            START_URL,
         ]
         try:
             self._process = subprocess.Popen(

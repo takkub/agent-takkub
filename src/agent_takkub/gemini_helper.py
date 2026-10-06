@@ -524,30 +524,50 @@ def _project_registry_files() -> list[Path]:
     return sorted(config_dir.glob("*.json"))
 
 
-def _find_project_id_for(target: str) -> str | None:
-    """Scan `~/.gemini/config/projects/*.json` for a project whose folder
-    matches the already-normalized `target` path. Best-effort: a corrupt
-    project file is skipped rather than raised (must not block spawning the
-    whole gemini role over one bad file)."""
-    for config_file in _project_registry_files():
-        try:
-            data = json.loads(config_file.read_text(encoding="utf-8"))
-        except Exception:
-            continue
-        project_id = data.get("id")
-        if not project_id:
-            continue
-        resources = data.get("projectResources", {}).get("resources", [])
-        for resource in resources:
+# #808: path -> ((mtime_ns, size), [(decoded folder, project id), ...]).
+# Spawn runs on the Qt main thread; re-reading ~100 registry files there on
+# every gemini spawn froze the UI 2.7s. A stat per file is all a repeat costs.
+_REGISTRY_CACHE: dict[str, tuple[tuple[int, int], list[tuple[str, str]]]] = {}
+
+
+def _registry_entries(config_file: Path) -> list[tuple[str, str]]:
+    try:
+        st = config_file.stat()
+    except OSError:
+        return []
+    sig = (st.st_mtime_ns, st.st_size)
+    cached = _REGISTRY_CACHE.get(str(config_file))
+    if cached is not None and cached[0] == sig:
+        return cached[1]
+    entries: list[tuple[str, str]] = []
+    try:
+        data = json.loads(config_file.read_text(encoding="utf-8"))
+    except Exception:
+        data = {}
+    project_id = data.get("id") if isinstance(data, dict) else None
+    if project_id:
+        for resource in data.get("projectResources", {}).get("resources", []):
             for uri in (
                 resource.get("gitFolder", {}).get("folderUri"),
                 resource.get("folderUri"),
             ):
-                if not uri:
-                    continue
-                decoded = _folder_uri_to_path(uri)
-                if decoded and _normalize_path_for_compare(decoded) == target:
-                    return project_id
+                decoded = _folder_uri_to_path(uri) if uri else None
+                if decoded:
+                    entries.append((decoded, project_id))
+    _REGISTRY_CACHE[str(config_file)] = (sig, entries)
+    return entries
+
+
+def _find_project_id_for(target: str) -> str | None:
+    """Scan `~/.gemini/config/projects/*.json` for a project whose folder
+    matches the already-normalized `target` path. Best-effort: a corrupt
+    project file is skipped rather than raised (must not block spawning the
+    whole gemini role over one bad file). Parsed files are cached by
+    mtime+size (#808)."""
+    for config_file in _project_registry_files():
+        for folder, project_id in _registry_entries(config_file):
+            if _normalize_path_for_compare(folder) == target:
+                return project_id
     return None
 
 

@@ -464,6 +464,12 @@ def size_warning(html: str, max_bytes: int = REPORT_SIZE_WARN_BYTES) -> str:
     )
 
 
+MOBILE_CHECK_SKIPPED = (
+    "mobile-check: SKIPPED (playwright not installed in this Python) — NOT verified; "
+    "run assets/report/mobile-check.cjs with Node Playwright instead"
+)
+
+
 def check_mobile(html: str, viewports: list[int] | None = None) -> list[str]:
     """Check HTML for mobile viewport issues using playwright.
 
@@ -472,7 +478,9 @@ def check_mobile(html: str, viewports: list[int] | None = None) -> list[str]:
         viewports: list of viewport widths to test (default: 360, 390, 768)
 
     Returns:
-        list of issues found (empty if no issues or playwright not available)
+        list of issues found — empty ONLY when every viewport was really
+        checked. Without playwright the single entry is
+        ``MOBILE_CHECK_SKIPPED`` (#805: an empty list there read as "passed").
     """
     if viewports is None:
         viewports = [360, 390, 768]
@@ -480,7 +488,7 @@ def check_mobile(html: str, viewports: list[int] | None = None) -> list[str]:
     try:
         from playwright.sync_api import sync_playwright
     except ImportError:
-        return []
+        return [MOBILE_CHECK_SKIPPED]
 
     issues = []
 

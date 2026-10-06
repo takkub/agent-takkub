@@ -373,6 +373,34 @@ class TestResolveAgyProjectId:
         config_dir.mkdir(parents=True, exist_ok=True)
         (config_dir / f"{project_id}.json").write_text(json.dumps(body), encoding="utf-8")
 
+    def test_unchanged_registry_file_is_not_reread_808(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        monkeypatch.setattr(gemini_helper.Path, "home", lambda: tmp_path)
+        config_dir = tmp_path / ".gemini" / "config" / "projects"
+        repo = tmp_path / "repo"
+        import json
+
+        uri = repo.as_uri()
+        _plant_project(config_dir, "p1", uri)
+        reads: list[str] = []
+        real_read = Path.read_text
+
+        def counting_read(self, *a, **kw):
+            reads.append(self.name)
+            return real_read(self, *a, **kw)
+
+        monkeypatch.setattr(Path, "read_text", counting_read)
+        assert gemini_helper.resolve_agy_project_id(str(repo)) == "p1"
+        assert gemini_helper.resolve_agy_project_id(str(repo)) == "p1"
+        assert reads == ["p1.json"]
+        # A rewritten file (new size) is parsed again.
+        (config_dir / "p1.json").write_text(
+            json.dumps({"id": "p2", "projectResources": {"resources": [{"folderUri": uri}]}}),
+            encoding="utf-8",
+        )
+        assert gemini_helper.resolve_agy_project_id(str(repo)) == "p2"
+
     def test_no_config_dir_returns_none(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
