@@ -720,6 +720,18 @@ class _LockHandle:
         self._stop.set()
         if self._thread is not None:
             self._thread.join(timeout=2)
+        # Windows: a waiter reading `pid`/`heartbeat` in _lock_slot_is_stale
+        # holds the file open, so a single rmtree half-fails and — with
+        # ignore_errors — left a live-looking slot dir behind; the waiter then
+        # sat out the full stale window (CI windows 2026-10-07, 5/300 locally).
+        for _ in range(40):
+            try:
+                shutil.rmtree(self.path)
+                return
+            except FileNotFoundError:
+                return
+            except OSError:
+                time.sleep(0.05)
         shutil.rmtree(self.path, ignore_errors=True)
 
 
