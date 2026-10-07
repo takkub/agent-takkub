@@ -3,12 +3,11 @@
 //
 // SAFETY MODEL — check first, never clobber:
 //   • Detects what's already present (preflight.js, non-mutating) and REPORTS it.
-//   • Provisions ONLY into the isolated AGENT_TAKKUB_HOME (default
+//   • Provisions the Python runtime into the isolated AGENT_TAKKUB_HOME (default
 //     ~/.agent-takkub) — never a repo `.venv`, never shared user state.
 //   • REUSES an existing cockpit venv (upgrade in place) instead of wiping it.
-//   • Does NOT touch the global claude CLI, ~/.claude plugins, or ~/.takkub
-//     config. Anything shared/missing is left for an explicit, detect-first
-//     `takkub doctor --fix` the user runs consciously.
+//   • Installs missing Claude and Codex CLIs; existing installations are reused.
+//     Plugins and account configuration are managed separately by provision/login.
 // Cross-platform (win32 + darwin); idempotent; fails loudly on missing Python
 // or a missing bundled wheel.
 
@@ -17,6 +16,7 @@ const fs = require('fs');
 const path = require('path');
 const { agentTakkubHome, venvDir, venvPython, findWheelForVersion } = require('./lib');
 const preflight = require('./preflight');
+const { ensureBaselineProviders } = require('./providers');
 
 // The wheel matching THIS install's declared version (#340) — not the
 // lexically-last filename in dist/. A string sort put "1.0.9" after
@@ -31,17 +31,6 @@ function findWheel() {
 
 function run(cmd, args) {
   return spawnSync(cmd, args, { stdio: 'inherit' }).status === 0;
-}
-
-// Install the claude CLI only when it's missing — never overwrite an existing
-// (possibly version-pinned) global install. Returns true if claude is available
-// afterward. Best-effort: a failure just falls back to a "install it yourself"
-// hint in the next-steps.
-function ensureClaudeCli(present) {
-  if (present) return true;
-  const npm = process.platform === 'win32' ? 'npm.cmd' : 'npm';
-  console.log('[agent-takkub] claude CLI not found — installing @anthropic-ai/claude-code…');
-  return run(npm, ['install', '-g', '@anthropic-ai/claude-code']);
 }
 
 // A local (non-global) install leaves a package that cannot work: the `takkub`
@@ -114,7 +103,7 @@ function main() {
   // already succeeded, so a hiccup here shouldn't fail the whole install.
   run(vpy, ['-m', 'pip', 'install', '--force-reinstall', '--no-deps', wheel]);
 
-  const claudeOk = ensureClaudeCli(env.claudeCli.present);
+  const providers = ensureBaselineProviders(env);
 
   // Keep the npm global bin dir on the persistent PATH — otherwise a broken
   // PATH makes claude/takkub/agent-takkub "command not found" in new shells
@@ -124,7 +113,7 @@ function main() {
     pathAdded = require('./pathfix').ensureGlobalBinOnPath();
     if (pathAdded) {
       console.log(
-        '[agent-takkub] ✓ npm global bin dir added to your PATH (open a NEW terminal to use takkub/claude).'
+        '[agent-takkub] ✓ npm global bin dir added to your PATH (open a NEW terminal to use takkub/claude/codex).'
       );
     }
   } catch (_e) {
@@ -148,12 +137,16 @@ function main() {
   );
   console.log('     it backs up everything first, so this is safe to let run.');
   console.log('\n   Next steps:');
-  if (!claudeOk) {
+  if (!providers.claude) {
     console.log('     • install the claude CLI: npm i -g @anthropic-ai/claude-code');
   }
-  console.log('     1) claude login          # authenticate (one-time, your account)');
-  console.log('     2) takkub provision      # install recommended plugins + browser MCPs (idempotent)');
-  console.log('     3) double-click "Takkub Cockpit" on the Desktop  (or run: agent-takkub)\n');
+  if (!providers.codex) {
+    console.log('     • install the codex CLI: npm i -g @openai/codex');
+  }
+  console.log('     1) claude login          # authenticate your Claude account');
+  console.log('     2) codex login           # authenticate your OpenAI account');
+  console.log('     3) takkub provision      # install recommended plugins + browser MCPs (idempotent)');
+  console.log('     4) double-click "Takkub Cockpit" on the Desktop  (or run: agent-takkub)\n');
 }
 
 try {

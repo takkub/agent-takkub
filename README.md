@@ -96,11 +96,12 @@ A role's own model wins over the provider default, so `backend` can run Codex on
 ## ⚡ Quick Start
 
 ```bash
-# 1. Install the cockpit globally  (isolated Python runtime + a Desktop icon)
+# 1. Install the cockpit, plus Claude and Codex CLIs if missing
 npm install -g agent-takkub
 
-# 2. Authenticate with your Claude account (if you haven't already)
+# 2. Authenticate with your Claude and OpenAI accounts
 claude login
+codex login
 
 # 3. Provision recommended plugins + browser-automation tools (idempotent)
 takkub provision
@@ -117,7 +118,7 @@ agent-takkub
 <table>
 <tr><td>
 
-**Requirements** — Node.js ≥ 18 and Python ≥ 3.11 already on your system. They're **detected, never reinstalled**. Everything else lives in an isolated `~/.agent-takkub`; your existing `claude` CLI, plugins, and config are left completely untouched.
+**Requirements** — Node.js ≥ 18 and Python ≥ 3.11 already on your system. The installer creates an isolated Python runtime and Desktop launcher, and installs missing Claude and Codex CLIs into your npm global prefix. Existing provider installations are reused. Authenticate with `claude login` and `codex login` before using those providers.
 
 **Optional: `graft` code-intelligence** needs Node ≥ 20 — stricter than the cockpit's own Node ≥ 18 floor. It's off until you run `takkub doctor --fix`; without it (or on Node 18–19), the cockpit runs exactly the same, just without the extra structural-search tools for code-reading roles.
 

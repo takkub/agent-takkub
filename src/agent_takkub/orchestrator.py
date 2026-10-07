@@ -15087,6 +15087,22 @@ class Orchestrator(
                             )
                         continue
                     if _session_has_draft(sess):  # #748: never type onto a draft
+                        # Logged once per idle episode: a silent skip here hid
+                        # the ghost-text-read-as-draft bug for days.
+                        if (
+                            ps.proactive_compact_draft_logged_since
+                            != ps.proactive_compact_idle_since
+                        ):
+                            ps.proactive_compact_draft_logged_since = (
+                                ps.proactive_compact_idle_since
+                            )
+                            _log_event(
+                                "proactive_idle_compact_skipped",
+                                role=role,
+                                project=project_name,
+                                reason="draft",
+                                idle_for=round(idle_for),
+                            )
                         continue
                     sess.write("/compact")
                     _delayed_enter(pane, sess, 150)

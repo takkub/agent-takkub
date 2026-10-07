@@ -1238,6 +1238,10 @@ class PaneState:
     # giving `takkub ma` one line per stretch to explain the skip. Cleared
     # back to "" the moment the pane is no longer in either blocked state.
     proactive_compact_busy_logged: str = ""
+    # proactive_compact_draft_logged_since: the idle episode (its
+    # proactive_compact_idle_since) whose draft-blocked skip was already
+    # logged — one line per episode instead of one per 5s tick.
+    proactive_compact_draft_logged_since: float = -1.0
     # proactive_compact_not_ready_since (#614): wall-clock when the CURRENT
     # not-ready stretch for this pane began (seeded on the first
     # not-ready tick of a stretch, cleared the first tick the pane is

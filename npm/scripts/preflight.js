@@ -2,12 +2,13 @@
 // Non-mutating environment detection. Runs ONLY `--version`-style probes and
 // filesystem existence checks — nothing here installs, writes, or overwrites.
 // This is what lets the installer "check first": report what's already present
-// and provision ONLY the gaps, so a machine that already has Python / claude /
+// and provision ONLY the gaps, so a machine that already has Python / Claude / Codex /
 // a cockpit venv is never clobbered.
 
 const { spawnSync } = require('child_process');
 const fs = require('fs');
 const { venvPython, agentTakkubHome } = require('./lib');
+const { probeCli } = require('./providers');
 
 function probe(cmd, args) {
   const r = spawnSync(cmd, args, { encoding: 'utf8' });
@@ -36,11 +37,13 @@ function detectPython() {
 
 // Detect the whole environment without mutating anything.
 function detect() {
-  const claude = probe('claude', ['--version']);
+  const claude = probeCli('claude');
+  const codex = probeCli('codex');
   return {
     python: detectPython(),
     node: probe('node', ['--version']),
     claudeCli: claude ? { present: true, version: claude } : { present: false },
+    codexCli: codex ? { present: true, version: codex } : { present: false },
     venv: { present: fs.existsSync(venvPython()), path: venvPython() },
     home: agentTakkubHome(),
   };
@@ -51,6 +54,7 @@ function report(d) {
   console.log(`    Python >=3.11 : ${d.python.present ? '✓ ' + d.python.version + ' (reuse existing)' : '· missing'}`);
   console.log(`    Node          : ${d.node ? '✓ ' + d.node : '· missing'}`);
   console.log(`    claude CLI    : ${d.claudeCli.present ? '✓ ' + d.claudeCli.version + ' (kept as-is)' : '· not found'}`);
+  console.log(`    codex CLI     : ${d.codexCli.present ? '✓ ' + d.codexCli.version + ' (kept as-is)' : '· not found'}`);
   console.log(`    cockpit venv  : ${d.venv.present ? '✓ exists (reuse/upgrade)' : '· will create'} — ${d.home}`);
 }
 

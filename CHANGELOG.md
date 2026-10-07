@@ -4,6 +4,13 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 
 ## [vNEXT]
 
+## [v2.2.6] - 2026-10-07
+
+### Fixed (แก้)
+
+- **compact อัตโนมัติไม่เคยยิงกับ Lead/pane ของ Claude ที่ว่างอยู่:** Claude Code แสดงคำแนะนำสีเทา (ตัวจาง SGR 2 เช่น `❯ เอาแบบนี้ เริ่มเลย`) ในช่องพิมพ์ แต่ pyte ทิ้ง attribute ตัวจาง ตัวเช็ค draft จึงนับเป็นข้อความค้าง แล้ว watchdog ข้าม `/compact` ไปตลอดโดยไม่ log อะไร (พบบน prod wash-locker 2026-10-07) · ตอนนี้หน้าจอเก็บ attribute ตัวจางต่อช่อง และตัวเช็ค draft ไม่นับข้อความตัวจาง (ข้อความที่พิมพ์จริงยังนับเป็น draft) · ถ้าข้ามเพราะเจอ draft จริง จะ log `proactive_idle_compact_skipped reason=draft` ครั้งละรอบที่ว่าง
+- **ติดตั้งครั้งแรกผ่าน npm:** `npm install -g agent-takkub` ติดตั้ง Claude และ Codex CLIs ที่ยังไม่มีให้อัตโนมัติ พร้อมตรวจว่ารันได้ และแสดงขั้นตอน login ทั้งสองตัว · แก้ Windows ที่เรียก `npm.cmd` ตรงๆ แล้วได้ `EINVAL` โดยรัน npm ผ่าน Node · ใช้ global prefix เดียวกับการติดตั้ง cockpit และใช้ provider เดิมเมื่อมีแล้ว
+
 ## [v2.2.5] - 2026-10-06
 
 ### Added (เพิ่ม)

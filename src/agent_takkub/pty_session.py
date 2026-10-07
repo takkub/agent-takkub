@@ -18,7 +18,7 @@ import sys
 import threading
 import time
 import unicodedata
-from collections import deque
+from collections import deque, namedtuple
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from enum import IntEnum
@@ -140,7 +140,47 @@ def _normalize_pty_transcript_chunk(data: bytes, last_row: list[int]) -> bytes:
     return _CUP_OR_ED_RE.sub(_repl, data)
 
 
-def _safe_screen_display(screen: pyte.Screen) -> list[str]:
+_DimChar = namedtuple(
+    "_DimChar",
+    (*pyte.screens.Char._fields, "dim"),
+    defaults=(*pyte.screens.Char._field_defaults.values(), False),
+)
+
+
+def _sgr_dim_after(dim: bool, attrs: tuple[int, ...]) -> bool:
+    """Faint (SGR 2) state after applying `attrs`, skipping 38/48/58 colour params."""
+    if not attrs:
+        return False
+    i = 0
+    while i < len(attrs):
+        a = attrs[i]
+        if a in (38, 48, 58) and i + 1 < len(attrs):
+            i += 5 if attrs[i + 1] == 2 else 3 if attrs[i + 1] == 5 else 2
+            continue
+        if a in (0, 22):
+            dim = False
+        elif a == 2:
+            dim = True
+        i += 1
+    return dim
+
+
+class _DimAwareScreen(pyte.Screen):
+    """pyte.Screen that keeps SGR 2 (faint) per cell — pyte 0.8 drops it.
+
+    Claude Code paints its prompt suggestion (ghost text such as ``❯ เอาแบบนี้
+    เริ่มเลย``) faint inside the composer. Without the flag the draft probe read
+    that hint as an unsubmitted draft, so the idle-compact watchdog skipped the
+    pane forever (2026-10-07, prod wash-locker Lead transcript: ``ESC[2m``)."""
+
+    def select_graphic_rendition(self, *attrs: int, **kwargs) -> None:
+        dim = _sgr_dim_after(bool(getattr(self.cursor.attrs, "dim", False)), attrs)
+        super().select_graphic_rendition(*attrs, **kwargs)
+        base = tuple(self.cursor.attrs)[: len(pyte.screens.Char._fields)]
+        self.cursor.attrs = _DimChar(*base, dim)
+
+
+def _safe_screen_display(screen: pyte.Screen, *, skip_dim: bool = False) -> list[str]:
     """``pyte.Screen.display`` rendered defensively against orphaned wide-char stubs.
 
     pyte writes a ``data=""`` stub into the cell *after* a wide (width-2)
@@ -172,10 +212,13 @@ def _safe_screen_display(screen: pyte.Screen) -> list[str]:
             if skip_stub:  # the legitimate stub right after a wide char
                 skip_stub = False
                 continue
-            data = line[x].data
+            cell = line[x]
+            data = cell.data
             if not data:  # orphaned stub / empty cell — pyte would IndexError here
                 continue
             skip_stub = wcwidth(data[0]) == 2
+            if skip_dim and getattr(cell, "dim", False):
+                data = " "  # faint = provider hint/ghost text, never user input
             chars.append(data)
         rows.append("".join(chars))
     return rows
@@ -2214,7 +2257,7 @@ class PtySession(QObject):
         super().__init__(parent)
         self.cols = cols
         self.rows = rows
-        self.screen = pyte.Screen(cols, rows)
+        self.screen = _DimAwareScreen(cols, rows)
         self.stream = pyte.ByteStream(self.screen)
         # Guards every read/write of the pyte screen. stream.feed() now runs in
         # the reader thread while the main thread reads display_lines() /
@@ -3090,6 +3133,15 @@ class PtySession(QObject):
         read."""
         return self._cached_ready
 
+    def _input_lines(self) -> list[str]:
+        """display_lines() with faint (SGR 2) cells blanked; plain rows when the
+        screen doesn't track faint (test doubles built via ``__new__``)."""
+        screen = self.__dict__.get("screen")
+        if not isinstance(screen, _DimAwareScreen) or "display_lines" in self.__dict__:
+            return self.display_lines()
+        with self._screen_lock:
+            return _safe_screen_display(screen, skip_dim=True)
+
     def shows_pending_input(self, fragment: str = "") -> bool:
         """True when the bottom input region holds unsent content.
 
@@ -3101,8 +3153,10 @@ class PtySession(QObject):
         needs the payload re-pasted (a CR resend can't recover a missing paste).
         Scoped to the same bottom footer/input region as is_at_ready_prompt() so
         conversation-body text quoting the content can't poison the verdict. (#79)
+        Faint cells (provider ghost text / prompt suggestions) are blanked first —
+        they are hints, not input (see `_DimAwareScreen`).
         """
-        lines = self.display_lines()
+        lines = self._input_lines()
         if _input_has_content(_ready_region(lines), fragment):
             return True
         # #748: tall composer — glyph row above the 6-row window.

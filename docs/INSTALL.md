@@ -46,6 +46,7 @@
 - ตรวจ: `node --version` ต้องโชว์ `v20.x` หรือสูงกว่า, `npx --version` ต้องโชว์เลข version
 
 ### 3. Claude Code CLI
+- ถ้าลง cockpit ด้วย `npm install -g agent-takkub` ระบบจะติดตั้ง Claude และ Codex ให้เมื่อยังไม่มี CLI ในเครื่อง และใช้ตัวเดิมเมื่อมีแล้ว
 - ติดตั้ง: `npm install -g @anthropic-ai/claude-code`
 - รัน `claude` ครั้งแรกเพื่อ login (Claude Max OAuth หรือใส่ API key)
 - ตรวจ: `claude --version` ต้องโชว์ version
@@ -61,7 +62,7 @@
 
 ### (ทางเลือก) 6. AI CLIs ตัวอื่น — สำหรับ role `codex` / `gemini` (model diversity)
 cockpit ใช้ **Claude อย่างเดียวก็ทำงานครบ** — Lead + ทุก role รันด้วย Claude ได้ 2 ตัวนี้เป็น optional ให้ "สมองที่ 2/3" จากโมเดลอื่นเวลา cross-check:
-- **OpenAI Codex CLI** — `npm install -g @openai/codex` แล้ว `codex login` (role `codex`)
+- **OpenAI Codex CLI** — npm installer ของ cockpit ติดตั้งให้เมื่อยังไม่มี จากนั้นรัน `codex login`; ถ้าลงจาก source ใช้ `npm install -g @openai/codex` (role `codex`)
 - **Google Antigravity CLI (`agy`)** — ลงที่ <https://antigravity.google/download> (native installer ลง `%LOCALAPPDATA%\agy\bin`) แล้วรัน `agy` 1 ครั้งทำ Google Sign-In (role `gemini`; แทน Gemini CLI เดิมที่ Google ปิด 18 มิ.ย. 2026)
 - **ไม่ลงก็ได้** — role `codex`/`gemini` จะรันด้วย Claude แทนอัตโนมัติ (substitution) ไม่ติดขัด แค่ไม่ได้มุมมองจากโมเดลอื่น
 - `scripts/install.ps1` ลง codex + agy ให้แบบ best-effort อยู่แล้ว

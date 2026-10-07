@@ -123,13 +123,13 @@ jobs:
 
   npm-wrapper:
     # npm/scripts/*.js are the cross-platform Windows/macOS launcher shims
-    # (postinstall wheel-pick, pathfix, shortcut, preflight-publish) — pure
-    # JS, no native deps, and their tests mock process.platform for both
-    # win32 and linux internally, so one ubuntu runner covers them. Was
-    # previously exercised only via a human typing `npm test` — CI never
-    # ran it, so regressions here (including the #340 wheel-pick guard)
-    # could land unnoticed.
-    runs-on: ubuntu-latest
+    # plus provider bootstrap. Provider tests spawn real fixture CLIs/npm,
+    # so exercise Windows batch shims and POSIX executables on their own OS.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 5
     permissions:
       contents: read
