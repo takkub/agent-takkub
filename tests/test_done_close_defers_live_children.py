@@ -31,6 +31,15 @@ from agent_takkub.orchestrator import (
 TEST_PROJECT = "done-close-defer-test"
 
 
+@pytest.fixture(autouse=True)
+def _resume_store_has_session(monkeypatch):
+    """#817 checks the provider store before auto-resume; these tests drive
+    the resume plumbing with synthetic uuids that have no transcript on disk."""
+    from agent_takkub import spawn_engine as _se
+
+    monkeypatch.setattr(_se, "_resume_uuid_matches_provider_cwd", lambda *a, **k: True)
+
+
 @pytest.fixture(scope="module")
 def qapp() -> QCoreApplication:
     app = QCoreApplication.instance()

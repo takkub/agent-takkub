@@ -4,6 +4,12 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 
 ## [vNEXT]
 
+## [v2.2.7] - 2026-10-07
+
+### Fixed (แก้)
+
+- **pane ของ codex crash-loop ตอนเริ่มงานใหม่ เพราะ resume session ที่ไม่มีอยู่จริง (#817):** role ที่เคยรันด้วย Claude แล้วสลับไปใช้ codex ยังจำ session ID ของ Claude ไว้ ตอน `done()` ID นี้ถูกจับคู่กับ provider=codex แล้วงานถัดไปถูกสั่ง `codex resume <ID ของ Claude>` → codex ตอบ "No saved session found" แล้วปิดตัว (exit 1) วน respawn จนโดน cap และใบงานค้างเป็นข้อความขยะ (พบบน prod ai-vdo) · ตอนนี้ก่อน auto-resume จะเช็คว่า session นั้นมีอยู่จริงในที่เก็บของ provider ตัวนั้น ถ้าไม่มีให้ spawn session ใหม่และลืม ID เก่า (log `auto_resume_session_missing`) ทั้งเส้นทางของ Claude และ provider อื่น · spawn ใหม่ที่ไม่ resume จะทิ้ง ID ที่ role เคยรายงานไว้ด้วย ID ของ provider ก่อนหน้าจึงไม่ติดข้ามมาอีก
+
 ## [v2.2.6] - 2026-10-07
 
 ### Docs (เอกสาร)

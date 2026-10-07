@@ -3216,7 +3216,27 @@ class SpawnEngineMixin:
                     and (time.time() - _prior_exit.get("ts", 0)) < RESUME_WINDOW_SEC
                     and _prior_provider == spec.name
                 ):
-                    resume_uuid = _prior_uuid
+                    # #817: the remembered uuid can belong to ANOTHER provider
+                    # (a role that ran claude, then codex: done() paired the
+                    # stale claude uuid with provider=codex) or to a session
+                    # the CLI no longer has. `codex resume <missing>` exits 1
+                    # before the task lands → respawn crash-loop. Resume only
+                    # what this provider's own store can actually open.
+                    if _resume_uuid_matches_provider_cwd(
+                        project_ns, spec.name, _prior_uuid, spawn_cwd, base_role
+                    ):
+                        resume_uuid = _prior_uuid
+                    else:
+                        _log_event(
+                            "auto_resume_session_missing",
+                            role=role_name,
+                            project=project_ns,
+                            provider=spec.name,
+                            session_uuid=str(_prior_uuid)[:12],
+                        )
+                        _ps_pre.session_uuid = None
+                        self._recent_exits.pop(_ekey_spawn, None)
+                        getattr(self, "_last_session_uuid", {}).pop(_ekey_spawn, None)
 
             if resume_uuid:
                 resume_argv.extend([spec.session_resume_flag, resume_uuid])
@@ -3224,6 +3244,12 @@ class SpawnEngineMixin:
                 _ps_new.session_uuid = resume_uuid
                 _ps_new.session_uuid_cwd = spawn_cwd
                 _ps_new.session_provider = spec.name
+            else:
+                # #817: a fresh conversation supersedes whatever this slot
+                # last reported. Providers without a SessionStart report
+                # (codex) would otherwise inherit the previous provider's
+                # uuid via `_session_uuid_for` and done() would re-seed it.
+                getattr(self, "_last_session_uuid", {}).pop(_ekey_spawn, None)
 
             tools_argv: list[str] = []
             if role_name != LEAD.name and spec.tools_flag:
@@ -4077,6 +4103,20 @@ class SpawnEngineMixin:
                 and prior_provider == CLAUDE
                 and effective_provider == CLAUDE
             )
+            if can_resume and not _resume_uuid_matches_provider_cwd(
+                project_ns, CLAUDE, prior_uuid, spawn_cwd, base_role
+            ):
+                # #817: never `--resume` a uuid claude can't open (another
+                # provider's id, or a transcript that is gone) — start fresh.
+                _log_event(
+                    "auto_resume_session_missing",
+                    role=role_name,
+                    project=project_ns,
+                    provider=CLAUDE,
+                    session_uuid=str(prior_uuid)[:12],
+                )
+                self._recent_exits.pop(_ekey_spawn, None)
+                can_resume = False
             if can_resume:
                 resume_argv.extend(["--resume", prior_uuid])
                 resumed = True

@@ -25,6 +25,15 @@ TEST_PROJECT = "spawn-task-test"
 
 
 @pytest.fixture(autouse=True)
+def _resume_store_has_session(monkeypatch):
+    """#817 checks the provider store before auto-resume; these tests drive
+    the resume plumbing with synthetic uuids that have no transcript on disk."""
+    from agent_takkub import spawn_engine as _se
+
+    monkeypatch.setattr(_se, "_resume_uuid_matches_provider_cwd", lambda *a, **k: True)
+
+
+@pytest.fixture(autouse=True)
 def _isolate_data_home(tmp_path, monkeypatch):
     """`orch.assign()` below is the real orchestrator method, not a mock, so
     it runs the real context-build pipeline (`facade._save_gate_trace` ->

@@ -23,6 +23,16 @@ from agent_takkub import config
 from agent_takkub import orchestrator as orch_mod
 from agent_takkub.orchestrator import RESUME_WINDOW_SEC, Orchestrator, PaneState, _exit_key
 
+
+@pytest.fixture(autouse=True)
+def _resume_store_has_session(monkeypatch):
+    """#817 checks the provider store before auto-resume; these tests drive
+    the resume plumbing with synthetic uuids that have no transcript on disk."""
+    from agent_takkub import spawn_engine as _se
+
+    monkeypatch.setattr(_se, "_resume_uuid_matches_provider_cwd", lambda *a, **k: True)
+
+
 # project="default" bypasses the CWD-within-project validation in spawn()
 _PROJECT = "default"
 
