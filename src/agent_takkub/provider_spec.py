@@ -307,6 +307,13 @@ class ProviderSpec:
     model_flag: str | None = None
     tools_flag: str | None = None
     autocompact_flag: str | None = None
+    # Slash command the idle-compact watchdog types to compact this CLI's
+    # conversation (orchestrator._check_proactive_compact). None = no manual
+    # command confirmed live, so the watchdog leaves the pane alone. Probed
+    # 2026-10-07: claude/codex/opencode `/compact` work; agy 1.3.1 answers
+    # "Unknown command" to /compact and /compress (it only self-compacts at
+    # its own threshold); cursor not verified (CLI not installed).
+    compact_command: str | None = None
     # Most CLIs accept effort as a regular ``flag value`` pair. Codex instead
     # exposes it through its generic config override:
     # ``-c model_reasoning_effort=<level>``. When effort_config_key is set,
@@ -790,6 +797,7 @@ claude_spec = ProviderSpec(
     ),
     tools_flag="--tools",  # #581 Phase 1: teammate built-in tool schema filtering
     autocompact_flag="--autocompact",  # #582: compact at 200k instead of ~1M
+    compact_command="/compact",  # live 2.1.292: compact_boundary 50k → 4k
     # (AskUserQuestion is a SECOND, separate --disallowed-tools flag at
     # spawn_engine.py:1594-1608 — not collapsed into this one field in Phase 0)
     model_flag="--model",  # spawn_engine.py:1483
@@ -905,6 +913,9 @@ codex_spec = ProviderSpec(
     tools_flag=None,
     # GAP (#103, #582): no auto-compact window flag (like claude's --autocompact).
     autocompact_flag=None,
+    # Documented + already driven by the Lead cached-input policy (#775);
+    # prod rollouts record `compacted` items after it (2026-09-29).
+    compact_command="/compact",
     ready_hard_blockers=("esc to interrupt", "esc to cancel"),  # pty_session.py:208-209
     ready_rules=(
         # Current-code truth (post-#99 fix): the banner-alone rule
@@ -1178,6 +1189,10 @@ gemini_spec = ProviderSpec(
     tools_flag=None,
     # GAP (#103, #582): no auto-compact window flag (like claude's --autocompact).
     autocompact_flag=None,
+    # GAP: agy 1.3.1 has no manual compact command ("Unknown command" for
+    # /compact and /compress, live 2026-10-07). It compacts itself at its own
+    # threshold (changelog: "compaction trigger threshold"), so compact_command
+    # stays None and the idle watchdog never types into an agy pane.
     ready_hard_blockers=(
         "esc to interrupt",
         "esc to cancel",
@@ -1406,6 +1421,8 @@ opencode_spec = ProviderSpec(
     tools_flag=None,
     # GAP (#103, #582): no auto-compact window flag (like claude's --autocompact).
     autocompact_flag=None,
+    # live 1.18.35 (2026-10-07): "Compaction · 5.0s", context 15.6K → 895.
+    compact_command="/compact",
     ready_hard_blockers=("esc interrupt",),  # opencode shows "esc interrupt" without "to"
     # #738: same string, second consumer. Real opencode 1.18.32 capture (own
     # PtySession, 110x36, 2026-09-26) of a live turn — the composer footer row
@@ -1542,6 +1559,8 @@ cursor_spec = ProviderSpec(
     tools_flag=None,
     # GAP (#103, #582): no auto-compact window flag (like claude's --autocompact).
     autocompact_flag=None,
+    # GAP: compact command not verified (cursor-agent not installed on the
+    # 2026-10-07 probe machine) — no idle compact until probed live.
     ready_hard_blockers=(),
     # ⚠ NOT yet calibrated: no Cursor TUI idle/busy markers have been observed.
     # Keep this empty rather than guessing markers that could misroute tasks.
@@ -1682,6 +1701,7 @@ def capability_matrix(spec: ProviderSpec) -> dict[str, str]:
     m["lead_context_recovery"] = {
         "claude": "partial",  # idle-age compact only, no cached-input threshold
         "codex": "supported",  # cached-input threshold drives /compact
+        "opencode": "partial",  # idle-age /compact only
     }.get(spec.name, "unsupported")
     m["remote_history"] = "supported" if spec.supports_remote_history else "unsupported"
     m["lead_questions"] = "supported" if spec.supports_lead_questions else "unsupported"
@@ -1970,6 +1990,13 @@ def auto_skip_feedback_for(provider: str) -> bool:
     (#509)."""
     spec = PROVIDER_REGISTRY.get(provider)
     return bool(spec.auto_skip_feedback) if spec is not None else False
+
+
+def compact_command_for(provider: str) -> str | None:
+    """Slash command that compacts `provider`'s conversation, or None when no
+    manual command is confirmed (see ProviderSpec.compact_command)."""
+    spec = PROVIDER_REGISTRY.get(provider)
+    return spec.compact_command if spec is not None else None
 
 
 def busy_queue_marker_for(provider: str) -> str | None:

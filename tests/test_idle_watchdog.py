@@ -1532,12 +1532,15 @@ class TestProactiveIdleCompact:
         orch._check_idle_teammates()
         assert pane.session.write.call_count == 2
 
-    def test_non_claude_provider_never_compacted(
-        self, orch: Orchestrator, monkeypatch: pytest.MonkeyPatch
+    @pytest.mark.parametrize("provider", ["gemini", "cursor"])
+    def test_provider_without_compact_command_never_compacted(
+        self, orch: Orchestrator, monkeypatch: pytest.MonkeyPatch, provider: str
     ) -> None:
+        """agy has no manual compact command (self-compacts) and cursor is
+        unverified — the watchdog must never type into them."""
         monkeypatch.setattr(
             "agent_takkub.provider_config.effective_provider_for",
-            lambda role, project=None: "codex",
+            lambda role, project=None: provider,
         )
         monkeypatch.setattr(orch_mod, "PROACTIVE_COMPACT_IDLE_AFTER_S", 100)
         pane = _make_pane(state="done", at_ready_prompt=True)
@@ -1550,6 +1553,28 @@ class TestProactiveIdleCompact:
         orch._check_idle_teammates()
 
         pane.session.write.assert_not_called()
+
+    @pytest.mark.parametrize("provider", ["codex", "opencode"])
+    def test_provider_with_compact_command_gets_idle_compact(
+        self, orch: Orchestrator, monkeypatch: pytest.MonkeyPatch, provider: str
+    ) -> None:
+        """codex / opencode `/compact` were verified live (2026-10-07): an idle
+        teammate on them is compacted like a claude one."""
+        monkeypatch.setattr(
+            "agent_takkub.provider_config.effective_provider_for",
+            lambda role, project=None: provider,
+        )
+        monkeypatch.setattr(orch_mod, "PROACTIVE_COMPACT_IDLE_AFTER_S", 100)
+        pane = _make_pane(state="done", at_ready_prompt=True)
+        orch.panes["backend"] = pane
+
+        clock = [1000.0]
+        monkeypatch.setattr(orch_mod.time, "time", lambda: clock[0])
+        orch._check_idle_teammates()
+        clock[0] += 10_000
+        orch._check_idle_teammates()
+
+        pane.session.write.assert_any_call("/compact")
 
     def test_rate_limited_pane_never_compacted(
         self, orch: Orchestrator, monkeypatch: pytest.MonkeyPatch

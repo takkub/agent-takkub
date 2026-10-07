@@ -4,6 +4,13 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 
 ## [vNEXT]
 
+## [v2.2.8] - 2026-10-07
+
+### Fixed (แก้)
+
+- **compact อัตโนมัติทำงานกับ codex teammate และ opencode ด้วย (เดิมมีแค่ Claude):** ProviderSpec มีฟิลด์ใหม่ `compact_command` ที่ใส่เฉพาะคำสั่งที่ทดสอบกับ CLI จริงแล้ว (claude/codex/opencode = `/compact`) · watchdog ใช้กฎ "ว่างนานพอแล้ว compact" กับทุก provider ที่มีคำสั่งนี้ และ log `provider` ใน event · codex Lead ใช้กฎนี้ด้วยถ้ากฎเดิม (cached input) ไม่ยิง · agy 1.3.1 ไม่มีคำสั่ง compact เอง (`/compact` และ `/compress` = Unknown command) แต่ compact ตัวเองเมื่อถึงเกณฑ์ cockpit จึงไม่พิมพ์อะไรใส่ · cursor ยังไม่ได้ทดสอบ (เครื่องนี้ไม่มี CLI) จึงยังไม่เปิด · ทดสอบ watchdog ตัวจริงกับ CLI จริงแล้ว: claude 50k → 4k tokens, opencode 16K → 2.7K
+- **ตัวเช็ค draft มองไม่เห็นข้อความที่พิมพ์ค้างใน opencode:** ช่องพิมพ์เป็นกรอบ `┃` ไม่มีสัญลักษณ์ prompt จึงอ่านเป็น "ว่าง" เสมอ · ตอนนี้ดูจากตำแหน่ง cursor ของ terminal (ทดสอบกับ opencode 1.18.35 ตัวจริง) cockpit จึงไม่พิมพ์ `/compact` หรือข้อความอื่นทับสิ่งที่ user พิมพ์ค้างไว้
+
 ## [v2.2.7] - 2026-10-07
 
 ### Fixed (แก้)

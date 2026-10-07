@@ -14766,11 +14766,12 @@ class Orchestrator(
         currently rate-limited (rate-limited panes can't run `/compact`
         either — it would just join the same stuck queue).
 
-        Claude uses the idle-age policy. Codex Lead additionally compacts
-        once its cached-input sample exceeds `lead_cached_input_tokens`, at
-        a safe idle prompt. Gemini, OpenCode, and Cursor remain explicit
-        ProviderSpec capability gaps; a provider switch is re-evaluated on
-        each tick.
+        Every provider with a live-verified `ProviderSpec.compact_command`
+        (claude, codex, opencode) uses the idle-age policy, typing that
+        command. Codex Lead additionally compacts once its cached-input
+        sample exceeds `lead_cached_input_tokens`, at a safe idle prompt.
+        Gemini/agy (self-compacts, no manual command) and Cursor (unverified)
+        are skipped; a provider switch is re-evaluated on each tick.
 
         One `/compact` per idle episode: `proactive_compact_sent_ts` is
         compared against `proactive_compact_idle_since`, so a pane that stays
@@ -15016,6 +15017,17 @@ class Orchestrator(
                                     cached_input_tokens=_cached,
                                     threshold=_threshold,
                                 )
+                                continue
+                    # Idle-age policy for every provider with a live-verified
+                    # compact command (ProviderSpec.compact_command). A codex
+                    # Lead also falls through here when the cached-input
+                    # policy above didn't fire — prod 2026-10-05 had one sit
+                    # at 141k cached with no compact. agy (self-compacts, no
+                    # command) and unverified cursor are skipped.
+                    from .provider_spec import compact_command_for
+
+                    _compact_cmd = compact_command_for(_effective_provider)
+                    if not _compact_cmd:
                         continue
 
                     # #465: Lead/specialist "not really idle" gates — see the
@@ -15104,7 +15116,7 @@ class Orchestrator(
                                 idle_for=round(idle_for),
                             )
                         continue
-                    sess.write("/compact")
+                    sess.write(_compact_cmd)
                     _delayed_enter(pane, sess, 150)
                     ps.proactive_compact_sent_ts = now
                     ps.proactive_compact_pending = True
@@ -15113,6 +15125,7 @@ class Orchestrator(
                         "proactive_idle_compact",
                         role=role,
                         project=project_name,
+                        provider=_effective_provider,
                         idle_for=round(idle_for),
                         overage=_project_in_overage,
                     )

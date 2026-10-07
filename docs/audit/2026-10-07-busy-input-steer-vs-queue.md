@@ -36,6 +36,22 @@ No provider tested left the message as a draft. Enter is enough for claude, agy 
 opencode, so `busy_queue_marker` and `busy_queue_key` stay unset for them (see
 `provider_spec.py`).
 
+## Compact command per provider (same day, live)
+
+| Provider | Manual compact | Live evidence | Idle watchdog |
+|---|---|---|---|
+| claude 2.1.292 | `/compact` | real watchdog fired, `compact_boundary` 50,363 → 4,261 tokens | yes |
+| codex 0.160 | `/compact` | documented, and prod rollouts record `compacted` items (2026-09-29) | yes. Lead also has the cached-input policy |
+| opencode 1.18.35 | `/compact` | real watchdog fired, "Compaction · 5.0s", context 16K → 2.7K | yes (v2.2.8) |
+| agy 1.3.1 | **none**: `/compact` and `/compress` return "Unknown command" | changelog describes its own threshold-based compaction | no. agy compacts itself |
+| cursor | not verified | CLI not installed | no |
+
+Before v2.2.8 the draft check could not see a typed draft in opencode. Its composer is a
+`┃` box with no prompt glyph, and the empty-state placeholder is grey rather than faint.
+v2.2.8 reads the visible terminal cursor instead: the cursor sits at bar+3 when the
+composer is empty and after the last typed character when it is not. Verified live, so
+the watchdog never types `/compact` over a user's draft.
+
 ## What this means for cockpit
 
 - A `takkub send` to a busy claude or opencode teammate reaches the running turn at

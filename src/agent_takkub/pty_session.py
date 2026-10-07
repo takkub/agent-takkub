@@ -3142,6 +3142,31 @@ class PtySession(QObject):
         with self._screen_lock:
             return _safe_screen_display(screen, skip_dim=True)
 
+    def _bar_composer_has_input(self) -> bool:
+        """opencode's composer is a `┃`-barred box with no prompt glyph, so
+        `_input_has_content` never finds it, and its empty-state placeholder
+        (`Ask anything… "Fix a TODO…"`) is grey, not faint. The visible
+        terminal cursor is the reliable signal: live 1.18.35 (2026-10-07) puts
+        it at bar+3 when empty and after the last typed character otherwise."""
+        screen = self.__dict__.get("screen")
+        if not isinstance(screen, pyte.Screen):
+            return False
+        with self._screen_lock:
+            cur = screen.cursor
+            if cur.hidden or not (0 <= cur.y < screen.lines):
+                return False
+            row = screen.buffer[cur.y]
+            bar = next(
+                (x for x in range(min(cur.x, screen.columns) - 1, -1, -1) if row[x].data == "┃"),
+                None,
+            )
+            if bar is None:
+                return False
+            start = bar + 3
+            return cur.x > start and any(
+                row[x].data.strip() for x in range(start, min(cur.x, screen.columns))
+            )
+
     def shows_pending_input(self, fragment: str = "") -> bool:
         """True when the bottom input region holds unsent content.
 
@@ -3156,6 +3181,8 @@ class PtySession(QObject):
         Faint cells (provider ghost text / prompt suggestions) are blanked first —
         they are hints, not input (see `_DimAwareScreen`).
         """
+        if self._bar_composer_has_input():
+            return True
         lines = self._input_lines()
         if _input_has_content(_ready_region(lines), fragment):
             return True
