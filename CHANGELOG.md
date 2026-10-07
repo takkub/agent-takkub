@@ -6,6 +6,10 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 
 ## [v2.2.6] - 2026-10-07
 
+### Docs (เอกสาร)
+
+- **ส่งข้อความตอน provider กำลังทำงาน: steer หรือรอคิว (ต่อจาก #809):** ทดสอบกับ CLI จริงด้วย `tools/steer_probe.py` · claude 2.1.292 และ opencode 1.18.34 รับเข้าคิวแล้วแทรกเข้า turn ที่รันอยู่หลัง tool call ถัดไป · agy 1.3.1 รับเข้าคิว แต่ใช้ข้อความหลัง turn จบ (ถ้าต้องให้มีผลทันทีต้อง Esc ก่อน) · ไม่มีตัวไหนทิ้งข้อความค้างเป็น draft · cursor ยังไม่ได้ทดสอบเพราะเครื่องนี้ไม่มี CLI · ตารางอยู่ใน `docs/audit/2026-10-07-busy-input-steer-vs-queue.md`
+
 ### Fixed (แก้)
 
 - **compact อัตโนมัติไม่เคยยิงกับ Lead/pane ของ Claude ที่ว่างอยู่:** Claude Code แสดงคำแนะนำสีเทา (ตัวจาง SGR 2 เช่น `❯ เอาแบบนี้ เริ่มเลย`) ในช่องพิมพ์ แต่ pyte ทิ้ง attribute ตัวจาง ตัวเช็ค draft จึงนับเป็นข้อความค้าง แล้ว watchdog ข้าม `/compact` ไปตลอดโดยไม่ log อะไร (พบบน prod wash-locker 2026-10-07) · ตอนนี้หน้าจอเก็บ attribute ตัวจางต่อช่อง และตัวเช็ค draft ไม่นับข้อความตัวจาง (ข้อความที่พิมพ์จริงยังนับเป็น draft) · ถ้าข้ามเพราะเจอ draft จริง จะ log `proactive_idle_compact_skipped reason=draft` ครั้งละรอบที่ว่าง

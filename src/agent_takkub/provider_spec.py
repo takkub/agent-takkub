@@ -219,6 +219,16 @@ class ProviderSpec:
     # queue. Providers WITHOUT a queue key (claude/agy/opencode: Enter submits
     # or interrupts while busy, never silently drops to a draft) leave all
     # three empty — verify-from-screen, never guess from docs alone.
+    # Live probe 2026-10-07 (tools/steer_probe.py, Windows ConPTY; table in
+    # docs/audit/2026-10-07-busy-input-steer-vs-queue.md) — Enter mid-turn:
+    #   claude 2.1.292   queued, STEERS in after the next tool call
+    #                    ("press up to edit queued messages")
+    #   agy 1.3.1        queued, applied only AFTER the turn ends (no steer;
+    #                    "▸ <msg>" + "press up to edit queued messages")
+    #   opencode 1.18.34 queued, STEERS in after the next tool call ("QUEUED")
+    #   codex 0.160      steers on Enter, Tab waits for turn end (#809, below)
+    #   cursor           GAP — CLI not installed on the probe machine, unverified
+    # None of the three leaves a draft, so they need no queue key.
     busy_queue_marker: str | None = None
     busy_queue_key: str | None = None
     busy_queue_confirm_markers: tuple[str, ...] = field(default_factory=tuple)
