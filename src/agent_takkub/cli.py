@@ -42,6 +42,7 @@ LEAD_ONLY_COMMANDS = frozenset(
         "close",
         "close-all",
         "kill",  # #430: kill processes under ANOTHER pane — Lead's call, audited
+        "submit",  # #819: press Enter on another pane's stuck composer draft
         "service-stop",  # #429: stopping a detached service is Lead's call too
         "end-session",
         "harvest",
@@ -1802,6 +1803,15 @@ def cmd_kill(args: argparse.Namespace) -> dict:
             }
         )
     )
+
+
+def cmd_submit(args: argparse.Namespace) -> dict:
+    """(lead) submit a draft stuck unsent in a pane's composer (#819) —
+    Enter only, never a repaste; refused when the composer reads empty."""
+    role, err = _resolve_role_arg(args)
+    if err:
+        return {"ok": False, "msg": err}
+    return _request(_with_project({"cmd": "submit", "role": role, "from": _from_role()}))
 
 
 def cmd_spawn_service(args: argparse.Namespace) -> dict:
@@ -6558,6 +6568,15 @@ def build_parser() -> argparse.ArgumentParser:
     skl.add_argument("--role", default=None, help="pane whose child processes to kill")
     skl.add_argument("--pid", type=int, default=None, help="only this PID (must be under the pane)")
     skl.set_defaults(func=cmd_kill)
+
+    # #819 lead-side submit of a stuck composer draft
+    ssb = sub.add_parser(
+        "submit",
+        help="(lead) press Enter on a pane whose task/message sits unsent in the composer (#819)",
+    )
+    ssb.add_argument("role_pos", nargs="?", default=None, metavar="ROLE", help="pane to submit")
+    ssb.add_argument("--role", default=None, help="pane to submit")
+    ssb.set_defaults(func=cmd_submit)
 
     # #429 detached services
     ssv = sub.add_parser(

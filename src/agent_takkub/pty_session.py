@@ -165,13 +165,65 @@ def _sgr_dim_after(dim: bool, attrs: tuple[int, ...]) -> bool:
     return dim
 
 
+def _zero_width_mark_re() -> re.Pattern[str]:
+    """Zero-width nonspacing marks pyte's ``draw`` can't place: category
+    Mn/Me with canonical combining class 0 (Thai ั ิ ี ึ ื ็ ์, many Indic
+    vowel signs). pyte only merges marks with ``unicodedata.combining() > 0``
+    and ``break``s out of the WHOLE chunk on these, dropping every character
+    after them (#823: ``ข้อความถึง backend`` rendered as ``ข้อความถ``). BMP only
+    — keeps the import-time scan to a few ms."""
+    cps = [
+        cp
+        for cp in range(0x300, 0x10000)
+        if unicodedata.category(chr(cp)) in ("Mn", "Me")
+        and not unicodedata.combining(chr(cp))
+        and wcwidth(chr(cp)) == 0
+    ]
+    return re.compile("[" + "".join(re.escape(chr(cp)) for cp in cps) + "]")
+
+
+_ZERO_WIDTH_MARK_RE = _zero_width_mark_re()
+
+
 class _DimAwareScreen(pyte.Screen):
     """pyte.Screen that keeps SGR 2 (faint) per cell — pyte 0.8 drops it.
 
     Claude Code paints its prompt suggestion (ghost text such as ``❯ เอาแบบนี้
     เริ่มเลย``) faint inside the composer. Without the flag the draft probe read
     that hint as an unsubmitted draft, so the idle-compact watchdog skipped the
-    pane forever (2026-10-07, prod wash-locker Lead transcript: ``ESC[2m``)."""
+    pane forever (2026-10-07, prod wash-locker Lead transcript: ``ESC[2m``).
+
+    Also merges class-0 zero-width marks into the previous cell (#823) — see
+    `_zero_width_mark_re`."""
+
+    def draw(self, data: str) -> None:
+        if not _ZERO_WIDTH_MARK_RE.search(data):
+            super().draw(data)
+            return
+        start = 0
+        for m in _ZERO_WIDTH_MARK_RE.finditer(data):
+            if m.start() > start:
+                super().draw(data[start : m.start()])
+            self._attach_mark(m.group())
+            start = m.end()
+        if start < len(data):
+            super().draw(data[start:])
+
+    def _attach_mark(self, mark: str) -> None:
+        """pyte's own combining branch, for a mark it refuses to combine."""
+        x, y = self.cursor.x, self.cursor.y
+        if x:
+            line = self.buffer[y]
+            col = x - 1
+            if col and line[col].data == "":  # stub after a wide char
+                col -= 1
+        elif y:
+            line = self.buffer[y - 1]
+            col = self.columns - 1
+        else:
+            return
+        last = line[col]
+        line[col] = last._replace(data=unicodedata.normalize("NFC", last.data + mark))
 
     def select_graphic_rendition(self, *attrs: int, **kwargs) -> None:
         dim = _sgr_dim_after(bool(getattr(self.cursor.attrs, "dim", False)), attrs)

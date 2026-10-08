@@ -3745,10 +3745,23 @@ class Orchestrator(
         ok, message = self._assign_dispatch(**item)
         if not ok:
             queue.insert(0, item)
+        elif any(q.get("_queued_task_id") == item["_queued_task_id"] for q in queue):
+            # #820: the busy-guard put it straight back (pane still mid-task)
+            # and returned ok — nothing was forwarded, so stay quiet.
+            _log_event(
+                "queued_assignment_still_busy",
+                role=role,
+                project=project,
+                task_id=item["_queued_task_id"][:8],
+            )
+            return True
+        backlog_id = str(item.get("_queued_backlog_id") or "")
         self._notify_lead(
             project,
-            f"[queued-assignment] {role}: task {item['_queued_task_id'][:8]} "
-            + ("forwarded when pane ready" if ok else f"retained; dispatch failed: {message}"),
+            f"[queued-assignment] {role}: task {item['_queued_task_id'][:8]}"
+            + (f" (backlog {backlog_id[:8]})" if backlog_id else "")
+            + " "
+            + ("forwarded to pane" if ok else f"retained; dispatch failed: {message}"),
             from_role=role,
             note="queued_assignment",
             kind="queued-assignment",
@@ -3794,6 +3807,7 @@ class Orchestrator(
         distinct_from: str | None = None,
         scope: str = "normal",
         _queued_task_id: str | None = None,
+        _queued_backlog_id: str | None = None,
     ) -> tuple[bool, str]:
         # Spawn the pane and run all post-spawn wiring (goal, provider rewrite,
         # verify hint, shard/plan bookkeeping, send). Shared by the normal assign
@@ -3844,6 +3858,9 @@ class Orchestrator(
             if not hasattr(self, "_pending_assignments"):
                 self._pending_assignments = {}
             pending_id = _queued_task_id or _uuid.uuid4().hex
+            _pending_backlog = _queued_backlog_id or self._peek_assign_backlog(
+                project_ns, role_name
+            )
             if _queued_task_id is None:
                 _log_event(
                     "assign_queued_behind_busy_pane",
@@ -3855,7 +3872,9 @@ class Orchestrator(
                     project_ns,
                     f"⏳ [{role_name}] pane ยัง busy (งานเดิม: "
                     f"{strip_new_task_header(current_state.last_assigned_task or '')[:80]!r}) → งานใหม่ "
-                    f"{pending_id[:8]} เข้าคิว จะส่งเองเมื่อ pane ว่างที่ prompt หรือ done · "
+                    f"{pending_id[:8]}"
+                    + (f" (backlog {_pending_backlog[:8]})" if _pending_backlog else "")
+                    + " เข้าคิว จะส่งเองเมื่อ pane ว่างที่ prompt หรือ done · "
                     f"ถ้าจะแทนที่ทันที: takkub close --role {role_name} แล้ว assign ใหม่",
                     from_role=role_name,
                     note="queued_assignment",
@@ -3878,6 +3897,9 @@ class Orchestrator(
                 distinct_from=distinct_from,
                 scope=scope,
                 _queued_task_id=pending_id,
+                # #821: the card stash expires after _ASSIGN_BACKLOG_TTL_S; a
+                # task queued longer than that lost its card at dispatch.
+                _queued_backlog_id=_pending_backlog,
             )
             bucket = self._pending_assignments.setdefault(key, [])
             if _queued_task_id is not None:
@@ -3945,6 +3967,7 @@ class Orchestrator(
                     distinct_from=distinct_from,
                     scope=scope,
                     _queued_task_id=_queued_task_id,
+                    _queued_backlog_id=_queued_backlog_id,
                 ),
             )
             return (
@@ -3999,7 +4022,9 @@ class Orchestrator(
                 project_ns,
                 role_name,
                 ps_assign.task_id,
-                item_id=self._peek_assign_backlog(project_ns, role_name) or None,
+                item_id=(
+                    _queued_backlog_id or self._peek_assign_backlog(project_ns, role_name) or None
+                ),
             )
         except Exception:
             _log_event("backlog_bind_error", role=role_name, project=project_ns)
@@ -4428,7 +4453,8 @@ class Orchestrator(
         ps_assign.last_assigned_task = delivery_task
         ps_assign.last_assigned_task_file = task_file
         ps_assign.last_assigned_scope = scope
-        ps_assign.backlog_id = self._take_assign_backlog(project_ns, role_name)
+        _taken_backlog_id = self._take_assign_backlog(project_ns, role_name)
+        ps_assign.backlog_id = _queued_backlog_id or _taken_backlog_id
         from . import task_scope as _task_scope
 
         ps_assign.budget_task_text = _task_scope.strip_budget(task)
@@ -5782,8 +5808,10 @@ class Orchestrator(
             _enter_delay_ms(body_payload),
             # Peer messages are never automatically pasted twice. If submit
             # evidence is ambiguous, retry Enter only and surface the existing
-            # delivery warning path instead of duplicating the body.
-            payload=None,
+            # delivery warning path instead of duplicating the body. The
+            # payload still feeds the composer probes (#819) — repaste=False.
+            payload=body_payload,
+            repaste=False,
             content_fragment=body,
             on_resend=lambda rem, r=to_role: _log_event(
                 "send_enter_resend", project=project_ns, role=r, remaining=rem
@@ -6269,6 +6297,42 @@ class Orchestrator(
                     note="message_replayed",
                     kind="message-replayed",
                 )
+
+    def submit_composer(self, role_name: str, project: str | None = None) -> tuple[bool, str]:
+        """(lead, #819) Submit a draft stuck unsent in a pane's composer —
+        Enter only (busy-queue key when the provider's queue footer is up),
+        never a repaste. Refuses when the composer reads empty, so a stray
+        call can't submit an empty turn or interrupt anything."""
+        from .provider_spec import busy_queue_key_for
+
+        project_ns = self._resolve_project(project)
+        pane = self._project_panes(project_ns).get(role_name)
+        sess = getattr(pane, "session", None)
+        if sess is None or getattr(sess, "is_alive", False) is not True:
+            return False, f"{role_name}: ไม่มี pane ที่รันอยู่"
+        try:
+            pending = sess.shows_pending_input("") is True
+        except Exception:
+            pending = False
+        if not pending:
+            return False, f"{role_name}: ช่องพิมพ์ว่าง — ไม่มีอะไรค้างให้ submit"
+        provider = getattr(getattr(pane, "model", None), "provider_name", None) or "claude"
+        key = b"\r"
+        try:
+            if sess.shows_busy_queue_marker(provider) is True:
+                key = busy_queue_key_for(provider).encode("ascii")
+        except Exception:
+            pass
+        label = "Enter" if key == b"\r" else "queue key"
+        _safe_session_write(sess, key, priority=WritePriority.CONTROL, kind="control")
+        _log_event(
+            "composer_submit_manual",
+            role=role_name,
+            project=project_ns,
+            provider=provider,
+            key=label,
+        )
+        return True, f"{role_name}: ส่ง {label} แล้ว — เช็คด้วย takkub status"
 
     def kill_pane_children(
         self,
@@ -7020,8 +7084,38 @@ class Orchestrator(
                 if not _resolved_close_uuid:
                     from .token_meter import provider_session_id_for_cwd
 
+                    # #824: never adopt a sibling pane's conversation in the
+                    # same cwd (frontend resumed backend's codex thread and
+                    # redid its task). Skip ids any other pane holds or will
+                    # resume (any project), and only accept a session started
+                    # after this pane spawned (it was not resumed, so its own
+                    # conversation is younger than the pane).
+                    _sibling_ids = frozenset(
+                        str(v)
+                        for k, v in (
+                            *(
+                                (k2, getattr(ps2, "session_uuid", None))
+                                for k2, ps2 in getattr(self, "_pane_state", {}).items()
+                            ),
+                            *(
+                                (k2, (ex or {}).get("session_uuid"))
+                                for k2, ex in getattr(self, "_recent_exits", {}).items()
+                            ),
+                        )
+                        if k != key and isinstance(v, str) and v
+                    )
+                    _spawn_ts_close = getattr(getattr(pane, "model", None), "spawn_ts", 0.0)
                     _resolved_close_uuid = provider_session_id_for_cwd(
-                        _close_prov, _close_cwd, session_uuid=None, not_before=0.0
+                        _close_prov,
+                        _close_cwd,
+                        session_uuid=None,
+                        not_before=0.0,
+                        exclude_ids=_sibling_ids,
+                        created_after=(
+                            float(_spawn_ts_close)
+                            if isinstance(_spawn_ts_close, (int, float))
+                            else 0.0
+                        ),
                     )
                     if _resolved_close_uuid:
                         _log_event(
@@ -8347,8 +8441,10 @@ class Orchestrator(
                     "เทียบ HEAD + dirty path/mtime/size ตอน assign"
                     + (
                         (
-                            f" — pane อื่นแตะ {len(sibling_files)} ไฟล์ทับช่วงเดียวกันจนหักออกแล้วเหลือ 0 "
-                            "จึงรายงานยอดก่อนหัก (แยกไม่ได้ว่าไฟล์ไหนของใครบน shared tree — #651)"
+                            # #823: plain wording — the old "หักออกแล้วเหลือ 0
+                            # จึงรายงานยอดก่อนหัก" read as a bogus count.
+                            f" — ⚠️ ยอดนี้อาจรวมไฟล์ของ pane อื่น ({len(sibling_files)} ไฟล์ทับช่วงเวลาเดียวกัน) "
+                            "เพราะ shared tree แยกเจ้าของไม่ได้ — งานขนานใช้ `--isolation worktree` (#651)"
                         )
                         if sibling_over_subtracted
                         else (
@@ -8752,10 +8848,30 @@ class Orchestrator(
                 active_task_id=had_task_id,
                 cited_task_id=older_id,
             )
+            # #824: a cited id that is ANOTHER role's live task means this
+            # pane did a sibling's work (e.g. resumed the wrong conversation)
+            # — say so plainly instead of the benign "older task" wording.
+            _owner_role = next(
+                (
+                    str(k).split("::", 1)[1]
+                    for k, ps_o in getattr(self, "_pane_state", {}).items()
+                    if k != key
+                    and str(k).startswith(f"{project_ns}::")
+                    and (getattr(ps_o, "task_id", None) or "")[:8].lower() in cited_ids
+                ),
+                None,
+            )
             self._notify_lead(
                 project_ns,
-                f"⚠️ [{from_role}] ได้รับรายงาน done สำหรับ task เก่า ({older_id}) "
-                f"ขณะที่ task {cur_tid} กำลัง active อยู่ — รายงานนี้จะไม่ปิด task {cur_tid}",
+                (
+                    f"🚨 [{from_role}] รายงาน done ของ task {older_id} ซึ่งเป็นงานของ "
+                    f"{_owner_role} (ยังเปิดอยู่) — {from_role} อาจทำงานซ้อนกับ {_owner_role} "
+                    f"บนไฟล์ชุดเดียวกัน (#824) · task {cur_tid} ของ {from_role} ยังไม่ปิด — "
+                    f"เช็ค `git diff` ก่อน แล้ว assign {from_role} ใหม่"
+                    if _owner_role
+                    else f"⚠️ [{from_role}] ได้รับรายงาน done สำหรับ task เก่า ({older_id}) "
+                    f"ขณะที่ task {cur_tid} กำลัง active อยู่ — รายงานนี้จะไม่ปิด task {cur_tid}"
+                ),
                 from_role=from_role,
                 note="done_older_task_ignored",
                 kind="done-older-task",
@@ -9239,6 +9355,24 @@ class Orchestrator(
                     and rec.get("kind", "instruction") != "info"
                     and not _is_info_message(rec.get("body", ""))
                 ]
+                # #823: only follow-ups the pane may not have acted on — not
+                # every confirmed one on every done. Skip ids the note cites,
+                # ids already warned about, and ones confirmed delivered well
+                # before this report (the pane had the turn to process them).
+                # Unconfirmed ("sent") or last-minute ones still warn.
+                _warned_fu = self.__dict__.setdefault("_followup_warned_ids", set())
+                _now_fu = time.time()
+                followups = [
+                    rec
+                    for rec in followups
+                    if str(rec.get("id", "")) not in _warned_fu
+                    and not (rec.get("id") and str(rec.get("id")) in (raw_note or ""))
+                    and not (
+                        rec.get("state") == "delivered"
+                        and _now_fu - float(rec.get("delivered_ts") or rec.get("ts") or 0) >= 60.0
+                    )
+                ]
+                _warned_fu.update(str(rec.get("id", "")) for rec in followups)
                 if followups:
                     ids = ", ".join(str(rec.get("id", "")) for rec in followups)
                     review_warnings.append(

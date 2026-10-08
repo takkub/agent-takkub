@@ -525,9 +525,42 @@ def provider_session_id_for_cwd(
     *,
     session_uuid: str | None = None,
     not_before: float = 0.0,
+    exclude_ids: frozenset[str] = frozenset(),
+    created_after: float = 0.0,
 ) -> str | None:
     """Resolve the provider-NATIVE session id for `cwd`'s session, for
     close-time resume preservation (#723).
+
+    #824: a newest-in-cwd guess can return a SIBLING pane's conversation when
+    two panes share one cwd (frontend resumed backend's codex thread and redid
+    its task). Ids in ``exclude_ids`` (claimed by other panes) are never
+    returned for any provider; codex also searches past them, bounded to
+    rollouts started after ``created_after`` (this pane's spawn). Ambiguity
+    resolves to None → cold respawn, never a foreign resume.
+    """
+    found = _provider_session_id_for_cwd(
+        provider,
+        cwd,
+        session_uuid=session_uuid,
+        not_before=not_before,
+        exclude_ids=exclude_ids,
+        created_after=created_after,
+    )
+    if found and found in exclude_ids:
+        return None
+    return found
+
+
+def _provider_session_id_for_cwd(
+    provider: str,
+    cwd: str | Path,
+    *,
+    session_uuid: str | None,
+    not_before: float,
+    exclude_ids: frozenset[str],
+    created_after: float,
+) -> str | None:
+    """Unfiltered resolve behind `provider_session_id_for_cwd`.
 
     claude's session uuid resumes as-is (`--resume <uuid>`), but every other
     resume-capable provider mints its own id at boot, which the cockpit never
@@ -549,10 +582,19 @@ def provider_session_id_for_cwd(
             return session_uuid or None
 
         if provider == "codex":
-            from .codex_helper import read_codex_session_meta
+            from .codex_helper import (
+                read_codex_session_meta,
+                resolve_codex_jsonl_for_cwd,
+                resolve_newest_codex_session_for_cwd,
+            )
 
-            cand = resolve_pane_session(
-                "codex", cwd, session_uuid=session_uuid, not_before=not_before
+            cand = (
+                resolve_codex_jsonl_for_cwd(cwd, session_uuid) if session_uuid else None
+            ) or resolve_newest_codex_session_for_cwd(
+                cwd,
+                not_before=not_before or created_after,
+                exclude_ids=exclude_ids,
+                created_after=created_after,
             )
             if cand is None:
                 return None

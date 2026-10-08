@@ -63,6 +63,7 @@ _LEAD_ONLY_CMDS = frozenset(
         "close",
         "close-all",
         "kill",  # #430
+        "submit",  # #819
         "service-stop",  # #429
         "harvest",
         "harvest-done",
@@ -1263,6 +1264,8 @@ class CliServer(QObject):
                     pid=req.get("pid"),
                     by=req.get("from") or "lead",
                 )
+            elif cmd == "submit":
+                ok, msg = self._orch.submit_composer(req.get("role") or "", project=from_project)
             elif cmd in ("spawn-service", "service-list", "service-stop"):
                 ok, msg = self._service_command(cmd, req, from_project)
             elif cmd == "skill-learn":

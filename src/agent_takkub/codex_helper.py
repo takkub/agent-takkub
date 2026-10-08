@@ -149,9 +149,16 @@ def resolve_newest_codex_session_for_cwd(
     *,
     not_before: float = 0.0,
     root: Path | None = None,
+    exclude_ids: frozenset[str] = frozenset(),
+    created_after: float = 0.0,
 ) -> Path | None:
     """Newest codex rollout file recorded against *cwd*, with no known session
     id yet — the token meter's per-pane resolution path.
+
+    ``exclude_ids`` / ``created_after`` (#824): close-time resume must never
+    pick a SIBLING pane's conversation in a shared cwd. Rollouts claimed by
+    another pane are skipped, and with ``created_after`` (the pane's own spawn
+    time) a rollout started before this pane existed is skipped too.
 
     Unlike claude, codex chooses its own session id after boot (there is no
     `--session-id`-equivalent flag the cockpit can pass at spawn, see
@@ -215,9 +222,29 @@ def resolve_newest_codex_session_for_cwd(
                     continue
                 for f in files:
                     meta = read_codex_session_meta(f)
-                    if normalize_codex_cwd(meta.get("cwd")) == wanted_cwd:
-                        return f
+                    if normalize_codex_cwd(meta.get("cwd")) != wanted_cwd:
+                        continue
+                    sid = str(meta.get("id") or meta.get("session_id") or "").strip()
+                    if exclude_ids and sid in exclude_ids:
+                        continue
+                    if created_after and _codex_meta_started_at(meta) < created_after - 30.0:
+                        continue
+                    return f
     return None
+
+
+def _codex_meta_started_at(meta: dict) -> float:
+    """Epoch seconds of a rollout's ``session_meta.timestamp`` (0.0 = unknown,
+    which a ``created_after`` bound treats as too old — default-deny)."""
+    from datetime import datetime
+
+    raw = str(meta.get("timestamp") or "").strip()
+    if not raw:
+        return 0.0
+    try:
+        return datetime.fromisoformat(raw.replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return 0.0
 
 
 # The token badge refreshes every 5 s per pane and only needs the most recent

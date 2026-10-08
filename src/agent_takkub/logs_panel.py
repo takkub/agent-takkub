@@ -47,7 +47,9 @@ def read_log_tail(path: Path, tail_bytes: int = _TAIL_BYTES) -> str:
         with open(path, "rb") as f:
             if size > tail_bytes:
                 f.seek(size - tail_bytes)
-            raw = f.read()
+            # Bounded read (#818): the log can grow between stat() and read();
+            # an unbounded read() then slurps everything appended meanwhile.
+            raw = f.read(tail_bytes)
     except OSError:
         return ""
     if size > tail_bytes:

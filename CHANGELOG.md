@@ -4,6 +4,18 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 
 ## [vNEXT]
 
+## [v2.2.9] - 2026-10-08
+
+### Fixed (แก้)
+
+- **pane ที่ใช้ repo เดียวกันไป resume conversation ของอีก pane (#824, #822):** ตอนปิด pane หลัง done cockpit หา session ของ codex ด้วย "rollout ใหม่สุดใน cwd" ถ้า 2 pane ใช้ repo เดียวกันก็จะได้ session ของอีกคน (prod ai-vdo: frontend กับ backend ได้ `01a118f3` ทั้งคู่ แล้ว frontend ไปทำงานเสียงของ backend ซ้ำบนไฟล์ชุดเดียวกัน · `Fork created` คือ codex เปิด session ที่อีก process ใช้อยู่) · ตอนนี้จะข้าม session ID ที่ pane อื่นใช้หรือจะ resume อยู่ (ทุก provider) และ codex จะรับเฉพาะ rollout ที่เริ่มหลัง pane นี้ spawn ถ้าไม่แน่ใจให้ spawn ใหม่ ไม่ resume ของคนอื่น · ถ้า pane รายงาน done ด้วย task ID ของ role อื่นที่ยังเปิดอยู่ Lead จะได้คำเตือน 🚨 ว่าอาจทำงานซ้อนกัน แทนข้อความ "task เก่า"
+- **ใบงานค้างในช่องพิมพ์ของ codex ไม่ถูก submit (#819):** ทางส่งงานที่ปิด repaste ส่ง `payload=None` ซึ่งทำให้ตัวตรวจหลัง Enter มองไม่เห็นข้อความที่ค้างในช่องพิมพ์ด้วย พอ pane ยังไม่ ready (codex เพิ่ง resume) ก็สรุปภายใน 1 วินาทีโดยไม่กด Enter ซ้ำเลย · ตอนนี้แยก flag `repaste` ออกจาก payload: ยังตรวจช่องพิมพ์และกด Enter ซ้ำตามงบเดิม แต่ไม่ paste ซ้ำ (#134 ยังเหมือนเดิม) ใช้ทั้งการส่งใบงานและ `takkub send` · เพิ่มคำสั่ง `takkub submit --role X` (Lead) กด Enter ให้ข้อความที่ค้างในช่องพิมพ์ ถ้าช่องว่างจะไม่ทำอะไร
+- **แจ้ง "forwarded when pane ready" ซ้ำทุกนาทีขณะ pane ยัง busy (#820):** ตัวส่งงานในคิวตอน pane ว่างเรียก dispatch ที่ busy-guard ใส่งานกลับเข้าคิวแต่ตอบ ok · ตอนนี้ถ้างานกลับเข้าคิวจะไม่แจ้ง Lead (log `queued_assignment_still_busy`) แจ้งครั้งเดียวตอนส่งจริง
+- **งานเดียวมี task ID 3 ตัว (#821):** delivery สร้าง uuid ใหม่แทน task ID ของ pane → ตอนนี้ใช้ task ID เดียวกันตลอดทาง (assign → คิว → delivery-unconfirmed) และข้อความคิว/forwarded แสดง backlog ID คู่กัน · งานที่ค้างในคิวเกิน 2 นาทีเคยหลุดจาก backlog card (stash หมดอายุ) ตอนนี้ card ติดไปกับงานในคิว
+- **`takkub tail` ภาษาไทยตกสระ (#823):** pyte หยุดวาดทั้งก้อนเมื่อเจอสระ/เครื่องหมายไทยที่ combining class = 0 (ึ ์ ี ั ...) ข้อความที่เหลือทั้งบรรทัดหายไป (`ข้อความถึง backend` → `ข้อความถ`) · screen ของ cockpit ต่อเครื่องหมายเหล่านี้เข้ากับตัวอักษรก่อนหน้าแล้ว — ตัวตรวจ prompt/draft ทุกตัวที่อ่านหน้าจอก็ได้ข้อความไทยครบด้วย
+- **คำเตือน "Lead follow-ups require review" ซ้ำทุก done (#823):** เตือนเฉพาะข้อความที่ยังไม่ยืนยันว่าถึง หรือเพิ่งถึงไม่เกิน 60 วินาทีก่อน done · ข้าม ID ที่ note อ้างถึงแล้ว และเตือนแต่ละ ID ครั้งเดียว · ข้อความ attribution บน shared tree เปลี่ยนเป็นภาษาที่อ่านเข้าใจ (ยอดอาจรวมไฟล์ของ pane อื่น ใช้ `--isolation worktree`)
+- **MemoryError ใน Logs panel (#818):** อ่านท้าย log ด้วย `read()` แบบไม่จำกัด ถ้า log โตระหว่าง `stat()` กับ `read()` ก็อ่านเกินไปเรื่อยๆ · จำกัดที่ `tail_bytes`
+
 ## [v2.2.8] - 2026-10-07
 
 ### Fixed (แก้)

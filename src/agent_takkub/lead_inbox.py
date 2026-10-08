@@ -777,8 +777,16 @@ def _delayed_enter_verified(
     validator: Callable[[], bool] | None = None,
     provider: str | None = None,
     steer: bool = False,
+    repaste: bool | None = None,
 ) -> None:
     """Like `_delayed_enter`, but recovers a submit that was swallowed.
+
+    ``repaste`` (#819): ``False`` keeps ``payload`` for the composer probes
+    (so a paste still sitting unsubmitted gets its CR resent) while never
+    writing the payload a second time. ``None`` = legacy: repaste whenever a
+    payload is given. Passing ``payload=None`` to disable repaste also blinded
+    the not-ready branch to a pending draft, so it settled in ~1s without a
+    single Enter resend (codex task stuck in the composer, #819).
 
     ``steer`` (#809): in busy-queue mode, submit with Enter first — codex
     0.160 (proven live 2026-10-06) takes Enter mid-turn as STEER ("Messages
@@ -870,6 +878,7 @@ def _delayed_enter_verified(
         except Exception:
             provider = None
     provider = provider or None
+    _can_repaste = payload is not None and repaste is not False
 
     def _settled(outcome: SubmitSettleOutcome | None = None) -> None:
         if on_settled is not None:
@@ -1118,7 +1127,7 @@ def _delayed_enter_verified(
             # near-universal under concurrent multi-project load (the visible
             # "เบิ้ลตามจำนวนโปรเจค"). Decide with a structural signal instead of
             # the ambiguous box state.
-            if payload is not None and not session.shows_pending_input(content_fragment):
+            if _can_repaste and not session.shows_pending_input(content_fragment):
                 # Did claude produce ANY output since we pasted? A paste that
                 # landed renders a placeholder / streams a reply (timestamp
                 # advances past the baseline); a swallowed paste leaves the pane
@@ -1684,8 +1693,14 @@ class LeadInboxMixin:
                     event_sink=lambda event, details: _log_event(event, **details)
                 )
             manager: DeliveryManager = self._delivery_manager
+            # #821: carry the pane's own task id — a fresh uuid here gave the
+            # same work a third id in delivery-unconfirmed notices.
+            try:
+                _delivery_task_id = self._ps(f"{project_ns}::{role_name}").task_id or ""
+            except Exception:
+                _delivery_task_id = ""
             delivery = manager.create(
-                task_id="",
+                task_id=_delivery_task_id if isinstance(_delivery_task_id, str) else "",
                 project_id=self._resolve_project(project),
                 pane_id=role_name,
                 session_generation=generation,
@@ -1965,7 +1980,8 @@ class LeadInboxMixin:
                 pane,
                 _task_sess,
                 _enter_delay_ms(payload),
-                payload=payload if allow_repaste else None,
+                payload=payload,
+                repaste=bool(allow_repaste),
                 content_fragment=task,
                 on_resend=_on_resend,
                 on_repaste=lambda rem, r=role_name, p=project: _log_event(

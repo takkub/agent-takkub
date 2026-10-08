@@ -570,8 +570,10 @@ class TestVerifiedEnterWiring:
     ) -> None:
         """#134: a caller that opts out of repaste (spawn_engine's
         _CURRENT_TASK_TRIGGER) must reach _delayed_enter_verified with
-        payload=None, so a "ready + empty box" verify reading can only ever
-        resend a bare CR — never write a second copy of the body."""
+        repaste=False, so a "ready + empty box" verify reading can only ever
+        resend a bare CR — never write a second copy of the body. #819: the
+        payload itself is still passed so the composer probes can see a
+        draft stuck unsubmitted."""
         reviewer = _pane(_live_session())
         reviewer.session.is_at_ready_prompt.return_value = True
         orch._panes_by_project["P"] = {"lead": _pane(_live_session()), "reviewer": reviewer}
@@ -588,7 +590,8 @@ class TestVerifiedEnterWiring:
                 allow_repaste=False,
             )
         verified.assert_called_once()
-        assert verified.call_args.kwargs["payload"] is None
+        assert verified.call_args.kwargs["repaste"] is False
+        assert verified.call_args.kwargs["payload"]
 
     def test_allow_repaste_default_keeps_payload_for_normal_tasks(
         self, orch: Orchestrator, monkeypatch
