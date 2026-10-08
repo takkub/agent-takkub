@@ -6,7 +6,13 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 
 ## [v2.2.9] - 2026-10-08
 
+### Added (เพิ่ม)
+
+- **ชน limit แล้วสลับไปบัญชีอื่นของ provider เดิมอัตโนมัติ:** เมื่อ pane ของ Claude หรือ Codex ชน usage limit ทั้งที่งานยังไม่เสร็จ cockpit จะเลือกบัญชีอื่นของ provider เดิมที่ login ไว้ (Settings → Accounts) ที่ยังไม่ติด limit ทั้งตามที่จำไว้และตาม telemetry ของบัญชีนั้น แล้ว respawn ตำแหน่งเดิมบนบัญชีนั้น ส่งใบงานเดิม + output ล่าสุด + path transcript ไปด้วย (flow เดียวกับ reroute ข้าม provider) · ถ้าทุกบัญชีติดหมดถึงจะย้ายไป provider อื่นตาม policy เดิม · ทำงานในโหมด "หยุดรอ" ด้วย เพราะไม่ได้เปลี่ยน provider · สลับเฉพาะ pane นั้น (`PaneState.account_override`) บัญชีที่ตั้งให้ทั้งโปรเจคไม่เปลี่ยน · Claude ได้ curated config dir แยกต่อบัญชี จึงไม่ทับ credentials ของ pane อื่นที่ยังรันอยู่ · งานถัดไปที่ spawn ระหว่างบัญชีของโปรเจคยังติด limit จะเริ่มบนบัญชีที่ว่างเลย · ข้ามโปรไฟล์ที่เป็นบัญชีเดียวกันแต่ตั้งชื่อต่างกัน · gap: agy/opencode/cursor ยังไม่มีวิธีชี้ pane ไปที่บัญชีอื่น จึงยังใช้ reroute ข้าม provider อย่างเดียว
+
 ### Fixed (แก้)
+
+- **ตรวจไม่เจอว่า Codex ชน usage limit เลย จึงไม่สลับอะไรให้ แม้จะเปิดโหมดสลับไว้:** codex แสดง `■ You’ve hit your usage limit … try again at 12:39 PM.` มี bullet `■`, apostrophe แบบโค้ง และขึ้นบรรทัดใหม่ก่อนเวลา reset ซึ่งตัวตรวจที่ทำมาตามหน้าจอของ Claude ไม่รู้จักสักอย่าง (prod ai-vdo: ไม่มี event `rate_limit_detected` ของ backend เลย) · ตอนนี้รองรับทั้งสามแบบ และอ่านเวลา reset จาก "try again at" ได้
 
 - **pane ที่ใช้ repo เดียวกันไป resume conversation ของอีก pane (#824, #822):** ตอนปิด pane หลัง done cockpit หา session ของ codex ด้วย "rollout ใหม่สุดใน cwd" ถ้า 2 pane ใช้ repo เดียวกันก็จะได้ session ของอีกคน (prod ai-vdo: frontend กับ backend ได้ `01a118f3` ทั้งคู่ แล้ว frontend ไปทำงานเสียงของ backend ซ้ำบนไฟล์ชุดเดียวกัน · `Fork created` คือ codex เปิด session ที่อีก process ใช้อยู่) · ตอนนี้จะข้าม session ID ที่ pane อื่นใช้หรือจะ resume อยู่ (ทุก provider) และ codex จะรับเฉพาะ rollout ที่เริ่มหลัง pane นี้ spawn ถ้าไม่แน่ใจให้ spawn ใหม่ ไม่ resume ของคนอื่น · ถ้า pane รายงาน done ด้วย task ID ของ role อื่นที่ยังเปิดอยู่ Lead จะได้คำเตือน 🚨 ว่าอาจทำงานซ้อนกัน แทนข้อความ "task เก่า"
 - **ใบงานค้างในช่องพิมพ์ของ codex ไม่ถูก submit (#819):** ทางส่งงานที่ปิด repaste ส่ง `payload=None` ซึ่งทำให้ตัวตรวจหลัง Enter มองไม่เห็นข้อความที่ค้างในช่องพิมพ์ด้วย พอ pane ยังไม่ ready (codex เพิ่ง resume) ก็สรุปภายใน 1 วินาทีโดยไม่กด Enter ซ้ำเลย · ตอนนี้แยก flag `repaste` ออกจาก payload: ยังตรวจช่องพิมพ์และกด Enter ซ้ำตามงบเดิม แต่ไม่ paste ซ้ำ (#134 ยังเหมือนเดิม) ใช้ทั้งการส่งใบงานและ `takkub send` · เพิ่มคำสั่ง `takkub submit --role X` (Lead) กด Enter ให้ข้อความที่ค้างในช่องพิมพ์ ถ้าช่องว่างจะไม่ทำอะไร

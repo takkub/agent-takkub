@@ -2068,7 +2068,9 @@ class SettingsWindow(
 
         park_hint = QLabel(
             "กำหนดพฤติกรรมเมื่อใช้งานจนชน limit ของ provider · "
-            "สลับ provider: จะย้ายงานไป provider อื่นที่โควตายังเหลือและไม่ถูก exclude · "
+            "ทุกโหมด: ถ้า Claude/Codex มีบัญชีอื่นที่ login ไว้และยังไม่ติด limit "
+            "จะสลับไปบัญชีนั้นก่อน (provider เดิม) · "
+            "สลับ provider: ถ้าทุกบัญชีติดหมด จะย้ายงานไป provider อื่นที่โควตายังเหลือและไม่ถูก exclude · "
             "หยุดรอ: จะคง session/browser เดิมไว้ และปลุกอัตโนมัติเมื่อครบเวลาคูลดาวน์ · "
             "บันทึกทันที มีผลเมื่อชน limit ครั้งถัดไป",
             park_panel,

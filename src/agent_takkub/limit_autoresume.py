@@ -155,6 +155,134 @@ def _usage_denies_limit(
     return (True, pct) if verdict == "denied" else (False, 0.0)
 
 
+# ── same-provider account switch ──────────────────────────────────────────
+# (provider, account profile name) → epoch its usage window resets. Process
+# memory only: a restart forgets, and the next hit simply records it again.
+_ACCOUNT_LIMIT_UNTIL: dict[tuple[str, str], float] = {}
+# Providers whose accounts the cockpit can point a single pane at
+# (CLAUDE_CONFIG_DIR / CODEX_HOME). agy/opencode/cursor have no per-pane
+# account knob — a quota hit there goes straight to the provider reroute.
+ACCOUNT_SWITCH_PROVIDERS = frozenset({"claude", "codex"})
+
+
+def account_limited(provider: str, name: str, now: float | None = None) -> bool:
+    until = _ACCOUNT_LIMIT_UNTIL.get((provider, name), 0.0)
+    return until > (time.time() if now is None else now)
+
+
+def _account_logged_in(provider: str, home: Path) -> bool:
+    """A login exists in *home* itself (never the OS-wide fallback files)."""
+    try:
+        if provider == "codex":
+            return (home / "auth.json").is_file()
+        if (home / ".credentials.json").is_file():
+            return True
+        # macOS keeps the token in the keychain; the dir still records the
+        # signed-in account.
+        data = json.loads((home / ".claude.json").read_text(encoding="utf-8"))
+        return bool((data or {}).get("oauthAccount"))
+    except (OSError, ValueError, AttributeError):
+        return False
+
+
+def _account_identity(provider: str, home: Path) -> str:
+    try:
+        from . import usage_shared
+
+        if provider == "codex":
+            return usage_shared.codex_identity(home) or ""
+        return usage_shared.claude_identity(home) or ""
+    except Exception:
+        return ""
+
+
+def _account_exhausted(provider: str, home: Path) -> bool:
+    """Best-effort: does *home*'s own cached telemetry show a spent window?
+    Unknown → False (the switch is cheap to undo: a hit there just moves on)."""
+    try:
+        if provider == CLAUDE:
+            verdict, pct = confirm_verdict_for_provider(CLAUDE, home)
+            return verdict == "confirmed" or pct >= auto_resume.QUOTA_REPROBE_EXHAUSTED_PERCENT
+        from .provider_usage import get_store
+
+        usage = get_store().get_account_usage(provider, home)
+        if usage is None:
+            return False
+        verdict, _pct = _classify_utilizations(
+            _window_utilizations(usage), auto_resume.QUOTA_REPROBE_EXHAUSTED_PERCENT
+        )
+        return verdict == "confirmed"
+    except Exception:
+        return False
+
+
+def pick_reroute_account(
+    project: str, hit_provider: str, current: str | None, reset_at: float
+) -> str | None:
+    """Another logged-in, not-spent account of *hit_provider* to move a
+    limit-hit task to, or None. Records *current* as limited until
+    *reset_at* so the pick never bounces back to it, and skips profiles that
+    are the same account under another name."""
+    if hit_provider not in ACCOUNT_SWITCH_PROVIDERS:
+        return None
+    from .user_profile import profile_for
+
+    current = current or profile_for(project, hit_provider)
+    now = time.time()
+    _ACCOUNT_LIMIT_UNTIL[(hit_provider, current)] = reset_at if reset_at > now else now + 3600.0
+    return _first_usable_account(hit_provider, current, now)
+
+
+def account_for_spawn(project: str, provider: str) -> str | None:
+    """The account a NEW pane should start on instead of the project's own,
+    while the project's account is still known to be spent (a done() closes
+    the switched pane, so the next task would otherwise boot straight back
+    onto the limit). None = use the project's account."""
+    if provider not in ACCOUNT_SWITCH_PROVIDERS:
+        return None
+    try:
+        from .user_profile import profile_for
+
+        current = profile_for(project, provider)
+        now = time.time()
+        if not account_limited(provider, current, now):
+            return None
+        # Spawn runs on the Qt main thread: no usage probe here (a claude
+        # probe is a network call) — known-limited memory only.
+        return _first_usable_account(provider, current, now, check_telemetry=False)
+    except Exception:
+        return None
+
+
+def _first_usable_account(
+    provider: str, current: str, now: float, *, check_telemetry: bool = True
+) -> str | None:
+    from .user_profile import profile_home, profiles_for_provider
+
+    hit_provider = provider
+    cur_home = profile_home(hit_provider, current)
+    cur_id = _account_identity(hit_provider, cur_home) if cur_home else ""
+    for prof in profiles_for_provider(hit_provider):
+        name = str(prof.get("name") or "")
+        if not name or name == current or account_limited(hit_provider, name, now):
+            continue
+        home = profile_home(hit_provider, name)
+        if home is None or not _account_logged_in(hit_provider, home):
+            continue
+        try:
+            if cur_home is not None and home.resolve() == cur_home.resolve():
+                continue
+        except OSError:
+            pass
+        if cur_id and _account_identity(hit_provider, home) == cur_id:
+            continue
+        if check_telemetry and _account_exhausted(hit_provider, home):
+            _ACCOUNT_LIMIT_UNTIL[(hit_provider, name)] = now + 1800.0
+            continue
+        return name
+    return None
+
+
 def confirm_verdict_for_provider(provider: str, config_dir: Path | None) -> tuple[str, float]:
     """Blocking (network) tri-state probe of *provider* for the auto-resume
     confirm loop (#704): `("confirmed", pct)` — exhausted per its own
@@ -523,6 +651,19 @@ class AutoResumeMixin:
             provider_state.set_quota_reset_at(hit_provider, reset_at)
             self._schedule_provider_quota_reset_notice(project, hit_provider, reset_at)
 
+        # Another logged-in account of the SAME provider first (user request
+        # 2026-10-08): same CLI, same model/effort, only the quota changes —
+        # the provider ring below is the fallback when every account is spent.
+        # Runs under the "park" policy too: park means "don't move my task to
+        # another provider", and this doesn't.
+        if ps.quota_reroute_count < auto_resume.MAX_REROUTE_ROUNDS:
+            account = pick_reroute_account(project, hit_provider, ps.account_override, reset_at)
+            if account is not None:
+                self._reroute_pane_to_provider(
+                    project, role, ps, hit_provider, hit_provider, reset_at, account=account
+                )
+                return
+
         policy = auto_resume.effective_quota_policy(project)
         if policy == auto_resume.QUOTA_POLICY_PARK:
             _log_event(
@@ -626,10 +767,12 @@ class AutoResumeMixin:
         reset_at: float,
         *,
         manual: bool = False,
+        account: str | None = None,
     ) -> None:
         """Close the quota-hit pane and respawn the SAME role on
         `new_provider`, resending its outstanding task with a short
-        progress note. Mirrors `Orchestrator._auto_recover_stuck`'s
+        progress note. ``account`` (same provider): respawn on that
+        user_profile account instead — `PaneState.account_override`. Mirrors `Orchestrator._auto_recover_stuck`'s
         close→snapshot→respawn shape — the closest existing precedent for
         "the pane itself is fine, only the provider under it needs to
         change" (no `--resume`, unlike that path: a different CLI can't
@@ -695,6 +838,11 @@ class AutoResumeMixin:
         # Same-provider manual replacement may keep those explicit choices.
         snap_model_override = ps.model_override if new_provider == hit_provider else None
         snap_effort_override = ps.effort_override if new_provider == hit_provider else None
+        # Accounts belong to one provider: keep the pane's account only while
+        # the provider stays the same, or take the one just picked.
+        snap_account = account or (ps.account_override if new_provider == hit_provider else None)
+        from_label = f"{hit_provider}/{ps.account_override or 'project account'}"
+        to_label = f"{new_provider}/{account}" if account else new_provider
 
         _write_progress_marker(
             project,
@@ -702,7 +850,7 @@ class AutoResumeMixin:
             ps,
             pane,
             status="rerouted",
-            reason=("manual_lead_replace" if manual else f"{hit_provider}->{new_provider}"),
+            reason=("manual_lead_replace" if manual else f"{from_label}->{to_label}"),
         )
         human = _human_duration(max(0, reset_at - time.time())) if reset_at else "ไม่ทราบ"
         _log_event(
@@ -712,11 +860,20 @@ class AutoResumeMixin:
             from_provider=hit_provider,
             to_provider=new_provider,
             round=reroute_count,
+            **({"to_account": account} if account else {}),
         )
         if not is_lead:
             lead_msg = (
-                f"🔀 [auto-resume] {hit_provider} ชนโควตา → {role} ย้ายไป {new_provider} "
-                f"ต่อจาก progress ล่าสุด, {hit_provider} กลับ {human}"
+                (
+                    f"🔀 [auto-resume] {hit_provider} บัญชี {ps.account_override or 'ของโปรเจค'} "
+                    f"ชนโควตา → {role} สลับไปบัญชี {account} ทำต่อจาก progress ล่าสุด, "
+                    f"บัญชีเดิมกลับ {human}"
+                )
+                if account
+                else (
+                    f"🔀 [auto-resume] {hit_provider} ชนโควตา → {role} ย้ายไป {new_provider} "
+                    f"ต่อจาก progress ล่าสุด, {hit_provider} กลับ {human}"
+                )
             )
             self._notify_lead(
                 project, lead_msg, from_role=role, note="quota_rerouted", kind="quota-rerouted"
@@ -755,6 +912,7 @@ class AutoResumeMixin:
             _ps_r = self._ps(key)
             _ps_r.quota_reroute_pending = False
             _ps_r.provider_override = new_provider
+            _ps_r.account_override = snap_account
             _ps_r.model_override = snap_model_override
             _ps_r.effort_override = snap_effort_override
             _ps_r.last_assigned_task = task
@@ -844,8 +1002,8 @@ class AutoResumeMixin:
                 self._send_when_ready(role, lead_takeover, project=project)
             elif task:
                 note = (
-                    f"\n\n[system] งานนี้ย้ายจาก provider {hit_provider} (ชนโควตา) มาที่ "
-                    f"{new_provider} — ทำต่อจากจุดที่ค้างไว้ (ถ้าเพิ่งเริ่มงานให้เริ่มใหม่ได้เลย), "
+                    f"\n\n[system] งานนี้ย้ายจาก {from_label} (ชนโควตา) มาที่ "
+                    f"{to_label} — ทำต่อจากจุดที่ค้างไว้ (ถ้าเพิ่งเริ่มงานให้เริ่มใหม่ได้เลย), "
                     "ถ้าเสร็จแล้วรายงานด้วย `takkub done`"
                 )
                 if isinstance(transcript_path, str) and transcript_path:

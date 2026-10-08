@@ -1754,6 +1754,24 @@ class ProviderUsageStore:
         with self._lock:
             return dict(self._cache)
 
+    def get_account_usage(self, provider: str, home: Path | str) -> ProviderUsage | None:
+        """Cached snapshot of the account living in *home* (cache read only)."""
+        try:
+            want = Path(home).resolve()
+        except OSError:
+            want = Path(home)
+        with self._lock:
+            items = list(self._account_cache.items())
+        for (prov, key), usage in items:
+            if prov != provider:
+                continue
+            try:
+                if Path(key).resolve() == want:
+                    return usage
+            except (OSError, ValueError):
+                continue
+        return None
+
     def get_all_account_usages(self) -> list[ProviderUsage]:
         """Return the meter-ready snapshots, one row per known account.
 

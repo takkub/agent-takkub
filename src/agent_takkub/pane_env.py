@@ -508,7 +508,7 @@ def apply_default_model(env: dict[str, str], model: str) -> None:
         env["ANTHROPIC_DEFAULT_MODEL"] = model
 
 
-def inject_user_profile_env(env: dict[str, str], project: str) -> None:
+def inject_user_profile_env(env: dict[str, str], project: str, account: str | None = None) -> None:
     """Set ``CLAUDE_CONFIG_DIR`` in *env* when it should differ from a plain
     ``claude`` default invocation.
 
@@ -520,11 +520,19 @@ def inject_user_profile_env(env: dict[str, str], project: str) -> None:
     profile must set the var there — otherwise every pane would fall through
     to the OS-wide ``~/.claude`` instead of the prod-scoped profile. A
     project's own explicit profile choice always wins either way.
+
+    *account* (a pane switched to another Claude account after a usage limit)
+    wins over the project's choice for THIS pane only.
     """
     from . import config
-    from .user_profile import DEFAULT_PROFILE, config_dir_for, profile_for
+    from .user_profile import DEFAULT_PROFILE, config_dir_for, profile_for, profile_home
 
     try:
+        if account:
+            home = profile_home("claude", account)
+            if home is not None:
+                env["CLAUDE_CONFIG_DIR"] = str(home)
+                return
         name = profile_for(project)
         if name != DEFAULT_PROFILE or config.DATA_HOME != config.REPO_ROOT:
             env["CLAUDE_CONFIG_DIR"] = str(config_dir_for(project))
@@ -532,7 +540,9 @@ def inject_user_profile_env(env: dict[str, str], project: str) -> None:
         pass
 
 
-def inject_curated_claude_config_dir(env: dict[str, str], project: str) -> None:
+def inject_curated_claude_config_dir(
+    env: dict[str, str], project: str, account: str | None = None
+) -> None:
     """Set ``CLAUDE_CONFIG_DIR`` to the curated directory for *project* (#563).
 
     Curated dir isolates global skills so only project-relevant skills load,
@@ -545,7 +555,7 @@ def inject_curated_claude_config_dir(env: dict[str, str], project: str) -> None:
     from .user_profile import ensure_curated_claude_config_dir
 
     try:
-        curated = ensure_curated_claude_config_dir(project)
+        curated = ensure_curated_claude_config_dir(project, account=account or None)
         env["CLAUDE_CONFIG_DIR"] = str(curated)
     except Exception:
         pass
@@ -629,7 +639,9 @@ def inject_claude_project_dir_name_env(
 _PROFILE_HOME_VAR: dict[str, str] = {"codex": "CODEX_HOME"}
 
 
-def inject_provider_home_env(env: dict[str, str], provider: str, project: str = "") -> None:
+def inject_provider_home_env(
+    env: dict[str, str], provider: str, project: str = "", account: str | None = None
+) -> None:
     """Point a non-claude provider's state at DATA_HOME (user directive
     2026-08-19) — the codex/opencode counterpart of
     ``inject_user_profile_env``'s ``CLAUDE_CONFIG_DIR``.
@@ -657,12 +669,16 @@ def inject_provider_home_env(env: dict[str, str], provider: str, project: str = 
     except Exception:
         pass
     var = _PROFILE_HOME_VAR.get(provider)
-    if not (var and project):
+    if not (var and (project or account)):
         return
     try:
-        from .user_profile import provider_config_dir_for
+        from .user_profile import profile_home, provider_config_dir_for
 
-        home = provider_config_dir_for(project, provider)
+        # *account*: this pane was switched to another account after a usage
+        # limit — that account's home, for this pane only.
+        home = (profile_home(provider, account) if account else None) or (
+            provider_config_dir_for(project, provider) if project else None
+        )
         if home is not None:
             env[var] = str(home)
     except Exception:

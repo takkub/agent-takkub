@@ -1626,7 +1626,7 @@ def _rate_limit_markers() -> tuple[str, ...]:
 # `resets_in_s: 18000` at 22:00:05 for a banner whose own text said 10pm
 # (i.e. now), and the pane went on to finish its task 4 minutes later.
 _RESET_TIME_RE = re.compile(
-    r"(?:reset[s]?(?:\s+at)?|continuing\s+automatically\s+at)\s+"
+    r"(?:reset[s]?(?:\s+at)?|continuing\s+automatically\s+at|try\s+again\s+at)\s+"
     r"(\d{1,2})(?::(\d{2}))?\s*(am|pm)?",
     re.IGNORECASE,
 )
@@ -1762,10 +1762,17 @@ def _quota_banner_text(lines) -> str:
         # Claude nests provider errors under a tool result with a tree
         # connector ("└ You've hit your session limit …"). It is still the
         # CLI's live quota banner, not an agent quoting the banner in prose.
-        candidate = line.strip().lstrip("⚠! └⎿").strip()
+        # Codex (2026-10-08 prod screen) prints its error with a "■" bullet,
+        # a typographic apostrophe ("You’ve") and wraps the reset clause
+        # onto its own line ("try again at 12:39 PM.") — none of which the
+        # claude-shaped checks matched, so a codex limit was never detected
+        # and the task never moved off the spent account.
+        candidate = line.replace("’", "'").strip().lstrip("⚠! └⎿■●").strip()
         if candidate.startswith(_QUOTA_BANNER_STARTS):
             banner.append(candidate)
-        elif banner and candidate.startswith(("resets ", "reset at ", "continuing automatically")):
+        elif banner and candidate.startswith(
+            ("resets ", "reset at ", "continuing automatically", "try again at ")
+        ):
             banner.append(candidate)
     return "\n".join(banner)
 

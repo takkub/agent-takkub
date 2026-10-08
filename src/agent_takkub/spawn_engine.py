@@ -266,6 +266,17 @@ def _pane_cli_bin_dir() -> str:
     return str(bin_dir)
 
 
+def _account_for_spawn(project_ns: str, provider: str) -> str | None:
+    """Another logged-in account while the project's own is still spent
+    (`limit_autoresume.account_for_spawn`); never blocks a spawn."""
+    try:
+        from .limit_autoresume import account_for_spawn
+
+        return account_for_spawn(project_ns, provider)
+    except Exception:
+        return None
+
+
 def _apply_v2_account_env_override(
     env: dict, provider_id: str, project_ns: str, role_name: str
 ) -> None:
@@ -1148,6 +1159,12 @@ class PaneState:
     # spawn time (provider_override/effective_provider_for) vs. because it
     # fled a quota hit mid-task.
     quota_reroute_from: str = ""
+    # account_override: the provider account (user_profile name) THIS pane
+    # runs on instead of the project's selection — set when a usage limit
+    # moved the task to another logged-in account of the same provider
+    # (claude/codex). None = the project's account. Survives respawns of the
+    # same task; cleared on a fresh assign().
+    account_override: str | None = None
     # quota_reroute_pending: a #514 reroute has closed (or tried to close)
     # this pane and its 2 s respawn timer has not run yet. The watchdog
     # tick keeps calling `_maybe_auto_resume_park` on the still-visible
@@ -2993,6 +3010,7 @@ class SpawnEngineMixin:
             env["TAKKUB_BASE_ROLE"] = base_role
             _stamp_subagent_fanout_env(env, int(_ps_initial.subagent_fanout or 0))
             apply_chrome_bin(env, base_role)
+            _account = _ps_initial.account_override or _account_for_spawn(project_ns, spec.name)
             inject_user_profile_env(env, project_ns)
             # Prod isolation for this provider's own state (sessions/auth/
             # config) — the non-claude counterpart of CLAUDE_CONFIG_DIR above.
@@ -3008,7 +3026,7 @@ class SpawnEngineMixin:
                     _log_event("provider_home_seeded", provider=spec.name)
             except Exception:
                 _log.exception("provider home seeding failed for %s", spec.name)
-            inject_provider_home_env(env, spec.name, project_ns)
+            inject_provider_home_env(env, spec.name, project_ns, account=_account)
             inject_provider_no_autoupdate_env(env, spec.name)
             from .core.routing.flag import v2_router_enabled
 
@@ -3661,8 +3679,11 @@ class SpawnEngineMixin:
         env = _build_lead_env(project_ns) if role_name == LEAD.name else _build_pane_env(project_ns)
         env["TAKKUB_ROLE"] = role_name
         apply_chrome_bin(env, base_role)
-        inject_user_profile_env(env, project_ns)
-        inject_curated_claude_config_dir(env, project_ns)
+        # A pane moved to another Claude account after a usage limit runs on
+        # that account (its own curated dir — never the project's).
+        _claude_account = _ps_initial.account_override or _account_for_spawn(project_ns, CLAUDE)
+        inject_user_profile_env(env, project_ns, account=_claude_account)
+        inject_curated_claude_config_dir(env, project_ns, account=_claude_account)
         inject_claude_project_dir_name_env(env, project_ns, claude, base_role)
         inject_provider_no_autoupdate_env(env, CLAUDE)
         from .core.routing.flag import v2_router_enabled

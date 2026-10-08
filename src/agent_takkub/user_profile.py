@@ -808,19 +808,44 @@ def _curate_settings_plugins(
         pass
 
 
-def curated_config_dir_for(project: str) -> Path:
+def profile_home(provider: str, name: str) -> Path | None:
+    """Home dir of the named account for *provider* (``CLAUDE_CONFIG_DIR`` /
+    ``CODEX_HOME``), or None when unknown. ``default`` → the provider's own
+    default home (claude: the cockpit default dir; codex: the pane CODEX_HOME)."""
+    provider = normalize_provider(provider)
+    if name == DEFAULT_PROFILE:
+        if provider == "claude":
+            return _DEFAULT_CONFIG_DIR
+        if provider == "codex":
+            from .codex_helper import codex_home
+
+            return codex_home()
+        return None
+    for p in _load_registry():
+        if p["name"] == name and p["provider"] == provider and p.get("config_dir"):
+            return Path(p["config_dir"])
+    return None
+
+
+def curated_config_dir_for(project: str, account: str | None = None) -> Path:
     """Return the curated ``CLAUDE_CONFIG_DIR`` path for *project* under DATA_HOME (#563).
 
     Follows #504's layout: ``DATA_HOME/providers/claude/<account>-<slug>``.
+    *account* overrides the project's selected profile (a pane switched to
+    another account after a usage limit) — one dir per account, so mirroring
+    that account's credentials never overwrites what other live panes of the
+    project are using.
     """
     from .config import DATA_HOME
 
-    account = profile_for(project)
+    account = account or profile_for(project)
     slug = _project_slug(project)
     return DATA_HOME / "providers" / "claude" / f"{account}-{slug}"
 
 
-def ensure_curated_claude_config_dir(project: str, base_dir: Path | None = None) -> Path:
+def ensure_curated_claude_config_dir(
+    project: str, base_dir: Path | None = None, account: str | None = None
+) -> Path:
     """Prepare a curated ``CLAUDE_CONFIG_DIR`` for *project* (#563, #580).
 
     Mirrors auth credentials (.credentials.json) and settings from the base
@@ -834,8 +859,8 @@ def ensure_curated_claude_config_dir(project: str, base_dir: Path | None = None)
     from .worktree_manager import _is_link_point, _make_link, _remove_link
 
     if base_dir is None:
-        base_dir = config_dir_for(project)
-    dest_dir = curated_config_dir_for(project)
+        base_dir = (profile_home("claude", account) if account else None) or config_dir_for(project)
+    dest_dir = curated_config_dir_for(project, account)
     try:
         if dest_dir.resolve() == base_dir.resolve():
             return dest_dir
