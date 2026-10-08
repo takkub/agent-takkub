@@ -317,6 +317,35 @@ def pick_reroute_account(
     return _first_usable_account(hit_provider, current, now)
 
 
+def account_with_fresh_headroom(provider: str, now: float | None = None) -> str | None:
+    """A logged-in account of *provider* whose FRESH meter snapshot shows
+    room below the pre-spawn line and that isn't recorded spent; None when
+    no account can prove it is usable (a stale/missing snapshot proves
+    nothing — never clear a stall on a guess)."""
+    now = time.time() if now is None else now
+    try:
+        from .provider_usage import STATUS_ACTIVE, get_store
+        from .user_profile import profile_home, profiles_for_provider
+
+        store = get_store()
+        for prof in profiles_for_provider(provider):
+            name = str(prof.get("name") or "")
+            home = profile_home(provider, name) if name else None
+            if home is None or account_limited(provider, name, now):
+                continue
+            if not _account_logged_in(provider, home):
+                continue
+            usage = store.get_account_usage(provider, home)
+            fetched = usage.fetched_at.timestamp() if usage and usage.fetched_at else 0.0
+            if usage is None or usage.status != STATUS_ACTIVE or now - fetched > METER_MAX_AGE_S:
+                continue
+            if meter_reset_at(provider, home, METER_PRESPAWN_PCT, now) is None:
+                return name
+    except Exception:
+        return None
+    return None
+
+
 def account_for_spawn(project: str, provider: str) -> str | None:
     """The account a NEW pane should start on instead of the project's own,
     while the project's account is still known to be spent (a done() closes
@@ -760,11 +789,6 @@ class AutoResumeMixin:
     def _reroute_or_park(self, project: str, role: str, ps: PaneState) -> None:
         hit_provider = ps.quota_provider or "claude"
         reset_at = ps.rate_limited_until
-        if reset_at:
-            from . import provider_state
-
-            provider_state.set_quota_reset_at(hit_provider, reset_at)
-            self._schedule_provider_quota_reset_notice(project, hit_provider, reset_at)
 
         # Another logged-in account of the SAME provider first (user request
         # 2026-10-08): same CLI, same model/effort, only the quota changes —
@@ -780,6 +804,17 @@ class AutoResumeMixin:
                     project, role, ps, hit_provider, hit_provider, reset_at, account=account
                 )
                 return
+
+        # Only now is the PROVIDER out: no other account of it can take the
+        # task. Recording it before the account pick marked codex "quota-hit"
+        # while another codex account was free, and the provider-level
+        # reprobe then announced a bogus "codex quota reset" off the default
+        # account (prod 2026-10-08).
+        if reset_at:
+            from . import provider_state
+
+            provider_state.set_quota_reset_at(hit_provider, reset_at)
+            self._schedule_provider_quota_reset_notice(project, hit_provider, reset_at)
 
         policy = auto_resume.effective_quota_policy(project)
         if policy == auto_resume.QUOTA_POLICY_PARK:
@@ -1221,7 +1256,13 @@ class AutoResumeMixin:
         from . import provider_state
 
         provider_state.clear_quota_reset(provider)
-        how = " (probe ยืนยันว่าใช้ได้ก่อนเวลาที่ banner บอก)" if reason == "reprobe" else ""
+        how = (
+            " (probe จาก usage meter: มีบัญชีที่ยังว่าง)"
+            if reason == "reprobe" and provider in ACCOUNT_SWITCH_PROVIDERS
+            else " (probe ยืนยันว่าใช้ได้ก่อนเวลาที่ banner บอก)"
+            if reason == "reprobe"
+            else ""
+        )
         msg = f"⏰ [auto-resume] {provider} quota reset แล้ว{how} — กลับมาใช้ปกติได้"
         self._notify_lead(project, msg, note="quota_provider_reset", kind="quota-reset")
         _log_event("provider_quota_reset", project=project, provider=provider, reason=reason)
@@ -1260,6 +1301,16 @@ class AutoResumeMixin:
     def _do_quota_reprobe(self, provider: str, reset_at: float) -> None:
         """Background thread — network I/O. Verdict is marshalled back to
         the Qt thread through `quotaReprobed` (declared on Orchestrator)."""
+        if provider in ACCOUNT_SWITCH_PROVIDERS:
+            # Multi-account provider: it is usable again only when SOME
+            # logged-in account has fresh meter headroom — the provider-wide
+            # fetch reads the default account alone, which may never have
+            # been the spent one.
+            free = account_with_fresh_headroom(provider)
+            _log_event("provider_quota_reprobe", provider=provider, free_account=free or "")
+            if free is not None:
+                self.quotaReprobed.emit(provider, float(reset_at), "clear", float(reset_at))
+            return
         from .provider_usage import fetch_provider_usage
 
         try:

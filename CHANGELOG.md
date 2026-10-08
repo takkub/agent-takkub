@@ -9,6 +9,7 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 ### Fixed (แก้)
 
 - **สลับบัญชีตอนติด limit แล้วกลับมาเปิดบนบัญชีเดิมที่ติดอยู่ และวนซ้ำทุก ~40 วินาที (#826):** prod เปิด V2 router (`core-v2-settings.json` `router: true`) ซึ่งเลือกบัญชีของโปรเจคแล้วเขียน `CODEX_HOME` / `CLAUDE_CONFIG_DIR` ทับบัญชีที่เพิ่งสลับไป pane ใหม่จึงรันบนบัญชีที่ติด limit (unirecon: สลับ monchai500 → sabuytube แต่จอยังขึ้น `5h 0% left · try again at 12:39`) · และหลัง respawn PaneState ถูกสร้างใหม่โดยไม่มีบัญชีที่สลับ ตัวตรวจ meter จึงไปเช็คบัญชีของโปรเจค (ที่ยังติด) แล้วสลับซ้ำวนไป · ตอนนี้บัญชีที่สลับมีผลเหนือ V2 router และ pane จำบัญชีที่ spawn จริงไว้กับตัว (`_spawn_account`) ตัวตรวจ meter, ขั้นยืนยัน และการเลือกบัญชีถัดไปอ่านจากตรงนั้น
+- **แจ้ง "codex quota reset แล้ว" ทั้งที่บัญชีที่ติดยังติดอยู่:** ระบบบันทึกว่า "ทั้ง provider ติด" ทันทีที่ pane ชน limit ทั้งที่ยังมีบัญชีอื่นให้สลับ แล้วตัว reprobe ไปเช็คแค่บัญชี default (ที่ไม่เคยติด) เลยประกาศว่า reset · ตอนนี้บันทึกว่า provider ติดก็ต่อเมื่อไม่มีบัญชีไหนของ provider นั้นรับงานได้แล้ว และ reprobe ของ Claude/Codex ดูทุกบัญชีจาก usage meter — บอกว่ากลับมาใช้ได้เฉพาะเมื่อมีบัญชีที่ login อยู่ ตัวเลขสด (≤15 นาที) และยังต่ำกว่า 95%
 
 ## [v2.2.9] - 2026-10-08
 

@@ -216,6 +216,41 @@ def test_v2_router_never_overrides_a_switched_account() -> None:
     assert src.count("_apply_v2_account_env_override(env,") == 2
 
 
+def test_provider_counts_usable_only_with_fresh_headroom_on_some_account(
+    accounts, monkeypatch
+) -> None:
+    """The provider-level reprobe used to read the default account alone and
+    announce "codex quota reset" while the spent account was still spent."""
+    _meter(monkeypatch, {"default": _usage([("primary", 100, 2)])})  # b: no snapshot
+    assert limit_autoresume.account_with_fresh_headroom("codex") is None
+    _meter(monkeypatch, {"b": _usage([("primary", 100, 2)], age_s=3600)})  # stale
+    assert limit_autoresume.account_with_fresh_headroom("codex") is None
+    _meter(monkeypatch, {"b": _usage([("primary", 20, 2)])})
+    assert limit_autoresume.account_with_fresh_headroom("codex") == "b"
+
+
+def test_account_switch_does_not_mark_the_whole_provider_spent(accounts, monkeypatch) -> None:
+    from types import SimpleNamespace
+
+    from agent_takkub import provider_state
+    from agent_takkub.spawn_engine import PaneState
+
+    recorded: list = []
+    monkeypatch.setattr(provider_state, "set_quota_reset_at", lambda p, t: recorded.append(p))
+    moved: list = []
+    host = SimpleNamespace(
+        _running_account=lambda project, role, ps: None,
+        _reroute_pane_to_provider=lambda *a, **k: moved.append(k.get("account")),
+        _schedule_provider_quota_reset_notice=lambda *a: None,
+    )
+    ps = PaneState()
+    ps.quota_provider = "codex"
+    ps.rate_limited_until = time.time() + 3600
+    limit_autoresume.AutoResumeMixin._reroute_or_park(host, "p", "backend", ps)
+    assert moved == ["b"]
+    assert recorded == []
+
+
 def test_providers_without_account_knob_never_switch(accounts) -> None:
     for provider in ("gemini", "opencode", "cursor"):
         assert limit_autoresume.pick_reroute_account("p", provider, None, time.time()) is None
