@@ -92,7 +92,6 @@ def _claude_windows(u: ProviderUsage, now: datetime) -> dict:
     }
 
 
-_STATUS_SORT_ORDER = {"active": 0, "stale": 1, "loading": 2, "error": 3, "unsupported": 4}
 # Data older than 2x the (10 min) Claude poll interval is shown as stale, with its age.
 _STALE_AGE_S = 1200.0
 _DETAIL_POPUP_WIDTH = 380
@@ -386,28 +385,101 @@ class _UsageBar(QWidget):
         p.end()
 
 
+_WINDOW_LABEL_WIDTH = 64
+_LONG_LABEL_CHARS = 12
+
+
 def _build_bar_row(
-    label: str, pct_used: float, color: str, stale: bool, parent: QWidget
+    label: str, pct_used: float, color: str, stale: bool, parent: QWidget, pct_text: str = ""
 ) -> QWidget:
+    """``[label] [====bar====] [NN%]`` — one line per quota window. A long
+    label (gemini's model-group names) goes on its own line above the bar
+    instead of squeezing it."""
+    if len(label) > _LONG_LABEL_CHARS:
+        box = QWidget(parent)
+        v = QVBoxLayout(box)
+        v.setContentsMargins(0, 2, 0, 0)
+        v.setSpacing(2)
+        tag = QLabel(label, box)
+        tag.setWordWrap(True)
+        tag.setStyleSheet(f"color:{cockpit_theme.TEXT_MUTED}; font-size:11px; font-weight:600;")
+        v.addWidget(tag)
+        v.addWidget(_build_bar_row("", pct_used, color, stale, box, pct_text))
+        return box
     row = QWidget(parent)
     lay = QHBoxLayout(row)
     lay.setContentsMargins(0, 0, 0, 0)
-    lay.setSpacing(6)
+    lay.setSpacing(8)
     if label:
         tag = QLabel(label, row)
-        # Minimum, not fixed: claude's own "5h"/"7d" tags (the only labels
-        # this ever rendered pre-#204-generalization) stay pixel-identical
-        # since both are narrower than _BAR_LABEL_WIDTH, but a longer Thai
-        # window label (e.g. "รายสัปดาห์") now gets to grow instead of
-        # clipping mid-word.
-        tag.setMinimumWidth(_BAR_LABEL_WIDTH)
-        tag.setStyleSheet(f"color:{cockpit_theme.TEXT_MUTED}; font-size:10px; font-weight:600;")
+        # One fixed column per zone so every bar starts at the same x
+        # ("5h", "หลัก", "รายสัปดาห์" all line up).
+        tag.setMinimumWidth(max(_BAR_LABEL_WIDTH, _WINDOW_LABEL_WIDTH))
+        tag.setStyleSheet(f"color:{cockpit_theme.TEXT_MUTED}; font-size:11px; font-weight:600;")
         lay.addWidget(tag)
     lay.addWidget(_UsageBar(pct_used, color, stale=stale, parent=row), 1)
+    if pct_text:
+        pct = QLabel(pct_text, row)
+        pct.setMinimumWidth(34)
+        pct.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        pct.setStyleSheet(f"color:{color}; font-size:11px; font-weight:600;")
+        lay.addWidget(pct)
     return row
 
 
-def _build_provider_card(u: ProviderUsage, now: datetime) -> QWidget:
+def _add_body(lay: QVBoxLayout, u: ProviderUsage, now: datetime, parent: QWidget) -> None:
+    """Render `_provider_body_entries` compactly: a bar and the text line that
+    restates it (``"หลัก: 79% · reset ใน 3ชม."``) collapse into one bar row
+    with the % on the right, plus a faint line for the reset/hint tail only —
+    the old card printed every window's label and % twice."""
+    entries = _provider_body_entries(u, now)
+    i = 0
+    while i < len(entries):
+        entry = entries[i]
+        if entry[0] == "bar":
+            _, bar_label, pct_used, color, stale = entry
+            nxt = entries[i + 1] if i + 1 < len(entries) else None
+            prefix = f"{bar_label}: "
+            if bar_label and nxt is not None and nxt[0] == "text" and nxt[1].startswith(prefix):
+                pct_text, _, tail = nxt[1][len(prefix) :].partition(" · ")
+                lay.addWidget(_build_bar_row(bar_label, pct_used, color, stale, parent, pct_text))
+                if tail:
+                    sub = QLabel(tail, parent)
+                    sub.setWordWrap(True)
+                    # Under the bar's start: past the label column, or flush
+                    # left when a long label sits on its own line.
+                    indent = (
+                        0
+                        if len(bar_label) > _LONG_LABEL_CHARS
+                        else max(_BAR_LABEL_WIDTH, _WINDOW_LABEL_WIDTH) + 8
+                    )
+                    sub.setContentsMargins(indent, 0, 0, 2)
+                    sub.setStyleSheet(f"color:{cockpit_theme.TEXT_FAINT}; font-size:10px;")
+                    lay.addWidget(sub)
+                i += 2
+                continue
+            lay.addWidget(_build_bar_row(bar_label, pct_used, color, stale, parent))
+        else:
+            _, text, color = entry
+            line = QLabel(text, parent)
+            line.setWordWrap(True)
+            line.setStyleSheet(f"color:{color}; font-size:11px;")
+            lay.addWidget(line)
+        i += 1
+
+
+def _group_by_provider(usages: list[ProviderUsage]) -> list[tuple[str, list[ProviderUsage]]]:
+    """Zones in first-seen provider order, every account of a provider
+    together (the old status/% sort scattered two Codex accounts apart)."""
+    zones: dict[str, list[ProviderUsage]] = {}
+    for u in usages:
+        zones.setdefault(u.provider, []).append(u)
+    return list(zones.items())
+
+
+def _build_provider_zone(provider: str, rows: list[ProviderUsage], now: datetime) -> QWidget:
+    """One bordered zone per provider: name (+ account count) on top, then a
+    block per account — email · plan, its bars — split by hairlines."""
     card = QFrame()
     card.setObjectName("usageProviderCard")
     card.setStyleSheet(
@@ -420,23 +492,38 @@ def _build_provider_card(u: ProviderUsage, now: datetime) -> QWidget:
     lay.setContentsMargins(10, 8, 10, 8)
     lay.setSpacing(3)
 
-    label = PROVIDER_LABELS.get(u.provider, u.provider)
-    account = f" · {u.account}" if u.account else ""
-    header_text = f"{label}{account}" if not u.plan else f"{label}{account} · {u.plan}"
-    header = QLabel(header_text, card)
-    header.setStyleSheet(f"color:{cockpit_theme.TEXT_PRIMARY}; font-size:12px; font-weight:600;")
-    lay.addWidget(header)
+    head = QWidget(card)
+    head_lay = QHBoxLayout(head)
+    head_lay.setContentsMargins(0, 0, 0, 2)
+    title = QLabel(PROVIDER_LABELS.get(provider, provider), head)
+    title.setStyleSheet(f"color:{cockpit_theme.TEXT_PRIMARY}; font-size:13px; font-weight:700;")
+    head_lay.addWidget(title)
+    head_lay.addStretch(1)
+    single = len(rows) == 1 and not rows[0].account
+    side = rows[0].plan if single else (f"{len(rows)} บัญชี" if len(rows) > 1 else "")
+    if side:
+        side_lbl = QLabel(side, head)
+        side_lbl.setStyleSheet(f"color:{cockpit_theme.TEXT_MUTED}; font-size:11px;")
+        head_lay.addWidget(side_lbl)
+    lay.addWidget(head)
 
-    for entry in _provider_body_entries(u, now):
-        if entry[0] == "bar":
-            _, bar_label, pct_used, color, stale = entry
-            lay.addWidget(_build_bar_row(bar_label, pct_used, color, stale, card))
-        else:
-            _, text, color = entry
-            line = QLabel(text, card)
-            line.setWordWrap(True)
-            line.setStyleSheet(f"color:{color}; font-size:11px;")
-            lay.addWidget(line)
+    for idx, u in enumerate(rows):
+        if idx:
+            rule = QFrame(card)
+            rule.setFixedHeight(1)
+            rule.setStyleSheet(f"background:{cockpit_theme.BORDER_HAIRLINE}; border:none;")
+            lay.addSpacing(3)
+            lay.addWidget(rule)
+            lay.addSpacing(3)
+        if not single and (u.account or u.plan):
+            who = " · ".join(b for b in (u.account, u.plan) if b)
+            acct = QLabel(who, card)
+            acct.setWordWrap(True)
+            acct.setStyleSheet(
+                f"color:{cockpit_theme.TEXT_PRIMARY}; font-size:11px; font-weight:600;"
+            )
+            lay.addWidget(acct)
+        _add_body(lay, u, now, card)
 
     return card
 
@@ -499,10 +586,8 @@ class _ProviderDetailPopup(QWidget):
         inner = QVBoxLayout(frame)
         inner.setContentsMargins(12, 12, 12, 12)
         inner.setSpacing(8)
-        for u in sorted(
-            usages, key=lambda u: (_STATUS_SORT_ORDER.get(u.status, 5), -(u.utilization or -1))
-        ):
-            inner.addWidget(_build_provider_card(u, now))
+        for provider, rows in _group_by_provider(usages):
+            inner.addWidget(_build_provider_zone(provider, rows, now))
         inner.addWidget(_build_autofetch_footer(usages, now, frame))
         outer.addWidget(frame)
         self.adjustSize()

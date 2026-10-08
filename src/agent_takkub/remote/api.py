@@ -920,13 +920,11 @@ def usage() -> dict:
     this handler fetching it inline."""
     from .. import __version__, provider_usage
 
-    store = provider_usage.get_store()
-    cache = store.get_all()
+    # One row per account, grouped by provider — the same rows the desktop
+    # meter shows (a second Codex/Claude account used to be missing here).
     providers = [
-        provider_usage.usage_to_dict(
-            cache.get(name) or provider_usage.ProviderUsage(provider=name, status="loading")
-        )
-        for name in provider_usage.PROVIDER_NAMES
+        provider_usage.usage_to_dict(row)
+        for row in provider_usage.display_rows(provider_usage.get_store())
     ]
     # #192: the phone had no way to tell whether it was talking to an old
     # cockpit build that predates a mirror-diagnostics fix — this rides

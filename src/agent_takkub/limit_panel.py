@@ -83,41 +83,17 @@ class LimitPanelMixin:
             return
         from . import provider_usage
 
-        claude_usage = _claude_provider_usage(data)
-        store = provider_usage.get_store()
-        cache = store.get_all()
-        # Codex may have several independently logged-in CODEX_HOME
-        # directories.  Keep one card for every account instead of silently
-        # picking whichever home happened to be the provider-level default.
-        account_reader = getattr(store, "get_all_account_usages", None)
-        # Lightweight test/third-party stores that predate the multi-account
-        # method still render their existing provider-level Codex row.
-        codex_accounts = account_reader() if callable(account_reader) else []
-        codex_rows = [usage for usage in codex_accounts if usage.provider == "codex"]
-        # One Claude card per distinct account (accountUuid), the same set and
-        # labels on every cockpit instance. The active tab's account leads (the
-        # header chip reads the first claude row); a store that predates
-        # multi-account Claude rows keeps the single LimitStore-fed card.
-        claude_rows = [usage for usage in codex_accounts if usage.provider == "claude"]
-        if claude_rows:
-            active_label = _active_claude_account_label()
-            claude_rows.sort(key=lambda u: u.account != active_label)
-        else:
-            claude_rows = [claude_usage]
-        others = [
-            *(
-                codex_rows
-                or [cache.get("codex") or ProviderUsage(provider="codex", status="loading")]
-            ),
-            *[
-                cache.get(name) or ProviderUsage(provider=name, status="loading")
-                for name in provider_usage.PROVIDER_NAMES
-                if name not in ("claude", "codex")
-            ],
-        ]
-        self._limit_label.set_usages(
-            [*claude_rows, *others], primary_provider=self._active_lead_provider()
+        # One row per account (Claude accountUuid / Codex CODEX_HOME), grouped
+        # by provider — the same builder `/api/usage` uses, so the PWA shows
+        # the same accounts. The active tab's Claude account leads (the header
+        # chip reads the first claude row); a store without multi-account rows
+        # keeps the single LimitStore-fed Claude card.
+        rows = provider_usage.display_rows(
+            provider_usage.get_store(),
+            claude_fallback=_claude_provider_usage(data),
+            active_claude_label=_active_claude_account_label(),
         )
+        self._limit_label.set_usages(rows, primary_provider=self._active_lead_provider())
 
     def _active_lead_provider(self) -> str:
         """Return the provider actually attached to the visible Lead pane."""

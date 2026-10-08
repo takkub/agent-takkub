@@ -131,6 +131,34 @@ def _error(provider: str, reason: str) -> ProviderUsage:
     return ProviderUsage(provider=provider, status=STATUS_ERROR, error=reason)
 
 
+def display_rows(
+    store: Any,
+    *,
+    claude_fallback: ProviderUsage | None = None,
+    active_claude_label: str | None = None,
+) -> list[ProviderUsage]:
+    """Every usage row to show, grouped by provider in `PROVIDER_NAMES` order
+    with one row per known account — the single source for the desktop meter
+    popup AND the PWA's `/api/usage`, so both list the same accounts in the
+    same zones (the PWA used to read one provider-level row each, so a second
+    Codex/Claude account never reached the phone). Cache reads only."""
+    cache = store.get_all()
+    reader = getattr(store, "get_all_account_usages", None)
+    accounts = reader() if callable(reader) else []
+    rows: list[ProviderUsage] = []
+    for name in PROVIDER_NAMES:
+        mine = [u for u in accounts if u.provider == name] if name in ("claude", "codex") else []
+        if mine and name == "claude" and active_claude_label:
+            mine.sort(key=lambda u: u.account != active_claude_label)
+        if not mine:
+            fallback = claude_fallback if name == "claude" else None
+            mine = [
+                fallback or cache.get(name) or ProviderUsage(provider=name, status=STATUS_LOADING)
+            ]
+        rows.extend(mine)
+    return rows
+
+
 def usage_to_dict(data: ProviderUsage) -> dict[str, Any]:
     """JSON-safe serialization for the `/api/usage` remote endpoint."""
     return {

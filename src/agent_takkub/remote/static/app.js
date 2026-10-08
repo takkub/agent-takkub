@@ -2878,19 +2878,23 @@
     return row;
   }
 
+  // One account block inside its provider zone (buildUsageZone). The zone
+  // header already names the provider, so the block's own head carries the
+  // account (email) instead — same layout as the desktop meter popup.
   function buildUsageCard(p) {
-    var meta = providerMeta(p.provider);
     var card = document.createElement("div");
-    card.className = "usage-card" + (p.status === "unsupported" ? " unsupported" : "");
+    card.className = "usage-acct" + (p.status === "unsupported" ? " unsupported" : "");
 
     var head = document.createElement("div");
     head.className = "usage-card-head";
 
     var left = document.createElement("div");
-    var nameEl = document.createElement("div");
-    nameEl.className = "usage-card-name";
-    nameEl.textContent = meta.logo + " " + meta.name;
-    left.appendChild(nameEl);
+    if (p.account) {
+      var nameEl = document.createElement("div");
+      nameEl.className = "usage-card-name";
+      nameEl.textContent = p.account;
+      left.appendChild(nameEl);
+    }
     if (p.plan) {
       var planEl = document.createElement("div");
       planEl.className = "usage-card-plan";
@@ -2906,6 +2910,10 @@
     // rolling windows (#204), each one gets its own row below instead of one
     // headline number here, so the same figure never shows twice.
     var isLive = p.status === "active" || p.status === "stale";
+    // Claude's per-account rows carry their windows in raw_data (the
+    // desktop meter reads the same field) — fall back to it.
+    var rawWindows = p.raw_data && Array.isArray(p.raw_data.windows) ? p.raw_data.windows : null;
+    if (!(Array.isArray(p.windows) && p.windows.length) && rawWindows) p.windows = rawWindows;
     var hasWindows = isLive && Array.isArray(p.windows) && p.windows.length > 0;
     var hasPct = isLive && !hasWindows && typeof p.utilization === "number";
     var pctEl = document.createElement("div");
@@ -2919,7 +2927,9 @@
       pctEl.style.color = "var(--faint)";
     }
     if (!hasWindows) head.appendChild(pctEl);
-    card.appendChild(head);
+    // No account, no plan and no number → the zone header already says it
+    // all; skip an empty head row holding a lone "—".
+    if (p.account || p.plan || hasPct) card.appendChild(head);
 
     if (hasPct) {
       var track = document.createElement("div");
@@ -3031,10 +3041,45 @@
       list.innerHTML = '<div class="resume-empty">ไม่มีข้อมูล usage</div>';
       return;
     }
+    // Group every account under its provider, in the order the cockpit
+    // sends them (claude, codex, gemini, opencode, cursor).
+    var zones = [];
+    var byProvider = {};
     providers.forEach(function (p) {
       if (!p || !p.provider) return;
-      list.appendChild(buildUsageCard(p));
+      if (!byProvider[p.provider]) {
+        byProvider[p.provider] = [];
+        zones.push(p.provider);
+      }
+      byProvider[p.provider].push(p);
     });
+    zones.forEach(function (name) {
+      list.appendChild(buildUsageZone(name, byProvider[name]));
+    });
+  }
+
+  function buildUsageZone(provider, rows) {
+    var meta = providerMeta(provider);
+    var zone = document.createElement("div");
+    zone.className = "usage-card usage-zone";
+    var head = document.createElement("div");
+    head.className = "usage-zone-head";
+    var title = document.createElement("div");
+    title.className = "usage-zone-title";
+    // "Codex", not the app-wide "OpenAI" — match the desktop meter's zones.
+    title.textContent = meta.logo + " " + (provider === "codex" ? "Codex" : meta.name);
+    head.appendChild(title);
+    if (rows.length > 1) {
+      var count = document.createElement("div");
+      count.className = "usage-card-plan";
+      count.textContent = rows.length + " บัญชี";
+      head.appendChild(count);
+    }
+    zone.appendChild(head);
+    rows.forEach(function (p) {
+      zone.appendChild(buildUsageCard(p));
+    });
+    return zone;
   }
 
   // #192: the phone previously had no way to tell it was talking to an old
