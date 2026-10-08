@@ -165,6 +165,90 @@ _ACCOUNT_LIMIT_UNTIL: dict[tuple[str, str], float] = {}
 ACCOUNT_SWITCH_PROVIDERS = frozenset({"claude", "codex"})
 
 
+# Usage meter as the PRIMARY limit signal (user 2026-10-08: "why read the
+# screen instead of the meter?"). The on-screen banner stays as the fallback
+# for the gap between meter polls (5 min) or with auto-fetch switched off.
+METER_SPENT_PCT = 100.0  # a working pane on this account is blocked now
+METER_PRESPAWN_PCT = 95.0  # don't START new work on an account this close
+METER_MAX_AGE_S = 900.0  # older snapshots are not trusted to block anything
+
+
+def _parse_iso_epoch(raw: object) -> float | None:
+    if not raw:
+        return None
+    try:
+        from datetime import datetime
+
+        return datetime.fromisoformat(str(raw)).timestamp()
+    except ValueError:
+        return None
+
+
+def meter_reset_at(
+    provider: str, home: Path | None, threshold: float, now: float | None = None
+) -> float | None:
+    """When the account in *home* is at/over *threshold* % in any window per
+    the cached usage meter: the epoch it frees up (latest reset among the
+    spent windows). None = not spent, unknown, or the snapshot is too old.
+    Cache read only — safe on the Qt main thread."""
+    if home is None:
+        return None
+    now = time.time() if now is None else now
+    try:
+        from .provider_usage import STATUS_ACTIVE, get_store
+
+        usage = get_store().get_account_usage(provider, home)
+    except Exception:
+        return None
+    if usage is None or usage.status != STATUS_ACTIVE:
+        return None
+    fetched = usage.fetched_at.timestamp() if usage.fetched_at else 0.0
+    if not fetched or now - fetched > METER_MAX_AGE_S:
+        return None
+    windows = list(usage.windows or [])
+    raw = (usage.raw_data or {}).get("windows")
+    if not windows and isinstance(raw, list):
+        windows = [w for w in raw if isinstance(w, dict)]
+    has_windows = bool(windows)
+    # Model-scoped windows (claude's seven_day_sonnet) don't block the whole
+    # account — a full Sonnet week still runs Opus.
+    windows = [
+        w
+        for w in windows
+        if not any(tag in str(w.get("name", "")).lower() for tag in ("sonnet", "opus"))
+    ]
+    # A spent window whose reset time has already passed is free again (the
+    # snapshot just predates the reset); one with no reset time still blocks.
+    spent_resets: list[float] = []
+    for w in windows:
+        pct = w.get("utilization")
+        if isinstance(pct, (int, float)) and pct >= threshold:
+            reset = _parse_iso_epoch(w.get("resets_at"))
+            if reset is None or reset > now:
+                spent_resets.append(reset or 0.0)
+    if not has_windows and isinstance(usage.utilization, (int, float)):
+        if usage.utilization >= threshold:
+            reset = usage.resets_at.timestamp() if usage.resets_at else None
+            if reset is None or reset > now:
+                spent_resets.append(reset or 0.0)
+    if not spent_resets:
+        return None
+    latest = max(spent_resets)
+    # A spent window without a usable reset time still blocks — back off an
+    # hour rather than claiming it is free.
+    return latest if latest > now else now + 3600.0
+
+
+def pane_account_home(project: str, provider: str, account: str | None) -> Path | None:
+    """Home of the account a pane runs on (its override, else the project's)."""
+    try:
+        from .user_profile import profile_for, profile_home
+
+        return profile_home(provider, account or profile_for(project, provider))
+    except Exception:
+        return None
+
+
 def account_limited(provider: str, name: str, now: float | None = None) -> bool:
     until = _ACCOUNT_LIMIT_UNTIL.get((provider, name), 0.0)
     return until > (time.time() if now is None else now)
@@ -241,14 +325,19 @@ def account_for_spawn(project: str, provider: str) -> str | None:
     if provider not in ACCOUNT_SWITCH_PROVIDERS:
         return None
     try:
-        from .user_profile import profile_for
+        from .user_profile import profile_for, profile_home
 
         current = profile_for(project, provider)
         now = time.time()
-        if not account_limited(provider, current, now):
+        # Spent = a recorded hit, or the usage meter already at the
+        # pre-spawn line — start elsewhere instead of walking into the wall.
+        if not account_limited(provider, current, now) and (
+            meter_reset_at(provider, profile_home(provider, current), METER_PRESPAWN_PCT, now)
+            is None
+        ):
             return None
-        # Spawn runs on the Qt main thread: no usage probe here (a claude
-        # probe is a network call) — known-limited memory only.
+        # Spawn runs on the Qt main thread: no live probe here (a claude
+        # probe is a network call) — memory + the meter's cached numbers.
         return _first_usable_account(provider, current, now, check_telemetry=False)
     except Exception:
         return None
@@ -275,6 +364,10 @@ def _first_usable_account(
         except OSError:
             pass
         if cur_id and _account_identity(hit_provider, home) == cur_id:
+            continue
+        meter_until = meter_reset_at(hit_provider, home, METER_PRESPAWN_PCT, now)
+        if meter_until is not None:
+            _ACCOUNT_LIMIT_UNTIL[(hit_provider, name)] = meter_until
             continue
         if check_telemetry and _account_exhausted(hit_provider, home):
             _ACCOUNT_LIMIT_UNTIL[(hit_provider, name)] = now + 1800.0
@@ -305,9 +398,19 @@ def confirm_verdict_for_provider(provider: str, config_dir: Path | None) -> tupl
         denied, pct = _usage_denies_limit(usage)
         return ("denied", pct) if denied else ("unknown", 0.0)
     try:
-        from .provider_usage import STATUS_ACTIVE, fetch_provider_usage
+        from .provider_usage import STATUS_ACTIVE, fetch_provider_usage, get_store
 
-        p_usage = fetch_provider_usage(provider)
+        # That account's own meter snapshot when it is fresh (codex keeps one
+        # per CODEX_HOME); the provider-wide fetch only reads the default
+        # account, which says nothing about a pane switched elsewhere.
+        p_usage = None
+        if config_dir is not None:
+            cached = get_store().get_account_usage(provider, config_dir)
+            fetched = cached.fetched_at.timestamp() if cached and cached.fetched_at else 0.0
+            if cached is not None and time.time() - fetched <= METER_MAX_AGE_S:
+                p_usage = cached
+        if p_usage is None:
+            p_usage = fetch_provider_usage(provider)
     except Exception:
         return "unknown", 0.0
     if p_usage is None or getattr(p_usage, "status", None) != STATUS_ACTIVE:
@@ -1184,7 +1287,15 @@ class AutoResumeMixin:
     def _confirm_limit_via_usage_async(self, project: str, role: str) -> None:
         from . import user_profile
 
-        config_dir = user_profile.config_dir_for(project)
+        # The account this pane actually runs on — a pane switched to another
+        # account must be confirmed against THAT account, not the project's.
+        ps = getattr(self, "_pane_state", {}).get(f"{project}::{role}")
+        provider = (ps.quota_provider if ps is not None else "") or effective_provider_for(
+            role, project
+        )
+        config_dir = pane_account_home(
+            project, provider, getattr(ps, "account_override", None)
+        ) or user_profile.config_dir_for(project)
         threading.Thread(
             target=self._do_confirm_usage_fetch,
             args=(project, role, config_dir),

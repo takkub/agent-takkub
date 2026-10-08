@@ -16885,6 +16885,22 @@ class Orchestrator(
         `npx tsc` Lead was trying to run on an otherwise-idle machine."""
         return _pane_quota_stalled(self, project, role, now)
 
+    def _meter_limit_reset_at(
+        self, project: str, role: str, provider: str, now: float
+    ) -> float | None:
+        """Reset epoch when the usage meter shows the account THIS pane runs
+        on (its switched account, else the project's) spent in any window;
+        None otherwise. Cache read only — no network on the watchdog tick."""
+        try:
+            from .limit_autoresume import METER_SPENT_PCT, meter_reset_at, pane_account_home
+
+            _ps_m = getattr(self, "_pane_state", {}).get(f"{project}::{role}")
+            account = getattr(_ps_m, "account_override", None)
+            home = pane_account_home(project, provider, account)
+            return meter_reset_at(provider, home, METER_SPENT_PCT, now)
+        except Exception:
+            return None
+
     def _rate_limit_suppressed(self, project: str, role: str, pane: AgentPane, now: float) -> bool:
         """Return True if `pane` is rate-limited and the watchdog should leave
         it alone until the limit resets.
@@ -16907,7 +16923,13 @@ class Orchestrator(
         if pane.session is None or not pane.session.is_alive:
             return False
         provider = getattr(pane.model, "provider_name", None) or "claude"
-        reset_at = pane.session.rate_limit_reset_at(provider)
+        # The usage meter first: it already knows the account's % and reset
+        # time, with no dependence on how each CLI words its banner (codex's
+        # went undetected on prod, #825). The on-screen banner remains the
+        # fallback for the gap between meter polls.
+        _meter_probe = getattr(self, "_meter_limit_reset_at", None)  # absent on test doubles
+        meter_reset = _meter_probe(project, role, provider, now) if _meter_probe else None
+        reset_at = meter_reset or pane.session.rate_limit_reset_at(provider)
         if reset_at is None:
             # No banner on screen: release both "this text was already
             # judged" latches so a genuinely new hit is detected normally.
@@ -16932,6 +16954,8 @@ class Orchestrator(
             marker = pane.session.quota_stall_marker(provider) or ""
         except Exception:
             marker = ""
+        if meter_reset and not marker:
+            marker = "usage-meter"
         ps = self._ps(key)
         ps.rate_limited_until = reset_at
         ps.quota_banner_recorded = True
@@ -17003,7 +17027,13 @@ class Orchestrator(
         model_note = f" · model now: {model}" if model else ""
         # #704: never quote the matched banner phrase verbatim — this notice
         # lands on the Lead pane's screen, where the same detector runs.
-        marker_note = " (usage-limit banner on screen)" if marker else ""
+        marker_note = (
+            " (usage meter at 100%)"
+            if marker == "usage-meter"
+            else " (usage-limit banner on screen)"
+            if marker
+            else ""
+        )
         msg = f"[system] {role} ({provider}) hit quota{marker_note} — resets in {human}{model_note}"
         self._notify_lead(project, msg, kind="quota-hit")
 
