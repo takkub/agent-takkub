@@ -185,6 +185,37 @@ def test_watchdog_detects_limit_from_meter_with_no_banner_on_screen() -> None:
     assert ps.quota_marker == "usage-meter"
 
 
+def test_running_account_comes_from_the_live_pane_not_rebuilt_state() -> None:
+    """prod 2026-10-08: PaneState was rebuilt after the switch, the watchdog
+    read the project's (spent) account again and re-switched every tick."""
+    from types import SimpleNamespace
+
+    from agent_takkub.orchestrator import Orchestrator
+    from agent_takkub.spawn_engine import PaneState
+
+    pane = SimpleNamespace(_spawn_account="default")
+    fake = SimpleNamespace(
+        _project_panes=lambda project: {"lead": pane},
+        _pane_state={"p::lead": PaneState()},  # override lost
+    )
+    assert Orchestrator._pane_running_account(fake, "p", "lead") == "default"
+    pane._spawn_account = None  # spawned on the project's own account
+    assert Orchestrator._pane_running_account(fake, "p", "lead") is None
+
+
+def test_v2_router_never_overrides_a_switched_account() -> None:
+    """prod runs with the V2 router on: it resolved the PROJECT's account and
+    wrote CODEX_HOME back over the switched one."""
+    import inspect
+
+    from agent_takkub import spawn_engine
+
+    src = inspect.getsource(spawn_engine)
+    assert "if v2_router_enabled() and not _account:" in src
+    assert "if v2_router_enabled() and not _claude_account:" in src
+    assert src.count("_apply_v2_account_env_override(env,") == 2
+
+
 def test_providers_without_account_knob_never_switch(accounts) -> None:
     for provider in ("gemini", "opencode", "cursor"):
         assert limit_autoresume.pick_reroute_account("p", provider, None, time.time()) is None

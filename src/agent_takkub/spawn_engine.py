@@ -3011,6 +3011,7 @@ class SpawnEngineMixin:
             _stamp_subagent_fanout_env(env, int(_ps_initial.subagent_fanout or 0))
             apply_chrome_bin(env, base_role)
             _account = _ps_initial.account_override or _account_for_spawn(project_ns, spec.name)
+            _ps_initial.account_override = _account
             inject_user_profile_env(env, project_ns)
             # Prod isolation for this provider's own state (sessions/auth/
             # config) — the non-claude counterpart of CLAUDE_CONFIG_DIR above.
@@ -3030,8 +3031,15 @@ class SpawnEngineMixin:
             inject_provider_no_autoupdate_env(env, spec.name)
             from .core.routing.flag import v2_router_enabled
 
-            if v2_router_enabled():
+            # A limit-driven account switch wins over the V2 router's pick:
+            # the router resolves the PROJECT's account and used to write its
+            # CODEX_HOME straight back over the switched one, so the pane
+            # respawned on the spent account in a loop (prod 2026-10-08).
+            if v2_router_enabled() and not _account:
                 _apply_v2_account_env_override(env, spec.name, project_ns, role_name)
+            # The account this pane really runs on — what the meter watchdog
+            # and the limit confirm check, even after PaneState is rebuilt.
+            pane._spawn_account = _account
             bin_dir = _pane_cli_bin_dir()
             if spec.prepend_bin_dir_to_path:
                 provider_dir = os.path.dirname(provider_bin)
@@ -3682,14 +3690,18 @@ class SpawnEngineMixin:
         # A pane moved to another Claude account after a usage limit runs on
         # that account (its own curated dir — never the project's).
         _claude_account = _ps_initial.account_override or _account_for_spawn(project_ns, CLAUDE)
+        _ps_initial.account_override = _claude_account
         inject_user_profile_env(env, project_ns, account=_claude_account)
         inject_curated_claude_config_dir(env, project_ns, account=_claude_account)
         inject_claude_project_dir_name_env(env, project_ns, claude, base_role)
         inject_provider_no_autoupdate_env(env, CLAUDE)
         from .core.routing.flag import v2_router_enabled
 
-        if v2_router_enabled():
+        # Same rule as the generic branch: a switched account beats the V2
+        # router's project-account pick.
+        if v2_router_enabled() and not _claude_account:
             _apply_v2_account_env_override(env, CLAUDE, project_ns, role_name)
+        pane._spawn_account = _claude_account
         # Shard env: let the agent know its instance identity vs behaviour identity.
         # TAKKUB_BASE_ROLE = base role name (loads qa.md, correct Chrome config, etc.)
         # TAKKUB_SHARD     = this shard's 1-based index (None-string when not a shard)

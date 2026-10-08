@@ -745,6 +745,18 @@ class AutoResumeMixin:
     # the task right now (forced-identity role, every other provider
     # disabled/uninstalled/itself still quota-hit, or the only remaining
     # candidate is the --distinct-from counterpart's own provider).
+    def _running_account(self, project: str, role: str, ps: PaneState | None) -> str | None:
+        """Account the live pane runs on (`Orchestrator._pane_running_account`),
+        falling back to PaneState on hosts/test doubles without it."""
+        probe = getattr(self, "_pane_running_account", None)
+        if callable(probe):
+            try:
+                return probe(project, role)
+            except Exception:
+                pass
+        override = getattr(ps, "account_override", None)
+        return override if isinstance(override, str) and override else None
+
     def _reroute_or_park(self, project: str, role: str, ps: PaneState) -> None:
         hit_provider = ps.quota_provider or "claude"
         reset_at = ps.rate_limited_until
@@ -760,7 +772,9 @@ class AutoResumeMixin:
         # Runs under the "park" policy too: park means "don't move my task to
         # another provider", and this doesn't.
         if ps.quota_reroute_count < auto_resume.MAX_REROUTE_ROUNDS:
-            account = pick_reroute_account(project, hit_provider, ps.account_override, reset_at)
+            account = pick_reroute_account(
+                project, hit_provider, self._running_account(project, role, ps), reset_at
+            )
             if account is not None:
                 self._reroute_pane_to_provider(
                     project, role, ps, hit_provider, hit_provider, reset_at, account=account
@@ -943,8 +957,9 @@ class AutoResumeMixin:
         snap_effort_override = ps.effort_override if new_provider == hit_provider else None
         # Accounts belong to one provider: keep the pane's account only while
         # the provider stays the same, or take the one just picked.
-        snap_account = account or (ps.account_override if new_provider == hit_provider else None)
-        from_label = f"{hit_provider}/{ps.account_override or 'project account'}"
+        running_account = self._running_account(project, role, ps)
+        snap_account = account or (running_account if new_provider == hit_provider else None)
+        from_label = f"{hit_provider}/{running_account or 'project account'}"
         to_label = f"{new_provider}/{account}" if account else new_provider
 
         _write_progress_marker(
@@ -968,7 +983,7 @@ class AutoResumeMixin:
         if not is_lead:
             lead_msg = (
                 (
-                    f"🔀 [auto-resume] {hit_provider} บัญชี {ps.account_override or 'ของโปรเจค'} "
+                    f"🔀 [auto-resume] {hit_provider} บัญชี {running_account or 'ของโปรเจค'} "
                     f"ชนโควตา → {role} สลับไปบัญชี {account} ทำต่อจาก progress ล่าสุด, "
                     f"บัญชีเดิมกลับ {human}"
                 )
@@ -1294,7 +1309,7 @@ class AutoResumeMixin:
             role, project
         )
         config_dir = pane_account_home(
-            project, provider, getattr(ps, "account_override", None)
+            project, provider, self._running_account(project, role, ps)
         ) or user_profile.config_dir_for(project)
         threading.Thread(
             target=self._do_confirm_usage_fetch,

@@ -4,6 +4,12 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 
 ## [vNEXT]
 
+## [v2.2.10] - 2026-10-08
+
+### Fixed (แก้)
+
+- **สลับบัญชีตอนติด limit แล้วกลับมาเปิดบนบัญชีเดิมที่ติดอยู่ และวนซ้ำทุก ~40 วินาที (#826):** prod เปิด V2 router (`core-v2-settings.json` `router: true`) ซึ่งเลือกบัญชีของโปรเจคแล้วเขียน `CODEX_HOME` / `CLAUDE_CONFIG_DIR` ทับบัญชีที่เพิ่งสลับไป pane ใหม่จึงรันบนบัญชีที่ติด limit (unirecon: สลับ monchai500 → sabuytube แต่จอยังขึ้น `5h 0% left · try again at 12:39`) · และหลัง respawn PaneState ถูกสร้างใหม่โดยไม่มีบัญชีที่สลับ ตัวตรวจ meter จึงไปเช็คบัญชีของโปรเจค (ที่ยังติด) แล้วสลับซ้ำวนไป · ตอนนี้บัญชีที่สลับมีผลเหนือ V2 router และ pane จำบัญชีที่ spawn จริงไว้กับตัว (`_spawn_account`) ตัวตรวจ meter, ขั้นยืนยัน และการเลือกบัญชีถัดไปอ่านจากตรงนั้น
+
 ## [v2.2.9] - 2026-10-08
 
 ### Added (เพิ่ม)

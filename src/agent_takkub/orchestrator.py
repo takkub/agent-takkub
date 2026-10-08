@@ -16885,6 +16885,19 @@ class Orchestrator(
         `npx tsc` Lead was trying to run on an otherwise-idle machine."""
         return _pane_quota_stalled(self, project, role, now)
 
+    def _pane_running_account(self, project: str, role: str) -> str | None:
+        """The account profile the live pane was SPAWNED on (None = the
+        project's own). Read from the pane itself — PaneState can be rebuilt
+        mid-episode, and checking the project's spent account instead made
+        the watchdog re-switch every tick (prod 2026-10-08)."""
+        pane = self._project_panes(project).get(role) if hasattr(self, "_project_panes") else None
+        spawned = getattr(pane, "_spawn_account", "") if pane is not None else ""
+        if spawned is None or (isinstance(spawned, str) and spawned):
+            return spawned
+        _ps = getattr(self, "_pane_state", {}).get(f"{project}::{role}")
+        override = getattr(_ps, "account_override", None)
+        return override if isinstance(override, str) and override else None
+
     def _meter_limit_reset_at(
         self, project: str, role: str, provider: str, now: float
     ) -> float | None:
@@ -16894,8 +16907,7 @@ class Orchestrator(
         try:
             from .limit_autoresume import METER_SPENT_PCT, meter_reset_at, pane_account_home
 
-            _ps_m = getattr(self, "_pane_state", {}).get(f"{project}::{role}")
-            account = getattr(_ps_m, "account_override", None)
+            account = self._pane_running_account(project, role)
             home = pane_account_home(project, provider, account)
             return meter_reset_at(provider, home, METER_SPENT_PCT, now)
         except Exception:
