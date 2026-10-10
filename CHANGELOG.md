@@ -4,7 +4,7 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 
 ## [vNEXT]
 
-## [v2.2.12] - 2026-10-10
+## [v2.2.13] - 2026-10-10
 
 ### Added (เพิ่ม)
 
