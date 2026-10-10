@@ -4,6 +4,19 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 
 ## [vNEXT]
 
+## [v2.2.12] - 2026-10-10
+
+### Added (เพิ่ม)
+
+- **ความพร้อมและนโยบาย Lead ข้ามทุก Provider (#838):** มีระบบ session-bound readiness (`TAKKUB_LEAD_READINESS_FILE`) บังคับให้ Lead อ่านนโยบายฉบับเต็มและกติกา team preset ด้วย `takkub context read` ก่อนเริ่มงานสำคัญ; คุมความพร้อมทั้งบน CLI server และ tool guard พร้อมคำสั่ง `takkub context status`
+- **Clean JSON stdout สำหรับคำสั่งโครงสร้าง (#839):** คำสั่งที่ส่งออก JSON (`takkub task impact`, `verify --json`, `disk --json`, `doctor --json`, `audit-skills --json`) ส่งข้อความสถานะมนุษย์ (`ok:`/`err:`) ไปที่ stderr ทำให้ stdout มีเฉพาะ JSON ล้วน สามารถ parse ด้วย `ConvertFrom-Json` หรือ `json.loads` ได้ทันทีโดยไม่ต้องตัดข้อความต่อท้าย
+
+### Fixed (แก้)
+
+- **Impact Plan สำหรับงาน Read-only และประวัติเก่า (#836):** การตรวจสอบสถานะ read-only และข้อความประวัติเก่า/คำวินิจฉัยไม่ถูกจัดประเภทผิดเป็นงานเสี่ยงที่ต้องมี impact plan เว้นแต่มีการระบุคำสั่งแก้ state จริง หรือมีแท็ก `[impact-required]`; และไม่บังคับแผนย้อนหลังตอนจบงานหากใบงานเดิมไม่มี
+- **สรุป Lead Inbox และลำดับความสำคัญของ User (#837):** เมื่อ Lead กำลังยุ่ง ระบบจะรวม inbox digest โดยเก็บเฉพาะ progress ล่าสุดของแต่ละ role, ตัดการแจ้งเตือน failure เก่าที่แก้ไขผ่านแล้ว, ป้องกัน notice `send-stuck` ที่ตกค้างไม่ให้เปิด pane ที่เสร็จแล้วซ้ำ และคงคำสั่งจาก User ไว้หัวคิวเสมอ
+- **ลำดับความสำคัญของ Custom Report Template CSS (#835):** `template.html` ที่อยู่ใน content directory ของผู้ใช้จะถูกโหลดก่อน template ที่มากับตัวติดตั้งเสมอ
+
 ## [v2.2.11] - 2026-10-10
 
 ### Added (เพิ่ม)
