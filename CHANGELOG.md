@@ -4,6 +4,19 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 
 ## [vNEXT]
 
+## [v2.2.11] - 2026-10-10
+
+### Added (เพิ่ม)
+
+- **ตรวจผลกระทบข้าม flow ก่อนปิดงาน (#833):** งานที่เปลี่ยน mode, identity หรือ shared state ต้องมี impact plan ก่อน assign โดยระบุพฤติกรรมเดิม/ใหม่, source of truth, upstream/downstream และ check พร้อมผู้รับผิดชอบ; task ledger เก็บแผนต่อเมื่อสลับ provider หรือ resume และ `done` ตรวจหลักฐานที่ตรง task, scope และ Git revision ปัจจุบันก่อนปิดงาน
+
+### Fixed (แก้)
+
+- **สลับบัญชี Codex เมื่อชน quota จริง:** ตัวตรวจ limit ใช้ meter ของบัญชีที่ pane กำลังรันและข้อมูลสดหลังเกิดเหตุ ไม่ตีความค่า 90% เก่าของบัญชีอื่นว่าเป็นการชน limit; footer ที่แสดง `5h 0% left` ใช้เป็นหลักฐานได้ทันที
+- **Lead กลับ provider ที่ตั้งไว้หลัง quota reset (#834):** เมื่อ Codex ฟื้นและ Lead เคย fallback ไป Gemini ระบบย้าย Lead กลับอัตโนมัติ; เมนูเลือก provider ตรวจ provider ของ pane จริง จึงสั่งกลับได้แม้ค่าที่ตั้งไว้เดิมเป็น Codex อยู่แล้ว
+- **ความผิดพลาดของ cockpit (#827–#832):** แก้ git snapshot บน Windows, inbox digest ที่เตือนผิด, Codex ที่ resume sub-agent thread แทน pane หลัก, Lead ที่พลาดนโยบาย cockpit เมื่อโปรเจกต์มี AGENTS.md, QA assignment ที่ทับสถานะข้อความ reviewer และ PWA ที่ปนประวัติ/สถานะข้าม provider หรือบัญชี พร้อม regression tests
+- **ความเสถียรของ full QA gate:** แยก state ของ usage store ในเทสบัญชี และตรวจสี fallback ตาม theme ที่ใช้งานจริง เพื่อไม่ให้ผลเทสขึ้นกับลำดับหรือ state จากเทสอื่น
+
 ## [v2.2.10] - 2026-10-08
 
 ### Fixed (แก้)
