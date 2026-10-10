@@ -4393,14 +4393,23 @@ class LeadInboxMixin:
             and lead.session.is_alive
             and not lead.session.is_at_ready_prompt()
         ):
-            # Keep one burst in cockpit storage instead of filling the
-            # provider's busy queue with a new follow-up every debounce window.
-            QTimer.singleShot(
-                1000,
-                lambda: self._flush_lead_digest(
-                    project_ns, generation=generation, arm_pump=arm_pump
-                ),
-            )
+            flushing = getattr(self, "_digest_flushing", set())
+            if not hasattr(self, "_digest_flushing"):
+                self._digest_flushing = flushing
+            if project_ns in flushing:
+                return False
+            flushing.add(project_ns)
+            try:
+                # Keep one burst in cockpit storage instead of filling the
+                # provider's busy queue with a new follow-up every debounce window.
+                QTimer.singleShot(
+                    1000,
+                    lambda: self._flush_lead_digest(
+                        project_ns, generation=generation, arm_pump=arm_pump
+                    ),
+                )
+            finally:
+                flushing.discard(project_ns)
             return False
         # Keep the last generation instead of deleting it. An early flush can
         # leave its uncancellable singleShot callback outstanding; a later
@@ -5024,7 +5033,16 @@ class LeadInboxMixin:
         if not lead.session.is_at_ready_prompt():
             waiting_body = _unwrap_notice_item(queue[0])[0]
             if not _human_notice(queue[0]) and _automatic_notice(waiting_body):
-                QTimer.singleShot(1000, lambda: self._pump_lead_notify(project_ns))
+                pumping = getattr(self, "_lead_notify_active", set())
+                if not hasattr(self, "_lead_notify_active"):
+                    self._lead_notify_active = pumping
+                if project_ns in pumping:
+                    return
+                pumping.add(project_ns)
+                try:
+                    QTimer.singleShot(1000, lambda: self._pump_lead_notify(project_ns))
+                finally:
+                    pumping.discard(project_ns)
                 return
             # Lead is busy — check retry cap before re-scheduling.
             if not hasattr(self, "_lead_notify_retry"):
