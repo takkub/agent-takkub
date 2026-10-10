@@ -165,6 +165,20 @@ def test_plan_and_gate_are_provider_independent(tmp_path: Path, monkeypatch) -> 
         )
 
 
+def test_missing_durable_plan_blocks_completion(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(task_ledger, "RUNTIME_DIR", tmp_path / "runtime")
+    task = append_block("แก้ audio_mode seedance_only", "impact-plan", _plan())
+    assert not task_ledger.impact_plan_is_durable("project", "backend", "task-a", _plan())
+    assert "missing from durable task ledger" in task_ledger.check_impact_completion(
+        "project", "backend", "task-a", "done", task_text=task
+    )
+    task_ledger.create_assignment(
+        "project", "backend", str(tmp_path), task, "goal", "feature", "codex", task_id="task-a"
+    )
+    assert task_ledger.impact_plan_is_durable("project", "backend", "task-a", _plan())
+    assert not task_ledger.impact_plan_is_durable("project", "backend", "task-b", _plan())
+
+
 def test_revision_tracks_modified_and_untracked_files(tmp_path: Path) -> None:
     _repo(tmp_path)
     first = git_revision(tmp_path)

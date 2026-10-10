@@ -42,6 +42,7 @@ Scope guard: only ever acts on a pane that has an outstanding assigned task
 from __future__ import annotations
 
 import json
+import re
 import threading
 import time
 from pathlib import Path
@@ -171,6 +172,13 @@ ACCOUNT_SWITCH_PROVIDERS = frozenset({"claude", "codex"})
 METER_SPENT_PCT = 100.0  # a working pane on this account is blocked now
 METER_PRESPAWN_PCT = 95.0  # don't START new work on an account this close
 METER_MAX_AGE_S = 900.0  # older snapshots are not trusted to block anything
+
+
+def codex_footer_spent(lines: list[str]) -> bool:
+    """The active Codex status footer reports no remaining quota in a window."""
+    return any(
+        re.search(r"\b(?:5h|weekly)\s+0%\s+left\b", line, re.IGNORECASE) for line in lines[-8:]
+    )
 
 
 def _parse_iso_epoch(raw: object) -> float | None:
@@ -405,7 +413,9 @@ def _first_usable_account(
     return None
 
 
-def confirm_verdict_for_provider(provider: str, config_dir: Path | None) -> tuple[str, float]:
+def confirm_verdict_for_provider(
+    provider: str, config_dir: Path | None, *, fresh_after: float = 0.0
+) -> tuple[str, float]:
     """Blocking (network) tri-state probe of *provider* for the auto-resume
     confirm loop (#704): `("confirmed", pct)` — exhausted per its own
     telemetry; `("denied", pct)` — demonstrably not exhausted, the banner
@@ -429,21 +439,30 @@ def confirm_verdict_for_provider(provider: str, config_dir: Path | None) -> tupl
     try:
         from .provider_usage import STATUS_ACTIVE, fetch_provider_usage, get_store
 
-        # That account's own meter snapshot when it is fresh (codex keeps one
-        # per CODEX_HOME); the provider-wide fetch only reads the default
-        # account, which says nothing about a pane switched elsewhere.
+        # A pre-hit snapshot cannot disprove a new banner. Probe the pane's
+        # own account after the hit, never the provider-wide default account.
         p_usage = None
         if config_dir is not None:
             cached = get_store().get_account_usage(provider, config_dir)
             fetched = cached.fetched_at.timestamp() if cached and cached.fetched_at else 0.0
-            if cached is not None and time.time() - fetched <= METER_MAX_AGE_S:
+            if (
+                cached is not None
+                and time.time() - fetched <= METER_MAX_AGE_S
+                and fetched >= fresh_after
+            ):
                 p_usage = cached
         if p_usage is None:
-            p_usage = fetch_provider_usage(provider)
+            p_usage = fetch_provider_usage(
+                provider, config_dir=config_dir, max_age_s=0.0 if fresh_after else 290.0
+            )
     except Exception:
         return "unknown", 0.0
     if p_usage is None or getattr(p_usage, "status", None) != STATUS_ACTIVE:
         return "unknown", 0.0
+    if fresh_after:
+        fetched = p_usage.fetched_at.timestamp() if p_usage.fetched_at else 0.0
+        if fetched < fresh_after:
+            return "unknown", 0.0
     # All windows, not the headline alone: codex's `utilization` is its 5h
     # `primary` window, so a weekly (`secondary`) exhaustion read "denied".
     verdict, pct = _classify_utilizations(
@@ -1379,7 +1398,9 @@ class AutoResumeMixin:
         provider = (ps.quota_provider if ps is not None else "") or effective_provider_for(
             role, project
         )
-        verdict, utilization = confirm_verdict_for_provider(provider, config_dir)
+        verdict, utilization = confirm_verdict_for_provider(
+            provider, config_dir, fresh_after=ps.limit_confirm_first_attempt_ts if ps else 0.0
+        )
         if verdict == "denied":
             self.limitUsageDenied.emit(project, role, float(utilization))
             return
@@ -1399,6 +1420,16 @@ class AutoResumeMixin:
         ps.limit_confirm_pending = False
         if not ps.rate_limited_until or ps.limit_parked or ps.quota_reroute_pending:
             return  # already cleared, or a park/reroute already committed
+        if ps.quota_provider == "codex":
+            pane = getattr(self, "_panes_by_project", {}).get(project, {}).get(role)
+            try:
+                lines = pane.session.display_lines() if pane and pane.session else []
+            except Exception:
+                lines = []
+            if codex_footer_spent(lines):
+                # The live Codex footer is newer than a lagging usage API.
+                self._reroute_or_park(project, role, ps)
+                return
         marker = ps.quota_marker
         ps.rate_limited_until = 0.0
         ps.quota_marker = ""

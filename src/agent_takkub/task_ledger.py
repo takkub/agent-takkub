@@ -368,6 +368,20 @@ def open_impact(project: str, role: str) -> dict | None:
     }
 
 
+def impact_plan_is_durable(project: str, role: str, task_id: str, plan: dict) -> bool:
+    """Check the exact plan and task identity survived the ledger write."""
+    from .impact_contract import plan_digest
+
+    active = open_impact(project, role)
+    impact = active.get("impact") if isinstance(active, dict) else None
+    return bool(
+        active
+        and active.get("task_id") == task_id
+        and isinstance(impact, dict)
+        and impact.get("plan_digest") == plan_digest(plan)
+    )
+
+
 def record_impact_evidence(project: str, role: str, task_id: str, evidence: dict) -> bool:
     """Persist checked evidence before the row is marked done."""
     state = _load_state(project)
@@ -390,11 +404,21 @@ def record_impact_evidence(project: str, role: str, task_id: str, evidence: dict
 
 
 def check_impact_completion(
-    project: str, role: str, task_id: str, note: str, revision: str | None = None
+    project: str,
+    role: str,
+    task_id: str,
+    note: str,
+    revision: str | None = None,
+    task_text: str = "",
 ) -> str:
     """Return a reason to keep the task open, or persist valid evidence."""
     active = open_impact(project, role)
     if active is None or not isinstance(active.get("impact"), dict):
+        from .impact_contract import plan_from_task
+
+        expected_plan, error = plan_from_task(task_text)
+        if expected_plan is not None or error:
+            return "impact plan missing from durable task ledger"
         return ""
     if active["task_id"] != task_id:
         return "impact evidence does not match the active task"

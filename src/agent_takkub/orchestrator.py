@@ -2601,6 +2601,15 @@ class Orchestrator(
             _log_event(
                 "ledger_hook_error", role=role_name, project=project_ns, stage="subagent-assign"
             )
+        from .impact_contract import plan_from_task as _impact_plan_from_task
+        from .task_ledger import impact_plan_is_durable
+
+        subagent_impact, _ = _impact_plan_from_task(task, scope)
+        if subagent_impact is not None and not impact_plan_is_durable(
+            project_ns, role_name, task_id, subagent_impact
+        ):
+            pending.pop(key, None)
+            return False, "impact plan could not be saved to the task ledger; assignment stopped"
 
         if shard_total > 0:
             group_key = f"{project_ns}::{base_role}"
@@ -2640,7 +2649,11 @@ class Orchestrator(
             from .task_ledger import check_impact_completion
 
             impact_error = check_impact_completion(
-                project_ns, role_name, state.get("task_id", ""), note
+                project_ns,
+                role_name,
+                state.get("task_id", ""),
+                note,
+                task_text=state.get("task", ""),
             )
             if impact_error:
                 return False, f"impact checks pending: {impact_error}"
@@ -3365,6 +3378,17 @@ class Orchestrator(
                 except Exception:
                     _log_event(
                         "ledger_hook_error", role=role_name, project=project_ns, stage="enqueue"
+                    )
+                from .impact_contract import plan_from_task as _impact_plan_from_task
+                from .task_ledger import impact_plan_is_durable
+
+                queued_impact, _ = _impact_plan_from_task(task, resolved_scope)
+                if queued_impact is not None and not impact_plan_is_durable(
+                    project_ns, role_name, task_id, queued_impact
+                ):
+                    return (
+                        False,
+                        "impact plan could not be saved to the task ledger; assignment stopped",
                     )
                 governor.enqueue(
                     project_id=project_ns,
@@ -4535,6 +4559,14 @@ class Orchestrator(
             self.ledgerChanged.emit(project_ns)
         except Exception:
             _log_event("ledger_hook_error", role=role_name, project=project_ns, stage="assign")
+        from .impact_contract import plan_from_task as _impact_plan_from_task
+        from .task_ledger import impact_plan_is_durable
+
+        dispatched_impact, _ = _impact_plan_from_task(raw_task_for_ledger, scope)
+        if dispatched_impact is not None and not impact_plan_is_durable(
+            project_ns, role_name, ps_assign.task_id, dispatched_impact
+        ):
+            return False, "impact plan could not be saved to the task ledger; assignment stopped"
         # New task → fresh one-shot budget for the Stop-hook done-gate.
         ps_assign.stop_gate_notified = False
         # New task → fresh auto-resume park/wake budget (issue: limit-aware
@@ -8831,6 +8863,7 @@ class Orchestrator(
                     revision=(
                         git_facts.get("impact_revision") if isinstance(git_facts, dict) else None
                     ),
+                    task_text=getattr(active_ps, "last_assigned_task", "") or "",
                 )
                 if impact_error:
                     return False, f"impact checks pending: {impact_error}"

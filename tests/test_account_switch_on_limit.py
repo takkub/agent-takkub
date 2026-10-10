@@ -10,7 +10,10 @@ provider before falling back to another provider.
 from __future__ import annotations
 
 import time
+from datetime import UTC, datetime
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -35,6 +38,68 @@ def test_codex_limit_banner_is_detected_with_its_clock_reset() -> None:
     )
     assert reset is not None
     assert time.strftime("%H:%M", time.localtime(reset)) == "12:39"
+
+
+def test_codex_footer_spent_while_meter_lags() -> None:
+    assert limit_autoresume.codex_footer_spent(CODEX_LIMIT_SCREEN)
+    assert not limit_autoresume.codex_footer_spent(["5h 10% left · weekly 22% left"])
+
+
+def test_confirm_never_denies_from_pre_hit_or_other_account_meter(tmp_path) -> None:
+    from agent_takkub.provider_usage import ProviderUsage
+
+    home = tmp_path / "pane-account"
+    hit_at = time.time()
+    stale = ProviderUsage(
+        provider="codex",
+        status="active",
+        utilization=90.0,
+        fetched_at=datetime.fromtimestamp(hit_at - 240, tz=UTC),
+    )
+    fresh = ProviderUsage(
+        provider="codex",
+        status="active",
+        utilization=100.0,
+        fetched_at=datetime.fromtimestamp(hit_at + 1, tz=UTC),
+    )
+    with (
+        patch("agent_takkub.provider_usage.get_store") as store,
+        patch("agent_takkub.provider_usage.fetch_provider_usage", return_value=fresh) as fetch,
+    ):
+        store.return_value.get_account_usage.return_value = stale
+        assert limit_autoresume.confirm_verdict_for_provider("codex", home, fresh_after=hit_at) == (
+            "confirmed",
+            100.0,
+        )
+    fetch.assert_called_once_with("codex", config_dir=home, max_age_s=0.0)
+
+    with (
+        patch("agent_takkub.provider_usage.get_store") as store,
+        patch("agent_takkub.provider_usage.fetch_provider_usage", return_value=stale),
+    ):
+        store.return_value.get_account_usage.return_value = stale
+        assert limit_autoresume.confirm_verdict_for_provider("codex", home, fresh_after=hit_at) == (
+            "unknown",
+            0.0,
+        )
+
+
+def test_live_zero_percent_footer_reroutes_despite_lagging_meter() -> None:
+    from agent_takkub.orchestrator import Orchestrator
+
+    o = Orchestrator.__new__(Orchestrator)
+    o._pane_state = {}
+    o._panes_by_project = {"ai-vdo": {"lead": SimpleNamespace(session=MagicMock())}}
+    o._panes_by_project["ai-vdo"]["lead"].session.display_lines.return_value = CODEX_LIMIT_SCREEN
+    ps = o._ps("ai-vdo::lead")
+    ps.quota_provider = "codex"
+    ps.rate_limited_until = time.time() + 3600
+    ps.limit_confirm_pending = True
+    with patch.object(o, "_reroute_or_park") as reroute:
+        o._on_limit_usage_denied("ai-vdo", "lead", 90.0)
+    reroute.assert_called_once_with("ai-vdo", "lead", ps)
+    assert ps.rate_limited_until > time.time()
+    assert not ps.quota_false_positive_armed
 
 
 @pytest.fixture
