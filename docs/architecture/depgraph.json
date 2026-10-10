@@ -76,6 +76,7 @@
         "agent_takkub.git_changes_service",
         "agent_takkub.git_status",
         "agent_takkub.graft_autobuild",
+        "agent_takkub.impact_contract",
         "agent_takkub.issues",
         "agent_takkub.limit_status",
         "agent_takkub.maintenance",
@@ -114,7 +115,7 @@
         "agent_takkub.verify",
         "agent_takkub.worktree_manager"
       ],
-      "fan_in": 51,
+      "fan_in": 52,
       "fan_out": 0
     },
     {
@@ -3036,7 +3037,9 @@
     },
     {
       "module": "agent_takkub.impact_contract",
-      "imports": [],
+      "imports": [
+        "agent_takkub._win_console"
+      ],
       "imported_by": [
         "agent_takkub.cli",
         "agent_takkub.cli_server",
@@ -3044,7 +3047,7 @@
         "agent_takkub.task_ledger"
       ],
       "fan_in": 4,
-      "fan_out": 0
+      "fan_out": 1
     },
     {
       "module": "agent_takkub.issues",
