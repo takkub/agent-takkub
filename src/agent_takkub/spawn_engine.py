@@ -56,7 +56,7 @@ from .lead_context import (
     _allowed_project_roots,
     _default_plugin_dirs,
     _render_lead_context,
-    render_lead_agents_md,
+    render_lead_agents_md_with_reason,
 )
 from .orchestrator_text import (
     _cwd_within_project,
@@ -593,7 +593,10 @@ def _resume_uuid_matches_provider_cwd(
     if provider == "codex":
         from .codex_helper import resolve_codex_jsonl_for_cwd
 
-        return resolve_codex_jsonl_for_cwd(cwd, session_uuid) is not None
+        return (
+            resolve_codex_jsonl_for_cwd(cwd, session_uuid, project=project_ns, allow_subagent=False)
+            is not None
+        )
     if provider == "opencode":
         from .opencode_helper import resolve_opencode_session
 
@@ -914,6 +917,9 @@ class PaneState:
     # #690: same fallback channel for the project/role memory pointers when a
     # non-claude pane's AGENTS.md is user-owned (they never landed there).
     pending_memory_note: str | None = None
+    # #830: if a project-owned AGENTS.md prevents Lead policy injection on non-Claude,
+    # carry the cockpit policy through the first turn/prompt fallback.
+    pending_lead_context: str | None = None
     # assign_ts: wall-clock when this pane's current task was dispatched
     # (_assign_dispatch). done() reads this BEFORE popping the PaneState so it
     # can scan the artifacts dir for screenshots newer than the assignment
@@ -2845,9 +2851,45 @@ class SpawnEngineMixin:
                 if spawn_cwd != str(DATA_HOME):
                     try:
                         post_compact_brief = self._build_post_compact_brief(project_ns)
-                        render_lead_agents_md(
-                            project_ns, spawn_cwd, post_compact_brief=post_compact_brief
+                        _lead_md_path, _lead_md_reason, _lead_md_text = (
+                            render_lead_agents_md_with_reason(
+                                project_ns, spawn_cwd, post_compact_brief=post_compact_brief
+                            )
                         )
+                        _ps_lead = self._ps(_exit_key(project_ns, role_name))
+                        if _lead_md_path:
+                            _log_event(
+                                "lead_policy_delivered",
+                                role=role_name,
+                                project=project_ns,
+                                provider=spec.name,
+                                delivery="agents_md",
+                                path=_lead_md_path,
+                                is_resume=bool(resume_uuid),
+                            )
+                        else:
+                            if _lead_md_text:
+                                _ps_lead.pending_lead_context = _lead_md_text
+                            _log_event(
+                                "provider_capability_fallback",
+                                role=role_name,
+                                project=project_ns,
+                                provider=spec.name,
+                                capability="lead_policy",
+                                state="partial" if _lead_md_text else "unsupported",
+                                fallback="pending_lead_context" if _lead_md_text else "none",
+                                reason=_lead_md_reason,
+                                is_resume=bool(resume_uuid),
+                            )
+                            _log_event(
+                                "lead_policy_degraded",
+                                role=role_name,
+                                project=project_ns,
+                                provider=spec.name,
+                                reason=_lead_md_reason,
+                                fallback="pending_lead_context" if _lead_md_text else "none",
+                                is_resume=bool(resume_uuid),
+                            )
                     except Exception:
                         _log.exception(
                             "could not render %s Lead context; spawning without it",

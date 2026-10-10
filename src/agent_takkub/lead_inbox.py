@@ -1013,28 +1013,22 @@ def _delayed_enter_verified(
             # budget stranded later panes' tasks under concurrent multi-spawn
             # (3+ codex panes booting at once outlasted the 3-resend budget).
             if not session.is_at_ready_prompt():
-                # #721: the provider's busy-queue footer is up — Enter can
-                # never submit this (it only leaves an unsubmitted draft), so
-                # the ready-prompt-based recovery below is meaningless here.
-                # The queue key we sent should have moved the paste into the
-                # provider's submit queue, which shows its confirm line; verify
-                # THAT arrived, retry the queue key on the generous busy budget,
-                # and report-stuck once that budget is exhausted.
+                # #721/#831: if the message is already confirmed in the provider's queue
+                # (e.g. agy "Press up to edit queued messages" or Codex "Queued follow-up inputs"),
+                # verify that immediately without additional resends.
+                if _shows_queue_confirm():
+                    _log_verify_decision(
+                        "queued_confirm",
+                        session=session,
+                        payload=payload,
+                        is_ready=False,
+                        shows_pending=True,
+                    )
+                    if on_queued is not None:
+                        on_queued()
+                    _settled(SubmitSettleOutcome(queue_submit_used=True, stuck_in_composer=False))
+                    return
                 if _busy_queue_mode_now():
-                    if _shows_queue_confirm():
-                        _log_verify_decision(
-                            "queued_confirm",
-                            session=session,
-                            payload=payload,
-                            is_ready=False,
-                            shows_pending=True,
-                        )
-                        if on_queued is not None:
-                            on_queued()
-                        _settled(
-                            SubmitSettleOutcome(queue_submit_used=True, stuck_in_composer=False)
-                        )
-                        return
                     if busy_remaining > 0:
                         _log_verify_decision(
                             "resend_busy_queue",
@@ -3051,14 +3045,34 @@ class LeadInboxMixin:
         lead = self._project_panes(project_ns).get(LEAD.name)
         if not (lead and lead.session and lead.session.is_alive):
             return
-        msg = (
-            f"⚠️ [delivery-stuck] {role_name} pane ยัง busy อยู่ (codex ต้องกด Tab เพื่อ "
-            f"queue ข้อความ — Enter ไม่ส่งตอนมี turn ค้าง) แต่ข้อความยังไม่ยืนยันเข้าคิว "
-            f"จึงค้างเป็น draft ในช่องพิมพ์ — เปิด pane {role_name} แล้วกด Tab "
-            f"เพื่อ queue เองถ้ายังไม่ถูกส่ง (issue #721)"
-        )
+        target_pane = self._project_panes(project_ns).get(role_name)
+        pane_model = getattr(target_pane, "model", None)
+        provider = getattr(pane_model, "provider_name", None)
+        if not provider:
+            from .provider_config import effective_provider_for
+
+            provider = effective_provider_for(role_name, project=project_ns)
+        provider = (provider or "").strip().lower()
+
+        if provider == "codex":
+            provider_guidance = (
+                "(codex ต้องกด Tab เพื่อ queue ข้อความ — Enter ไม่ส่งตอนมี turn ค้าง) "
+                f"แต่ข้อความยังไม่ยืนยันเข้าคิว จึงค้างเป็น draft ในช่องพิมพ์ — เปิด pane {role_name} "
+                "แล้วกด Tab เพื่อ queue เองถ้ายังไม่ถูกส่ง (issue #721)"
+            )
+        elif provider == "gemini":
+            provider_guidance = (
+                f"(gemini/agy กำลังประมวลผล) ข้อความยังไม่ยืนยันเข้าคิวใน composer — "
+                f"เปิด pane {role_name} เพื่อตรวจคิวข้อความ (Press up to edit queued messages) (issue #831)"
+            )
+        else:
+            provider_guidance = (
+                f"({provider or 'provider'} ยัง busy อยู่) แต่ข้อความยังไม่ยืนยันเข้าคิว — "
+                f"เปิด pane {role_name} เพื่อตรวจสถานะในช่องพิมพ์"
+            )
+        msg = f"⚠️ [delivery-stuck] {role_name} pane ยัง busy อยู่ {provider_guidance}"
         self._notify_lead(project_ns, msg, kind="delivery-stuck")
-        _log_event("delivery_stuck_warned", role=role_name, project=project_ns)
+        _log_event("delivery_stuck_warned", role=role_name, project=project_ns, provider=provider)
 
     def _warn_lead_delivery_blocked(self, role_name: str, project: str | None) -> None:
         """Tell the Lead that an assign was dropped by the single-flight gate
@@ -5040,6 +5054,20 @@ class LeadInboxMixin:
         # when it happened to be flushed — this queue previously carried no
         # timestamp at all (see _enqueue_live_lead_notice's docstring).
         raw_body = f"{_occurred_stamp(item_ts)}{raw_body}"
+        # #830: if Lead has pending policy context from a user-owned AGENTS.md fallback,
+        # prepend it to the first notice reaching Lead so policy is guaranteed delivered.
+        ps_lead = self._ps(f"{project_ns}::lead")
+        _pending_lead = getattr(ps_lead, "pending_lead_context", None)
+        if _pending_lead:
+            ps_lead.pending_lead_context = None
+            raw_body = f"[System Cockpit Policy (delivered via fallback)]\n{_pending_lead}\n\n---\n\n{raw_body}"
+            _log_event(
+                "lead_policy_delivered",
+                role="lead",
+                project=project_ns,
+                provider=getattr(getattr(lead, "model", None), "provider_name", "") or "claude",
+                delivery="notice_pump_fallback",
+            )
         body = _sanitize_pane_text(raw_body)
         _notify_sess = lead.session
         notice_expires_at = time.time() + float(

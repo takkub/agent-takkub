@@ -1421,6 +1421,7 @@ class TestLeadHistory:
         assert result == {
             "project": "proj-a",
             "provider": "claude",
+            "account": "default",
             "messages": [],
             "working": False,
             "lead_provider_note": None,
@@ -1443,6 +1444,7 @@ class TestLeadHistory:
         assert result == {
             "project": "proj-a",
             "provider": "claude",
+            "account": "default",
             "messages": [
                 {"text": "first", "kind": "me"},
                 {"text": "second", "kind": "lead"},

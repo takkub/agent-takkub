@@ -2847,7 +2847,11 @@ class Orchestrator(
         (`team_preset.set_override`) and prepends a `[system]` notice ahead
         of *task* so the Lead sees it in the same message; ignored for every
         other role (spawning a teammate doesn't change the project's size)."""
-        from .work_discipline import confirmation_digest, needs_spec_confirmation
+        from .work_discipline import (
+            confirmation_digest,
+            is_spec_confirmation_enabled,
+            needs_spec_confirmation,
+        )
 
         # #762: bind THIS request's backlog card before anything reads it.
         requested_role_name = role_name
@@ -2856,7 +2860,11 @@ class Orchestrator(
             assign_backlog_id = self.activate_assign_backlog(project, role_name, task)
         except Exception:  # bare test doubles / storage trouble never block an assign
             pass
-        if needs_spec_confirmation(task):
+        if (
+            is_spec_confirmation_enabled()
+            or spec_confirmation is not None
+            or "_confirm_task_discipline" in self.__dict__
+        ) and needs_spec_confirmation(task):
             expected = confirmation_digest(task)
             if not self._confirm_task_discipline(
                 "spec", role_name, self._resolve_project(project), task, expected
@@ -4551,11 +4559,16 @@ class Orchestrator(
                     _snap_mgr = _WorktreeManagerSnap()
                     base_sha, git_root, dirty = _snap_mgr.shared_tree_baseline(cwd)
                     if git_root is None:
-                        # #800: check multi-repo project paths if root is not a git repo
-                        from .config import _project_dict
+                        # #800/#827: check multi-repo project paths or Lead pane cwd if root is not a git repo
+                        from .config import _project_dict, lead_cwd
 
-                        for p_path in _project_dict(project_ns).get("paths", {}).values():
-                            if _snap_mgr.git_root(p_path):
+                        candidate_cwds = list(_project_dict(project_ns).get("paths", {}).values())
+                        _lead_p = self._project_panes(project_ns).get("lead")
+                        _lead_c = getattr(_lead_p, "_session_cwd", None) or lead_cwd(project_ns)
+                        if _lead_c and _lead_c not in candidate_cwds:
+                            candidate_cwds.append(_lead_c)
+                        for p_path in candidate_cwds:
+                            if p_path and _snap_mgr.git_root(p_path):
                                 b_sha, g_root, d_snap = _snap_mgr.shared_tree_baseline(p_path)
                                 if g_root:
                                     return b_sha, g_root, d_snap, False
@@ -4631,6 +4644,8 @@ class Orchestrator(
             # after the language line, which stays the paste's first line.
             _pending_mem = getattr(ps_assign, "pending_memory_note", None)
             ps_assign.pending_memory_note = None
+            _pending_lead = getattr(ps_assign, "pending_lead_context", None)
+            ps_assign.pending_lead_context = None
             _prefix = []
             if _pending_lang:
                 _prefix.append(f"[ภาษาที่ตอบ (#621)] {_pending_lang}")
@@ -4638,6 +4653,8 @@ class Orchestrator(
                 _prefix.append(_pending_contract)
             if _pending_mem:
                 _prefix.append(_pending_mem)
+            if _pending_lead:
+                _prefix.append(f"[System Cockpit Policy (delivered via fallback)]\n{_pending_lead}")
             if _prefix:
                 paste_text = "\n\n".join(_prefix) + f"\n\n{paste_text}"
             self._send_when_ready(role_name, paste_text, project=project)
@@ -5746,6 +5763,21 @@ class Orchestrator(
                         )
                 except Exception:
                     pass
+
+        # #830: if Lead has pending policy context from a user-owned AGENTS.md fallback,
+        # prepend it to the first message reaching Lead so policy is guaranteed delivered.
+        if to_role == LEAD.name:
+            _pending_lead = getattr(ps_send, "pending_lead_context", None)
+            if _pending_lead:
+                ps_send.pending_lead_context = None
+                msg = f"[System Cockpit Policy (delivered via fallback)]\n{_pending_lead}\n\n---\n\n{msg}"
+                _log_event(
+                    "lead_policy_delivered",
+                    role=LEAD.name,
+                    project=project_ns,
+                    provider=getattr(getattr(pane, "model", None), "provider_name", "") or "claude",
+                    delivery="first_message_fallback",
+                )
 
         # shell panes are a raw PowerShell/bash terminal, not an LLM: a
         # `[{from} → {to}] ` header would be parsed as PowerShell type
@@ -9341,7 +9373,7 @@ class Orchestrator(
         # success. Keep these warnings visible even in a condensed digest.
         from .orchestrator_text import done_report_warnings
 
-        review_warnings = done_report_warnings(raw_note)
+        review_warnings = done_report_warnings(raw_note, report_path=session_md_path)
         if had_assign_ts:
             try:
                 from . import role_messages

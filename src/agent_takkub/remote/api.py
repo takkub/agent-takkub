@@ -75,7 +75,9 @@ def _lead_provider_note(provider: str) -> str | None:
 # and an 8-char session id prefix ever reach this text, never a full uuid or
 # filesystem path (§7.3 — same bar `notify.py`'s own docstrings hold this
 # module to).
-def _empty_reason_payload(diagnosis: dict) -> dict | None:
+def _empty_reason_payload(diagnosis: dict | None) -> dict | None:
+    if not diagnosis:
+        return None
     code = diagnosis.get("code")
     if code is None:
         return None
@@ -818,9 +820,13 @@ def lead_history(orch, project_ns: str, limit: object = None) -> dict:
         if not messages
         else None
     )
+    from .. import user_profile
+
+    account = user_profile.profile_for(project_ns, provider)
     return {
         "project": project_ns,
         "provider": provider,
+        "account": account,
         "messages": messages,
         "working": working,
         "lead_provider_note": _lead_provider_note(provider),

@@ -169,6 +169,60 @@ def verify_mode(cfg: dict) -> str:
     return cfg.get("checker") or "self"
 
 
+def verify_checker_provenance(
+    project: str,
+    since_ts: float | None = None,
+) -> tuple[bool, str, dict | None]:
+    """Verify that the project's configured checker gate has been satisfied by a
+    registered cockpit assignment (issue #830).
+
+    Returns `(satisfied, reason, details)`:
+      - If verify_mode is "self": `(True, "self-verify", {"mode": "self"})`.
+      - If verify_mode is a checker role (e.g. "reviewer" or "qa"):
+        Checks `task_ledger` for a completed assignment (`status == "ok"`)
+        under that role (or its alias/canonical role) that was registered
+        through the cockpit (`detail_rel` or `task_id` present).
+        Unregistered native child agent turns never satisfy this requirement.
+    """
+    cfg = current(project)
+    mode = verify_mode(cfg)
+    if mode == "self":
+        return True, "self-verify", {"mode": "self", "checker": None}
+
+    checker_role = CHECKER_ROLES.get(mode, mode)
+    accepted_roles = {mode, checker_role}
+    from . import task_ledger
+
+    try:
+        state = task_ledger.load_state(project)
+    except Exception as exc:
+        return False, f"failed to load task ledger: {exc}", None
+
+    groups = state.get("groups", [])
+    matching_rows: list[dict] = []
+    for g in groups:
+        for feat in g.get("features", []):
+            for row in feat.get("rows", []):
+                r_role = row.get("role", "")
+                if r_role in accepted_roles and row.get("status") == "ok":
+                    if row.get("detail_rel") or row.get("task_id"):
+                        matching_rows.append(row)
+
+    if not matching_rows:
+        return (
+            False,
+            f"no registered cockpit done report for checker role '{mode}' (native child turns do not satisfy checker gate)",
+            {"mode": mode, "checker": checker_role, "found_rows": 0},
+        )
+
+    last_row = matching_rows[-1]
+    return (
+        True,
+        f"verified by registered {last_row.get('role')} assignment",
+        {"mode": mode, "checker": checker_role, "row": last_row},
+    )
+
+
 # ─────────────────────────────────────────────────────────────────────
 # Storage
 # ─────────────────────────────────────────────────────────────────────

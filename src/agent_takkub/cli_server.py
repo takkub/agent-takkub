@@ -987,10 +987,15 @@ class CliServer(QObject):
                         else (from_project or "default")
                     )
                     fp = self._assign_fingerprint(project_ns_fp, role, req.get("task", ""), mode)
-                    from .work_discipline import needs_spec_confirmation
+                    from .work_discipline import (
+                        is_spec_confirmation_enabled,
+                        needs_spec_confirmation,
+                    )
 
-                    awaiting_spec = cmd == "assign" and needs_spec_confirmation(
-                        str(req.get("task", "") or "")
+                    awaiting_spec = (
+                        cmd == "assign"
+                        and is_spec_confirmation_enabled()
+                        and needs_spec_confirmation(str(req.get("task", "") or ""))
                     )
                     now_fp = time.time()
                     last_seen = self._recent_assign_fingerprints.get(fp)
@@ -1190,10 +1195,12 @@ class CliServer(QObject):
                         if awaiting_spec
                         else f"task queued for {role} (spawning async, +{delay}ms)"
                     )
+                    target_role = role
                     if (role or "").strip().lower() == "reviewer" and mode in {"code", "e2e", "ui"}:
                         from .routing_planner import _MODE_TO_LEGACY_ROLE
 
                         resolved_pane = _MODE_TO_LEGACY_ROLE.get(mode, "reviewer")
+                        target_role = resolved_pane
                         ack_msg += f" → pane: {resolved_pane}"
                     # #590 item D: `orchestrator.assign()` runs staggered off
                     # a QTimer and its return value (which includes the
@@ -1218,7 +1225,9 @@ class CliServer(QObject):
                         ack_msg = f"{resolution_line}{ack_msg}"
                     if cmd == "assign" and auto_mode_note:
                         ack_msg = f"{ack_msg}\n[{auto_mode_note}]"
-                    queued_notice = self._queued_no_pane_suffix(project_ns_fp, role)
+                    # #831: stale message cleanup belongs to the target execution role,
+                    # not the unmapped alias (e.g. reviewer --mode e2e resolves to qa)
+                    queued_notice = self._queued_no_pane_suffix(project_ns_fp, target_role)
                     if queued_notice:
                         ack_msg = f"{ack_msg}\n{queued_notice}"
                     if backlog_note:

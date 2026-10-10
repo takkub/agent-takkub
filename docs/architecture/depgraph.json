@@ -1,6 +1,6 @@
 {
   "generated_by": "grimp 3.14",
-  "module_count": 371,
+  "module_count": 372,
   "modules": [
     {
       "module": "agent_takkub",
@@ -661,6 +661,17 @@
       "fan_out": 0
     },
     {
+      "module": "agent_takkub.codex_account",
+      "imports": [
+        "agent_takkub.config"
+      ],
+      "imported_by": [
+        "agent_takkub.codex_helper"
+      ],
+      "fan_in": 1,
+      "fan_out": 1
+    },
+    {
       "module": "agent_takkub.codex_agents_md",
       "imports": [],
       "imported_by": [
@@ -676,6 +687,7 @@
       "module": "agent_takkub.codex_helper",
       "imports": [
         "agent_takkub._win_console",
+        "agent_takkub.codex_account",
         "agent_takkub.config"
       ],
       "imported_by": [
@@ -696,7 +708,7 @@
         "agent_takkub.user_profile"
       ],
       "fan_in": 15,
-      "fan_out": 2
+      "fan_out": 3
     },
     {
       "module": "agent_takkub.config",
@@ -721,6 +733,7 @@
         "agent_takkub.claude_update",
         "agent_takkub.cli",
         "agent_takkub.cli_server",
+        "agent_takkub.codex_account",
         "agent_takkub.codex_helper",
         "agent_takkub.core.capabilities.audit",
         "agent_takkub.core.capabilities.skill_store",
@@ -829,7 +842,7 @@
         "agent_takkub.worktree_manager",
         "agent_takkub.worktree_reuse"
       ],
-      "fan_in": 123,
+      "fan_in": 124,
       "fan_out": 2
     },
     {
@@ -3587,6 +3600,8 @@
         "agent_takkub.backlog",
         "agent_takkub.config",
         "agent_takkub.lead_context",
+        "agent_takkub.provider_config",
+        "agent_takkub.provider_spec",
         "agent_takkub.team_preset",
         "agent_takkub.venv_integrity"
       ],
@@ -3600,7 +3615,7 @@
         "agent_takkub.pipeline_executor"
       ],
       "fan_in": 7,
-      "fan_out": 6
+      "fan_out": 8
     },
     {
       "module": "agent_takkub.pane_health",
@@ -3985,6 +4000,7 @@
         "agent_takkub.limit_autoresume",
         "agent_takkub.limit_panel",
         "agent_takkub.orchestrator",
+        "agent_takkub.pane_guard",
         "agent_takkub.pipeline_executor",
         "agent_takkub.remote.api",
         "agent_takkub.remote.notify",
@@ -4004,7 +4020,7 @@
         "agent_takkub.user_actions",
         "agent_takkub.user_profile"
       ],
-      "fan_in": 30,
+      "fan_in": 31,
       "fan_out": 10
     },
     {
@@ -4109,6 +4125,7 @@
         "agent_takkub.notice_facts",
         "agent_takkub.orchestrator",
         "agent_takkub.orchestrator_text",
+        "agent_takkub.pane_guard",
         "agent_takkub.provider_config",
         "agent_takkub.provider_install",
         "agent_takkub.provider_model_catalog",
@@ -4127,7 +4144,7 @@
         "agent_takkub.status_header",
         "agent_takkub.user_actions"
       ],
-      "fan_in": 35,
+      "fan_in": 36,
       "fan_out": 4
     },
     {
@@ -4285,13 +4302,14 @@
         "agent_takkub.spawn_engine",
         "agent_takkub.team_preset",
         "agent_takkub.usage_ledger",
+        "agent_takkub.user_profile",
         "agent_takkub.worktree_manager"
       ],
       "imported_by": [
         "agent_takkub.remote.http_server"
       ],
       "fan_in": 1,
-      "fan_out": 11
+      "fan_out": 12
     },
     {
       "module": "agent_takkub.remote.auth",
@@ -5660,9 +5678,10 @@
         "agent_takkub.orchestrator",
         "agent_takkub.project_nav",
         "agent_takkub.qa_gate",
-        "agent_takkub.task_dock"
+        "agent_takkub.task_dock",
+        "agent_takkub.team_preset"
       ],
-      "fan_in": 6,
+      "fan_in": 7,
       "fan_out": 4
     },
     {
@@ -5688,7 +5707,8 @@
         "agent_takkub.provider_config",
         "agent_takkub.role_models",
         "agent_takkub.roles",
-        "agent_takkub.routing_planner"
+        "agent_takkub.routing_planner",
+        "agent_takkub.task_ledger"
       ],
       "imported_by": [
         "agent_takkub.cli",
@@ -5709,7 +5729,7 @@
         "agent_takkub.user_actions"
       ],
       "fan_in": 16,
-      "fan_out": 7
+      "fan_out": 8
     },
     {
       "module": "agent_takkub.terminal_widget",
@@ -5964,6 +5984,7 @@
         "agent_takkub.pane_env",
         "agent_takkub.project_memory",
         "agent_takkub.provider_usage",
+        "agent_takkub.remote.api",
         "agent_takkub.remote.notify",
         "agent_takkub.settings_accounts",
         "agent_takkub.settings_window",
@@ -5973,7 +5994,7 @@
         "agent_takkub.user_actions",
         "agent_takkub.worktree_manager"
       ],
-      "fan_in": 25,
+      "fan_in": 26,
       "fan_out": 9
     },
     {

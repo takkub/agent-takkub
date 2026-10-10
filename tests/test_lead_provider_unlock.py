@@ -79,8 +79,11 @@ def _spawn_lead_and_capture(
         )
         stack.enter_context(
             patch(
-                "agent_takkub.spawn_engine.render_lead_agents_md",
-                side_effect=lambda *a, **kw: agents_md_calls.append((a, kw)),
+                "agent_takkub.spawn_engine.render_lead_agents_md_with_reason",
+                side_effect=lambda *a, **kw: (
+                    agents_md_calls.append((a, kw))
+                    or (str(tmp_path / "AGENTS.md"), "written", "policy text")
+                ),
             )
         )
         # Teammate cheatsheet must NEVER be called for Lead.

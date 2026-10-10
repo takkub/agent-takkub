@@ -115,6 +115,24 @@ def confirmation_digest(task: str) -> str:
     return hashlib.sha256((task or "").strip().encode("utf-8")).hexdigest()[:12]
 
 
+def is_spec_confirmation_enabled(settings_home: Path | None = None) -> bool:
+    """Check if spec confirmation modal is explicitly enabled in work-discipline.json.
+    Defaults to False so assignments create backlog and proceed autonomously without
+    blocking on desktop modal popups. Set 'spec_confirmation': true to require modal.
+    """
+    if settings_home is None:
+        from .config import SETTINGS_HOME
+
+        settings_home = SETTINGS_HOME
+    try:
+        raw = json.loads((settings_home / "work-discipline.json").read_text(encoding="utf-8"))
+        if isinstance(raw, dict) and "spec_confirmation" in raw:
+            return bool(raw["spec_confirmation"])
+    except (OSError, ValueError, TypeError):
+        pass
+    return False
+
+
 def task_limits(scope: str, settings_home: Path | None = None) -> TaskLimits:
     """Read validated per-tier limits; corrupt or missing settings use defaults."""
     values = DEFAULT_LIMITS

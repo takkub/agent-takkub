@@ -5522,9 +5522,14 @@ def cmd_lead_edits(args: argparse.Namespace) -> dict:
 
     status = pane_guard.get_lead_edits_status(project=project)
     p_name = project or "default"
+    covered_note = (
+        ""
+        if status.get("covered", True)
+        else f" (uncovered: provider '{status.get('provider')}' does not enforce file guards)"
+    )
     msg = (
         f"lead-edits [{p_name}]: {status['files_count']}/2 files, "
-        f"{status['total_lines']}/30 lines (updated: {status.get('updated_at') or 'never'})"
+        f"{status['total_lines']}/30 lines (updated: {status.get('updated_at') or 'never'}){covered_note}"
     )
     _utf8_print(msg)
     return {"ok": True, "msg": msg, "data": status}

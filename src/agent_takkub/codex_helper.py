@@ -32,23 +32,25 @@ from pathlib import Path
 from ._win_console import SUBPROCESS_NO_WINDOW
 
 
-def codex_home() -> Path:
+def codex_home(project: str = "") -> Path:
     """Return the CODEX_HOME an installed cockpit's codex panes actually use.
 
     Precedence — deliberately isolation-first:
 
-    1. ``config.provider_home_env("codex")`` (installed build) — the same
+    1. Named account config dir from user_profile for `project` (#505/#832).
+    2. ``config.provider_home_env("codex")`` (installed build) — the same
        value ``pane_env.inject_provider_home_env`` exports into the pane, so
        this reader can never point somewhere no pane writes to.
-    2. an inherited ``CODEX_HOME`` (dev checkout, or a user who set it).
-    3. Codex's own default, ``~/.codex``.
-
-    Order 1-before-2 matters: the cockpit process may itself have inherited a
-    ``CODEX_HOME`` from the user's shell, but the pane's value is assigned,
-    not defaulted — reading the inherited one here would send the Remote
-    mirror hunting in a directory the pane never writes to.
+    3. an inherited ``CODEX_HOME`` (dev checkout, or a user who set it).
+    4. Codex's own default, ``~/.codex``.
     """
     from . import config
+    from .codex_account import selected_codex_config_dir
+
+    if project:
+        acct_dir = selected_codex_config_dir(project)
+        if acct_dir is not None and acct_dir.is_dir():
+            return acct_dir
 
     isolated = config.provider_home_dir("codex", "CODEX_HOME")
     if isolated is not None:
@@ -57,33 +59,14 @@ def codex_home() -> Path:
     return Path(configured) if configured else Path.home() / ".codex"
 
 
-def codex_sessions_root() -> Path:
-    """Return Codex's provider-owned interactive session store.
-
-    ``CODEX_HOME`` is part of Codex's local-state contract; when it is not
-    set the CLI uses ``~/.codex``.  Keeping this resolver in the core adapter
-    lets both the optional Remote package and the spawn engine validate the
-    same store without making core orchestration import ``agent_takkub.remote``.
-    """
-    return codex_home() / "sessions"
+def codex_sessions_root(project: str = "") -> Path:
+    """Return Codex's provider-owned interactive session store."""
+    return codex_home(project) / "sessions"
 
 
-def codex_archived_sessions_root() -> Path:
-    """Return Codex's archived-session store (``codex archive``, 0.148+).
-
-    Verified on-disk (0.148.0): ``codex archive <id>`` MOVES the rollout file
-    out of the day-sharded ``sessions/YYYY/MM/DD/`` tree into a flat
-    ``archived_sessions/`` directory — no date subfolders, and `unarchive`
-    moves it straight back. `codex_sessions_root()`'s day-sharded resolvers
-    never look here, so an exact by-ID lookup for a session that got archived
-    mid-flight would otherwise resolve to nothing (not an error — a silent
-    "session vanished", the exact failure mode `provider-integration`'s row 4
-    warns about). Callers doing an exact id+cwd match should fall back here
-    when the primary root misses; the broader "newest session for this cwd"
-    scan never needs to, because a session actively being spawned/resumed
-    can't already be archived.
-    """
-    return codex_home() / "archived_sessions"
+def codex_archived_sessions_root(project: str = "") -> Path:
+    """Return Codex's archived-session store (``codex archive``, 0.148+)."""
+    return codex_home(project) / "archived_sessions"
 
 
 def normalize_codex_cwd(value: object) -> str:
@@ -110,6 +93,8 @@ def resolve_codex_jsonl_for_cwd(
     session_id: str,
     *,
     root: Path | None = None,
+    project: str = "",
+    allow_subagent: bool = False,
 ) -> Path | None:
     """Resolve *session_id* only when its recorded cwd exactly matches *cwd*.
 
@@ -126,7 +111,15 @@ def resolve_codex_jsonl_for_cwd(
     # fallback — callers relying on the real store also check `archived_sessions/`
     # (see `codex_archived_sessions_root`) since `codex archive` moves the file
     # there and this is an exact id+cwd lookup, not the newest-for-cwd scan.
-    bases = [root] if root is not None else [codex_sessions_root(), codex_archived_sessions_root()]
+    bases = (
+        [root]
+        if root is not None
+        else [
+            codex_sessions_root(project),
+            codex_archived_sessions_root(project),
+            *([codex_sessions_root(), codex_archived_sessions_root()] if project else []),
+        ]
+    )
     for base in bases:
         if not base.is_dir():
             continue
@@ -138,6 +131,19 @@ def resolve_codex_jsonl_for_cwd(
                 if meta_id != wanted_id:
                     continue
                 if normalize_codex_cwd(meta.get("cwd")) == wanted_cwd:
+                    # #829: sub-agent thread of multi-agent v2 cannot be resumed as a parent session.
+                    if not allow_subagent and (
+                        meta.get("thread_source") == "subagent"
+                        or bool(meta.get("parent_thread_id"))
+                    ):
+                        parent_id = str(meta.get("parent_thread_id") or "").strip()
+                        if parent_id and parent_id != wanted_id:
+                            parent_path = resolve_codex_jsonl_for_cwd(
+                                cwd, parent_id, root=root, project=project, allow_subagent=False
+                            )
+                            if parent_path:
+                                return parent_path
+                        return None
                     return path
         except OSError:
             continue
@@ -151,6 +157,8 @@ def resolve_newest_codex_session_for_cwd(
     root: Path | None = None,
     exclude_ids: frozenset[str] = frozenset(),
     created_after: float = 0.0,
+    project: str = "",
+    parent_only: bool = True,
 ) -> Path | None:
     """Newest codex rollout file recorded against *cwd*, with no known session
     id yet — the token meter's per-pane resolution path.
@@ -175,9 +183,12 @@ def resolve_newest_codex_session_for_cwd(
     wanted_cwd = normalize_codex_cwd(cwd)
     if not wanted_cwd:
         return None
-    base = root if root is not None else codex_sessions_root()
+    base = root if root is not None else codex_sessions_root(project)
     if not base.is_dir():
-        return None
+        if project:
+            base = codex_sessions_root()
+        if not base.is_dir():
+            return None
 
     from datetime import date as _date
     from datetime import datetime
@@ -228,6 +239,12 @@ def resolve_newest_codex_session_for_cwd(
                     if exclude_ids and sid in exclude_ids:
                         continue
                     if created_after and _codex_meta_started_at(meta) < created_after - 30.0:
+                        continue
+                    # #829: sub-agent thread of multi-agent v2 cannot be resumed as parent
+                    if parent_only and (
+                        meta.get("thread_source") == "subagent"
+                        or bool(meta.get("parent_thread_id"))
+                    ):
                         continue
                     return f
     return None

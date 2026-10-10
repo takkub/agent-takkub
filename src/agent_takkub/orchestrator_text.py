@@ -54,46 +54,121 @@ def done_note_preview(body: str, *, transcript_path=None, max_lines: int = 5) ->
     return "\n".join(lines[:max_lines])
 
 
+_SECTION_LABEL_SYNONYMS: dict[str, tuple[str, ...]] = {
+    "CHANGED": (
+        "CHANGED",
+        "CHANGES",
+        "CHANGE",
+        "FIXES",
+        "FIX",
+        "MODIFIED",
+        "MODIFICATIONS",
+        "การแก้ไข",
+        "แก้ไข",
+        "การเปลี่ยนแปลง",
+        "SUMMARY",
+        "OVERVIEW",
+    ),
+    "EVIDENCE": (
+        "EVIDENCE",
+        "TESTS",
+        "TEST",
+        "TESTING",
+        "TEST RESULTS",
+        "TEST RESULT",
+        "VERIFICATION",
+        "PROOF",
+        "RESULTS",
+        "RESULT",
+        "หลักฐาน",
+        "ผลการทดสอบ",
+        "ผลการตรวจ",
+        "ผลทดสอบ",
+    ),
+    "REMOVED": (
+        "REMOVED",
+        "REMOVE",
+        "DELETED",
+        "DELETE",
+        "CLEANUP",
+        "CLEANED",
+        "ลบ",
+        "การลบ",
+        "ไฟล์ที่ลบ",
+    ),
+}
+
+
 def _has_section_content(
     note: str, label: str, all_labels: tuple[str, ...] = ("CHANGED", "EVIDENCE", "REMOVED")
 ) -> bool:
     if not note:
         return False
-    other_labels = [lbl for lbl in all_labels if lbl != label]
-    other_pat = "|".join(other_labels)
-    # #814: a one-paragraph note (`STATUS: … CHANGED: … EVIDENCE: …`) is just
-    # as complete — mid-line, the label counts when a colon follows it.
-    head_pattern = (
-        rf"(?:(?:^|[\r\n;])\s*(?:#+\s*|[-*]\s*)?\b{label}(?:\s*\([^)]*\))?\s*(?::|\s*-|\n|$)"
-        rf"|\b{label}(?:\s*\([^)]*\))?\s*:)"
-    )
-    match = re.search(head_pattern, note, re.I)
-    if not match:
-        return False
-    rest = note[match.end() :]
-    next_head_pattern = (
-        rf"(?:(?:^|[\r\n;])\s*(?:#+\s*|[-*]\s*)?(?:{other_pat})\b"
-        rf"|\b(?:{other_pat})(?:\s*\([^)]*\))?\s*:)"
-    )
-    next_match = re.search(next_head_pattern, rest, re.I)
-    body = rest[: next_match.start()] if next_match else rest
-    return bool(body.strip())
+    synonyms = _SECTION_LABEL_SYNONYMS.get(label.upper(), (label,))
+    other_synonyms: list[str] = []
+    for other in all_labels:
+        if other != label:
+            other_synonyms.extend(_SECTION_LABEL_SYNONYMS.get(other.upper(), (other,)))
+    other_pat = "|".join(re.escape(s) for s in other_synonyms)
+
+    for syn in synonyms:
+        # #814/#828: one-paragraph note or markdown section with flexible headers
+        is_ascii = syn.isascii()
+        b_pre = r"\b" if is_ascii else r"(?:(?<![a-zA-Z0-9])|^)"
+        b_post = r"\b" if is_ascii else r"(?![a-zA-Z0-9])"
+        head_pattern = (
+            rf"(?:(?:^|[\r\n;])\s*(?:#+\s*|[-*]\s*)?{b_pre}{re.escape(syn)}{b_post}(?:\s*\([^)]*\))?\s*(?::|\s*-|\n|$)"
+            rf"|{b_pre}{re.escape(syn)}{b_post}(?:\s*\([^)]*\))?\s*:)"
+        )
+        match = re.search(head_pattern, note, re.I)
+        if not match:
+            continue
+        rest = note[match.end() :]
+        next_head_pattern = (
+            rf"(?:(?:^|[\r\n;])\s*(?:#+\s*|[-*]\s*)?(?:{other_pat})(?:\b|(?![a-zA-Z0-9]))"
+            rf"|(?:\b|(?<![a-zA-Z0-9]))(?:{other_pat})(?:\s*\([^)]*\))?\s*:)"
+        )
+        next_match = re.search(next_head_pattern, rest, re.I)
+        body = rest[: next_match.start()] if next_match else rest
+        if body.strip():
+            return True
+    return False
 
 
-def done_report_warnings(note: str) -> list[str]:
+def done_report_warnings(note: str, report_path: str | pathlib.Path | None = None) -> list[str]:
     """Provider-independent quality flags; never turn an incomplete note into PASS evidence."""
+    # #828: check attached report file if provided or cited in note
+    full_content = note or ""
+    if not report_path and note:
+        m = re.search(r"(?:^|\s)report:\s*([^\s\r\n]+\.md)\b", note, re.I)
+        if m:
+            report_path = m.group(1).strip()
+    has_report = False
+    if report_path:
+        try:
+            rp = pathlib.Path(report_path)
+            if rp.is_file():
+                report_text = rp.read_text(encoding="utf-8", errors="replace")
+                if report_text.strip():
+                    full_content = f"{full_content}\n\n{report_text}"
+                    has_report = True
+        except OSError:
+            pass
+
     warnings = []
-    missing = [
-        label
-        for label in ("CHANGED", "EVIDENCE", "REMOVED")
-        if not _has_section_content(note or "", label)
-    ]
+    has_changed = _has_section_content(full_content, "CHANGED")
+    has_evidence = _has_section_content(full_content, "EVIDENCE")
+    required_labels: list[str] = ["CHANGED", "EVIDENCE"]
+    if not has_report and not (has_changed and has_evidence):
+        required_labels.append("REMOVED")
+
+    missing = [label for label in required_labels if not _has_section_content(full_content, label)]
     if missing:
         warnings.append("note incomplete: missing " + ", ".join(missing))
     if re.search(
         r"(?:skip\w*|ไม่ได้รัน|ไม่ยืนยัน|ยกเว้น)[^\n]{0,60}(?:tsc|typecheck)|"
         r"(?:tsc|typecheck)[^\n]{0,60}(?:skip\w*|ไม่ได้รัน|ไม่ยืนยัน)",
-        note or "",
+        full_content,
         re.I,
     ):
         warnings.append("typecheck unverified")

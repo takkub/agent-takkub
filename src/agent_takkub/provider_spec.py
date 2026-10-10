@@ -1251,6 +1251,15 @@ gemini_spec = ProviderSpec(
     enter_delay_per_kb_ms=150,
     enter_delay_max_ms=3000,
     input_swallow_recovery=True,
+    # #831: agy queues messages while a turn is running ("Press up to edit queued messages").
+    # Submitting with Enter adds it to agy's internal queue; confirming either marker
+    # proves the message arrived and avoids repetitive Enter resend bursts.
+    busy_queue_marker="press up to edit queued messages",
+    busy_queue_key="\r",
+    busy_queue_confirm_markers=(
+        "queued messages",
+        "press up to edit queued messages",
+    ),
     multiline_newline_seq="\x1b\r",  # agy is Ink-based like claude — same ESC+CR
     # multiline newline behavior (#149).
     handles_osc_color_reply=True,  # Ink-based like claude — same clean OSC reply parse
@@ -1669,6 +1678,7 @@ CAPABILITY_NAMES: tuple[str, ...] = (
     "task_token_budget",  # hard task stop from provider token usage telemetry
     "quota_reroute",  # quota hit moves work to an available provider
     "lead_context_recovery",  # proactive context reduction for an idle Lead
+    "native_tool_interception",  # capability to intercept native child tools/edits via hooks
 )
 
 
@@ -1709,6 +1719,7 @@ def capability_matrix(spec: ProviderSpec) -> dict[str, str]:
     m["modal_detection"] = "supported" if spec.ready_hard_blockers else "partial"
     m["tool_stuck_detection"] = "supported" if spec.tool_running_markers else "unsupported"
     m["feedback_prompt_skip"] = "supported" if spec.auto_skip_feedback else "unsupported"
+    m["native_tool_interception"] = "supported" if spec.supports_hooks else "unsupported"
     try:
         from .config import PROVIDER_ISOLATION_GAPS
 
@@ -2147,3 +2158,8 @@ def scaffolding_process_names_for(provider: str) -> frozenset[str]:
     return frozenset(
         normalize_process_name(n) for n in (*own, *GENERIC_SCAFFOLDING_PROCESS_NAMES, *win32)
     )
+
+
+def spec_for(provider: str) -> ProviderSpec | None:
+    """Return the ProviderSpec for *provider*, or None if not registered."""
+    return PROVIDER_REGISTRY.get((provider or "").strip().lower())

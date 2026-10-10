@@ -1579,11 +1579,25 @@ def get_lead_edits_status(
         except Exception:
             pass
 
+    covered = True
+    prov_name = "claude"
+    try:
+        from .provider_config import effective_provider_for
+        from .provider_spec import spec_for
+
+        prov_name = effective_provider_for("lead", project)
+        spec = spec_for(prov_name)
+        covered = bool(spec and spec.use_file_guards)
+    except Exception:
+        pass
+
     return {
         "files": files_list,
         "files_count": len(set(files_list)),
         "total_lines": accum_lines,
         "updated_at": updated_at,
+        "covered": covered,
+        "provider": prov_name,
     }
 
 

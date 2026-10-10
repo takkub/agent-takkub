@@ -69,6 +69,8 @@
         picker: null,
         lastLeadAt: 0,
         emptyReason: null,
+        currentProvider: null,
+        currentAccount: null,
       };
     }
     return state.leadByProject[project];
@@ -163,7 +165,20 @@
   function setProvider(value, project) {
     var fallback = (project && state.providersByProject[project]) || "claude";
     var provider = normalizeProvider(value || fallback);
+    var oldProvider = project ? state.providersByProject[project] : null;
     if (project) state.providersByProject[project] = provider;
+    if (project && oldProvider && oldProvider !== provider) {
+      var lead = projectLeadState(project);
+      if (lead) {
+        lead.messages = [];
+        lead.historyLoaded = false;
+        lead.historyGeneration += 1;
+        lead.currentProvider = provider;
+        lead.emptyReason = null;
+        if (typeof connectProjectStream === "function") connectProjectStream(project);
+        if (typeof loadHistory === "function") loadHistory(project, true, true);
+      }
+    }
     var visible = visibleProject();
     if (project && visible && project !== visible) return;
     if (state.provider === provider) return;
@@ -2033,7 +2048,16 @@
       .then(function (r) { return r.json(); })
       .then(function (data) {
         if (state.leadByProject[project] !== lead || lead.historyGeneration !== generation) return;
-        setProvider(data && data.provider, project);
+        var resProvider = (data && data.provider) || "claude";
+        var resAccount = (data && data.account) || null;
+        var providerChanged = lead.currentProvider && lead.currentProvider !== resProvider;
+        var accountChanged =
+          lead.currentAccount !== undefined &&
+          lead.currentAccount !== null &&
+          lead.currentAccount !== resAccount;
+        lead.currentProvider = resProvider;
+        lead.currentAccount = resAccount;
+        setProvider(resProvider, project);
         var messages = Array.isArray(data && data.messages) ? data.messages : [];
         // #192: a blank chat must say why instead of staying silent — only
         // meaningful when history actually came back empty (a populated
@@ -2044,8 +2068,8 @@
             : null;
         // The composer can be used while history is still in flight. Preserve
         // those optimistic project-scoped messages instead of replacing them
-        // when the older history snapshot arrives.
-        var pending = lead.messages.slice(preserveFrom);
+        // when the older history snapshot arrives (unless provider/account changed).
+        var pending = (providerChanged || accountChanged) ? [] : lead.messages.slice(preserveFrom);
         lead.messages = [];
         messages.forEach(function (m) {
           var text = m && typeof m.text === "string" ? m.text : null;

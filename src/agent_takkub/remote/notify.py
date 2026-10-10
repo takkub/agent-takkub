@@ -1304,16 +1304,30 @@ def _list_recent_gemini_sessions(
 # resolution is cwd + pane spawn time until the rollout file's id is known.
 
 
-def _codex_sessions_root() -> Path:
+def _codex_sessions_root(project_ns: str = "") -> Path:
     from ..codex_helper import codex_sessions_root
 
-    return codex_sessions_root()
+    return codex_sessions_root(project_ns)
 
 
-def _codex_archived_sessions_root() -> Path:
+def _safe_codex_sessions_root(project_ns: str = "") -> Path:
+    try:
+        return _codex_sessions_root(project_ns)
+    except TypeError:
+        return _codex_sessions_root()
+
+
+def _codex_archived_sessions_root(project_ns: str = "") -> Path:
     from ..codex_helper import codex_archived_sessions_root
 
-    return codex_archived_sessions_root()
+    return codex_archived_sessions_root(project_ns)
+
+
+def _safe_codex_archived_sessions_root(project_ns: str = "") -> Path:
+    try:
+        return _codex_archived_sessions_root(project_ns)
+    except TypeError:
+        return _codex_archived_sessions_root()
 
 
 def _safe_mtime(path: Path) -> float:
@@ -1430,12 +1444,12 @@ def _resolve_codex_jsonl_path(
     if not wanted_cwd:
         return None
     wanted_uuid = str(session_uuid or "").strip()
-    cache_key = (wanted_cwd, wanted_uuid, int(not_before or 0.0))
+    cache_key = (project_ns, wanted_cwd, wanted_uuid, int(not_before or 0.0))
     cached = _CODEX_RESOLVE_CACHE.get(cache_key)
     if cached is not None and cached.is_file():
         return cached
 
-    root = _codex_sessions_root()
+    root = _safe_codex_sessions_root(project_ns)
     # A picker/desktop resume supplies Codex's authoritative thread id. Its
     # rollout can be days old and may not receive a new write until the user
     # submits another prompt, so spawn-time filtering must not hide it from
@@ -1448,7 +1462,7 @@ def _resolve_codex_jsonl_path(
         # session doesn't go silently blank. `_codex_rollout_candidates`
         # already falls back to a flat whole-tree walk for a non-date layout,
         # so no extra branching is needed for the archived root's shape.
-        for search_root in (root, _codex_archived_sessions_root()):
+        for search_root in (root, _safe_codex_archived_sessions_root(project_ns)):
             if not search_root.is_dir():
                 continue
             for path in _codex_rollout_candidates(search_root):
@@ -1621,7 +1635,7 @@ def _list_recent_codex_sessions(
     from .. import config as _config
 
     wanted_cwd = _norm_cwd(_config.lead_cwd(project_ns))
-    root = _codex_sessions_root()
+    root = _safe_codex_sessions_root(project_ns)
     if not wanted_cwd or not root.is_dir():
         return []
     found: list[tuple[float, Path, dict]] = []
@@ -2044,7 +2058,9 @@ def supports_remote_history(provider: str) -> bool:
     return history_scanner(provider) is not None
 
 
-def _read_from_conversation_store_v2(project_ns: str, limit: int) -> list[dict] | None:
+def _read_from_conversation_store_v2(
+    project_ns: str, limit: int, expected_provider: str = ""
+) -> list[dict] | None:
     """Core V2 Conversation read-through (#309 Phase 6). Flag
     `TAKKUB_V2_CONVERSATION` is on by default since 1.0.84; this is the ONE touch point
     `remote/` makes into `core.*` (plan §6d "แก้ remote/ น้อยที่สุด 1 จุด
@@ -2067,6 +2083,12 @@ def _read_from_conversation_store_v2(project_ns: str, limit: int) -> list[dict] 
 
         store = ConversationStore()
         conversation_id = conversation_id_for(project_ns, "lead")
+        if expected_provider:
+            bindings = store.provider_bindings(project_ns, conversation_id)
+            if bindings:
+                last_binding = bindings[-1]
+                if last_binding.provider_id and last_binding.provider_id != expected_provider:
+                    return None
         messages = store.read_messages(project_ns, conversation_id)
         if not messages:
             return None
@@ -2096,7 +2118,7 @@ def read_recent_lead_messages(
     leaves for the phone — the transcript on disk may hold a value a pane
     printed from an env file, and the mirror must not copy it further.
     """
-    v2_messages = _read_from_conversation_store_v2(project_ns, limit)
+    v2_messages = _read_from_conversation_store_v2(project_ns, limit, expected_provider=provider)
     if v2_messages is not None:
         return _redact_messages(v2_messages)
     scanner = history_scanner(provider)

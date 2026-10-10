@@ -589,16 +589,22 @@ def _provider_session_id_for_cwd(
             )
 
             cand = (
-                resolve_codex_jsonl_for_cwd(cwd, session_uuid) if session_uuid else None
+                resolve_codex_jsonl_for_cwd(cwd, session_uuid, allow_subagent=False)
+                if session_uuid
+                else None
             ) or resolve_newest_codex_session_for_cwd(
                 cwd,
                 not_before=not_before or created_after,
                 exclude_ids=exclude_ids,
                 created_after=created_after,
+                parent_only=True,
             )
             if cand is None:
                 return None
             meta = read_codex_session_meta(cand)
+            if meta.get("thread_source") == "subagent" or bool(meta.get("parent_thread_id")):
+                parent_id = str(meta.get("parent_thread_id") or "").strip()
+                return parent_id or None
             return str(meta.get("id") or meta.get("session_id") or "").strip() or None
 
         if provider == "gemini":

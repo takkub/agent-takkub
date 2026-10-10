@@ -549,6 +549,7 @@ Lead ทำเองได้เฉพาะงานเล็กเมื่อ
 - native child ต้องจบด้วย `takkub subagent-done --role <role> "<summary>"` ตามคำสั่งใน capsule เพื่อให้ inbox/wait/ledger เห็นผล
 - `--mode subagent` ใช้ provider เดียวกับ Lead เสมอ จึงห้ามอ้างว่าเป็น cross-model/cross-provider check
 - scan/audit/search/triage ชิ้นเล็กเหมาะกับ `--mode subagent` ของ Lead; implementation ที่ user ต้องเห็นหรือ cross-check ต่างโมเดลใช้ pane
+- ห้ามใช้ native subagent / spawn_agent ตรวจงานแทน checker หรืออ้างว่า review เสร็จโดยไม่มี registered assign: cockpit ตรวจสอบ approval provenance จาก registered task ID และ done artifact ใน task ledger เท่านั้น หากตรวจงานด้วย native child ที่ไม่ได้ลงทะเบียน cockpit จะถือว่ายังไม่มี checker approval และไม่ผ่าน gate
 - **fan-out งาน implement ให้ specialist (#641): `takkub assign --role frontend --shards N "<task>"` = เปิด pane เดียว แล้ว pane นั้นยิง native subagent N ตัวเอง** (claude Agent / codex spawn_agent / agy run_subagent / opencode task) — **`frontend#1..#K` แยก pane ถูกปฏิเสธที่ระบบแล้ว** (assign/spawn error ทันที — จ่ายค่า boot+MCP+RAM ซ้ำ K รอบ) · ระบบ fallback เป็น N pane ให้เองเฉพาะ reviewer e2e/ui (browser profile ต่อ shard), `--plan`, และ provider ที่ไม่มี subagent (cursor) · ต้องการ pane แยกจริงใส่ `--fanout pane` · Lead ห้ามรัน subagent N ตัวเองแทน specialist (Lead จะติดรอ)
 - If you need to communicate with another agent, use the shell command `takkub send --to <role> "<message>"`.
 
@@ -846,11 +847,11 @@ def _render_lead_context(
     return str(out)
 
 
-def render_lead_agents_md(
+def render_lead_agents_md_with_reason(
     project: str,
     spawn_cwd: str,
     post_compact_brief: str | None = None,
-) -> str | None:
+) -> tuple[str | None, str, str | None]:
     """AGENTS.md variant of `_render_lead_context` for every non-Claude Lead
     provider (issue #101 degraded mode, generalized by ProviderSpec #103).
     These providers auto-discover `AGENTS.md` from cwd instead of accepting
@@ -866,25 +867,17 @@ def render_lead_agents_md(
     content is generated here directly, bypassing `ensure_agents_md`'s
     teammate cheatsheet entirely.
 
-    Returns the written path, or None if there's no cockpit CLAUDE.md, or
-    the target AGENTS.md already exists and is user-owned (no marker).
-
-    **Known gap (#103, noted 2026-09-07 review):** when this returns None
-    for the user-owned-AGENTS.md reason, a non-Claude Lead in that project
-    gets ZERO cockpit policy text at all — role-disabled/team-preset
-    wording included — since there is no other delivery channel for it
-    (unlike Claude Lead, which reads its own `--append-system-prompt-file`
-    regardless of any project AGENTS.md). This does NOT bypass enforcement:
-    `is_role_enabled`/`team_preset.can_spawn` are checked in code at the
-    actual `spawn()` boundary (see spawn_engine.py, #510/#512 H6) no matter
-    which provider Lead runs as. The gap is purely informational — that
-    Lead has no way to know a role is off before trying it.
+    Returns `(written_path_or_none, reason, context_text)`:
+      - `(path, "written", text)` — written or refreshed successfully.
+      - `(None, "user-owned", text)` — existing AGENTS.md without marker; left untouched.
+      - `(None, "no_context", None)` — no cockpit CLAUDE.md available.
+      - `(None, "<error>", text)` — disk write failure.
     """
     text = _build_lead_context_text(
         project, post_compact_brief=post_compact_brief, claude_cwd=spawn_cwd
     )
     if text is None:
-        return None
+        return None, "no_context", None
 
     # (#687) a non-Claude Lead has no native auto-memory (/memory is a
     # claude-CLI feature keyed to CLAUDE_CONFIG_DIR) — before this block,
@@ -914,19 +907,34 @@ def render_lead_agents_md(
     except Exception:
         _log_event("lead_memory_inject_failed", project=project)
 
-    from .codex_agents_md import TAKKUB_MARKER
+    from .codex_agents_md import TAKKUB_MARKER, _ensure_git_excluded
 
     target = pathlib.Path(spawn_cwd) / "AGENTS.md"
     try:
         if target.exists():
-            head = target.read_text(encoding="utf-8", errors="replace").splitlines()
+            existing = target.read_text(encoding="utf-8", errors="replace")
+            head = existing.splitlines()
             first = head[0] if head else ""
-            if TAKKUB_MARKER not in first:
-                return None  # user-owned — don't clobber (mirrors ensure_agents_md)
+            if existing.strip() and TAKKUB_MARKER not in first:
+                return None, "user-owned", text  # user-owned — don't clobber (#830)
         target.write_text(f"{TAKKUB_MARKER}\n\n{text}", encoding="utf-8")
-    except OSError:
-        return None
-    return str(target)
+        _ensure_git_excluded(pathlib.Path(spawn_cwd), "AGENTS.md")
+    except OSError as e:
+        return None, f"write failed: {e}", text
+    return str(target), "written", text
+
+
+def render_lead_agents_md(
+    project: str,
+    spawn_cwd: str,
+    post_compact_brief: str | None = None,
+) -> str | None:
+    """Convenience wrapper around `render_lead_agents_md_with_reason` returning
+    the written path or None."""
+    path, _reason, _text = render_lead_agents_md_with_reason(
+        project, spawn_cwd, post_compact_brief=post_compact_brief
+    )
+    return path
 
 
 # Role-scoped plugin injection. `--plugin-dir` loads each plugin's skill +
