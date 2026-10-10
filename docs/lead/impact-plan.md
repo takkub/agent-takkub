@@ -17,28 +17,20 @@
   "upstream": ["project settings", "episode continuation"],
   "downstream": ["voice UI", "API", "assembly", "QA", "export"],
   "checks": [
-    {
-      "id": "assembly-native",
-      "flow": "worker",
-      "expected": "external TTS/Music calls = 0",
-      "method": "fake provider + call ledger",
-      "owner": "backend"
-    }
-  ],
-  "not_applicable": {
-    "ui": "ตรวจแยกในงาน frontend; worker นี้ไม่แสดง UI",
-    "api": "ไม่มี API ที่เปลี่ยนในงาน worker นี้",
-    "state": "ไม่มี state/queue ที่เปลี่ยนในงาน worker นี้",
-    "qa": "ตรวจแยกในงาน QA ที่มี task ID ของตนเอง",
-    "export": "ตรวจแยกในงาน export ที่มี task ID ของตนเอง",
-    "resume": "ไม่มี resume path ที่เปลี่ยนในงาน worker นี้",
-    "retry": "ไม่มี retry path ที่เปลี่ยนในงาน worker นี้",
-    "regenerate": "ไม่มี regenerate path ที่เปลี่ยนในงาน worker นี้",
-    "continuation": "ตรวจแยกในงาน episode continuation",
-    "cost": "ไม่มีค่าใช้จ่ายที่เปลี่ยนในงาน worker นี้",
-    "cache": "ไม่มี cache ที่เปลี่ยนในงาน worker นี้",
-    "other_modes": "ตรวจ hybrid และ mute ในงาน QA แยก"
-  }
+    {"id":"voice-ui","flow":"ui","expected":"แสดงตัวละครและโหมดเสียงถูกต้อง","method":"เปิดหน้าเสียงหลายตัวละคร","owner":"frontend"},
+    {"id":"voice-api","flow":"api","expected":"API เคารพ audio_mode","method":"เรียก fake API ของโหมดนี้","owner":"backend"},
+    {"id":"mode-state","flow":"state","expected":"queue เก็บ audio_mode เดิม","method":"ตรวจ state/queue หลังสร้างงาน","owner":"backend"},
+    {"id":"assembly-native","flow":"worker","expected":"external TTS/Music calls = 0","method":"fake provider + call ledger","owner":"backend"},
+    {"id":"shot-qa","flow":"qa","expected":"raw clip QA คาดหวังเสียง native","method":"ตรวจ fake QA request","owner":"qa"},
+    {"id":"export-audio","flow":"export","expected":"export มีเสียง native","method":"ตรวจไฟล์ export จริงจาก fake provider","owner":"qa"},
+    {"id":"resume-mode","flow":"resume","expected":"resume ใช้ audio_mode เดิม","method":"หยุดแล้วทำต่อใน fixture","owner":"qa"},
+    {"id":"retry-mode","flow":"retry","expected":"retry ไม่เรียก external TTS","method":"จำลอง failure แล้วตรวจ call ledger","owner":"qa"},
+    {"id":"regenerate-mode","flow":"regenerate","expected":"regenerate ไม่เปลี่ยนโหมดเสียง","method":"สร้าง shot ซ้ำใน fixture","owner":"qa"},
+    {"id":"episode-mode","flow":"continuation","expected":"ตอนต่อสืบทอด audio_mode และโมเดล","method":"สร้างตอนต่อแล้วอ่าน options","owner":"backend"},
+    {"id":"mode-cost","flow":"cost","expected":"ไม่มีต้นทุน external TTS/Music","method":"ตรวจ cost plan","owner":"backend"},
+    {"id":"cached-final","flow":"cache","expected":"final เก่าคนละโหมดไม่ถูกนำมาใช้","method":"เปลี่ยนโหมดแล้วตรวจ assembly signature","owner":"qa"},
+    {"id":"hybrid-mute","flow":"other_modes","expected":"hybrid ยังมีเสียงแยก; mute export เงียบ","method":"รัน fake pipeline ทั้งสองโหมด","owner":"qa"}
+  ]
 }
 ```
 
@@ -61,6 +53,9 @@ state/queue/ledger และไฟล์ export ตามที่เกี่�
 `takkub task impact --role backend` แสดง `task_id`, `plan_digest`, `revision`
 ปัจจุบัน สร้าง evidence JSON นอก repo ที่กำลังแก้เพื่อไม่ให้ไฟล์หลักฐานเปลี่ยน
 revision ของตัวเอง:
+
+ตัวอย่าง evidence ข้างล่างแสดงรูปแบบของหนึ่งรายการเท่านั้น แผนตัวอย่างข้างบน
+จะผ่าน `done` ได้เมื่อมีผลตรวจครบทุก `id` ใน `checks` ตาม revision เดียวกัน
 
 ```json
 {

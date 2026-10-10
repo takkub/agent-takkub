@@ -16,7 +16,7 @@ from unittest.mock import MagicMock
 import pytest
 from PyQt6.QtCore import QCoreApplication
 
-from agent_takkub import config
+from agent_takkub import cockpit_theme, config
 from agent_takkub import orchestrator as orch_mod
 from agent_takkub.headless_pane import HeadlessPane
 from agent_takkub.headless_window import HeadlessWindow, _HeadlessTab
@@ -191,7 +191,7 @@ class TestTeammatePaneLifecycle:
         window._ensure_teammate_pane("designer2", "proj")
         pane = window._tabs["proj"].teammate_panes["designer2"]
         assert pane.role.name == "designer2"
-        assert pane.role.color == "#94a3b8"
+        assert pane.role.color == cockpit_theme.ROLE_COLOR_FALLBACK
 
     def test_remove_teammate_pane_unregisters_on_next_tick(
         self, window: HeadlessWindow, qapp: QCoreApplication

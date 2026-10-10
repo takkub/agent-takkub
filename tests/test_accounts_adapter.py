@@ -102,8 +102,13 @@ class TestCodexLoginStatus:
         (tmp_path / "auth.json").write_text("not json", encoding="utf-8")
         assert accounts_adapter.codex_login_status(tmp_path).state == accounts_adapter.UNKNOWN
 
-    def test_plan_comes_only_from_a_running_usage_store(self, tmp_path: Path) -> None:
-        # No store started in tests → no plan, never a probe.
+    def test_plan_comes_only_from_a_running_usage_store(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from agent_takkub import provider_usage
+
+        monkeypatch.setattr(provider_usage, "peek_store", lambda: None)
+        # No running store → no plan, never a probe.
         assert accounts_adapter._codex_plan_cached(tmp_path, is_default=True) is None
 
     def test_named_account_never_borrows_the_default_providerwide_plan(
