@@ -448,14 +448,21 @@ class TestResumeUuidMatchesProviderCwd:
 
         seen: dict[str, str] = {}
 
-        def _resolve(cwd: str, uuid: str) -> pathlib.Path:
-            seen.update(cwd=cwd, uuid=uuid)
+        def _resolve(
+            cwd: str, uuid: str, *, project: str = "", allow_subagent: bool = True
+        ) -> pathlib.Path:
+            seen.update(cwd=cwd, uuid=uuid, project=project, allow_subagent=allow_subagent)
             return tmp_path / "rollout.jsonl"
 
         monkeypatch.setattr(codex_helper, "resolve_codex_jsonl_for_cwd", _resolve)
 
         assert _resume_uuid_matches_provider_cwd("default", "codex", "codex-uuid", str(tmp_path))
-        assert seen == {"cwd": str(tmp_path), "uuid": "codex-uuid"}
+        assert seen == {
+            "cwd": str(tmp_path),
+            "uuid": "codex-uuid",
+            "project": "default",
+            "allow_subagent": False,
+        }
 
     def test_opencode_uses_provider_core_resolver(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path

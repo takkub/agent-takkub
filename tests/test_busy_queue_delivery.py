@@ -174,7 +174,9 @@ class TestBusyQueueProviderSpec:
             busy_queue_marker_for,
         )
 
-        for name in ("claude", "gemini", "agy", "opencode"):
+        assert busy_queue_marker_for("gemini") == "press up to edit queued messages"
+        assert busy_queue_key_for("gemini") == "\r"
+        for name in ("claude", "agy", "opencode"):
             assert busy_queue_marker_for(name) is None
             assert busy_queue_key_for(name) == "\r"
             assert busy_queue_confirm_markers_for(name) == ()

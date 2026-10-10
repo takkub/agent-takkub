@@ -8,6 +8,8 @@ import re
 import subprocess
 from pathlib import Path
 
+from ._win_console import SUBPROCESS_NO_WINDOW
+
 FLOWS = (
     "ui",
     "api",
@@ -168,24 +170,31 @@ def git_revision(cwd: str | Path | None) -> str | None:
                 capture_output=True,
                 check=True,
                 timeout=5,
+                creationflags=SUBPROCESS_NO_WINDOW,
             )
             .stdout.decode("utf-8", errors="replace")
             .strip()
         )
         head = subprocess.run(
-            ["git", "-C", root, "rev-parse", "HEAD"], capture_output=True, check=True, timeout=5
+            ["git", "-C", root, "rev-parse", "HEAD"],
+            capture_output=True,
+            check=True,
+            timeout=5,
+            creationflags=SUBPROCESS_NO_WINDOW,
         ).stdout.strip()
         changed = subprocess.run(
             ["git", "-C", root, "diff", "--name-only", "-z", "HEAD"],
             capture_output=True,
             check=True,
             timeout=5,
+            creationflags=SUBPROCESS_NO_WINDOW,
         ).stdout
         untracked = subprocess.run(
             ["git", "-C", root, "ls-files", "--others", "--exclude-standard", "-z"],
             capture_output=True,
             check=True,
             timeout=5,
+            creationflags=SUBPROCESS_NO_WINDOW,
         ).stdout
         digest = hashlib.sha256(head)
         for raw in sorted(set((changed + untracked).split(b"\0")) - {b""}):

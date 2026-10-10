@@ -16,8 +16,12 @@ CLAUDE_UUID = "91f6367e-2154-4af8-98ad-2d607e15470a"
 
 
 def test_codex_store_rejects_another_providers_uuid(tmp_path, monkeypatch):
-    monkeypatch.setattr(codex_helper, "codex_sessions_root", lambda: tmp_path / "sessions")
-    monkeypatch.setattr(codex_helper, "codex_archived_sessions_root", lambda: tmp_path / "arch")
+    monkeypatch.setattr(
+        codex_helper, "codex_sessions_root", lambda project="": tmp_path / "sessions"
+    )
+    monkeypatch.setattr(
+        codex_helper, "codex_archived_sessions_root", lambda project="": tmp_path / "arch"
+    )
     assert not _resume_uuid_matches_provider_cwd(
         "ai-vdo", "codex", CLAUDE_UUID, str(tmp_path), "backend"
     )

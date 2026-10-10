@@ -104,7 +104,7 @@ class TestHops:
             {"text": "ok", "kind": "me"},
             {"kind": "sys"},
         ]
-        monkeypatch.setattr(notify, "_read_from_conversation_store_v2", lambda *_a: None)
+        monkeypatch.setattr(notify, "_read_from_conversation_store_v2", lambda *_a, **_kw: None)
         monkeypatch.setattr(notify, "history_scanner", lambda _p: scanner)
         rows = notify.read_recent_lead_messages(MagicMock(), 10, provider="claude", project_ns="P")
         assert "hunter22222" not in rows[0]["text"]

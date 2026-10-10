@@ -17207,7 +17207,17 @@ class Orchestrator(
                 if not ok:
                     self.leadUnavailable.emit(project, f"quota reset respawn failed: {msg}")
                     return
+            # A live fallback Lead still needs its recovery record. The
+            # provider's own meter/reset confirmation restores it later.
             else:
+                live_provider = getattr(getattr(lead, "model", None), "provider_name", None)
+                if live_provider != recovery[0]:
+                    _log_event(
+                        "lead_quota_reset_waiting_for_probe",
+                        project=project,
+                        provider=recovery[0],
+                    )
+                    return
                 self._lead_quota_recovery.pop(project, None)
                 getattr(self, "_lead_quota_recovery_spawned_at", {}).pop(project, None)
 

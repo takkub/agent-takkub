@@ -617,6 +617,7 @@ def _lead_provider_takeover_brief(
     panes: dict,
     *,
     manual: bool = False,
+    restoring: bool = False,
 ) -> str:
     """Build the cross-provider context a replacement Lead can safely use.
 
@@ -629,7 +630,9 @@ def _lead_provider_takeover_brief(
     lines = [
         "[system] Lead provider takeover",
         (
-            f"The previous Lead ({hit_provider}) was replaced by the user. "
+            f"The previous Lead ({hit_provider}) was a quota fallback; the configured provider is available again. "
+            if restoring
+            else f"The previous Lead ({hit_provider}) was replaced by the user. "
             if manual
             else f"The previous Lead ({hit_provider}) hit its quota. "
         )
@@ -939,6 +942,7 @@ class AutoResumeMixin:
         *,
         manual: bool = False,
         account: str | None = None,
+        restoring: bool = False,
     ) -> None:
         """Close the quota-hit pane and respawn the SAME role on
         `new_provider`, resending its outstanding task with a short
@@ -962,6 +966,7 @@ class AutoResumeMixin:
                 new_provider,
                 self._panes_by_project.get(project, {}),
                 manual=manual,
+                restoring=restoring,
             )
             if is_lead
             else ""
@@ -1022,11 +1027,21 @@ class AutoResumeMixin:
             ps,
             pane,
             status="rerouted",
-            reason=("manual_lead_replace" if manual else f"{from_label}->{to_label}"),
+            reason=(
+                "quota_provider_restored"
+                if restoring
+                else "manual_lead_replace"
+                if manual
+                else f"{from_label}->{to_label}"
+            ),
         )
         human = _human_duration(max(0, reset_at - time.time())) if reset_at else "ไม่ทราบ"
         _log_event(
-            "lead_manually_replaced" if manual else "pane_quota_rerouted",
+            "lead_quota_provider_restored"
+            if restoring
+            else "lead_manually_replaced"
+            if manual
+            else "pane_quota_rerouted",
             role=role,
             project=project,
             from_provider=hit_provider,
@@ -1065,7 +1080,13 @@ class AutoResumeMixin:
             # and the takeover brief was pasted into the SAME pane every
             # 5 s tick — 300+ rounds on prod before anyone noticed.
             close_kwargs["force"] = True
-            close_kwargs["reason"] = "manual_lead_replace" if manual else "quota_reroute"
+            close_kwargs["reason"] = (
+                "quota_provider_restored"
+                if restoring
+                else "manual_lead_replace"
+                if manual
+                else "quota_reroute"
+            )
         self.close(role, **close_kwargs)
         # close() pops PaneState. Keep the handover latch on the fresh state
         # until the timer runs, so another × click cannot queue a second
@@ -1195,7 +1216,7 @@ class AutoResumeMixin:
         saved takeover context there. Called for unexpected exits across every
         provider, not just Codex.
         """
-        recovery = getattr(self, "_lead_quota_recovery", {}).get(project)
+        recovery = self.__dict__.get("_lead_quota_recovery", {}).get(project)
         if role != LEAD.name or recovery is None:
             return False
         hit_provider, _cwd, _takeover, reset_at = recovery
@@ -1248,10 +1269,7 @@ class AutoResumeMixin:
     def _schedule_provider_quota_reset_notice(
         self, project: str, provider: str, reset_at: float
     ) -> None:
-        """Once `provider`'s quota window actually resets, clear the
-        recorded quota-hit and tell Lead once — the pane that fled the hit
-        stays on whichever provider it rerouted to; this just says new/future
-        work can route to `provider` again."""
+        """After the reset buffer, clear the hit and restore a fallback Lead."""
         delay_ms = max(0, int((reset_at + auto_resume.WAKE_BUFFER_S - time.time()) * 1000))
         QTimer.singleShot(
             delay_ms,
@@ -1270,9 +1288,8 @@ class AutoResumeMixin:
         self._clear_provider_quota_stall(project, provider, reason="window_elapsed")
 
     def _clear_provider_quota_stall(self, project: str, provider: str, *, reason: str) -> None:
-        """Shared tail of the reset timer and the #663 re-probe: drop the
-        recorded quota-hit and tell Lead once, same event either way."""
-        from . import provider_state
+        """Clear the hit and restore a live Lead that fled this provider."""
+        from . import provider_config, provider_state
 
         provider_state.clear_quota_reset(provider)
         how = (
@@ -1285,6 +1302,30 @@ class AutoResumeMixin:
         msg = f"⏰ [auto-resume] {provider} quota reset แล้ว{how} — กลับมาใช้ปกติได้"
         self._notify_lead(project, msg, note="quota_provider_reset", kind="quota-reset")
         _log_event("provider_quota_reset", project=project, provider=provider, reason=reason)
+        recovery = self.__dict__.get("_lead_quota_recovery", {}).get(project)
+        if recovery is None or recovery[0] != provider:
+            return
+        if provider_config.provider_for(LEAD.name, project) != provider:
+            return  # the operator changed the configured Lead meanwhile
+        pane = self._project_panes(project).get(LEAD.name)
+        if pane is None or pane.session is None or not pane.session.is_alive:
+            return  # the existing reset/respawn path handles a dead Lead
+        live_provider = getattr(getattr(pane, "model", None), "provider_name", None)
+        if live_provider == provider:
+            self._lead_quota_recovery.pop(project, None)
+            self.__dict__.get("_lead_quota_recovery_spawned_at", {}).pop(project, None)
+            return
+        ps = self._ps(f"{project}::{LEAD.name}")
+        self._reroute_pane_to_provider(
+            project,
+            LEAD.name,
+            ps,
+            provider,
+            str(live_provider or ""),
+            0.0,
+            manual=True,
+            restoring=True,
+        )
 
     # ── #663: periodic re-probe of quota-stalled providers ─────────────
     def _maybe_reprobe_quota_stalls(self, now: float) -> None:

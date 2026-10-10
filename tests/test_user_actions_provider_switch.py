@@ -80,6 +80,22 @@ def test_cancel_keeps_existing_provider(monkeypatch: pytest.MonkeyPatch) -> None
     window._restart_lead_for_active_project.assert_not_called()
 
 
+def test_selecting_configured_provider_restores_live_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(QMessageBox, "question", lambda *_a, **_kw: QMessageBox.StandardButton.Ok)
+    provider_config.save_role_overrides({"lead": "codex"}, "proj", scope=["lead"])
+    window = _fake_window()
+    fallback = MagicMock()
+    fallback.model.provider_name = "gemini"
+    window.orch._project_panes.return_value = {"lead": fallback}
+
+    UserActionsMixin._on_user_changed(window, "default", "codex")
+
+    window._restart_lead_for_active_project.assert_called_once_with()
+    assert provider_config.provider_for("lead", "proj") == "codex"
+
+
 def test_selecting_codex_account_keeps_lead_provider(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

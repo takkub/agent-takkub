@@ -230,6 +230,45 @@ def _pane_alive():
     return p
 
 
+def test_quota_probe_restores_live_fallback_lead(monkeypatch) -> None:
+    from agent_takkub import limit_autoresume as la
+    from agent_takkub import provider_config
+
+    o = _bare_orch()
+    lead = _pane_alive()
+    lead.model.provider_name = "gemini"
+    o._panes_by_project = {"proj": {"lead": lead}}
+    o._lead_quota_recovery = {"proj": ("codex", "C:/work", "brief", time.time() + 3600)}
+    monkeypatch.setattr(provider_config, "provider_for", lambda role, project: "codex")
+    with patch.object(o, "_reroute_pane_to_provider") as reroute:
+        la.AutoResumeMixin._clear_provider_quota_stall(o, "proj", "codex", reason="reprobe")
+    reroute.assert_called_once_with(
+        "proj",
+        "lead",
+        o._ps("proj::lead"),
+        "codex",
+        "gemini",
+        0.0,
+        manual=True,
+        restoring=True,
+    )
+
+
+def test_reset_timer_keeps_live_fallback_recovery_until_probe() -> None:
+    o = _bare_orch()
+    lead = _pane_alive()
+    lead.model.provider_name = "gemini"
+    o._panes_by_project = {"proj": {"lead": lead}}
+    recovery = ("codex", "C:/work", "brief", time.time())
+    o._lead_quota_recovery = {"proj": recovery}
+    o._ps("proj::lead")
+
+    o._emit_rate_limit_reset("proj", "lead")
+
+    assert o._lead_quota_recovery["proj"] == recovery
+    o._notify_lead.assert_not_called()
+
+
 # ── layer 2: _maybe_auto_resume_park gate ───────────────────────────────────
 
 

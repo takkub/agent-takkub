@@ -1024,7 +1024,13 @@ class UserActionsMixin:
         old_provider = provider_config.provider_for("lead", project)
         old_name = user_profile.profile_for(project, provider=provider)
         old_cd = user_profile.config_dir_for(project)
-        changed = old_provider != provider or old_name != name
+        lead = self.orch._project_panes(project).get("lead")
+        live_provider = getattr(getattr(lead, "model", None), "provider_name", None)
+        changed = (
+            old_provider != provider
+            or old_name != name
+            or (isinstance(live_provider, str) and live_provider != provider)
+        )
         if not changed:
             return
 

@@ -247,8 +247,13 @@ class TestAsyncSpawnDispatch:
         ],
     )
     def test_async_assign_refusal_notifies_lead_after_queued_ack(
-        self, qapp: QCoreApplication, refusal: str, next_step: str
+        self, qapp: QCoreApplication, refusal: str, next_step: str, monkeypatch
     ):
+        from agent_takkub import work_discipline
+
+        monkeypatch.setattr(work_discipline, "is_spec_confirmation_enabled", lambda: True)
+        monkeypatch.setattr(work_discipline, "needs_spec_confirmation", lambda task: True)
+
         class _RejectingOrch(_FakeOrch):
             def __init__(self, refusal_message):
                 super().__init__()
