@@ -757,6 +757,17 @@ def cmd_assign(args: argparse.Namespace) -> dict:
     )
     if task_err:
         return {"ok": False, "msg": task_err}
+    impact_file = getattr(args, "impact_plan_file", None)
+    if impact_file:
+        try:
+            from .impact_contract import append_block
+
+            plan = json.loads(Path(impact_file).read_text(encoding="utf-8"))
+            if not isinstance(plan, dict):
+                raise ValueError("plan must be a JSON object")
+            task_text = append_block(task_text, "impact-plan", plan)
+        except (OSError, ValueError) as exc:
+            return {"ok": False, "msg": f"could not read --impact-plan-file: {exc}"}
     args.task = task_text
     base_role = (getattr(args, "role", "") or "").split("#", 1)[0].strip().lower()
 
@@ -1229,14 +1240,33 @@ def cmd_assign(args: argparse.Namespace) -> dict:
     return resp
 
 
+def _note_with_impact_evidence(args: argparse.Namespace) -> tuple[str, str]:
+    note = args.note or ""
+    path = getattr(args, "impact_evidence_file", None)
+    if not path:
+        return note, ""
+    try:
+        from .impact_contract import append_block
+
+        evidence = json.loads(Path(path).read_text(encoding="utf-8"))
+        if not isinstance(evidence, dict):
+            raise ValueError("evidence must be a JSON object")
+        return append_block(note, "impact-evidence", evidence), ""
+    except (OSError, ValueError) as exc:
+        return "", f"could not read --impact-evidence-file: {exc}"
+
+
 def cmd_subagent_done(args: argparse.Namespace) -> dict:
+    note, error = _note_with_impact_evidence(args)
+    if error:
+        return {"ok": False, "msg": error}
     return _request(
         _with_project(
             {
                 "cmd": "subagent-done",
                 "from": _from_role(),
                 "role": args.role,
-                "note": args.note or "",
+                "note": note,
                 "failed": bool(getattr(args, "fail", False)),
             }
         )
@@ -1681,12 +1711,15 @@ def cmd_restart(_: argparse.Namespace) -> dict:
 
 
 def cmd_done(args: argparse.Namespace) -> dict:
+    note, error = _note_with_impact_evidence(args)
+    if error:
+        return {"ok": False, "msg": error}
     return _request(
         _with_project(
             {
                 "cmd": "done",
                 "from": _from_role(),
-                "note": args.note or "",
+                "note": note,
                 # #296: --blocked implies a non-success outcome (the task did
                 # NOT get done) but carries the reason that it could not RUN,
                 # which routes to a human instead of back to a role.
@@ -2687,6 +2720,17 @@ def cmd_task(args: argparse.Namespace) -> dict:
     it exits, since only a live pane's done/close handler ever flips it.
     """
     _warn_deprecated_role(getattr(args, "role", None))
+    if args.t_cmd == "impact":
+        from .impact_contract import git_revision
+        from .task_ledger import open_impact
+
+        project = getattr(args, "project", None) or _from_project() or "default"
+        active = open_impact(project, args.role)
+        if active is None:
+            return {"ok": False, "msg": f"no active task for {args.role} in {project}"}
+        active["revision"] = git_revision(active["cwd"])
+        _utf8_print(json.dumps(active, ensure_ascii=False, indent=2))
+        return {"ok": True, "msg": "impact status"}
     if args.t_cmd == "show":
         resp = _request(
             _with_project({"cmd": "task-show", "role": args.role, "from": _from_role()})
@@ -5557,6 +5601,11 @@ def build_parser() -> argparse.ArgumentParser:
         "deep: high risk (schema/auth/payment/infra) — test real logic + allow gate.",
     )
     sa.add_argument(
+        "--impact-plan-file",
+        default=None,
+        help="JSON impact plan for cross-flow changes (#833); persisted with the task",
+    )
+    sa.add_argument(
         "--spec-confirmation",
         default=None,
         metavar="HASH",
@@ -5943,6 +5992,9 @@ def build_parser() -> argparse.ArgumentParser:
     sd = sub.add_parser("done", help="(agent) report done to Lead")
     sd.add_argument("note", nargs="?", default="")
     sd.add_argument(
+        "--impact-evidence-file", default=None, help="JSON results for the assigned impact checks"
+    )
+    sd.add_argument(
         "--fail",
         action="store_true",
         help="report a FAILED result (QA/verify failed) → Lead proposes a fix loop",
@@ -5973,6 +6025,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     ssd.add_argument("--role", required=True)
     ssd.add_argument("note", nargs="?", default="")
+    ssd.add_argument(
+        "--impact-evidence-file", default=None, help="JSON results for the assigned impact checks"
+    )
     ssd.add_argument("--fail", action="store_true")
     ssd.set_defaults(func=cmd_subagent_done)
 
@@ -6333,6 +6388,9 @@ def build_parser() -> argparse.ArgumentParser:
     st_sub = st.add_subparsers(dest="t_cmd", required=True)
     sts = st_sub.add_parser("show", help="print the full text of a role's last assigned task")
     sts.add_argument("--role", required=True, help="role name to look up")
+    sti = st_sub.add_parser("impact", help="show active impact plan, task id and current revision")
+    sti.add_argument("--role", required=True)
+    sti.add_argument("--project", default=None)
     str_ = st_sub.add_parser(
         "reconcile",
         help="close ledger rows orphaned by a cockpit session that exited without `takkub done`",

@@ -236,6 +236,7 @@ def create_assignment(
     status: str = "working",
     scope: str = "normal",
     mode: str = "pane",
+    task_id: str = "",
 ) -> tuple[str, pathlib.Path | None]:
     """Record a fresh assignment: per-task detail `.md` + an upserted `INDEX.md` row.
 
@@ -264,6 +265,11 @@ def create_assignment(
     cwd_disp = _display_path(cwd) if cwd else "—"
     summary = _derive_summary(task)
     scope = (scope or "normal").strip().lower()
+    from .impact_contract import plan_digest, plan_from_task
+
+    impact_plan, impact_error = plan_from_task(task, scope)
+    if impact_error:
+        return f"⚠️ [impact] {impact_error}", None
 
     detail_name = f"{hhmmss}-{role}-ledger.md"
     detail_rel = f"{date}/{detail_name}"
@@ -303,7 +309,14 @@ def create_assignment(
         "assign_hhmmss": now.strftime("%H:%M:%S"),
         "done_hhmmss": None,
         "detail_rel": detail_rel if detail_written else None,
+        "task_id": task_id,
     }
+    if impact_plan is not None:
+        row["impact"] = {
+            "plan": impact_plan,
+            "plan_digest": plan_digest(impact_plan),
+            "evidence": None,
+        }
 
     state = _load_state(project)
     # Orphan/double-count fix: a re-assign to a role that still has an open
@@ -324,6 +337,7 @@ def create_assignment(
         "row_index": len(feat["rows"]) - 1,
         "scope": scope,
         "mode": mode,
+        "task_id": task_id,
     }
 
     try:
@@ -335,6 +349,69 @@ def create_assignment(
         warning = f"{warning}\n{w2}" if warning else w2
 
     return warning, (detail_path if detail_written else None)
+
+
+def open_impact(project: str, role: str) -> dict | None:
+    """Read the active task's plan and identity from durable ledger state."""
+    state = _load_state(project)
+    ptr = state.get("open", {}).get(role)
+    if not isinstance(ptr, dict):
+        return None
+    row, _rows = _open_row(state, ptr)
+    if not isinstance(row, dict):
+        return None
+    return {
+        "task_id": row.get("task_id", ""),
+        "cwd": row.get("cwd", ""),
+        "impact": row.get("impact"),
+        "status": row.get("status"),
+    }
+
+
+def record_impact_evidence(project: str, role: str, task_id: str, evidence: dict) -> bool:
+    """Persist checked evidence before the row is marked done."""
+    state = _load_state(project)
+    ptr = state.get("open", {}).get(role)
+    if not isinstance(ptr, dict):
+        return False
+    row, _rows = _open_row(state, ptr)
+    if not isinstance(row, dict) or row.get("task_id") != task_id:
+        return False
+    impact = row.get("impact")
+    if not isinstance(impact, dict):
+        return False
+    impact["evidence"] = evidence
+    try:
+        _save_state(project, state)
+        _regen_index(project, state)
+    except OSError:
+        return False
+    return True
+
+
+def check_impact_completion(
+    project: str, role: str, task_id: str, note: str, revision: str | None = None
+) -> str:
+    """Return a reason to keep the task open, or persist valid evidence."""
+    active = open_impact(project, role)
+    if active is None or not isinstance(active.get("impact"), dict):
+        return ""
+    if active["task_id"] != task_id:
+        return "impact evidence does not match the active task"
+    from .impact_contract import evidence_from_note, git_revision, validate_evidence
+
+    evidence, error = evidence_from_note(note)
+    if error:
+        return error
+    current_revision = revision if revision is not None else git_revision(active["cwd"])
+    error = validate_evidence(
+        active["impact"]["plan"], evidence, task_id=task_id, revision=current_revision
+    )
+    if error:
+        return error
+    if not record_impact_evidence(project, role, task_id, evidence):
+        return "could not persist impact evidence in the task ledger"
+    return ""
 
 
 def read_detail_task(path: pathlib.Path | str) -> str | None:

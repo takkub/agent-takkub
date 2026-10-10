@@ -1018,6 +1018,15 @@ class CliServer(QObject):
                 # created from the task text), and starting new work reports
                 # what else is still pending. Synchronous so a bad id fails
                 # the ack and the card id + pending list ride back on it.
+                if cmd == "assign":
+                    from .impact_contract import plan_from_task
+
+                    _impact_plan, impact_error = plan_from_task(
+                        str(req.get("task", "") or ""), str(req.get("scope", "normal") or "normal")
+                    )
+                    if impact_error:
+                        self._reply(sock, ok=False, msg=impact_error)
+                        return
                 backlog_note = ""
                 _backlog_fn = getattr(self._orch, "backlog_for_assign", None)
                 if (
@@ -1307,14 +1316,32 @@ class CliServer(QObject):
                         _git_inputs = _inputs_fn(_done_role, project=from_project)
                     except Exception:
                         _git_inputs = None
+                _impact_active = None
+                try:
+                    from .task_ledger import open_impact
+
+                    _impact_active = open_impact(from_project, _done_role)
+                    if not isinstance(_impact_active, dict) or not isinstance(
+                        _impact_active.get("impact"), dict
+                    ):
+                        _impact_active = None
+                except Exception:
+                    _impact_active = None
                 # isinstance, not truthiness: a MagicMock orchestrator (tests)
                 # returns a truthy mock here and must stay on the inline path.
-                if isinstance(_git_inputs, dict) and _git_inputs:
+                if (isinstance(_git_inputs, dict) and _git_inputs) or _impact_active:
 
-                    def _collect(_inp=_git_inputs):
-                        from .worktree_manager import WorktreeManager
+                    def _collect(_inp=_git_inputs, _impact=_impact_active):
+                        facts = {}
+                        if isinstance(_inp, dict) and _inp:
+                            from .worktree_manager import WorktreeManager
 
-                        return WorktreeManager().collect_done_git_facts(**_inp)
+                            facts = WorktreeManager().collect_done_git_facts(**_inp)
+                        if _impact:
+                            from .impact_contract import git_revision
+
+                            facts["impact_revision"] = git_revision(_impact["cwd"]) or ""
+                        return facts
 
                     def _finish(facts, _sock=sock, _role=_done_role, _kw=_done_kwargs):
                         try:

@@ -4,6 +4,11 @@
 
 ## ก่อน assign
 
+งานที่เปลี่ยน mode, identity หรือ shared state ต้องทำ impact plan ตาม
+`docs/lead/impact-plan.md` ก่อน assign ใช้ `--impact-plan-file` เพื่อเก็บแผนใน task ledger.
+เมื่อรายงาน done ใช้ `--impact-evidence-file`; `takkub task impact --role <role>`
+แสดง task ID, plan digest และ revision ปัจจุบันสำหรับผูกหลักฐาน.
+
 - **ผลลัพธ์:** อาการหรือเป้าหมายที่ผู้ใช้ขอ และเกณฑ์ที่เห็นได้ว่าจบ
 - **หลักฐาน:** ขั้นตอน/คำสั่งที่ทำให้เกิด, log หรือ path ที่ Lead ตรวจแล้ว; แยกข้อเท็จจริงกับสมมติฐาน
 - **ขอบเขต:** cwd, ไฟล์/subsystem ที่เกี่ยว, สิ่งที่ห้ามแตะ, งานที่ต้องรอ

@@ -1,6 +1,6 @@
 {
   "generated_by": "grimp 3.14",
-  "module_count": 372,
+  "module_count": 373,
   "modules": [
     {
       "module": "agent_takkub",
@@ -531,6 +531,7 @@
         "agent_takkub.docs_verify",
         "agent_takkub.doctor",
         "agent_takkub.gemini_helper",
+        "agent_takkub.impact_contract",
         "agent_takkub.issues",
         "agent_takkub.lead_context",
         "agent_takkub.limit_autoresume",
@@ -573,13 +574,14 @@
         "agent_takkub.__main__"
       ],
       "fan_in": 1,
-      "fan_out": 59
+      "fan_out": 60
     },
     {
       "module": "agent_takkub.cli_server",
       "imports": [
         "agent_takkub.browser_chrome",
         "agent_takkub.config",
+        "agent_takkub.impact_contract",
         "agent_takkub.orchestrator",
         "agent_takkub.orchestrator_text",
         "agent_takkub.pane_guard",
@@ -591,6 +593,7 @@
         "agent_takkub.service_spawner",
         "agent_takkub.shard_fanout",
         "agent_takkub.spawn_queue_health",
+        "agent_takkub.task_ledger",
         "agent_takkub.team_preset",
         "agent_takkub.user_profile",
         "agent_takkub.work_discipline",
@@ -601,7 +604,7 @@
         "agent_takkub.main_window"
       ],
       "fan_in": 2,
-      "fan_out": 17
+      "fan_out": 19
     },
     {
       "module": "agent_takkub.cli_shim",
@@ -3032,6 +3035,18 @@
       "fan_out": 2
     },
     {
+      "module": "agent_takkub.impact_contract",
+      "imports": [],
+      "imported_by": [
+        "agent_takkub.cli",
+        "agent_takkub.cli_server",
+        "agent_takkub.orchestrator",
+        "agent_takkub.task_ledger"
+      ],
+      "fan_in": 4,
+      "fan_out": 0
+    },
+    {
       "module": "agent_takkub.issues",
       "imports": [
         "agent_takkub._win_console",
@@ -3472,6 +3487,7 @@
         "agent_takkub.fix_loop",
         "agent_takkub.graft_autobuild",
         "agent_takkub.headless_pane",
+        "agent_takkub.impact_contract",
         "agent_takkub.lead_context",
         "agent_takkub.lead_draft_state",
         "agent_takkub.lead_inbox",
@@ -3527,7 +3543,7 @@
         "agent_takkub.user_actions"
       ],
       "fan_in": 6,
-      "fan_out": 68
+      "fan_out": 69
     },
     {
       "module": "agent_takkub.orchestrator_text",
@@ -5669,11 +5685,13 @@
       "imports": [
         "agent_takkub.cached_read",
         "agent_takkub.config",
+        "agent_takkub.impact_contract",
         "agent_takkub.path_safe",
         "agent_takkub.task_scope"
       ],
       "imported_by": [
         "agent_takkub.cli",
+        "agent_takkub.cli_server",
         "agent_takkub.maintenance",
         "agent_takkub.orchestrator",
         "agent_takkub.project_nav",
@@ -5681,8 +5699,8 @@
         "agent_takkub.task_dock",
         "agent_takkub.team_preset"
       ],
-      "fan_in": 7,
-      "fan_out": 4
+      "fan_in": 8,
+      "fan_out": 5
     },
     {
       "module": "agent_takkub.task_scope",

@@ -475,6 +475,7 @@ def _build_lead_context_text(
 > 1. **สรุปงาน (Summary & Plan):** เมื่อได้รับคำสั่งหรือโจทย์จาก user → ให้วิเคราะห์ วางแผน และ **สรุปงาน** ออกมาเป็นหัวข้อที่ชัดเจน
 > 2. **ส่งต่อทีม (Delegate):** **ห้ามลงมือเขียน/แก้ไข code เองเด็ดขาด** เว้นแต่เข้าเกณฑ์ tiny-fix carve-out (#585) ครบทุกข้อ
 > 3. **มอบหมายงาน (`takkub assign`):** ให้ส่งงานต่อให้ specialist role ที่เหมาะสม เช่น `frontend`, `backend`, `devops`, `qa`, `mobile` ผ่านคำสั่ง `takkub assign --role <role> --cwd <path> "<task>"` เสมอ — **auto-fire ได้เลย** รายงานบรรทัดเดียว (ใครทำ/ทำอะไร/scope) ไม่ต้องขอ confirm ทุก assign
+> 4. **ผลกระทบข้าม flow (#833):** งานที่เปลี่ยน mode/identity/shared state ต้องทำ `docs/lead/impact-plan.md` และส่ง `--impact-plan-file` ก่อน assign; ตรวจ `takkub task impact --role <role>` แล้วแนบ `--impact-evidence-file` เมื่อ done. หลักฐานต้องตรง task/plan/revision ปัจจุบัน ไม่ถือว่า tests ผ่านเพียงอย่างเดียวคือ flow เสร็จ
 
 ### กฎเดียวกันสำหรับทุก provider — ไม่มี provider ใดเป็นข้อยกเว้น
 

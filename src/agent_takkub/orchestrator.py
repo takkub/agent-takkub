@@ -2580,7 +2580,7 @@ class Orchestrator(
         try:
             from .task_ledger import create_assignment
 
-            warning = create_assignment(
+            warning, _detail_path = create_assignment(
                 project_ns,
                 role_name,
                 run_cwd,
@@ -2590,6 +2590,7 @@ class Orchestrator(
                 parent_provider,
                 scope=scope,
                 mode="subagent",
+                task_id=task_id,
             )
             if warning:
                 self._notify_lead(
@@ -2631,10 +2632,19 @@ class Orchestrator(
             return False, str(exc)
         project_ns = self._resolve_project(project)
         pending = getattr(self, "_subagent_assignments", {})
-        state = pending.pop((project_ns, role_name), None)
+        state = pending.get((project_ns, role_name))
         if state is None:
             return False, f"no pending subagent assignment for {role_name}"
         note = (note or "").strip()
+        if not failed:
+            from .task_ledger import check_impact_completion
+
+            impact_error = check_impact_completion(
+                project_ns, role_name, state.get("task_id", ""), note
+            )
+            if impact_error:
+                return False, f"impact checks pending: {impact_error}"
+        pending.pop((project_ns, role_name), None)
         now = datetime.now()
         try:
             from .task_ledger import mark_done
@@ -2847,11 +2857,18 @@ class Orchestrator(
         (`team_preset.set_override`) and prepends a `[system]` notice ahead
         of *task* so the Lead sees it in the same message; ignored for every
         other role (spawning a teammate doesn't change the project's size)."""
+        # #833: risky cross-flow work needs a reviewable plan before any pane,
+        # backlog card or worker can start changing files.
+        from .impact_contract import plan_from_task
         from .work_discipline import (
             confirmation_digest,
             is_spec_confirmation_enabled,
             needs_spec_confirmation,
         )
+
+        _impact_plan, impact_error = plan_from_task(task, scope)
+        if impact_error:
+            return False, impact_error
 
         # #762: bind THIS request's backlog card before anything reads it.
         requested_role_name = role_name
@@ -3334,6 +3351,7 @@ class Orchestrator(
                         provider or "",
                         status="queued",
                         scope=resolved_scope,
+                        task_id=task_id,
                     )
                     if ledger_warning_q:
                         self._notify_lead(
@@ -4508,6 +4526,7 @@ class Orchestrator(
                 feature,
                 effective_provider,
                 scope=scope,
+                task_id=ps_assign.task_id,
             )
             if ledger_warning:
                 self._notify_lead(
@@ -8795,6 +8814,26 @@ class Orchestrator(
             )
 
         key = f"{project_ns}::{from_role}"
+
+        # Verify before releasing the resource token or acknowledging delivery.
+        # A rejected report must leave the task runnable for another check.
+        if not failed and not blocked:
+            from .task_ledger import check_impact_completion
+
+            active_ps = getattr(self, "_pane_state", {}).get(key)
+            active_task_id = getattr(active_ps, "task_id", None)
+            if active_task_id:
+                impact_error = check_impact_completion(
+                    project_ns,
+                    from_role,
+                    active_task_id,
+                    note,
+                    revision=(
+                        git_facts.get("impact_revision") if isinstance(git_facts, dict) else None
+                    ),
+                )
+                if impact_error:
+                    return False, f"impact checks pending: {impact_error}"
 
         # #228: capture this pane instance's own auth token *before* any
         # teardown below. close() (scheduled 2.5s later) is what revokes it,
