@@ -766,6 +766,12 @@ def _isolate_runtime(monkeypatch: pytest.MonkeyPatch, tmp_path):
                     _m, "SETTINGS_HOME", tmp_path / "_isolated_takkub", raising=False
                 )
 
+    # codex_account imports SETTINGS_HOME by value, so config's patch below
+    # cannot isolate its profile reads on a fresh Windows CI worker.
+    codex_account_mod = _maybe_module("agent_takkub.codex_account", force=True)
+    if codex_account_mod is not None:
+        monkeypatch.setattr(codex_account_mod, "SETTINGS_HOME", tmp_path / "_isolated_takkub")
+
     # #510: pipeline_config._PATH / _BASE_DIR are the same import-time-bound-
     # to-SETTINGS_HOME shape as the constants above — missed by the 2026-08-23
     # audit because nothing on the hot path read pipelines.json back then.
