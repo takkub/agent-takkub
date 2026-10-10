@@ -2727,10 +2727,14 @@ def cmd_task(args: argparse.Namespace) -> dict:
         project = getattr(args, "project", None) or _from_project() or "default"
         active = open_impact(project, args.role)
         if active is None:
-            return {"ok": False, "msg": f"no active task for {args.role} in {project}"}
+            return {
+                "ok": False,
+                "msg": f"no active task for {args.role} in {project}",
+                "structured_output": True,
+            }
         active["revision"] = git_revision(active["cwd"])
         _utf8_print(json.dumps(active, ensure_ascii=False, indent=2))
-        return {"ok": True, "msg": "impact status"}
+        return {"ok": True, "msg": "", "quiet": True}
     if args.t_cmd == "show":
         resp = _request(
             _with_project({"cmd": "task-show", "role": args.role, "from": _from_role()})
@@ -3390,7 +3394,7 @@ def cmd_verify(args: argparse.Namespace) -> dict:
 
     result = run_checks(checks, cwd=cwd)
     summary = format_summary(result)
-    print(summary)
+    print(summary, file=sys.stderr if args.json else sys.stdout)
 
     if args.json:
         data = {
@@ -3503,7 +3507,7 @@ def cmd_audit_skills(args: argparse.Namespace) -> dict:
 
         data = [{"role_a": a, "role_b": b, "similarity": s} for a, b, s in pairs]
         print(json.dumps(data, indent=2))
-        print(f"\n{len(pairs)} pair(s) above threshold {args.threshold}")
+        print(f"\n{len(pairs)} pair(s) above threshold {args.threshold}", file=sys.stderr)
     else:
         output_path = Path(args.output)
         output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -4837,6 +4841,59 @@ def cmd_activity(_: argparse.Namespace) -> dict:
     return {"ok": True, "msg": ""}
 
 
+def cmd_context(args: argparse.Namespace) -> dict:
+    from . import lead_readiness
+
+    path = os.environ.get(lead_readiness.ENV_FILE)
+    if _from_role() != "lead" or not path:
+        return {"ok": False, "msg": "no registered Lead context; restart Lead to bootstrap"}
+    if args.context_action == "status":
+        state = lead_readiness.read_state(path)
+        error = lead_readiness.reason(path, project=_from_project())
+        _utf8_print(
+            json.dumps(
+                {
+                    "session": state["session"],
+                    "project": state["project"],
+                    "provider": state["provider"],
+                    "revision": state["revision"],
+                    "ready": not error,
+                    "reason": error,
+                    "native_tool_gate": state["native_tool_gate"],
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
+        return {"ok": not error, "msg": "", "quiet": True}
+    state, text = lead_readiness.refresh(path)
+    if state["project"] != _from_project():
+        return {"ok": False, "msg": "Lead context belongs to a different project"}
+    _utf8_print(text)
+    sys.stdout.flush()  # partial/broken stdout must never acknowledge a read
+    lead_readiness.acknowledge(path, state)
+    return {"ok": True, "msg": "", "quiet": True}
+
+
+def cmd_context_guard(_: argparse.Namespace) -> dict:
+    if _from_role() != "lead":
+        return {"ok": True, "msg": ""}
+    from . import lead_readiness
+
+    try:
+        payload = _read_hook_stdin()
+        tool_name = str(payload.get("tool_name") or "")
+        tool_input = payload.get("tool_input") or {}
+        error = lead_readiness.current_reason()
+        if error and not lead_readiness.bootstrap_allowed(tool_name, tool_input):
+            print(f"[takkub guard: lead_context] {error}", file=sys.stderr)
+            return {"ok": True, "msg": "", "exit_code": 2}
+    except Exception as exc:
+        print(f"[takkub guard: lead_context] cannot verify readiness: {exc}", file=sys.stderr)
+        return {"ok": True, "msg": "", "exit_code": 2}
+    return {"ok": True, "msg": ""}
+
+
 def cmd_session_report(_: argparse.Namespace) -> dict:
     """Internal command wired as the `SessionStart` hook `command` for every
     cockpit-spawned claude pane (see hook_wiring.py). Fires on every session
@@ -4859,6 +4916,12 @@ def cmd_session_report(_: argparse.Namespace) -> dict:
         if not session_id:
             return {"ok": True, "msg": ""}  # malformed payload — nothing to report
         source = payload.get("source", "")
+        if role == "lead":
+            from . import lead_readiness
+
+            readiness_path = os.environ.get(lead_readiness.ENV_FILE)
+            if readiness_path:
+                lead_readiness.invalidate(readiness_path, source or "session-start")
         # #587 C1: SessionStart fires on startup/resume/clear/compact alike —
         # only a real fresh startup should reset Lead's tiny-fix accumulation,
         # else `/clear` or an auto-compact mid-task gives Lead a brand-new
@@ -6388,7 +6451,10 @@ def build_parser() -> argparse.ArgumentParser:
     st_sub = st.add_subparsers(dest="t_cmd", required=True)
     sts = st_sub.add_parser("show", help="print the full text of a role's last assigned task")
     sts.add_argument("--role", required=True, help="role name to look up")
-    sti = st_sub.add_parser("impact", help="show active impact plan, task id and current revision")
+    sti = st_sub.add_parser(
+        "impact",
+        help="print one JSON object with active impact plan, task id and current revision; errors go to stderr",
+    )
     sti.add_argument("--role", required=True)
     sti.add_argument("--project", default=None)
     str_ = st_sub.add_parser(
@@ -6486,6 +6552,12 @@ def build_parser() -> argparse.ArgumentParser:
     # be able to report it.
     ssr = sub.add_parser("session-report", help=argparse.SUPPRESS)
     ssr.set_defaults(func=cmd_session_report)
+
+    sctx = sub.add_parser("context", help="read or inspect the complete active Lead policy")
+    sctx.add_argument("context_action", choices=("read", "status"))
+    sctx.set_defaults(func=cmd_context)
+    scg = sub.add_parser("_context-guard", help=argparse.SUPPRESS)
+    scg.set_defaults(func=cmd_context_guard)
 
     # Internal — wired as the PreToolUse/Bash hook `command` for every
     # cockpit-spawned claude pane (see hook_wiring.py). Blocks a teammate from
@@ -7437,6 +7509,31 @@ def main(argv: list[str] | None = None) -> int:
         print(f"error: {gate_err}", file=sys.stderr)
         return 1
 
+    if _from_role() == "lead" and args.command not in {
+        "context",
+        "doctor",
+        "list",
+        "status",
+        "inbox",
+        "messages",
+        "tail",
+        "disk",
+        "team",
+        "task",
+        "_guard",
+        "_context-guard",
+        "_hook",
+        "_activity",
+        "session-report",
+        "lead-edits",
+    }:
+        from .lead_readiness import current_reason
+
+        context_error = current_reason()
+        if context_error:
+            print(f"error: {context_error}", file=sys.stderr)
+            return 1
+
     try:
         resp = args.func(args)
     except Exception as e:
@@ -7488,7 +7585,14 @@ def main(argv: list[str] | None = None) -> int:
             print(f"  (disabled in Settings: {', '.join(disabled)})")
     msg = resp.get("msg", "")
     if msg:
-        print(("ok: " if ok else "err: ") + msg)
+        # #839: human status must not corrupt structured stdout. This also
+        # covers existing --json commands (disk, doctor, migrate, verify).
+        status_stream = (
+            sys.stderr
+            if getattr(args, "json", False) or resp.get("structured_output")
+            else sys.stdout
+        )
+        print(("ok: " if ok else "err: ") + msg, file=status_stream)
     return resp.get("exit_code", 0 if ok else 1)
 
 

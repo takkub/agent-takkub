@@ -511,7 +511,23 @@ def _system_marker_role(body: str) -> str | None:
 def _is_digestible_lead_notice(body: str) -> bool:
     """True only for the high-volume, non-blocking done/peer-CC paths."""
     stripped = body.strip()
-    return bool(_DONE_NOTICE_RE.match(stripped) or _CC_NOTICE_RE.match(stripped))
+    return bool(
+        _DONE_NOTICE_RE.match(stripped)
+        or _CC_NOTICE_RE.match(stripped)
+        or re.match(r"\[[^\]]+ progress\]", stripped, re.I)
+    )
+
+
+def _automatic_notice(body: str) -> bool:
+    return (
+        (_DIGEST_HEADER in body and "[auto-chain handoff]" not in body.lower())
+        or _is_digestible_lead_notice(body)
+        or "Backlog รอ Lead" in body
+    ) and not _is_immediate_lead_notice(body)
+
+
+def _human_notice(item) -> bool:
+    return bool(isinstance(item, tuple) and len(item) > 3 and item[3] == "human")
 
 
 def _is_immediate_lead_notice(body: str) -> bool:
@@ -1378,7 +1394,7 @@ class LeadInboxMixin:
         project_ns = self._resolve_project(project)
         lead = self._project_panes(project_ns).get(LEAD.name)
         if lead and lead.session and lead.session.is_alive:
-            self._notify_lead(project_ns, prompt, kind="inject-lead-prompt")
+            self._notify_lead(project_ns, prompt, from_role="user", kind="inject-lead-prompt")
             _log_event("inject_lead_prompt", project=project_ns)
             return True
         self._pending_done_notices.setdefault(project_ns, []).append(
@@ -4289,6 +4305,7 @@ class LeadInboxMixin:
         front: bool = False,
         pane_token: str | None = None,
         queued_ts: float | None = None,
+        human: bool = False,
     ) -> None:
         """Append one ready-to-deliver body without starting the pump.
 
@@ -4312,12 +4329,23 @@ class LeadInboxMixin:
             self._lead_notify_pumping = set()
         queue = self._lead_notify_queue.setdefault(project_ns, collections.deque())
         item = (body, pane_token, queued_ts if queued_ts is not None else time.time())
-        if front:
+        if human:
+            item = (*item, "human")
+            # Human instructions retain their text and FIFO order and precede
+            # automatic notices, including old blockers that will be rechecked.
+            priority_end = 0
+            while priority_end < len(queue) and _human_notice(queue[priority_end]):
+                priority_end += 1
+            queue.insert(priority_end, item)
+        elif front:
             # Keep blocking notices FIFO with each other while placing them
             # ahead of informational/digest bodies already waiting on a busy
             # Lead.
             priority_end = 0
-            while priority_end < len(queue) and _is_blocking_lead_notice(queue[priority_end][0]):
+            while priority_end < len(queue) and (
+                _human_notice(queue[priority_end])
+                or _is_blocking_lead_notice(queue[priority_end][0])
+            ):
                 priority_end += 1
             queue.insert(priority_end, item)
         else:
@@ -4357,6 +4385,23 @@ class LeadInboxMixin:
         timers = getattr(self, "_digest_timer", {})
         if generation is not None and timers.get(project_ns) != generation:
             return False
+        lead = self._project_panes(project_ns).get(LEAD.name)
+        if (
+            not trailing_body
+            and lead
+            and lead.session
+            and lead.session.is_alive
+            and not lead.session.is_at_ready_prompt()
+        ):
+            # Keep one burst in cockpit storage instead of filling the
+            # provider's busy queue with a new follow-up every debounce window.
+            QTimer.singleShot(
+                1000,
+                lambda: self._flush_lead_digest(
+                    project_ns, generation=generation, arm_pump=arm_pump
+                ),
+            )
+            return False
         # Keep the last generation instead of deleting it. An early flush can
         # leave its uncancellable singleShot callback outstanding; a later
         # burst must receive a strictly newer token so that old callback cannot
@@ -4365,7 +4410,26 @@ class LeadInboxMixin:
         pending = getattr(self, "_lead_digest_queue", {}).pop(project_ns, None)
         if not pending:
             return False
-        items = list(pending)
+        items = []
+        progress_by_role = {}
+        for entry in pending:
+            body, _token, stamp = _unwrap_notice_item(entry)
+            body = self._revalidate_system_notice(project_ns, body, queued_ts=stamp)
+            if not body:
+                continue
+            progress = re.match(r"\[([^\]]+) progress\]", body, re.I)
+            done_role = _notice_role_tag(body)
+            if progress:
+                previous = progress_by_role.get(progress.group(1))
+                if previous is not None:
+                    items[previous] = None
+                progress_by_role[progress.group(1)] = len(items)
+            elif done_role in progress_by_role:
+                items[progress_by_role.pop(done_role)] = None
+            items.append(entry)
+        items = [entry for entry in items if entry is not None]
+        if not items:
+            return False
         now_ts = time.time()
         already_read = getattr(self, "_inbox_seen", {}).get(project_ns, ())
         lines = []
@@ -4424,7 +4488,8 @@ class LeadInboxMixin:
             # digest in the same payload/turn, so Lead sees the prerequisite
             # done notes first without waiting through a separate digest turn.
             digest = f"{digest}\n\n{trailing_body}"
-        self._enqueue_live_lead_notice(project_ns, digest)
+        oldest_ts = min((_unwrap_notice_item(e)[2] or now_ts) for e in items)
+        self._enqueue_live_lead_notice(project_ns, digest, queued_ts=oldest_ts)
         _log_event("lead_inbox_digest", project=project_ns, count=len(items))
         if arm_pump:
             self._arm_lead_notify_pump(project_ns)
@@ -4549,7 +4614,9 @@ class LeadInboxMixin:
         watched = set(active.get("roles", ()))
         return role in watched or _split_shard(role)[0] in watched
 
-    def _revalidate_system_notice(self, project_ns: str, body: str) -> str:
+    def _revalidate_system_notice(
+        self, project_ns: str, body: str, *, queued_ts: float | None = None
+    ) -> str:
         """(#266) A delivery-health system notice
         ([delivery-unconfirmed]/[spawn-stuck]/[delivery-boot-stall]/
         [spawn-failed]/[delivery-busy-wait]) is enqueued the moment the
@@ -4592,15 +4659,30 @@ class LeadInboxMixin:
         Lead a real spawn failure had "resolved itself" purely because the
         pane it was reporting the absence of was, indeed, absent.
         """
+        role_match = re.match(r"\[([^\]]+) (?:FAILED|progress)\]", body.strip(), re.I)
+        if role_match and queued_ts is not None:
+            role = role_match.group(1)
+            resolved = getattr(self, "_wait_done_events", {}).get((project_ns, role), {})
+            ps = getattr(self, "_pane_state", {}).get(f"{project_ns}::{role}")
+            if (
+                resolved.get("failed") is False
+                and resolved.get("ts", 0) >= queued_ts
+                and (ps is None or (getattr(ps, "assign_ts", 0) or 0) <= queued_ts)
+            ):
+                _log_event("lead_notice_superseded", project=project_ns, role=role, body=body)
+                return ""
+        if "[send-stuck]" in body:
+            target = re.search(r"\[send-stuck\]\s+ข้อความไปยัง\s+(\S+)", body)
+            if target and self.list_status(project=project_ns).get(
+                target.group(1)
+            ) in _DIGEST_TERMINAL_PANE_STATES | {None}:
+                _log_event("lead_notice_superseded", project=project_ns, body=body)
+                return ""
         # #793: Revalidate backlog review items. If cards are already done, drop notice
         if "backlog" in body and (
             "รอยืนยัน" in body or "backlog-review" in body or "backlog_review" in body
         ):
             try:
-                import re
-
-                from . import backlog
-
                 card_ids = re.findall(r"\[([a-zA-Z0-9_#-]+)\]", body)
                 if card_ids:
                     real_cards = [
@@ -4746,6 +4828,7 @@ class LeadInboxMixin:
         # whatever the pane printed — scrub credential values before the
         # text lands in the Lead transcript or the durable inbox file.
         body = self._redact_forwarded_text(body, project_ns, hop="notify_lead", from_role=from_role)
+        human = from_role == "user" or kind == "inject-lead-prompt"
         lead = self._project_panes(project_ns).get(LEAD.name)
         if lead and lead.session and lead.session.is_alive:
             window_ms = _inbox_digest_window_ms()
@@ -4753,7 +4836,10 @@ class LeadInboxMixin:
             immediate = _is_immediate_lead_notice(body)
             blocking = _is_blocking_lead_notice(body)
 
-            if digestible and not immediate and window_ms > 0:
+            if human:
+                self._enqueue_live_lead_notice(project_ns, body, human=True, queued_ts=occurred_ts)
+                self._arm_lead_notify_pump(project_ns)
+            elif digestible and not immediate and window_ms > 0:
                 if not hasattr(self, "_lead_digest_queue"):
                     self._lead_digest_queue = {}
                 self._lead_digest_queue.setdefault(project_ns, collections.deque()).append(
@@ -4936,6 +5022,10 @@ class LeadInboxMixin:
             return
 
         if not lead.session.is_at_ready_prompt():
+            waiting_body = _unwrap_notice_item(queue[0])[0]
+            if not _human_notice(queue[0]) and _automatic_notice(waiting_body):
+                QTimer.singleShot(1000, lambda: self._pump_lead_notify(project_ns))
+                return
             # Lead is busy — check retry cap before re-scheduling.
             if not hasattr(self, "_lead_notify_retry"):
                 self._lead_notify_retry = {}
@@ -5041,11 +5131,15 @@ class LeadInboxMixin:
         # actually land — see _revalidate_system_notice's docstring for why
         # (the queue can sit for minutes between enqueue and this point).
         # No-op for every other notice shape (plain done/CC/FAILED bodies).
-        raw_body = self._revalidate_system_notice(project_ns, raw_body)
+        if not _human_notice(queue[0]):
+            raw_body = self._revalidate_system_notice(project_ns, raw_body, queued_ts=item_ts)
         if not raw_body or not raw_body.strip():
-            queue.pop(0)
+            queue.popleft()
             if queue:
                 QTimer.singleShot(50, lambda: self._pump_lead_notify(project_ns))
+            else:
+                getattr(self, "_lead_notify_pumping", set()).discard(project_ns)
+                self._reset_lead_notify_backoff(project_ns)
             return
         item_role = _notice_role_tag(raw_body)
         if self._provenance_stale(project_ns, item_role, item_pane_token, queued_ts=item_ts):
@@ -5225,6 +5319,7 @@ class LeadInboxMixin:
                 self._notify_lead(
                     project_ns,
                     item["body"],
+                    from_role=item.get("role", "system"),
                     pane_token=item.get("pane_token"),
                     queued_ts=item.get("queued_ts"),
                     kind="pending-done-flush",
@@ -5361,6 +5456,10 @@ class LeadInboxMixin:
         lead = self._project_panes(project_ns).get(LEAD.name)
         if not (lead and lead.session and lead.session.is_alive):
             return
+        if not lead.session.is_at_ready_prompt() and all(
+            _automatic_notice(item.get("body", "")) for item in pending
+        ):
+            return
         # Deliver-then-ack (HIGH#1,
         # docs/reviews/2026-07-11-full-system-review-codex.md): only pop/persist
         # empty once the write is known to have succeeded, so a torn-down
@@ -5380,7 +5479,9 @@ class LeadInboxMixin:
             # path exists specifically for items that have been stuck
             # durable through _DONE_NOTICE_STALE_S (60s) of a not-ready
             # Lead, so it's at LEAST as likely to be carrying stale claims.
-            item_body = self._revalidate_system_notice(project_ns, item.get("body", ""))
+            item_body = self._revalidate_system_notice(
+                project_ns, item.get("body", ""), queued_ts=item.get("queued_ts")
+            )
             if not item_body or not item_body.strip():
                 return ""
             role = _notice_role_tag(item_body)

@@ -54,6 +54,11 @@ state/queue/ledger และไฟล์ export ตามที่เกี่�
 ปัจจุบัน สร้าง evidence JSON นอก repo ที่กำลังแก้เพื่อไม่ให้ไฟล์หลักฐานเปลี่ยน
 revision ของตัวเอง:
 
+stdout ของคำสั่งนี้เป็น JSON object เดียว (exit code 0) ใช้กับ
+`ConvertFrom-Json` หรือ `json.loads` ได้ทันที โดยไม่มี status ต่อท้าย
+หากไม่มี active task หรืออ่านข้อมูลล้มเหลว stdout ว่าง, error อยู่ stderr
+และ exit code เป็น 1
+
 ตัวอย่าง evidence ข้างล่างแสดงรูปแบบของหนึ่งรายการเท่านั้น แผนตัวอย่างข้างบน
 จะผ่าน `done` ได้เมื่อมีผลตรวจครบทุก `id` ใน `checks` ตาม revision เดียวกัน
 

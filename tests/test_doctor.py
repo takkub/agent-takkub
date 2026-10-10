@@ -1646,8 +1646,7 @@ class TestCmdDoctorExitCode:
             cli.main(["doctor", "--json"])
 
         captured = capsys.readouterr()
-        # find JSON in output (may have trailing ok:/err: line)
-        parsed = json.loads(captured.out.split("\n\nok:")[0].split("\nerr:")[0].strip())
+        parsed = json.loads(captured.out)
         assert isinstance(parsed, list)
         assert len(parsed) == 2
         assert parsed[0]["status"] == "ok"

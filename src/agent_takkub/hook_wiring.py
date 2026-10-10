@@ -202,6 +202,7 @@ def _rendered_settings(*, concise: bool = False, remote_control: bool = True) ->
     like it always has."""
     settings = copy.deepcopy(_HOOK_SETTINGS)
     pre_tool_use: list[dict] = [
+        {"matcher": "", "hooks": [{"type": "command", "command": "takkub _context-guard"}]},
         guard_hook_fragment("Bash"),
         guard_hook_fragment("Edit"),
         guard_hook_fragment("Write"),

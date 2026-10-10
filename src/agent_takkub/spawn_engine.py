@@ -920,6 +920,7 @@ class PaneState:
     # #830: if a project-owned AGENTS.md prevents Lead policy injection on non-Claude,
     # carry the cockpit policy through the first turn/prompt fallback.
     pending_lead_context: str | None = None
+    lead_readiness_file: str = ""
     # assign_ts: wall-clock when this pane's current task was dispatched
     # (_assign_dispatch). done() reads this BEFORE popping the PaneState so it
     # can scan the artifacts dir for screenshots newer than the assignment
@@ -2795,6 +2796,20 @@ class SpawnEngineMixin:
         # Lead-specific context content (BLOCKED_DIRS/session-brief, not the
         # generic teammate cheatsheet) — see the `_is_lead` forks inside.
         _is_lead = role_name == LEAD.name
+        if _is_lead:
+            # One common bootstrap for every registered provider and failover.
+            # Missing/partial policy refuses launch instead of generic coding.
+            from . import lead_readiness
+
+            try:
+                readiness = lead_readiness.prepare(
+                    project_ns,
+                    effective_provider,
+                    cwd or lead_cwd(project=project_ns) or str(DATA_HOME),
+                )
+                _ps_initial.lead_readiness_file = str(readiness)
+            except Exception as exc:
+                return False, f"Lead context bootstrap failed: {exc}"
 
         if effective_provider != CLAUDE:
             # ── generic non-claude provider branch (#103 Phase 1) ──────
@@ -3045,6 +3060,8 @@ class SpawnEngineMixin:
             env = _build_lead_env(project_ns) if _is_lead else _build_pane_env(project_ns)
             env["TAKKUB_ROLE"] = role_name
             env["TAKKUB_PROJECT"] = project_ns
+            if _is_lead:
+                env["TAKKUB_LEAD_READINESS_FILE"] = _ps_initial.lead_readiness_file
             # #690: claude panes already get this (see the claude env block);
             # non-claude teammates need it to find THEIR role-memory file from
             # the per-cwd AGENTS.md rule (memory_prompt.shared_role_memory_block)
@@ -3728,6 +3745,8 @@ class SpawnEngineMixin:
 
         env = _build_lead_env(project_ns) if role_name == LEAD.name else _build_pane_env(project_ns)
         env["TAKKUB_ROLE"] = role_name
+        if role_name == LEAD.name:
+            env["TAKKUB_LEAD_READINESS_FILE"] = _ps_initial.lead_readiness_file
         apply_chrome_bin(env, base_role)
         # A pane moved to another Claude account after a usage limit runs on
         # that account (its own curated dir — never the project's).

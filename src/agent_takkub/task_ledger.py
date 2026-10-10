@@ -306,6 +306,7 @@ def create_assignment(
         "status": status,
         "scope": scope,
         "mode": mode,
+        "impact_required": impact_plan is not None,
         "assign_hhmmss": now.strftime("%H:%M:%S"),
         "done_hhmmss": None,
         "detail_rel": detail_rel if detail_written else None,
@@ -364,6 +365,7 @@ def open_impact(project: str, role: str) -> dict | None:
         "task_id": row.get("task_id", ""),
         "cwd": row.get("cwd", ""),
         "impact": row.get("impact"),
+        "impact_required": row.get("impact_required"),
         "status": row.get("status"),
     }
 
@@ -413,15 +415,19 @@ def check_impact_completion(
 ) -> str:
     """Return a reason to keep the task open, or persist valid evidence."""
     active = open_impact(project, role)
+    if active is not None and active["task_id"] != task_id:
+        return "impact evidence does not match the active task"
     if active is None or not isinstance(active.get("impact"), dict):
+        # #836: assignment classified the original brief. Provider delivery
+        # wrappers and quoted policy must not impose new requirements at done.
+        if active is not None and active.get("impact_required") is False:
+            return ""
         from .impact_contract import plan_from_task
 
         expected_plan, error = plan_from_task(task_text)
         if expected_plan is not None or error:
             return "impact plan missing from durable task ledger"
         return ""
-    if active["task_id"] != task_id:
-        return "impact evidence does not match the active task"
     from .impact_contract import evidence_from_note, git_revision, validate_evidence
 
     evidence, error = evidence_from_note(note)

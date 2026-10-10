@@ -822,6 +822,16 @@ User เปิด **Multi mode** — เมื่อ request มี **หลา�
         except Exception:
             _log_event("skill_learning_index_error", project=project, target="lead")
 
+    suffix += (
+        "\n\n## Mandatory Lead bootstrap (all providers)\n"
+        "Before substantive action run `takkub context read`. This delivers the complete\n"
+        "active policy and effective team setting and records session-bound readiness.\n"
+        "Repeat after resume, compaction, failover or policy/settings changes.\n"
+        "The effective team policy takes precedence over generic delegation defaults:\n"
+        "solo-lead allows direct implementation/self-verification; auto honors task sizing;\n"
+        "full delegates implementation through visible enabled takkub positions.\n"
+        "Bootstrap and diagnostic reads remain available when readiness fails.\n"
+    )
     return base + suffix
 
 

@@ -35,7 +35,36 @@ _RISK = re.compile(
 
 def needs_plan(task: str, scope: str = "normal") -> bool:
     """Flag cross-flow tasks; a caller can also opt in with a plan block."""
-    return bool(_RISK.search(task or "")) or "[impact-required]" in (task or "").lower()
+    text = task or ""
+    if "[impact-required]" in text.lower():
+        return True
+    # Classify instructions rather than quoted diagnostics/historical evidence.
+    text = re.sub(r"```[^\n]*\n.*?```", "", text, flags=re.S)
+    for clause in re.split(
+        r"[\n.;]|\bthen\b|\band (?=(?:change|switch|update|modify)\b)", text, flags=re.I
+    ):
+        if clause.lstrip().startswith(">"):
+            continue
+        match = _RISK.search(clause)
+        if match is None:
+            continue
+        prefix = clause[: match.start()]
+        if re.search(
+            r"\b(?:do not|don't|must not|never|no)\b|ห้าม|ไม่(?:ต้อง|ให้|เปลี่ยน|สลับ)", prefix, re.I
+        ):
+            continue
+        if re.search(
+            r"\b(?:already|previously|historical|completed)\b|ก่อนหน้า|เสร็จแล้ว", prefix, re.I
+        ):
+            continue
+        if re.search(
+            r"\b(?:verify|inspect|check|read.only)\b|ตรวจสอบ|ยืนยัน", prefix, re.I
+        ) and not re.search(
+            r"\b(?:change|switch|update|modify|set|enable|disable)\b|เปลี่ยน|สลับ|แก้", clause, re.I
+        ):
+            continue
+        return True
+    return False
 
 
 def _block(text: str, kind: str) -> tuple[dict | None, str]:

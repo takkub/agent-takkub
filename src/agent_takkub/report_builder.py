@@ -304,16 +304,16 @@ class ReportBuilder:
         # Source of truth: repo-root `assets/report/template.html` (dev
         # checkout) or the packaged `_assets/report/` copy (installed build,
         # staged by setup.py from the same repo-root source). The per-content
-        # template override and the minimal fallback stay last so a user
+        # template override takes precedence so a user
         # explicitly dropping `template.html` into their content dir always
         # wins over the shipped kit.
-        asset_template = report_asset_root() / "template.html"
-        if asset_template.exists():
-            return asset_template.read_text(encoding="utf-8")
-
         content_template = self.content_dir / "template.html"
         if content_template.exists():
             return content_template.read_text(encoding="utf-8")
+
+        asset_template = report_asset_root() / "template.html"
+        if asset_template.exists():
+            return asset_template.read_text(encoding="utf-8")
 
         # Fallback to a minimal template if nothing is found
         return self._get_fallback_template()

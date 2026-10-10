@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import json
 import subprocess
 from pathlib import Path
 from unittest.mock import MagicMock, patch
+
+import pytest
 
 from agent_takkub import task_ledger
 from agent_takkub.impact_contract import (
@@ -105,6 +108,65 @@ def test_seedance_mode_requires_complete_plan() -> None:
     assert "continuation" in error
     plan, error = plan_from_task(append_block(task, "impact-plan", _plan()))
     assert not error and plan == _plan()
+
+
+@pytest.mark.parametrize("provider", ["claude", "codex", "gemini-agy", "opencode", "cursor"])
+def test_task_impact_stdout_is_one_json_object(
+    tmp_path: Path, monkeypatch, capsys, provider: str
+) -> None:
+    from agent_takkub import cli
+
+    monkeypatch.setattr(task_ledger, "RUNTIME_DIR", tmp_path / "runtime")
+    monkeypatch.setenv("TAKKUB_PROJECT", "impact-json")
+    monkeypatch.setenv("TAKKUB_ROLE", "reviewer")
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _repo(repo)
+    plan = _plan()
+    warning, detail = task_ledger.create_assignment(
+        "impact-json",
+        "reviewer",
+        str(repo),
+        append_block("Verify current flow", "impact-plan", plan),
+        "goal",
+        "feature",
+        provider,
+        task_id="current-task",
+    )
+    assert not warning and detail is not None
+
+    assert cli.main(["task", "impact", "--role", "reviewer"]) == 0
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+    assert payload["task_id"] == "current-task"
+    assert payload["revision"] == git_revision(repo)
+    assert payload["status"] == "working"
+    assert payload["impact"]["plan_digest"] == plan_digest(plan)
+    assert payload["impact"]["plan"]["checks"] == plan["checks"]
+    assert captured.err == ""
+
+
+def test_task_impact_no_active_task_keeps_stdout_empty(tmp_path, monkeypatch, capsys) -> None:
+    from agent_takkub import cli
+
+    monkeypatch.setattr(task_ledger, "RUNTIME_DIR", tmp_path)
+    assert cli.main(["task", "impact", "--role", "reviewer", "--project", "empty"]) == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "no active task for reviewer in empty" in captured.err
+
+
+def test_task_impact_read_failure_keeps_stdout_empty(monkeypatch, capsys) -> None:
+    from agent_takkub import cli
+
+    def unreadable(*_args):
+        raise OSError("ledger unreadable")
+
+    monkeypatch.setattr(task_ledger, "open_impact", unreadable)
+    assert cli.main(["task", "impact", "--role", "reviewer"]) == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "ledger unreadable" in captured.err
 
 
 def test_ledger_rejects_stale_and_incomplete_evidence_after_resume(

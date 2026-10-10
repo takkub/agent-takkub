@@ -12,13 +12,8 @@ from agent_takkub import cli
 
 
 def _json_body(out: str):
-    """`cli.main` appends a trailing "ok: <msg>"/"err: <msg>" status line
-    after any command's JSON output (cli.py's own epilogue) — strip it
-    before parsing."""
-    body, _, _tail = out.rpartition("\nok: ")
-    if not body:
-        body, _, _tail = out.rpartition("\nerr: ")
-    return json.loads(body or out)
+    """Structured stdout must parse in full without stripping status text."""
+    return json.loads(out)
 
 
 @pytest.fixture(autouse=True)

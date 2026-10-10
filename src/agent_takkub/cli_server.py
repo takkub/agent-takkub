@@ -601,6 +601,34 @@ class CliServer(QObject):
                 return
 
         # done/progress: reject from_role == "lead" — Lead never closes (or
+        if from_role_norm == "lead" and cmd in {
+            "assign",
+            "spawn",
+            "send",
+            "close",
+            "close-all",
+            "kill",
+            "submit",
+            "service-stop",
+            "pipeline-run",
+            "goal",
+            "end-session",
+            "restart",
+            "report-send",
+            "skill-learn",
+            "subagent-done",
+        }:
+            state = getattr(self._orch, "_pane_state", {}).get(f"{from_project}::lead")
+            readiness_file = getattr(state, "lead_readiness_file", "")
+            if isinstance(readiness_file, str) and readiness_file:
+                from .lead_readiness import reason
+
+                error = reason(readiness_file, project=from_project)
+                if error:
+                    self._reply(sock, ok=False, msg=error)
+                    return
+
+        # done/progress: reject from_role == "lead" — Lead never closes (or
         # progress-reports on) itself. This guard lives at the orchestrator
         # level too; both layers protect against the done→close chain
         # accidentally targeting the Lead pane.

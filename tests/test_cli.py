@@ -30,6 +30,44 @@ class TestArgparse:
     `from_project` field (None when the CLI runs outside a cockpit-spawned
     pane); tests only assert on the fields the CLI actively populates."""
 
+    @pytest.mark.parametrize("passed", [True, False])
+    def test_verify_json_stdout_parses_on_success_and_failure(
+        self, monkeypatch, capsys, tmp_path, passed
+    ) -> None:
+        from agent_takkub import verify
+
+        result = verify.VerifyResult(
+            checks=[
+                verify.CheckResult(
+                    verify.Check("fixture", ["mock-check"], "python"),
+                    0 if passed else 1,
+                    "test output",
+                    "",
+                    1.0,
+                )
+            ],
+            all_passed=passed,
+        )
+        monkeypatch.setattr(verify, "run_checks", lambda *_args, **_kwargs: result)
+        assert cli.main(["verify", "--cwd", str(tmp_path), "--json"]) == (0 if passed else 1)
+        captured = capsys.readouterr()
+        payload = json.loads(captured.out)
+        assert payload["all_passed"] is passed
+        assert payload["checks"][0]["name"] == "fixture"
+        assert "fixture" in captured.err
+
+    def test_audit_skills_json_stdout_has_no_human_trailer(self, monkeypatch, capsys) -> None:
+        monkeypatch.setattr(
+            "agent_takkub.skill_audit.audit_skills",
+            lambda *_args, **_kwargs: [("backend", "reviewer", 0.75)],
+        )
+        assert cli.main(["audit-skills", "--json"]) == 0
+        captured = capsys.readouterr()
+        assert json.loads(captured.out) == [
+            {"role_a": "backend", "role_b": "reviewer", "similarity": 0.75}
+        ]
+        assert "1 pair(s)" in captured.err
+
     def test_assign_requires_role_and_task(self, fake_request: list[dict[str, Any]]) -> None:
         cli.main(["assign", "--role", "frontend", "make a thing"])
         payload = fake_request[-1]
@@ -1933,10 +1971,7 @@ class TestDiskPruneCli:
         (tmp_path / "venv").mkdir()
         assert cli.main(["disk", "--json"]) == 0
         out = capsys.readouterr().out
-        # main() appends a trailing human-readable "ok: ..." line after the
-        # JSON blob (same convention as `verify --json`/`audit-skills --json`)
-        # — decode just the first JSON value and ignore that trailer.
-        report, _ = json.JSONDecoder().raw_decode(out)
+        report = json.loads(out)
         assert report["data_home"] == str(tmp_path.resolve())
         assert any(c["key"] == "venv" for c in report["categories"])
 
