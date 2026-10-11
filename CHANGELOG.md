@@ -4,6 +4,8 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 
 ## [vNEXT]
 
+## [v2.2.15] - 2026-10-11
+
 ### Fixed (แก้)
 
 - **pre-commit บน Windows ล้มก่อนตรวจจริง (#863):** hook ของ import-linter, pytest collect-only และ depgraph ใช้ `bash -c` ที่ quote แตกบน Windows · เปลี่ยนเป็น Python runner เดียวที่หา venv ของ main worktree และตรวจไฟล์จาก checkout ปัจจุบัน · รัน hook ทั้งสามบน Windows ผ่านแล้ว
