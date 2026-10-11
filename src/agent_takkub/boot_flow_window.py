@@ -2280,6 +2280,14 @@ class BootFlowWindow(QDialog):
         `progress` signals keep a live receiver: it parks itself in
         `_LINGERING_WIZARDS` until `_release_worker` sees the last one
         stop."""
+        # #345/#640: the gate is done listening, so stop the page-C progress
+        # throttle too. The deadline can quit the loop while the migration
+        # worker's `resultReady` is still queued (or just before it is
+        # disconnected below), so `_on_migration_done` — the only place that
+        # stops `_migrate_throttle` — is not guaranteed to run. Without this
+        # the 120 ms timer stayed armed, firing against a wizard nobody owns
+        # (and tripping the test-session QTimer-leak guard).
+        self.shutdown_timers()
         live = [w for w in self._workers if _is_running(w)]
         for w in live:
             try:
@@ -2288,6 +2296,16 @@ class BootFlowWindow(QDialog):
                 pass  # nothing connected (already delivered)
         if live:
             _LINGERING_WIZARDS.add(self)
+
+    def shutdown_timers(self) -> None:
+        """Stop every QTimer this wizard directly owns — currently only the
+        page-C `_migrate_throttle`. Mirrors CliServer/Orchestrator/
+        HeadlessWindow.shutdown_timers (#344/#345): the gate fires it via
+        `release_workers` on its way out so a #640 deadline that races the
+        worker's queued `resultReady` can't leave the throttle armed, and
+        tests can call it directly when they tear a wizard down."""
+        for timer in self.findChildren(QTimer, options=Qt.FindChildOption.FindDirectChildrenOnly):
+            timer.stop()
 
     def wait_workers(self, timeout_s: float) -> bool:
         """Bounded wait for every running worker (process exit path); False

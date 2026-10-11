@@ -1841,6 +1841,44 @@ class TestWorkerLifetimeOutlivesTheWizard:
         assert migrated == [True], "gate returned while the migration ladder was still running"
         assert any(event == "boot_gate_timeout" for event, _ in logged)
 
+    def test_release_workers_stops_the_progress_throttle(
+        self, _qt_session_app, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """#640/#345 regression: the deadline can quit the gate's loop while
+        the migration worker's `resultReady` is still queued, so
+        `_on_migration_done` — the only place that stops `_migrate_throttle`
+        — never runs. `release_workers`, the gate's single "stop listening"
+        hook, must disarm the 120 ms throttle itself or it leaks (tripping
+        the session QTimer-leak guard, as on macOS CI)."""
+        import threading
+
+        monkeypatch.delattr(QThread, "start", raising=False)  # real threads
+        app = QApplication.instance()
+        assert app is not None
+
+        release = threading.Event()
+        flow = _FakeFlow(items=[], plan=_plan())
+        flow.run_migration = lambda cb: (release.wait(5), _outcome())[1]
+        w = bfw.BootFlowWindow(flow=flow)
+        try:
+            w.show()
+            w._on_plan_ready(_plan())
+            app.processEvents()
+            w._on_premigrate_start_clicked()
+            _pump_until(app, lambda: any(t.isRunning() for t in w._workers))
+            assert w._migrate_throttle.isActive(), "throttle should be armed during migration"
+            # resultReady is still queued (worker blocked) -> `_on_migration_done`
+            # hasn't fired; `release_workers` alone must disarm the throttle.
+            w.release_workers()
+            assert not w._migrate_throttle.isActive()
+        finally:
+            release.set()
+            for worker in w._workers:
+                worker.wait(3000)
+            app.processEvents()
+            w.close()
+            app.processEvents()
+
     def test_disabled_ceiling_no_longer_overflows_the_timer(
         self, _qt_session_app, monkeypatch: pytest.MonkeyPatch
     ) -> None:
