@@ -70,12 +70,7 @@ repos:
         # extension) on macOS/Linux — detect which one exists instead of
         # hardcoding either (macOS panes were previously getting a
         # nonexistent-path failure here since Scripts/ was hardcoded).
-        entry: >-
-          bash -c '
-          ROOT="$(dirname "$(git rev-parse --path-format=absolute --git-common-dir)")";
-          if [ -d "$ROOT/.venv/Scripts" ]; then BIN="$ROOT/.venv/Scripts"; EXT=".exe"; else BIN="$ROOT/.venv/bin"; EXT=""; fi;
-          PYTHONPATH="$(pwd)/src" "$BIN/lint-imports$EXT"
-          '
+        entry: python tools/run_precommit_gate.py import-linter
         pass_filenames: false
         stages: [pre-commit]
 
@@ -92,12 +87,7 @@ repos:
       - id: pytest-collect-only
         name: pytest collect-only (import sanity)
         language: system
-        entry: >-
-          bash -c '
-          ROOT="$(dirname "$(git rev-parse --path-format=absolute --git-common-dir)")";
-          if [ -d "$ROOT/.venv/Scripts" ]; then BIN="$ROOT/.venv/Scripts"; EXT=".exe"; else BIN="$ROOT/.venv/bin"; EXT=""; fi;
-          PYTHONPATH="$(pwd)/src" "$BIN/python$EXT" -m pytest tests --collect-only -q
-          '
+        entry: python tools/run_precommit_gate.py pytest-collect-only
         pass_filenames: false
         files: ^(src|tests)/
         stages: [pre-commit]
@@ -115,11 +105,6 @@ repos:
         # the provenance-only generated_by field, so it never writes the file and
         # never false-positives on git-diff/CRLF flicker or a grimp point bump —
         # same code path CI's Depgraph freshness check step uses.
-        entry: >-
-          bash -c '
-          ROOT="$(dirname "$(git rev-parse --path-format=absolute --git-common-dir)")";
-          if [ -d "$ROOT/.venv/Scripts" ]; then BIN="$ROOT/.venv/Scripts"; EXT=".exe"; else BIN="$ROOT/.venv/bin"; EXT=""; fi;
-          PYTHONPATH="$(pwd)/src" "$BIN/python$EXT" tools/gen_import_graph.py --check
-          '
+        entry: python tools/run_precommit_gate.py depgraph-fresh
         pass_filenames: false
         stages: [pre-commit]

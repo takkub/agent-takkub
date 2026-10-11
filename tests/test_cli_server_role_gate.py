@@ -391,15 +391,53 @@ class TestTeamSetSelfEscalationGuard:
         resp = sock.last_response()
         assert resp["ok"] is True
 
-    def test_non_lead_caller_still_allowed(self, srv_sock) -> None:
-        """The guard only fires for from=='lead' — Settings/mobile call this
-        with no `from` at all, same scoping as the M3 guard above."""
+    def test_non_lead_caller_still_allowed_if_policy_unrestricted(
+        self, srv_sock, monkeypatch
+    ) -> None:
+        """A human terminal can set a preset while no restricted Lead is active."""
+        from agent_takkub import team_preset
+
+        monkeypatch.setattr(team_preset, "current", lambda _project: {"lead_may_implement": True})
         srv, sock = srv_sock
         srv._orch.set_team_preset.return_value = (True, "team preset set to solo-lead")
+        # #842: "non-lead" now means the client process is provably not under
+        # any pane (a human terminal) — not merely a missing `from`.
+        srv._peer_runs_under_a_pane = lambda _sock: False
         sock.reset()
         srv._dispatch(sock, {"cmd": "team", "action": "set", "preset": "solo-lead"})
         resp = sock.last_response()
         assert resp["ok"] is True
+
+    def test_detached_helper_cannot_unlock_restricted_team_842(self, srv_sock) -> None:
+        srv, sock = srv_sock
+        srv._peer_runs_under_a_pane = lambda _sock: False
+        sock.reset()
+        srv._dispatch(sock, {"cmd": "team", "action": "set", "preset": "solo-lead"})
+        assert sock.last_response()["ok"] is False
+        srv._orch.set_team_preset.assert_not_called()
+
+    @pytest.mark.parametrize("command", ["assign", "spawn", "send", "submit"])
+    def test_restricted_project_cannot_route_through_shell_842(self, srv_sock, command) -> None:
+        srv, sock = srv_sock
+        req = {"cmd": command, "from": "lead", "auth": _GATE_TEST_TOKEN}
+        req["to" if command == "send" else "role"] = "shell"
+        sock.reset()
+        srv._dispatch(sock, req)
+        assert sock.last_response()["ok"] is False
+        assert "shell" in sock.last_response()["msg"]
+
+    @pytest.mark.parametrize("peer", [True, None])
+    def test_spoofed_empty_from_under_a_pane_rejected_842(self, srv_sock, peer) -> None:
+        """A Lead that clears TAKKUB_ROLE/its token still runs under its pane
+        process; an unverifiable caller is treated the same (fail closed)."""
+        srv, sock = srv_sock
+        srv._orch.set_team_preset.return_value = (True, "should not be reached")
+        srv._peer_runs_under_a_pane = lambda _sock: peer
+        sock.reset()
+        srv._dispatch(sock, {"cmd": "team", "action": "set", "preset": "solo-lead"})
+        resp = sock.last_response()
+        assert resp["ok"] is False
+        srv._orch.set_team_preset.assert_not_called()
 
     def test_lead_clear_override_still_allowed(self, srv_sock) -> None:
         """clear-override only reverts to a standing preset a human already

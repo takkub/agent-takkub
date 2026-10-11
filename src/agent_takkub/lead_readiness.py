@@ -139,7 +139,6 @@ def prepare(project: str, provider: str, cwd: str) -> Path:
             "text": text,
             "epoch": 0,
             "read_epoch": None,
-            "native_tool_gate": "supported" if provider == "claude" else "unsupported",
         },
     )
     return path
@@ -152,12 +151,44 @@ def read_state(path: str | Path) -> dict:
     return state
 
 
+def _enforcement_path(session: str) -> Path:
+    # Deliberately NOT under `lead-readiness/`: a sandboxed Lead must write its
+    # readiness acknowledgement there, so it must not be able to forge the
+    # record of which boundary it runs under (#842).
+    from .config import RUNTIME_DIR
+
+    return RUNTIME_DIR / "lead-enforcement" / f"{session}.json"
+
+
+def record_enforcement(path: str | Path, mode: str) -> None:
+    """#842: which OS-level boundary this Lead session actually runs under."""
+    state = read_state(path)
+    _write(_enforcement_path(state["session"]), {"mode": mode, "ts": time.time()})
+
+
+def enforcement_status(state: dict, facts: dict) -> tuple[str, str]:
+    """``(gate_label, gap_reason)`` for this session under the CURRENT policy."""
+    from .lead_enforcement import enforcement_gap, gate_label
+
+    restricted = not bool((facts.get("team") or {}).get("lead_may_implement"))
+    provider = str(state.get("provider") or "")
+    try:
+        mode = json.loads(_enforcement_path(state["session"]).read_text(encoding="utf-8"))["mode"]
+    except (OSError, ValueError, KeyError, TypeError):
+        mode = None
+    return gate_label(provider, mode, restricted), enforcement_gap(provider, mode, restricted)
+
+
 def reason(path: str | Path, *, project: str | None = None) -> str:
     try:
         state = read_state(path)
         if project is not None and state["project"] != project:
             return "Lead context belongs to a different project"
-        revision, _documents, _facts = _sources(state["project"], state["cwd"])
+        revision, _documents, facts = _sources(state["project"], state["cwd"])
+        # #842: a restricted policy the session cannot honour is never "ready".
+        _gate, gap = enforcement_status(state, facts)
+        if gap:
+            return gap
         if revision != state["revision"]:
             return "Lead project/policy/team settings changed; run takkub context read"
         if state.get("read_epoch") != state["epoch"]:

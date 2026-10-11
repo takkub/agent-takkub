@@ -126,6 +126,12 @@ def _capture_spawn_argv(
 
     orch = Orchestrator()
     orch.shutdown_timers()
+    if role_name == "lead":
+        # This test covers the legacy unrestricted Claude argv. Restricted
+        # Claude Leads are rejected before reaching PtySession (#842).
+        monkeypatch.setattr(
+            "agent_takkub.lead_enforcement.lead_is_restricted", lambda _project: False
+        )
 
     # We need a fake pane in the right project slot
     fake_pane = MagicMock()

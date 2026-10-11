@@ -2810,6 +2810,13 @@ class SpawnEngineMixin:
                 _ps_initial.lead_readiness_file = str(readiness)
             except Exception as exc:
                 return False, f"Lead context bootstrap failed: {exc}"
+            from .lead_enforcement import lead_is_restricted
+
+            if lead_is_restricted(project_ns) and effective_provider != "codex":
+                return False, (
+                    f"restricted Lead cannot start with {effective_provider}: "
+                    "no enforceable read-only execution boundary"
+                )
 
         if effective_provider != CLAUDE:
             # ── generic non-claude provider branch (#103 Phase 1) ──────
@@ -3117,7 +3124,41 @@ class SpawnEngineMixin:
             autonomy_argv = list(
                 spec.autonomy_flags.get(sys.platform, spec.autonomy_flags.get("default", []))
             )
-            if spec.name == "codex":
+            _lead_sandboxed = False
+            if _is_lead and spec.name == "codex":
+                # #842: a Lead that may not implement runs inside Codex's own
+                # OS sandbox (read-only + cockpit-owned roots) instead of the
+                # bypass flags. Fail closed: no profile → no restricted Lead.
+                from . import lead_enforcement
+
+                if lead_enforcement.lead_is_restricted(project_ns):
+                    try:
+                        _roots = lead_enforcement.lead_write_roots(project_ns, env)
+                        autonomy_argv = lead_enforcement.codex_lead_argv(_roots)
+                        _scratch = str(lead_enforcement.lead_scratch_dir(project_ns))
+                        env["TEMP"] = env["TMP"] = env["TMPDIR"] = _scratch
+                        lead_enforcement.verify_codex_boundary(provider_bin, spawn_cwd, env, _roots)
+                        _lead_sandboxed = True
+                    except Exception as exc:
+                        return False, f"restricted Lead sandbox could not be prepared: {exc}"
+                _ps_lead = self._pane_state.get(_exit_key(project_ns, role_name))
+                _readiness_file = getattr(_ps_lead, "lead_readiness_file", None)
+                if _readiness_file:
+                    from . import lead_readiness
+
+                    lead_readiness.record_enforcement(
+                        _readiness_file,
+                        lead_enforcement.MODE_CODEX_SANDBOX
+                        if _lead_sandboxed
+                        else lead_enforcement.MODE_NONE,
+                    )
+                _log_event(
+                    "lead_enforcement",
+                    project=project_ns,
+                    provider=spec.name,
+                    mode="codex_sandbox" if _lead_sandboxed else "none",
+                )
+            if spec.name == "codex" and not _lead_sandboxed:
                 # #784: central evidence/docs live outside the workspace.
                 # Grant only this project's two directories, including resume.
                 for env_key in ("TAKKUB_ARTIFACTS_DIR", "TAKKUB_DOCS_DIR"):
@@ -3214,15 +3255,20 @@ class SpawnEngineMixin:
             from .mcp_bridge import McpResolutionError, mcp_argv_for_provider
 
             try:
-                mcp_argv = mcp_argv_for_provider(
-                    spec.name,
-                    base_role,
-                    shard_idx,
-                    project_ns,
-                    provider_bin=provider_bin,
-                    cwd=spawn_cwd,
-                    env=env,
-                )
+                if _lead_sandboxed:
+                    # MCP server processes do not inherit Codex's local command
+                    # sandbox. No Lead MCP may cross this boundary (#842).
+                    mcp_argv = ["-c", "mcp_servers={}", "-c", "features.plugins=false"]
+                else:
+                    mcp_argv = mcp_argv_for_provider(
+                        spec.name,
+                        base_role,
+                        shard_idx,
+                        project_ns,
+                        provider_bin=provider_bin,
+                        cwd=spawn_cwd,
+                        env=env,
+                    )
             except McpResolutionError as exc:
                 return False, (
                     f"could not verify {spec.name}'s inherited MCP servers, so "

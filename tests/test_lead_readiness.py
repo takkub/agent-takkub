@@ -18,7 +18,7 @@ def test_prepare_and_read_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch)
     assert state["session"] == path.stem
     assert state["project"] == "default"
     assert state["provider"] == "claude"
-    assert state["native_tool_gate"] == "supported"
+    assert "native_tool_gate" not in state  # capability is read from trusted session state
     assert state["epoch"] == 0
     assert state["read_epoch"] is None
     assert "Mandatory Lead bootstrap" in state["text"]
@@ -26,6 +26,10 @@ def test_prepare_and_read_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch)
 
 def test_reason_lifecycle(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("agent_takkub.config.RUNTIME_DIR", tmp_path / "runtime")
+    monkeypatch.setattr(
+        "agent_takkub.team_preset.current",
+        lambda project=None: {"preset": "solo-lead", "roles": {}, "lead_may_implement": True},
+    )
     path = lead_readiness.prepare("default", "claude", str(tmp_path))
 
     # Initial state: unread
@@ -99,6 +103,8 @@ def test_cli_context_read_and_status(
 ) -> None:
     monkeypatch.setattr("agent_takkub.config.RUNTIME_DIR", tmp_path / "runtime")
     path = lead_readiness.prepare("default", "codex", str(tmp_path))
+    # spawn records the boundary it actually applied (#842)
+    lead_readiness.record_enforcement(path, "codex_sandbox")
 
     monkeypatch.setenv(lead_readiness.ENV_FILE, str(path))
     monkeypatch.setenv("TAKKUB_ROLE", "lead")
@@ -110,7 +116,7 @@ def test_cli_context_read_and_status(
     status = json.loads(out)
     assert status["ready"] is False
     assert status["provider"] == "codex"
-    assert status["native_tool_gate"] == "unsupported"
+    assert status["native_tool_gate"] in ("os_sandbox", "not_required")
 
     # Read context
     assert cli.main(["context", "read"]) == 0
@@ -123,3 +129,46 @@ def test_cli_context_read_and_status(
     status2 = json.loads(out2)
     assert status2["ready"] is True
     assert status2["reason"] == ""
+
+
+def test_restricted_codex_lead_without_sandbox_is_never_ready_842(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from agent_takkub import lead_enforcement
+
+    monkeypatch.setattr("agent_takkub.config.RUNTIME_DIR", tmp_path / "runtime")
+    path = lead_readiness.prepare("default", "codex", str(tmp_path))
+    state = lead_readiness.read_state(path)
+    restricted = {"team": {"lead_may_implement": False}}
+    unrestricted = {"team": {"lead_may_implement": True}}
+
+    # spawned before the policy turned restricted → gap, fail closed
+    lead_readiness.record_enforcement(path, lead_enforcement.MODE_NONE)
+    state = lead_readiness.read_state(path)
+    gate, gap = lead_readiness.enforcement_status(state, restricted)
+    assert gate == "unenforced" and "restart Lead" in gap
+    assert lead_readiness.enforcement_status(state, unrestricted) == ("not_required", "")
+
+    lead_readiness.record_enforcement(path, lead_enforcement.MODE_CODEX_SANDBOX)
+    state = lead_readiness.read_state(path)
+    assert lead_readiness.enforcement_status(state, restricted) == ("os_sandbox", "")
+
+
+def test_restricted_unsupported_provider_is_not_ready_842() -> None:
+    from agent_takkub.lead_enforcement import enforcement_gap, gate_label
+
+    for provider in ("claude", "gemini", "opencode", "cursor"):
+        assert gate_label(provider, None, True) == "unenforced"
+        assert "not enforced" in enforcement_gap(provider, None, True)
+
+
+def test_codex_lead_argv_is_read_only_base_plus_roots_842() -> None:
+    from agent_takkub import lead_enforcement
+
+    argv = lead_enforcement.codex_lead_argv([r"C:\rt\docs", "/rt/events.log"])
+    joined = " ".join(argv)
+    assert "--dangerously-bypass-approvals-and-sandbox" not in argv
+    assert "-s" not in argv  # never mixed with the legacy sandbox keys
+    assert 'extends=":read-only"' in joined
+    assert '"C:/rt/docs"="write"' in joined and '"/rt/events.log"="write"' in joined
+    assert 'default_permissions="takkub_lead"' in joined

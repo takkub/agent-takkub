@@ -530,6 +530,42 @@ class CliServer(QObject):
             else:
                 self._dispatch(sock, req)
 
+    def _peer_runs_under_a_pane(self, sock) -> bool | None:
+        """#842: True when the TCP client process descends from a cockpit
+        pane's process (so it is an agent, whatever `from`/env it claims),
+        False when it provably does not (a human terminal), None when that
+        could not be established. Identity from the OS, not the request."""
+        try:
+            import psutil
+
+            peer_port = int(sock.peerPort())
+            server_port = int(self._server.serverPort())
+            pid = next(
+                (
+                    c.pid
+                    for c in psutil.net_connections(kind="tcp")
+                    if c.laddr
+                    and c.raddr
+                    and c.laddr.port == peer_port
+                    and c.raddr.port == server_port
+                    and c.pid
+                ),
+                None,
+            )
+            if pid is None:
+                return None
+            pane_pids = set()
+            for panes in getattr(self._orch, "_panes_by_project", {}).values():
+                for pane in panes.values():
+                    session = getattr(pane, "session", None)
+                    pane_pid = getattr(session, "_pid", None)
+                    if isinstance(pane_pid, int):
+                        pane_pids.add(pane_pid)
+            chain = {pid} | {p.pid for p in psutil.Process(pid).parents()}
+            return bool(chain & pane_pids)
+        except Exception:
+            return None
+
     def _caller_is_lead(self, req: dict) -> bool:
         """True if the request carries the Lead capability token. Used to gate
         sensitive read-only payloads (M3#16) without timing side-channels."""
@@ -592,6 +628,31 @@ class CliServer(QObject):
                     msg=f"unauthorized: lead-only command {self._instance_context()}",
                 )
                 return
+
+        # A raw shell pane executes text without a specialist task boundary.
+        # In a restricted project, sending commands there would let Lead route
+        # implementation around the visible specialist assignment policy.
+        if cmd in {"assign", "spawn", "send", "submit"}:
+            target_role = str(req.get("to") if cmd == "send" else req.get("role") or "")
+            if target_role.split("#", 1)[0].lower() == "shell":
+                from .lead_enforcement import lead_is_restricted
+
+                if lead_is_restricted(from_project):
+                    _log_event(
+                        "lead_policy_denied",
+                        role="lead",
+                        project=from_project,
+                        task="",
+                        tool=cmd,
+                        target="shell",
+                        reason="unscoped_shell_pane",
+                    )
+                    self._reply(
+                        sock,
+                        ok=False,
+                        msg="restricted project cannot route commands through an unscoped shell pane",
+                    )
+                    return
 
         # Layer 3 — send-as-lead guard. `send` isn't lead-only (teammates
         # message each other peer-to-peer), but a payload claiming
@@ -1883,7 +1944,57 @@ class CliServer(QObject):
                 # LIVE Lead pane gets the `[system]` broadcast this project's
                 # orchestrator instance owns.
                 team_action = req.get("action", "")
-                if team_action == "set" and from_role_norm == "lead":
+                # A restricted Lead can start a detached helper that no longer
+                # appears below its pane in the process tree. For any CLI
+                # caller, never let this network route lift a protected
+                # project's Lead policy; a human can use the Settings UI.
+                from . import team_preset
+
+                try:
+                    current_policy = team_preset.current(from_project)
+                    if not current_policy.get("lead_may_implement", False):
+                        target = (
+                            team_preset.resolve(str(req.get("preset", "")), project=from_project)
+                            if team_action == "set"
+                            else team_preset.resolve(
+                                team_preset.current_preset_id(from_project), project=from_project
+                            )
+                            if team_action == "clear-override"
+                            else current_policy
+                        )
+                        if target.get("lead_may_implement", False):
+                            _log_event(
+                                "lead_policy_denied",
+                                role="lead",
+                                project=from_project,
+                                task="",
+                                tool=f"team {team_action}",
+                                target=str(
+                                    req.get("preset") or team_preset.current_preset_id(from_project)
+                                )[:80],
+                                reason="restricted_policy_unlock",
+                            )
+                            self._reply(
+                                sock,
+                                ok=False,
+                                msg="CLI cannot unlock a restricted Lead team policy; use Settings and restart Lead",
+                            )
+                            return
+                except ValueError:
+                    pass  # Unknown preset gets the normal validation error below.
+                except Exception:
+                    self._reply(sock, ok=False, msg="cannot verify team policy; refusing change")
+                    return
+                # #842: `from` and env are the caller's own claims — a Lead can
+                # clear TAKKUB_ROLE/the token and look like a human terminal.
+                # The token or the client's process ancestry decides instead;
+                # unverifiable callers are treated as panes (fail closed).
+                caller_is_agent = (
+                    from_role_norm == "lead"
+                    or self._caller_is_lead(req)
+                    or self._peer_runs_under_a_pane(sock) is not False
+                )
+                if team_action == "set" and caller_is_agent:
                     # B-M1 (round2 review 2026-09-07): the same escalation
                     # M3 above already blocks for `assign --team` — a running
                     # Lead setting the project's STANDING preset to one with

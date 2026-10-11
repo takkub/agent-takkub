@@ -63,10 +63,17 @@ def _spawn_codex_and_capture_argv(
     role: str = "codex",
     allowed_mcps: list[str] | None = None,
     output_env: dict[str, str] | None = None,
+    restricted_lead: bool | None = None,
 ):
+    from agent_takkub import lead_enforcement
     from agent_takkub import pane_tools_policy as ptp
     from agent_takkub import shared_dev_tools as sdt
     from agent_takkub.provider_config import CODEX
+
+    if restricted_lead is not None:
+        monkeypatch.setattr(
+            lead_enforcement, "lead_is_restricted", lambda _project: restricted_lead
+        )
 
     orch = _make_orchestrator(qapp, monkeypatch)
     pane = _make_codex_pane(role)
@@ -104,6 +111,7 @@ def _spawn_codex_and_capture_argv(
         patch("agent_takkub.codex_agents_md.ensure_agents_md", return_value=(True, "planted")),
         patch("agent_takkub.orchestrator.inject_user_profile_env"),
         patch("agent_takkub.mcp_bridge._codex_resolved_mcp_names", return_value=[]),
+        patch("agent_takkub.lead_enforcement.verify_codex_boundary"),
     ):
         mock_pty = MagicMock()
         mock_pty.spawn.side_effect = lambda **kw: pty_spawn_calls.append(kw)
@@ -166,21 +174,36 @@ class TestCodexArgvNetworkAccess:
             role=role,
             output_env={"TAKKUB_ARTIFACTS_DIR": artifacts, "TAKKUB_DOCS_DIR": docs},
         )
-        assert [argv[i + 1] for i, arg in enumerate(argv[:-1]) if arg == "--add-dir"] == [
-            artifacts,
-            docs,
-        ]
+        add_dirs = [argv[i + 1] for i, arg in enumerate(argv[:-1]) if arg == "--add-dir"]
+        if role == "lead":
+            assert add_dirs == []
+            profile = next(
+                value for value in argv if str(value).startswith("permissions.takkub_lead=")
+            )
+            assert artifacts.replace("\\", "/") in profile
+            assert docs.replace("\\", "/") in profile
+        else:
+            assert add_dirs == [artifacts, docs]
 
     def test_lead_spawn_uses_provider_trust_argv(self, qapp, monkeypatch, tmp_path):
         argv = _spawn_codex_and_capture_argv(qapp, monkeypatch, tmp_path, "win32", role="lead")
+        assert argv[:3] == ["codex", "--ask-for-approval", "never"]
+        assert "--dangerously-bypass-approvals-and-sandbox" not in argv
+        assert any('trust_level="trusted"' in str(value) for value in argv)
+        assert "mcp_servers={}" in argv
+        assert "features.plugins=false" in argv
+        assert not any(str(value).startswith("mcp_servers.") for value in argv)
+
+    def test_unrestricted_lead_keeps_legacy_argv(self, qapp, monkeypatch, tmp_path):
+        argv = _spawn_codex_and_capture_argv(
+            qapp, monkeypatch, tmp_path, "win32", role="lead", restricted_lead=False
+        )
         assert argv[:4] == [
             "codex",
             "--dangerously-bypass-approvals-and-sandbox",
             "--disable",
             "apps",
         ]
-        assert argv[4] == "-c"
-        assert 'trust_level="trusted"' in argv[5]
 
     def test_macos_codex_argv_opens_workspace_write_network(self, qapp, monkeypatch, tmp_path):
         argv = _spawn_codex_and_capture_argv(qapp, monkeypatch, tmp_path, "darwin")

@@ -6,10 +6,13 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 
 ### Fixed (แก้)
 
+- **pre-commit บน Windows ล้มก่อนตรวจจริง (#863):** hook ของ import-linter, pytest collect-only และ depgraph ใช้ `bash -c` ที่ quote แตกบน Windows · เปลี่ยนเป็น Python runner เดียวที่หา venv ของ main worktree และตรวจไฟล์จาก checkout ปัจจุบัน · รัน hook ทั้งสามบน Windows ผ่านแล้ว
 - **cockpit กิน RAM โตไม่หยุด (#862):** pane ที่ถูก discard ตอนซ่อนแท็บเก็บ output PTY ทุก byte ไว้ใน `_pending_writes` แบบไม่มีเพดาน · จำกัด 2M ตัวอักษร เกินแล้วเก็บครึ่งหลังที่ใหม่สุดพร้อมบรรทัดแจ้ง (ยังไม่ได้วัดยืนยันบน prod)
 - **transcript เก็บ secret ดิบ (#853):** ก่อนเขียน `*.transcript.log` ลบค่าของ env ที่ชื่อเป็น secret ทั้งของ pane และ `.env*` ใน cwd รวมทั้งรูปแบบ key ที่รู้จัก (เพิ่ม Google API key) · gap: ค่าที่ถูกตัดคร่อม 2 chunk ยังหลุดได้
 - **guard `lead_context` ไม่รับคำสั่งที่ตัวเองสั่งให้รัน (#854):** รับ PowerShell และ `2>&1` ต่อท้ายแล้ว (pipe ยังบล็อก เพราะ `| tail` จะนับว่าอ่านแล้วทั้งที่ไม่เห็นเนื้อหา) · `context read` ไม่พิมพ์ CLAUDE.md ซ้ำ 2 รอบ (71KB → 66KB)
 - **Lead โดนรบกวนด้วยข้อความ (#851 #857 #859 #861):** บรรทัด backlog รอยืนยันรวมเข้า done digest แทนการส่งแยกทุกครั้ง · digest ถึง Lead ที่ยาวไม่เกิน ~1KB ส่งตรงแทน "อ่านไฟล์นี้" (`TAKKUB_LEAD_INLINE_MAX`) · digest บอก provider/model ที่รัน pane · message ที่ค้างจากงานก่อนถูกยกเลิกตอน assign/spawn ไม่ replay ใส่ pane ใหม่และไม่ CC เข้า Lead
+- **Codex Lead แก้โค้ดเองได้ทั้งที่ policy ห้าม (#842):** restricted Codex Lead ใช้ permission profile แบบ read-only และ preflight ทดสอบ sandbox จริงก่อน spawn; ปิด MCP/plugins/apps และไม่ให้เขียน event log · restricted Lead บน provider ที่ไม่มีขอบเขตบังคับสิทธิ์จะไม่ spawn · CLI ปฏิเสธการปลด preset ที่จำกัดอยู่แล้วทุก caller · Windows codex 0.162.1 ผ่านการทดสอบเขียน scratch และปฏิเสธการเขียนไฟล์นอกสิทธิ์ · ยังต้องตรวจ live TUI, macOS, audit ของทุก denied attempt และการเริ่ม session ใหม่หลังเปลี่ยน policy ก่อนปิด issue — รายละเอียด `docs/design/2026-10-11-842-codex-lead-enforcement.md`
+- **ชุด #843–#860:** `takkub backlog` เปล่า = list (#860) · `backlog defer --reason` (#844) · `takkub wait --all` (#856) · pane อ่าน `takkub messages` ของ role ตัวเองได้ (#852) · ไม่เตือน "ไม่มี commit" กับงาน ops (#850) · guard-block ไม่นับเป็นรอบ fix-loop และ scope ไม่ใช่ deep แก้ต่อได้เลย (#855) · เตือนใบงานที่สั่ง commit ในโหมด shared (#858) · typecheck/build เดี่ยวไม่โดนบล็อกเพราะ pane อื่นทำงาน (#846) · งานเปิดเบราว์เซอร์ไม่แตก shard เป็น subagent (#847 #848) · impact evidence ผิด task บอก id ทั้งสองฝั่ง (#845) · snapshot ตอนปิดไม่ commit ไฟล์ที่ worktree อื่นค้างอยู่ (#849) · Codex ยืนยันข้อความเข้าคิวด้วย "edit last queued message" (#843)
 
 ## [v2.2.14] - 2026-10-11
 

@@ -37,9 +37,10 @@
 > แต่อ่าน pyproject ตอนรันเทส bump คร่อมกันเมื่อไหร่จะตกแบบหลอกๆ (เจอจริงตอน 1.0.79,
 > gate report 2026-08-20 16:50 — report ย้ายไป `<DATA_HOME>/runtime/qa-reports/` แล้ว #436) — รอ gate จบก่อนค่อย bump
 
-- **CI ต้องเขียวครบทุก job** (`.github/workflows/ci.yml`) — **8 matrix jobs**:
+- **CI ต้องเขียวครบทุก job** (`.github/workflows/ci.yml`) — **10 matrix jobs**:
   `lint-and-test` รัน 3 OS (`windows-latest` · `macos-latest` · `ubuntu-latest`) และ
-  `installed-gate` รัน 2 OS (`windows-latest` · `macos-latest`) และ `npm-wrapper` รัน 3 OS
+  `installed-gate` รัน 2 OS (`windows-latest` · `macos-latest`), `npm-wrapper` รัน 3 OS,
+  และ `codex-sandbox` รัน 2 OS (`windows-latest` · `macos-latest`)
   ตรวจ workflow ชื่อ `ci` ที่ตรง release commit และต้อง `completed/success` ก่อน publish
 - **installed-mode gate** (`tests/test_installed_mode_gate.py`) proves the ACTUAL packaged behavior
   (DATA_HOME/ASSETS_ROOT/CLI_BIN_DIR/pane-env/CLI wiring) works when running from a real installed
@@ -194,14 +195,14 @@ git tag vX.Y.Z && git push origin vX.Y.Z
 > หมายเหตุ: v1.0.76–78 ถูก tag ทีหลังที่ HEAD ตอนนั้น จึงไม่ได้ชี้ที่ release commit เป๊ะ
 > (`v1.0.78` → `685efc5` ไม่ใช่ `3129b74`) — ตั้งแต่ 1.0.79 เป็นต้นไป tag ที่ release commit เลย
 
-## 6. Push + รอ CI เขียวครบ 8 matrix jobs
+## 6. Push + รอ CI เขียวครบ 10 matrix jobs
 
 ```bash
 git push origin main
 gh run list --commit <release-sha> --json databaseId,name,status,conclusion
 gh run view <ci-run-id> --json headSha,status,conclusion,jobs
 # ต้องตรง release-sha และ completed/success:
-# lint-and-test (3 OS), installed-gate (Windows/macOS), npm-wrapper (3 OS)
+# lint-and-test (3 OS), installed-gate (Windows/macOS), npm-wrapper (3 OS), codex-sandbox (Windows/macOS)
 ```
 
 **ห้าม publish ก่อน CI เขียว** — ถ้า `installed-gate` แดงโดยเฉพาะ (แม้ `lint-and-test` เขียว) แปลว่า

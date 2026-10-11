@@ -4893,6 +4893,11 @@ def cmd_context(args: argparse.Namespace) -> dict:
     if args.context_action == "status":
         state = lead_readiness.read_state(path)
         error = lead_readiness.reason(path, project=_from_project())
+        try:
+            _rev, _docs, _facts = lead_readiness._sources(state["project"], state["cwd"])
+            native_gate, _gap = lead_readiness.enforcement_status(state, _facts)
+        except Exception:
+            native_gate = "unknown"
         _utf8_print(
             json.dumps(
                 {
@@ -4902,7 +4907,7 @@ def cmd_context(args: argparse.Namespace) -> dict:
                     "revision": state["revision"],
                     "ready": not error,
                     "reason": error,
-                    "native_tool_gate": state["native_tool_gate"],
+                    "native_tool_gate": native_gate,
                 },
                 ensure_ascii=False,
                 indent=2,
