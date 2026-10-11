@@ -266,9 +266,11 @@ class TestStaleSendsRetired:
         role_messages.append_queued_no_pane(tmp_path, "p", to_role="fe", from_role="lead", body="q")
         o = Orchestrator.__new__(Orchestrator)
         note = o._queued_no_pane_notice("p", "fe")
-        assert "message ค้าง 1" in note
+        # #851: the queued one is retired at assign, never replayed
+        assert "ยกเลิก 1 message ที่ค้างจากงานก่อน" in note
         assert "ยกเลิก 2 ข้อความ" in note
-        assert "--drop" in note
+        recs = {r["body"]: r for r in role_messages.read(tmp_path, "p")}
+        assert recs["q"]["abandoned_reason"] == "dropped_stale_task_boundary"
 
     def test_cli_badge_for_new_reasons(self) -> None:
         lines = role_messages.format_for_cli(

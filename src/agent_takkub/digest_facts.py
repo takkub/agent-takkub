@@ -89,6 +89,9 @@ class DigestFacts:
     # Only ever computed for a shared-tree pane (worktree isolation has its
     # own dirty tree, nothing to attribute to a sibling); see `_uncommitted_bit`.
     uncommitted_unrelated: bool = False
+    # #859: which CLI actually ran the pane ("codex", "claude/opus" ...) — a
+    # role is served by different providers across a day (failover, reroute).
+    provider: str | None = None
 
 
 # #470: a "0 files touched" digest line reads as "nothing happened" — true
@@ -248,6 +251,8 @@ def format_digest_fact_line(facts: DigestFacts, *, stamp: str = "") -> str:
     context/pointer, never identity.
     """
     head = f"[{facts.role}] {facts.verdict}"
+    if facts.provider:
+        head = f"[{facts.role} · {facts.provider}] {facts.verdict}"
     if facts.ref:
         head += f" [ref {facts.ref}]"
     bits = [head]

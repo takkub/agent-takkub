@@ -4,6 +4,13 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 
 ## [vNEXT]
 
+### Fixed (แก้)
+
+- **cockpit กิน RAM โตไม่หยุด (#862):** pane ที่ถูก discard ตอนซ่อนแท็บเก็บ output PTY ทุก byte ไว้ใน `_pending_writes` แบบไม่มีเพดาน · จำกัด 2M ตัวอักษร เกินแล้วเก็บครึ่งหลังที่ใหม่สุดพร้อมบรรทัดแจ้ง (ยังไม่ได้วัดยืนยันบน prod)
+- **transcript เก็บ secret ดิบ (#853):** ก่อนเขียน `*.transcript.log` ลบค่าของ env ที่ชื่อเป็น secret ทั้งของ pane และ `.env*` ใน cwd รวมทั้งรูปแบบ key ที่รู้จัก (เพิ่ม Google API key) · gap: ค่าที่ถูกตัดคร่อม 2 chunk ยังหลุดได้
+- **guard `lead_context` ไม่รับคำสั่งที่ตัวเองสั่งให้รัน (#854):** รับ PowerShell และ `2>&1` ต่อท้ายแล้ว (pipe ยังบล็อก เพราะ `| tail` จะนับว่าอ่านแล้วทั้งที่ไม่เห็นเนื้อหา) · `context read` ไม่พิมพ์ CLAUDE.md ซ้ำ 2 รอบ (71KB → 66KB)
+- **Lead โดนรบกวนด้วยข้อความ (#851 #857 #859 #861):** บรรทัด backlog รอยืนยันรวมเข้า done digest แทนการส่งแยกทุกครั้ง · digest ถึง Lead ที่ยาวไม่เกิน ~1KB ส่งตรงแทน "อ่านไฟล์นี้" (`TAKKUB_LEAD_INLINE_MAX`) · digest บอก provider/model ที่รัน pane · message ที่ค้างจากงานก่อนถูกยกเลิกตอน assign/spawn ไม่ replay ใส่ pane ใหม่และไม่ CC เข้า Lead
+
 ## [v2.2.14] - 2026-10-11
 
 ### Fixed (แก้)

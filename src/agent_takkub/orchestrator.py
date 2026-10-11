@@ -3606,10 +3606,21 @@ class Orchestrator(
             return ""
         note = ""
         if pending:
+            # #851: queued before this assign = an earlier task's message;
+            # retire now instead of replaying it into the new pane.
+            for rec in pending:
+                role_messages.mark_abandoned(
+                    RUNTIME_DIR, project_ns, rec.get("id", ""), "dropped_stale_task_boundary"
+                )
+            _log_event(
+                "send_queued_no_pane_dropped_stale",
+                project=project_ns,
+                role=role_name,
+                count=len(pending),
+            )
             note = (
-                f"⚠️ มี message ค้าง {len(pending)} ตัวจากรอบก่อนของ '{role_name}' "
-                f"จะถูกส่งให้ pane ใหม่ด้วย (mark stale) — ดูด้วย `takkub messages --role {role_name}`"
-                f" · ถ้าไม่เกี่ยวกับงานนี้: `takkub messages --role {role_name} --drop`"
+                f"ℹ️ ยกเลิก {len(pending)} message ที่ค้างจากงานก่อนของ '{role_name}' "
+                f"(ไม่ส่งให้ pane ใหม่) — ดูได้ที่ `takkub messages --role {role_name}`"
             )
         if superseded:
             note += ("\n" if note else "") + (
@@ -5603,6 +5614,7 @@ class Orchestrator(
         ps = self._pane_state.get(_exit_key(project_ns, role_name))
         current_task_id = ps.task_id if ps else None
         delivered = 0
+        dropped_stale = 0
         for rec in pending:
             # A message received during quota handover still belongs to the
             # same assignment. Only a different task makes it stale (#841).
@@ -5612,35 +5624,39 @@ class Orchestrator(
             if not isinstance(body, str):
                 role_messages.mark_abandoned(RUNTIME_DIR, project_ns, msg_id, "empty body")
                 continue
-            delivery_body = (
-                "[stale — ส่งไว้ก่อน task ปัจจุบัน ตอน pane เดิมปิดอยู่ · "
-                "ถ้าไม่เกี่ยวกับ task นี้ให้ข้าม ห้ามตอบแล้ว done]\n" + body
-                if stale
-                else body
-            )
-            ok, _detail = self.send(
-                role_name, delivery_body, from_role=rec.get("from"), project=project_ns
-            )
+            if stale:
+                # #851: a message for an earlier task is dropped, not replayed
+                # into the new pane with a "stale" label and CC'd to Lead —
+                # the label never stopped a pane from answering it (#473), and
+                # every CC cost Lead a turn. It stays readable as abandoned in
+                # `takkub messages`.
+                role_messages.mark_abandoned(
+                    RUNTIME_DIR, project_ns, msg_id, "dropped_stale_task_boundary"
+                )
+                dropped_stale += 1
+                continue
+            ok, _detail = self.send(role_name, body, from_role=rec.get("from"), project=project_ns)
             if not ok:
                 continue  # keep the durable placeholder until a write succeeds
             # #303: `send()` above already appended a fresh "sent" record for
             # the real delivery — mark the queued placeholder terminal so it
             # is never picked up again, without double-counting it as a
             # second live delivery attempt.
-            role_messages.mark_abandoned(
-                RUNTIME_DIR,
-                project_ns,
-                msg_id,
-                "flushed_stale_after_new_assign" if stale else "flushed_after_spawn",
-            )
+            role_messages.mark_abandoned(RUNTIME_DIR, project_ns, msg_id, "flushed_after_spawn")
             delivered += 1
+        if dropped_stale:
+            _log_event(
+                "send_queued_no_pane_dropped_stale",
+                project=project_ns,
+                role=role_name,
+                count=dropped_stale,
+            )
         if delivered:
             _log_event(
                 "send_queued_no_pane_flushed",
                 project=project_ns,
                 role=role_name,
                 count=delivered,
-                stale=stale,
             )
 
     def _redact_forwarded_text(
@@ -9058,6 +9074,7 @@ class Orchestrator(
             )
         # A successful report moves its card to review. FAILED/blocked reports
         # leave it active for the fix loop or an owner decision.
+        backlog_review_line = None
         if not failed and not blocked:
             try:
                 from . import backlog
@@ -9077,20 +9094,12 @@ class Orchestrator(
             else:
                 if review_card and review_card.get("status") == "review":
                     card_id = review_card["id"]
-                    try:
-                        self._notify_lead(
-                            project_ns,
-                            f"📋 backlog [{card_id}] รอยืนยันหลัง {from_role} done — "
-                            f"ตรวจงานแล้วปิดด้วย `takkub backlog done {card_id}` "
-                            "หรือระบุสถานะอื่นหากงานยังไม่เสร็จ",
-                            from_role=from_role,
-                            note="backlog_review",
-                            kind="backlog-review",
-                        )
-                    except Exception:
-                        _log_event(
-                            "backlog_review_notice_error", role=from_role, project=project_ns
-                        )
+                    # #861: folded into the done notice below rather than a
+                    # second Lead turn per done (19 such nags in one session).
+                    backlog_review_line = (
+                        f"📋 backlog [{card_id}] รอยืนยัน — "
+                        f"ตรวจแล้วปิดด้วย `takkub backlog done {card_id}`"
+                    )
         # #244: the issue/task ref shown to Lead must come from the ORIGINAL
         # assign spec Lead itself sent (last_assigned_task), never from the
         # agent's own done() note — an agent has mistyped the issue number
@@ -9420,6 +9429,16 @@ class Orchestrator(
                     investigate_task=investigate_task,
                 )
                 _worktree_digest_precomputed = None
+            # #859: name the CLI that actually ran this pane (+ spawn model).
+            _pane_model = getattr(pane, "model", None)
+            _provider = getattr(_pane_model, "provider_name", None)
+            if digest_facts is not None and isinstance(_provider, str) and _provider:
+                _spawn_model = getattr(_pane_model, "spawn_model", None)
+                if isinstance(_spawn_model, str) and _spawn_model:
+                    _provider = f"{_provider}/{_spawn_model}"
+                from dataclasses import replace as _replace_facts
+
+                digest_facts = _replace_facts(digest_facts, provider=_provider)
             # #739/#740: a done that belongs to the PREVIOUS task (quoting its
             # id, reusing its report, or arriving seconds after an
             # implementation assign with nothing changed) must not close this
@@ -9591,6 +9610,28 @@ class Orchestrator(
             )
             notice = f"{notice}\n{merge_line}"
             merge_folded_into_notice = True
+
+        if backlog_review_line:
+            if will_send_notice:
+                notice = f"{notice}\n{backlog_review_line}"
+                if digest_facts is not None:
+                    from dataclasses import replace
+
+                    digest_facts = replace(
+                        digest_facts,
+                        headline=f"{digest_facts.headline} — {backlog_review_line}",
+                    )
+            else:
+                try:
+                    self._notify_lead(
+                        project_ns,
+                        f"{backlog_review_line} (หลัง {from_role} done)",
+                        from_role=from_role,
+                        note="backlog_review",
+                        kind="backlog-review",
+                    )
+                except Exception:
+                    _log_event("backlog_review_notice_error", role=from_role, project=project_ns)
 
         if will_send_notice:
             # Route through _notify_lead so concurrent done notices are serialised

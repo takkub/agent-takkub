@@ -1503,13 +1503,25 @@ def _task_handoff_pointer(
     return pointer, forward_path
 
 
-def _message_handoff_pointer(message: str, project_ns: str, role_name: str) -> str:
+def _lead_inline_threshold() -> int:
+    """#857: Lead notices (done/FAILED digests, worktree-ready) are mostly a
+    few short lines; at 400 chars nearly every one became a file pointer that
+    cost Lead a Read per notification. Inline up to ~1KB instead."""
+    try:
+        return max(TASK_HANDOFF_THRESHOLD, int(os.environ.get("TAKKUB_LEAD_INLINE_MAX", "1000")))
+    except ValueError:
+        return 1000
+
+
+def _message_handoff_pointer(
+    message: str, project_ns: str, role_name: str, *, threshold: int | None = None
+) -> str:
     """Keep long agent-to-agent payloads in Markdown, including shell-reader CLIs.
 
     A failed file write must never silently revert to a huge inline paste.
     Callers retain their durable queue or report a delivery failure instead.
     """
-    if len(message) < TASK_HANDOFF_THRESHOLD:
+    if len(message) < (threshold or TASK_HANDOFF_THRESHOLD):
         return message
     _, path = _task_handoff_pointer(message, project_ns, role_name, force=True)
     if path is None:

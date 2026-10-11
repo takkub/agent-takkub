@@ -360,6 +360,8 @@ def format_for_cli(records: list[dict], *, limit: int = 20) -> list[str]:
             badge = "🗑️ หมดอายุ (>12h) ถูกยกเลิก"
         elif state == "abandoned" and rec.get("abandoned_reason") == "superseded_by_assign":
             badge = "🗑️ งานเก่า — ยกเลิกตอน assign ใหม่ (#705)"
+        elif state == "abandoned" and rec.get("abandoned_reason") == "dropped_stale_task_boundary":
+            badge = "🗑️ ค้างจากงานก่อน — ไม่ส่งให้ pane ใหม่ (#851)"
         elif state == "abandoned" and rec.get("abandoned_reason") == "dropped_by_lead":
             badge = "🗑️ Lead ยกเลิก (--drop)"
         else:

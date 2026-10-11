@@ -72,6 +72,18 @@ class TestTaskHandoffPointer:
         with pytest.raises(OSError, match="message was not sent"):
             _message_handoff_pointer("full report " * 100, TEST_PROJECT, "lead")
 
+    def test_lead_digest_under_1kb_stays_inline_857(self, monkeypatch) -> None:
+        from agent_takkub.orchestrator_text import _lead_inline_threshold
+
+        monkeypatch.delenv("TAKKUB_LEAD_INLINE_MAX", raising=False)
+        digest = "• [backend] done · 0 commit ahead\n   ↳ fixed\n" * 15  # ~700 chars
+        assert TASK_HANDOFF_THRESHOLD < len(digest) < _lead_inline_threshold()
+        out = _message_handoff_pointer(
+            digest, TEST_PROJECT, "lead", threshold=_lead_inline_threshold()
+        )
+        assert out == digest
+        assert _message_handoff_pointer(digest, TEST_PROJECT, "backend") != digest
+
     def test_short_task_pastes_directly(self) -> None:
         task = "[ROLE: backend] add a health check endpoint"
         assert len(task) < TASK_HANDOFF_THRESHOLD

@@ -418,6 +418,33 @@ class TestOpsTaskWiring:
         assert facts.files_touched == 0
         assert facts.ops_task is True
 
+    def test_backlog_review_folded_into_done_notice_861(self, orch, monkeypatch):
+        from agent_takkub import backlog
+
+        proj = "proj"
+        _register_pane(orch, LEAD.name, proj, _make_alive_session())
+        _register_pane(orch, "devops", proj, _make_alive_session(), cwd="/repo/api")
+        orch._pane_state[f"{proj}::devops"] = PaneState(
+            last_assigned_task="deploy to prod",
+            worktree=None,
+            assign_base_sha="abc123",
+            assign_git_root="/repo",
+            assign_dirty_snapshot={},
+        )
+        monkeypatch.setattr(wm_mod, "WorktreeManager", lambda *a, **k: self._ZeroDiffFake())
+        monkeypatch.setattr(
+            backlog, "on_ledger_done", lambda *a, **k: {"id": "abcd1234", "status": "review"}
+        )
+        captured: list[tuple[str, dict]] = []
+        orch._notify_lead = lambda ns, notice, **kw: captured.append((notice, kw))  # type: ignore[assignment]
+
+        orch.done("devops", note="Deployed to VPS", project=proj)
+
+        assert [kw.get("kind") for _n, kw in captured] == ["done"]
+        notice, kw = captured[0]
+        assert "takkub backlog done abcd1234" in notice
+        assert "abcd1234" in kw["digest_facts"].headline
+
     def test_backend_role_zero_files_without_ops_keywords_not_flagged(self, orch, monkeypatch):
         proj = "proj"
         _register_pane(orch, LEAD.name, proj, _make_alive_session())

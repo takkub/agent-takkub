@@ -75,6 +75,11 @@ class TestInvestigateTaskZeroFiles:
 
 
 class TestFormatDigestFactLine:
+    def test_provider_named_in_head_859(self):
+        line = format_digest_fact_line(DigestFacts(role="frontend", provider="codex/gpt-6.1"))
+        assert line.startswith("• [frontend · codex/gpt-6.1] done")
+        assert format_digest_fact_line(DigestFacts(role="frontend")).startswith("• [frontend] done")
+
     def test_worktree_clean_merge_renders_full_table(self):
         facts = DigestFacts(
             role="backend",

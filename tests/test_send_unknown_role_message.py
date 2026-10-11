@@ -221,9 +221,7 @@ class TestQueuedMessageStaleAcrossAssign:
     real task as done with zero work. A flushed message must say clearly
     when it predates the task the pane was actually just given."""
 
-    def test_flush_marks_stale_and_prefixes_body_when_new_task_assigned_since_queueing(
-        self, orch: Orchestrator
-    ) -> None:
+    def test_flush_drops_message_queued_before_a_new_assign_851(self, orch: Orchestrator) -> None:
         from agent_takkub import role_messages
 
         orch.send("backend", "old clarification", from_role="lead", project="p")
@@ -237,12 +235,11 @@ class TestQueuedMessageStaleAcrossAssign:
         orch._flush_queued_no_pane_messages("p", "backend")
 
         all_records = role_messages.read(orch_mod.RUNTIME_DIR, "p", role="backend")
-        sent = next(r for r in all_records if r["state"] == "sent")
-        assert "stale" in sent["body"].lower()
-        assert "old clarification" in sent["body"]
-        assert "ห้ามตอบแล้ว done" in sent["body"]
+        # #851: never replayed into the new pane (nor CC'd to Lead)
+        assert not any(r["state"] == "sent" for r in all_records)
+        pane.session.write.assert_not_called()
         abandoned = next(r for r in all_records if r["state"] == "abandoned")
-        assert abandoned["abandoned_reason"] == "flushed_stale_after_new_assign"
+        assert abandoned["abandoned_reason"] == "dropped_stale_task_boundary"
 
     def test_flush_delivers_unmodified_when_no_new_assign_happened(
         self, orch: Orchestrator

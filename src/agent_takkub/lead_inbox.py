@@ -60,6 +60,7 @@ from .lead_draft_state import (
 from .orchestrator_text import (
     _enter_delay_ms,
     _exit_key,
+    _lead_inline_threshold,
     _log_event,
     _message_handoff_pointer,
     _notice_fingerprint,
@@ -5247,7 +5248,11 @@ class LeadInboxMixin:
             os.environ.get("TAKKUB_TASK_DELIVERY_TTL_SEC", "30")
         )
         try:
-            payload = _paste_payload(_message_handoff_pointer(body, project_ns, "lead"))
+            payload = _paste_payload(
+                _message_handoff_pointer(
+                    body, project_ns, "lead", threshold=_lead_inline_threshold()
+                )
+            )
             wrote = _safe_session_write(
                 _notify_sess,
                 payload,
@@ -5624,7 +5629,11 @@ class LeadInboxMixin:
             os.environ.get("TAKKUB_TASK_DELIVERY_TTL_SEC", "30")
         )
         try:
-            payload = _paste_payload(_message_handoff_pointer(body, project_ns, "lead"))
+            payload = _paste_payload(
+                _message_handoff_pointer(
+                    body, project_ns, "lead", threshold=_lead_inline_threshold()
+                )
+            )
             wrote = _safe_session_write(
                 sess,
                 payload,
