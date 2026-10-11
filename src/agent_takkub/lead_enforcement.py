@@ -198,7 +198,7 @@ def verify_codex_boundary(
             cwd=cwd,
             env=env,
             capture_output=True,
-            timeout=25,
+            timeout=60,
             check=False,
             creationflags=SUBPROCESS_NO_WINDOW,
         )
@@ -214,7 +214,7 @@ def verify_codex_boundary(
             cwd=cwd,
             env=env,
             capture_output=True,
-            timeout=25,
+            timeout=60,
             check=False,
             creationflags=SUBPROCESS_NO_WINDOW,
         )

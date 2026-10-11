@@ -86,6 +86,13 @@ Disposable dirs under `C:\Users\monch\takkub-sbx-probe-842`, probe = Python `ope
   `verify_codex_boundary` against a disposable project. Allowed scratch write
   and denied protected write both passed. This did not replace the running
   Cockpit installation or restart its Lead.
+* Isolated Cockpit activation with that wheel: separate `AGENT_TAKKUB_HOME`,
+  disposable project, `full` preset, Codex provider, and a real `HeadlessPane`.
+  After the initial cold-start failures, `Orchestrator.spawn("lead")` returned success and the
+  pane state recorded `lead_enforcement_mode=codex_sandbox`; the pane was then
+  terminated. The first cold-start attempt failed closed when the sandbox
+  preflight exceeded its 25-second timeout. The source timeout is now 60
+  seconds. No model call was made in either activation attempt.
 
 ## Residual gaps (not claimed as protected)
 
