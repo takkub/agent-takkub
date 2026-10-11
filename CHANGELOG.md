@@ -12,6 +12,7 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 - **สลับ account/provider แล้ว task ledger ปิดทั้งที่งานยังทำต่อ (#840):** recovery close เคยปิด assignment และทิ้ง task ID/ใบงาน/scope/backlog/budget · ตอนนี้รักษา assignment เดิมไว้ตลอด close/spawn gap และคำสั่งใหม่ที่เข้าระหว่างสลับยังผูกกับ task เดิม
 - **ตัวใหม่หลัง quota handover หลุดจากนโยบาย cockpit (#841):** direct handover ส่ง fallback context ที่เกิดตอน spawn ด้วย และล้าง pending policy เฉพาะเมื่อยืนยันการรับแล้ว · Lead takeover ต้องอ่าน `takkub context read`, ตรวจ context/team status และรักษาโหมด solo-lead/auto/full ก่อนทำงานต่อ · เก็บคำสั่งจากผู้ใช้ไว้หาก session เปลี่ยนก่อนยืนยันการรับ
 - **ข้อจำกัดของ provider แสดงชัดเจน:** Gemini/agy ยังใช้ข้อความใหม่หลังจบ turn และ Cursor ยังไม่ได้ยืนยัน steering แบบ live; `takkub send` แจ้งข้อจำกัดขณะ pane busy · การรับเข้า CLI ไม่ใช่หลักฐานว่า model ใช้คำสั่งแล้ว
+- **boot migration deadline ชนกับ worker completion แล้ว QTimer รั่ว (CI macOS 2.2.14):** deadline ของ boot gate (#640) ออกจากลูปได้ทั้งที่ `resultReady` ของ migration worker ยังค้างในคิว ทำให้ `_on_migration_done` — จุดเดียวที่หยุด `_migrate_throttle` (120 ms) — ไม่ได้รัน และ timer ค้างยิงใส่ wizard ที่ไม่มีเจ้าของ · `release_workers` (hook "เลิกฟัง" เดียวของ gate) เรียก `shutdown_timers()` (#344/#345) เพื่อปลดอาวุธ throttle ก่อน disconnect worker พร้อม regression test
 
 ## [v2.2.13] - 2026-10-10
 
