@@ -100,8 +100,10 @@ Disposable dirs under `C:\Users\monch\takkub-sbx-probe-842`, probe = Python `ope
 * **Denied-attempt audit**: structured events are emitted at session exit for
   recognized Codex tool failures. It is not a guaranteed record of every
   denied operation: a missing session ID, missing/truncated rollout or a new
-  error format can omit an event. Attribution requires the exact Codex session
-  ID and cwd; the collector does not guess from another pane's newest rollout.
+  error format can omit an event. Attribution uses the exact Codex session ID
+  and cwd where available. For a new session without an ID yet, it accepts a
+  rollout only when its cwd/start time match and no peer rollout exists in the
+  same window; ambiguous cases are reported as audit unavailable.
   Existing sessions do not gain this collector until restarted.
 * **Policy flips while an unrestricted Lead runs**: readiness becomes false,
   but that old process must restart to gain the OS sandbox.

@@ -3,9 +3,13 @@
 from __future__ import annotations
 
 import json
+import time
+from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
+
+import pytest
 
 from agent_takkub.lead_enforcement import codex_denial_records
 from agent_takkub.spawn_engine import SpawnEngineMixin
@@ -155,3 +159,56 @@ def test_protected_lead_exit_emits_structured_denial(monkeypatch, tmp_path: Path
         )
     ]
     fake._on_session_exit.assert_called_once()
+
+
+@pytest.mark.parametrize("peer_exists", [False, True])
+def test_lead_audit_requires_unambiguous_new_codex_session(
+    monkeypatch, tmp_path: Path, peer_exists: bool
+) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    candidate = tmp_path / "candidate.jsonl"
+    peer = tmp_path / "peer.jsonl"
+    candidate.write_text("", encoding="utf-8")
+    events = []
+    monkeypatch.setattr(
+        "agent_takkub.spawn_engine._log_event",
+        lambda name, **details: events.append((name, details)),
+    )
+    monkeypatch.setattr(
+        "agent_takkub.codex_helper.resolve_newest_codex_session_for_cwd",
+        lambda *_args, **kwargs: (
+            (peer if peer_exists else None) if kwargs.get("exclude_ids") else candidate
+        ),
+    )
+    monkeypatch.setattr(
+        "agent_takkub.codex_helper.read_codex_session_meta",
+        lambda _path: {"id": "new-session", "timestamp": datetime.now(UTC).isoformat()},
+    )
+    monkeypatch.setattr(
+        "agent_takkub.lead_enforcement.codex_denial_records",
+        lambda *_args: [
+            {
+                "tool": "apply_patch",
+                "target": "sentinel.txt",
+                "reason": "patch_permission_denied",
+            }
+        ],
+    )
+    state = SimpleNamespace(
+        codex_spawn_ts=time.time() - 1000,
+        lead_enforcement_mode="codex_sandbox",
+        session_uuid=None,
+        task_id="task-42",
+    )
+    fake = SimpleNamespace(
+        _pane_state={"sample::lead": state},
+        _panes_by_project={},
+        _on_session_exit=MagicMock(),
+    )
+
+    SpawnEngineMixin._on_codex_exit(fake, 0, "lead", str(project), "sample", MagicMock())
+
+    assert events[0][0] == (
+        "lead_native_audit_unavailable" if peer_exists else "lead_native_denied"
+    )

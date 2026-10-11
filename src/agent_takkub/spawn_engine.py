@@ -4656,11 +4656,43 @@ class SpawnEngineMixin:
             # or stdout (which may contain secrets). The OS sandbox remains
             # the boundary if this best-effort audit adapter is unavailable.
             try:
-                from .codex_helper import resolve_codex_jsonl_for_cwd
+                from .codex_helper import (
+                    read_codex_session_meta,
+                    resolve_codex_jsonl_for_cwd,
+                    resolve_newest_codex_session_for_cwd,
+                )
                 from .lead_enforcement import codex_denial_records
 
                 sid = str(getattr(_ps_cx, "session_uuid", "") or "")
                 rollout = resolve_codex_jsonl_for_cwd(cwd, sid, project=project) if sid else None
+                if rollout is None and not sid and spawn_ts is not None:
+                    # Codex chooses its own session ID after launch. Accept a
+                    # rollout discovered by cwd/time only if it is the sole
+                    # parent session in the window; another pane in the same
+                    # cwd makes attribution ambiguous, so skip the audit.
+                    candidate = resolve_newest_codex_session_for_cwd(
+                        cwd, not_before=spawn_ts, created_after=spawn_ts, project=project
+                    )
+                    if candidate is not None:
+                        meta = read_codex_session_meta(candidate)
+                        candidate_id = str(meta.get("id") or meta.get("session_id") or "")
+                        raw_stamp = str(meta.get("timestamp") or "")
+                        try:
+                            started = datetime.fromisoformat(
+                                raw_stamp.replace("Z", "+00:00")
+                            ).timestamp()
+                        except ValueError:
+                            started = 0.0
+                        if candidate_id and started >= spawn_ts - 2.0:
+                            peer = resolve_newest_codex_session_for_cwd(
+                                cwd,
+                                not_before=spawn_ts,
+                                created_after=spawn_ts,
+                                exclude_ids=frozenset({candidate_id}),
+                                project=project,
+                            )
+                            if peer is None:
+                                rollout = candidate
                 if rollout is None:
                     _log_event("lead_native_audit_unavailable", role=role_name, project=project)
                 else:
