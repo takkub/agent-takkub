@@ -151,6 +151,7 @@ def _spawn_role_and_capture_argv(
     from contextlib import ExitStack
 
     monkeypatch.setenv("TAKKUB_TEAMMATE_MODEL", "claude-sonnet-5")
+    monkeypatch.setattr("agent_takkub.lead_enforcement.lead_is_restricted", lambda _p: False)
     monkeypatch.setenv("TAKKUB_TEAMMATE_EFFORT", "high")
     monkeypatch.setenv("TAKKUB_TEAMMATE_FALLBACK", "claude-haiku-4-5")
     monkeypatch.delenv("TAKKUB_TEAMMATE_DISALLOWED_TOOLS", raising=False)

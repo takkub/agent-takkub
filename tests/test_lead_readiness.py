@@ -172,3 +172,5 @@ def test_codex_lead_argv_is_read_only_base_plus_roots_842() -> None:
     assert 'extends=":read-only"' in joined
     assert '"C:/rt/docs"="write"' in joined and '"/rt/events.log"="write"' in joined
     assert 'default_permissions="takkub_lead"' in joined
+    assert '"127.0.0.1"="allow"' in joined
+    assert "features.network_proxy=true" in argv

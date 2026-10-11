@@ -49,6 +49,14 @@ def orch(qapp: QCoreApplication, tmp_env: pathlib.Path) -> Orchestrator:
 
 
 def _spawn_capture(orch: Orchestrator, role_name: str, cwd: str = "/proj") -> list[str]:
+    # Hook wiring assertions cover the explicitly unrestricted Claude Lead path.
+    with patch("agent_takkub.lead_enforcement.lead_is_restricted", return_value=False):
+        return _spawn_capture_unrestricted(orch, role_name, cwd)
+
+
+def _spawn_capture_unrestricted(
+    orch: Orchestrator, role_name: str, cwd: str = "/proj"
+) -> list[str]:
     fake_pane = MagicMock()
     fake_pane.session = None
     fake_pane.state = "empty"

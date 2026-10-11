@@ -93,7 +93,10 @@ def codex_lead_argv(write_roots: list[str]) -> list[str]:
     Replaces the platform autonomy flags (never combined with ``-s``/
     ``sandbox_workspace_write`` — Codex documents the two as exclusive)."""
     grants = ", ".join(f'{_toml_str(root)}="write"' for root in write_roots)
-    profile = f'{{extends=":read-only", filesystem={{{grants}}}, network={{enabled=true}}}}'
+    profile = (
+        f'{{extends=":read-only", filesystem={{{grants}}}, '
+        'network={enabled=true, domains={"127.0.0.1"="allow", "localhost"="allow"}}}'
+    )
     return [
         "--ask-for-approval",
         "never",
@@ -103,6 +106,8 @@ def codex_lead_argv(write_roots: list[str]) -> list[str]:
         f"permissions.{PROFILE_NAME}={profile}",
         "-c",
         f'default_permissions="{PROFILE_NAME}"',
+        "-c",
+        "features.network_proxy=true",
         "--disable",
         "apps",
     ]

@@ -61,6 +61,14 @@ def orch(qapp: QCoreApplication, monkeypatch: pytest.MonkeyPatch) -> Orchestrato
 def _spawn_capture_env(orch: Orchestrator, role_name: str) -> dict[str, str]:
     """Spawn *role_name* with blocking I/O mocked; return the env dict passed to PtySession.spawn."""
     captured: dict[str, str] = {}
+    # This fixture checks the historical unrestricted Claude Lead argv/env path.
+    with patch("agent_takkub.lead_enforcement.lead_is_restricted", return_value=False):
+        return _spawn_capture_env_unrestricted(orch, role_name, captured)
+
+
+def _spawn_capture_env_unrestricted(
+    orch: Orchestrator, role_name: str, captured: dict[str, str]
+) -> dict[str, str]:
 
     mock_session = MagicMock()
     mock_session.processExited = MagicMock()

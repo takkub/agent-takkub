@@ -1233,6 +1233,8 @@ class TestToctouRedeferEdge:
         """
         from agent_takkub.roles import LEAD
 
+        monkeypatch.setattr("agent_takkub.lead_enforcement.lead_is_restricted", lambda _p: False)
+
         orch = _make_orchestrator(qapp, monkeypatch)
         pane = MagicMock()
         pane.role = MagicMock()

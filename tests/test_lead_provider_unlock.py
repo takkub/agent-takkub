@@ -54,6 +54,9 @@ def _make_pane():
 def _spawn_lead_and_capture(
     qapp, monkeypatch, tmp_path, effective_provider, *extra_patches, **spawn_kwargs
 ):
+    # Legacy provider argv tests exercise an explicitly implementation-capable Lead.
+    # Restricted Leads are covered by the #842 enforcement tests.
+    monkeypatch.setattr("agent_takkub.lead_enforcement.lead_is_restricted", lambda _p: False)
     orch = _make_orchestrator(monkeypatch)
     orch._lead_token = "test-lead-token"
     pane = _make_pane()
