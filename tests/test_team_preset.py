@@ -27,6 +27,38 @@ def test_solo_lead_disables_all_positions_and_checker():
     assert team_preset.verify_mode(cfg) == "self"
 
 
+def test_live_lead_guard_refuses_transition_to_restricted_preset():
+    class LiveLeadGuard:
+        def check(self, project):
+            assert project == "proj"
+            return "restart active Lead"
+
+    team_preset.set_current("solo-lead", "proj")
+    guard = LiveLeadGuard()
+    team_preset.register_restriction_guard(guard.check)
+
+    with pytest.raises(ValueError, match="restart active Lead"):
+        team_preset.set_current("full", "proj")
+
+    assert team_preset.current("proj")["preset"] == "solo-lead"
+
+
+def test_live_lead_guard_refuses_override_clear_that_tightens_policy():
+    class LiveLeadGuard:
+        def check(self, _project):
+            return "restart active Lead"
+
+    team_preset.set_current("full", "proj")
+    team_preset.set_override("solo-lead", "proj")
+    guard = LiveLeadGuard()
+    team_preset.register_restriction_guard(guard.check)
+
+    with pytest.raises(ValueError, match="restart active Lead"):
+        team_preset.clear_override("proj")
+
+    assert team_preset.current("proj")["preset"] == "solo-lead"
+
+
 def test_pair_checker_is_reviewer():
     team_preset.set_current("pair", "proj")
     cfg = team_preset.current("proj")

@@ -56,9 +56,38 @@ from __future__ import annotations
 
 import json
 import re
+import weakref
 from pathlib import Path
 
 from .config import SETTINGS_HOME as _BASE_DIR
+
+_restriction_guards: list[weakref.WeakMethod] = []
+
+
+def register_restriction_guard(callback) -> None:
+    """Register a live Cockpit's check before policy tightens for its Lead."""
+    _restriction_guards[:] = [ref for ref in _restriction_guards if ref() is not None]
+    _restriction_guards.append(weakref.WeakMethod(callback))
+
+
+def _check_restriction_transition(old: dict, new: dict, project: str | None) -> None:
+    old_id = old.get("override") or old.get("preset") or _DEFAULT_PRESET
+    new_id = new.get("override") or new.get("preset") or _DEFAULT_PRESET
+    old_id = old_id if old_id in PRESET_IDS else _DEFAULT_PRESET
+    new_id = new_id if new_id in PRESET_IDS else _DEFAULT_PRESET
+    before = _resolve(old_id, project, old)
+    after = _resolve(new_id, project, new)
+    if not before["lead_may_implement"] or after["lead_may_implement"]:
+        return
+    for ref in list(_restriction_guards):
+        guard = ref()
+        if guard is None:
+            _restriction_guards.remove(ref)
+            continue
+        reason = guard(project)
+        if reason:
+            raise ValueError(reason)
+
 
 # ─────────────────────────────────────────────────────────────────────
 # Preset roster & built-ins
@@ -298,6 +327,7 @@ def _load_raw(project: str | None) -> dict:
 
 
 def _save_raw(data: dict, project: str | None) -> None:
+    _check_restriction_transition(_load_raw(project), data, project)
     p = path(project)
     p.parent.mkdir(parents=True, exist_ok=True)
     tmp = p.with_suffix(p.suffix + ".tmp")

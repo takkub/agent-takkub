@@ -1835,6 +1835,9 @@ class Orchestrator(
         # access site (self._pane_state[...] etc.) work unchanged.
         # Lifecycle notes are in PaneRegistry's docstring (spawn_engine.py).
         self._registry: PaneRegistry = PaneRegistry()
+        from . import team_preset as _team_preset_guard
+
+        _team_preset_guard.register_restriction_guard(self._lead_restriction_transition_block)
         # Windows mini-browser uses a fixed CDP endpoint. The process is
         # started lazily for an eligible browser pane and stopped explicitly
         # by the GUI/headless teardown paths.
@@ -7605,6 +7608,26 @@ class Orchestrator(
         self.teamPresetChanged.emit(project_ns, cfg["preset"])
         _log_event("team_preset_set", project=project_ns, preset=cfg["preset"])
         return True, f"team preset set to {cfg['preset']}"
+
+    def _lead_restriction_transition_block(self, project: str | None) -> str:
+        """A live unrestricted Lead must restart before its policy tightens.
+
+        Its native OS permissions were fixed at process spawn. Refusing the
+        policy write avoids claiming a restricted preset while that old
+        process can still edit project files.
+        """
+        project_ns = self._resolve_project(project)
+        pane = self._panes_by_project.get(project_ns, {}).get(LEAD.name)
+        session = getattr(pane, "session", None)
+        if not session or not session.is_alive:
+            return ""
+        state = self._pane_state.get(_exit_key(project_ns, LEAD.name))
+        if getattr(state, "lead_enforcement_mode", "") == "codex_sandbox":
+            return ""
+        return (
+            "close the active unrestricted Lead before selecting a restricted "
+            "team preset, then spawn Lead again with the protected runtime"
+        )
 
     def clear_team_preset_override(self, project: str | None = None) -> tuple[bool, str]:
         """Clear this project's active per-task team-preset override (#512

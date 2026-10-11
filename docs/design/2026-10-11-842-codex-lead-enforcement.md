@@ -20,7 +20,7 @@ scripts, `spawn_agent` children) could write anywhere. Prompt text was the only 
 | T6 | policy tampering (team preset file) | writable | outside every writable root (`projects/<slug>/team_preset.json`) |
 | T7 | native subagents (`spawn_agent`) | inherit full access | inherit the sandbox (same process tree) |
 | T8 | MCP servers (run outside the sandbox) | unrestricted | disabled for restricted Codex Lead, including inherited and plugin MCPs |
-| T9 | policy flips to restricted while an unrestricted Lead is running | unnoticed | readiness reports "not enforced — restart Lead"; Lead-only CLI refuses until respawn |
+| T9 | policy flips to restricted while an unrestricted Lead is running | unnoticed | Cockpit rejects the preset/override write until that Lead is closed; readiness also reports "not enforced — restart Lead" if policy changes outside Cockpit |
 
 ## Design
 
@@ -45,6 +45,10 @@ scripts, `spawn_agent` children) could write anywhere. Prompt text was the only 
 * A restricted Codex Lead gets an empty MCP table and disabled plugins/apps.
   The CLI server rejects any `team set`/`clear-override` that would unlock an
   already restricted policy, regardless of caller claims or process ancestry.
+  The team-preset storage path also rejects a permissive-to-restricted change
+  while a live unrestricted Lead exists. This covers Settings and CLI routes
+  before the stricter policy is persisted; the operator can close Lead, change
+  the preset, then spawn a protected Lead.
 * On protected Codex session exit, the cockpit reads Codex's rollout tool
   outcomes and emits `lead_native_denied` events with role, project, task,
   tool, project-relative target and reason. It never copies command input or
@@ -105,8 +109,8 @@ Disposable dirs under `C:\Users\monch\takkub-sbx-probe-842`, probe = Python `ope
   rollout only when its cwd/start time match and no peer rollout exists in the
   same window; ambiguous cases are reported as audit unavailable.
   Existing sessions do not gain this collector until restarted.
-* **Policy flips while an unrestricted Lead runs**: readiness becomes false,
-  but that old process must restart to gain the OS sandbox.
+* **Policy changes outside Cockpit** (manual config edits): readiness becomes
+  false, but the old unrestricted process must restart to gain the OS sandbox.
 * **Command network egress**: a live Windows TUI denied one direct external
   socket attempt. The no-model `codex sandbox` subcommand still reached
   `1.1.1.1:443` with the same allowlist because it did not start the proxy.
