@@ -4656,18 +4656,11 @@ class SpawnEngineMixin:
             # or stdout (which may contain secrets). The OS sandbox remains
             # the boundary if this best-effort audit adapter is unavailable.
             try:
-                from .codex_helper import (
-                    resolve_codex_jsonl_for_cwd,
-                    resolve_newest_codex_session_for_cwd,
-                )
+                from .codex_helper import resolve_codex_jsonl_for_cwd
                 from .lead_enforcement import codex_denial_records
 
                 sid = str(getattr(_ps_cx, "session_uuid", "") or "")
                 rollout = resolve_codex_jsonl_for_cwd(cwd, sid, project=project) if sid else None
-                if rollout is None and spawn_ts is not None:
-                    rollout = resolve_newest_codex_session_for_cwd(
-                        cwd, created_after=spawn_ts, project=project
-                    )
                 if rollout is None:
                     _log_event("lead_native_audit_unavailable", role=role_name, project=project)
                 else:

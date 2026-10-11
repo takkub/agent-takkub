@@ -79,14 +79,23 @@ Disposable dirs under `C:\Users\monch\takkub-sbx-probe-842`, probe = Python `ope
   with access denied; a scratch write succeeded; Python `socket.connect_ex` to
   `1.1.1.1:443` returned 10013 (`connected=False`). The sentinel was
   `b'PROTECTED-842\r\n'` before and after. No approval was requested.
+* Isolated installed-wheel probe on Windows: built wheel at commit `99491e82`,
+  installed into a separate venv under
+  `C:\Users\monch\AppData\Local\Temp\takkub-842-install-25691011191756`,
+  verified import came from that venv's `site-packages`, then ran the shipped
+  `verify_codex_boundary` against a disposable project. Allowed scratch write
+  and denied protected write both passed. This did not replace the running
+  Cockpit installation or restart its Lead.
 
 ## Residual gaps (not claimed as protected)
 
 * **macOS**: same flags, Seatbelt backend — not run on a Mac yet.
 * **Denied-attempt audit**: structured events are emitted at session exit for
   recognized Codex tool failures. It is not a guaranteed record of every
-  denied operation: a missing/truncated rollout or a new error format can omit
-  an event. Existing sessions do not gain this collector until restarted.
+  denied operation: a missing session ID, missing/truncated rollout or a new
+  error format can omit an event. Attribution requires the exact Codex session
+  ID and cwd; the collector does not guess from another pane's newest rollout.
+  Existing sessions do not gain this collector until restarted.
 * **Policy flips while an unrestricted Lead runs**: readiness becomes false,
   but that old process must restart to gain the OS sandbox.
 * **Command network egress**: a live Windows TUI denied one direct external
