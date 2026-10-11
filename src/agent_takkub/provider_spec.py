@@ -232,6 +232,9 @@ class ProviderSpec:
     busy_queue_marker: str | None = None
     busy_queue_key: str | None = None
     busy_queue_confirm_markers: tuple[str, ...] = field(default_factory=tuple)
+    # Last live audit: Enter applies at the next tool boundary (True), only
+    # after the turn ends (False), or has not been verified (None).
+    busy_steering_supported: bool | None = None
     # #424: split one big PTY paste into chunks of this many characters with
     # `paste_chunk_delay_ms` between them (0 = write the payload in one go).
     # Only needed for a provider WITHOUT `supports_agent_file_read` (so a long
@@ -734,6 +737,7 @@ TEAMMATE_DEFAULT_BUILTIN_TOOLS: tuple[str, ...] = tuple(
 # for a future phase to consume without re-deriving them from scratch.
 claude_spec = ProviderSpec(
     name="claude",
+    busy_steering_supported=True,
     binary_names=["claude", "claude.exe"],  # config.py:542 find_claude_executable
     install_instructions=(
         "Install Anthropic Claude Code via npm: `npm install -g @anthropic-ai/claude-code`"
@@ -857,6 +861,7 @@ claude_spec = ProviderSpec(
 # concat; task_notice_preamble feeds orchestrator_text.py's codex task rewrite.
 codex_spec = ProviderSpec(
     name="codex",
+    busy_steering_supported=True,
     binary_names=["codex", "codex.cmd", "codex.bat"],
     # codex 0.154: `multi_agent` feature = stable/on by default; tools
     # spawn_agent / wait_agent / send_input / close_agent / list_agents
@@ -992,8 +997,8 @@ codex_spec = ProviderSpec(
     # incident). #809, re-probed live on 0.160 (2026-10-06): Enter mid-turn
     # now STEERS — "Messages to be submitted after next tool call", applied
     # inside the running turn — while Tab still waits for the turn to end;
-    # `takkub send` to a teammate uses Enter first (steer=True), notices to
-    # the Lead keep Tab. The strings below are lowercase because
+    # task corrections and human instructions use Enter on every retry
+    # (steer=True, #841); automatic notices may use Tab. The strings below are lowercase because
     # PtySession._ready_region() normalizes the screen to lowercase before
     # matching.
     busy_queue_marker="tab to queue message",
@@ -1169,6 +1174,7 @@ codex_spec = ProviderSpec(
 # concat.
 gemini_spec = ProviderSpec(
     name="gemini",
+    busy_steering_supported=False,
     binary_names=["agy", "agy.exe"],
     # agy 1.2.3 ships subagents (run_subagent + custom subagent frontmatter,
     # per `agy changelog`); the fan-out block tells the pane to fall back to
@@ -1407,6 +1413,7 @@ gemini_spec = ProviderSpec(
 # `opencode auth login` (or /connect in the TUI) per backend.
 opencode_spec = ProviderSpec(
     name="opencode",
+    busy_steering_supported=True,
     display_name="OpenCode",
     binary_names=["opencode", "opencode.cmd", "opencode.exe"],
     # opencode 1.18: built-in subagents `general` + `explore` via the task
@@ -2008,6 +2015,20 @@ def compact_command_for(provider: str) -> str | None:
     manual command is confirmed (see ProviderSpec.compact_command)."""
     spec = PROVIDER_REGISTRY.get(provider)
     return spec.compact_command if spec is not None else None
+
+
+def busy_steering_warning_for(provider: str) -> str:
+    """Explain a known/unknown active-turn gap without promising application.
+
+    Based on the dated live audit above, not an assumption that every CLI's
+    Enter key has Codex's behaviour. Never interrupt an executing tool here.
+    """
+    spec = PROVIDER_REGISTRY.get(provider)
+    if spec is not None and spec.busy_steering_supported is True:
+        return ""
+    if spec is not None and spec.busy_steering_supported is False:
+        return f"{provider}: active-turn steering unsupported; this CLI applies new input after the turn ends"
+    return f"{provider or 'provider'}: active-turn steering unverified; CLI receipt does not prove the instruction was applied"
 
 
 def busy_queue_marker_for(provider: str) -> str | None:

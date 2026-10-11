@@ -5543,7 +5543,13 @@ class Orchestrator(
         from . import role_messages
 
         role_messages.append_queued_no_pane(
-            RUNTIME_DIR, project_ns, to_role=to_role, from_role=from_role, body=msg, kind=kind
+            RUNTIME_DIR,
+            project_ns,
+            to_role=to_role,
+            from_role=from_role,
+            body=msg,
+            kind=kind,
+            task_id=getattr(self._pane_state.get(_exit_key(project_ns, to_role)), "task_id", None),
         )
         _log_event("send_queued_no_pane", project=project_ns, to=to_role, from_role=from_role)
         return True, (
@@ -5595,9 +5601,12 @@ class Orchestrator(
         # message was queued (a plain manual respawn/reopen with no assign
         # leaves task_id None, and the message still delivers normally).
         ps = self._pane_state.get(_exit_key(project_ns, role_name))
-        stale = bool(ps and ps.task_id)
+        current_task_id = ps.task_id if ps else None
         delivered = 0
         for rec in pending:
+            # A message received during quota handover still belongs to the
+            # same assignment. Only a different task makes it stale (#841).
+            stale = bool(current_task_id and rec.get("task_id") != current_task_id)
             body = rec.get("body")
             msg_id = rec.get("id", "")
             if not isinstance(body, str):
@@ -5609,7 +5618,11 @@ class Orchestrator(
                 if stale
                 else body
             )
-            self.send(role_name, delivery_body, from_role=rec.get("from"), project=project_ns)
+            ok, _detail = self.send(
+                role_name, delivery_body, from_role=rec.get("from"), project=project_ns
+            )
+            if not ok:
+                continue  # keep the durable placeholder until a write succeeds
             # #303: `send()` above already appended a fresh "sent" record for
             # the real delivery — mark the queued placeholder terminal so it
             # is never picked up again, without double-counting it as a
@@ -5817,18 +5830,11 @@ class Orchestrator(
 
         # #830: if Lead has pending policy context from a user-owned AGENTS.md fallback,
         # prepend it to the first message reaching Lead so policy is guaranteed delivered.
+        _pending_lead = None
         if to_role == LEAD.name:
             _pending_lead = getattr(ps_send, "pending_lead_context", None)
             if _pending_lead:
-                ps_send.pending_lead_context = None
                 msg = f"[System Cockpit Policy (delivered via fallback)]\n{_pending_lead}\n\n---\n\n{msg}"
-                _log_event(
-                    "lead_policy_delivered",
-                    role=LEAD.name,
-                    project=project_ns,
-                    provider=getattr(getattr(pane, "model", None), "provider_name", "") or "claude",
-                    delivery="first_message_fallback",
-                )
 
         # shell panes are a raw PowerShell/bash terminal, not an LLM: a
         # `[{from} → {to}] ` header would be parsed as PowerShell type
@@ -5843,7 +5849,8 @@ class Orchestrator(
         body = header + _sanitize_pane_text(msg)
         _send_sess = pane.session
         body_payload = _paste_payload(body)
-        message_expires_at = time.time() + float(
+        message_sent_ts = time.time()
+        message_expires_at = message_sent_ts + float(
             os.environ.get("TAKKUB_TASK_DELIVERY_TTL_SEC", "30")
         )
         # #277: record the message BEFORE writing it. `send` used to leave no
@@ -5874,7 +5881,7 @@ class Orchestrator(
             if hasattr(_send_sess, "last_output_monotonic")
             else None
         )
-        _safe_session_write(
+        wrote = _safe_session_write(
             _send_sess,
             body_payload,
             priority=WritePriority.TASK,
@@ -5882,6 +5889,55 @@ class Orchestrator(
             expires_at=message_expires_at,
             session_generation=send_generation,
         )
+        if not wrote:
+            from . import role_messages
+
+            role_messages.mark_abandoned(RUNTIME_DIR, project_ns, message_id, "writer_rejected")
+            return (
+                False,
+                f"{to_role} writer rejected message (id {message_id}); receipt unconfirmed",
+            )
+
+        def _on_message_settled(outcome=None):
+            stuck = bool(outcome is not None and getattr(outcome, "stuck_in_composer", False))
+            if pane.session is not _send_sess or not _send_sess.is_alive:
+                if to_role == LEAD.name and from_role in {"user", "remote"}:
+                    self._notify_lead(
+                        project_ns,
+                        raw_msg,
+                        from_role="user",
+                        queued_ts=message_sent_ts,
+                        kind="human-send-session-replaced",
+                    )
+                    from . import role_messages
+
+                    role_messages.mark_abandoned(
+                        RUNTIME_DIR, project_ns, message_id, "moved_to_lead_inbox"
+                    )
+                return
+            self._confirm_role_message(
+                project_ns,
+                message_id,
+                _send_sess,
+                write_baseline=write_baseline,
+                queue_stuck=stuck,
+                role=to_role,
+            )
+            if (
+                _pending_lead
+                and not stuck
+                and self._pane_state.get(f"{project_ns}::{to_role}") is ps_send
+                and ps_send.pending_lead_context == _pending_lead
+                and not _send_sess.is_at_ready_prompt()
+            ):
+                ps_send.pending_lead_context = None
+                _log_event(
+                    "lead_policy_delivered",
+                    role=to_role,
+                    project=project_ns,
+                    delivery="first_message_fallback",
+                )
+
         # Self-healing submit (issue #22): resend Enter if the peer message's
         # submit was swallowed mid-paste-render. Safe — a busy target isn't at
         # its ready prompt, so no resend fires into an in-flight turn.
@@ -5910,21 +5966,12 @@ class Orchestrator(
             # fires the record stays "sent", which is the honest state: bytes
             # written, receipt unproven. #721: a busy-queue submit that sticks
             # in the composer must NOT be marked delivered.
-            on_settled=lambda _o=None, p=project_ns, m=message_id, s=_send_sess, b=write_baseline, r=to_role: (
-                self._confirm_role_message(
-                    p,
-                    m,
-                    s,
-                    write_baseline=b,
-                    queue_stuck=bool(_o is not None and getattr(_o, "stuck_in_composer", False)),
-                    role=r,
-                )
-            ),
+            on_settled=_on_message_settled,
             expires_at=message_expires_at,
             # #809: a message INTO a working teammate is a revision of its
             # active task — steer the live turn, don't park it until the turn
-            # ends. Messages to the Lead stay queued (informational).
-            steer=to_role != LEAD.name,
+            # ends. Human instructions to Lead have the same priority.
+            steer=to_role != LEAD.name or from_role in {"user", "remote"},
         )
 
         # Record delivery time for stall detection: receiving a message counts
@@ -6001,9 +6048,19 @@ class Orchestrator(
         # happened at this point — the pane may still be booting, mid-turn, or
         # about to be respawned out from under the paste. The record above is
         # what turns that from an unanswerable question into a lookup.
+        steering_warning = ""
+        if (
+            to_role != LEAD.name or from_role in {"user", "remote"}
+        ) and not _send_sess.is_at_ready_prompt():
+            from .provider_spec import busy_steering_warning_for
+
+            target_provider = getattr(getattr(pane, "model", None), "provider_name", "")
+            if isinstance(target_provider, str):
+                steering_warning = busy_steering_warning_for(target_provider)
         return True, (
             f"queued to {to_role} (id {message_id}) — "
             f"ยืนยันว่าถึงมือจริงไหมด้วย `takkub messages --role {to_role}`"
+            + (f" · {steering_warning}" if steering_warning else "")
         )
 
     def push_report(
@@ -6279,9 +6336,9 @@ class Orchestrator(
                 project_ns,
                 (
                     f"⚠️ [send-stuck] ข้อความไปยัง {role or 'pane'} ไม่ถูก submit เนื่องจาก pane "
-                    f"ยัง busy และ codex ต้องการ Tab เพื่อ queue (Enter ไม่ส่งตอน busy) แต่ยัง "
-                    f"ไม่ยืนยันเข้าคิว — ข้อความค้างเป็น draft ในช่องพิมพ์ · เปิด pane นั้นแล้วกด "
-                    f"Tab เพื่อ queue เอง (issue #721) · ตรวจด้วย `takkub messages --role "
+                    f"ยังไม่ยืนยันการรับข้อความ — อาจค้างเป็น draft ในช่องพิมพ์ · ตรวจ pane "
+                    f"และความสามารถในการรับคำสั่งระหว่างทำงานของ provider ก่อนส่งใหม่ "
+                    f"(issue #841) · ตรวจด้วย `takkub messages --role "
                     f"{role or ''}`"
                 ),
                 from_role="system",
@@ -6993,7 +7050,9 @@ class Orchestrator(
         # its open row to "closed" (abandoned). The done()→auto-close 2.5s later
         # is a no-op here since done() already popped the state (and already
         # flipped the row to ok/fail).
-        if _ps_close is not None:
+        # A quota/provider recovery continues this assignment in a new CLI;
+        # closing the transport must not abandon its durable task (#840/#841).
+        if _ps_close is not None and not recovery_close:
             try:
                 from .task_ledger import mark_done
 

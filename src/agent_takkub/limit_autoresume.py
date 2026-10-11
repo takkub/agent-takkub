@@ -637,8 +637,19 @@ def _lead_provider_takeover_brief(
             else f"The previous Lead ({hit_provider}) hit its quota. "
         )
         + f"You are the replacement Lead on {new_provider}; continue coordinating the same unfinished work.",
-        "This is a fresh CLI session. Read the managed project context first, then "
-        "use the sources below before deciding or assigning work.",
+        f"You are still the agent-takkub Lead for project {project}. Only the account/provider "
+        "has changed; your cockpit role, unfinished tasks and team policy have not. "
+        "This is a fresh CLI session, so before substantive action run `takkub context read` "
+        "and read its complete output, then `takkub context status` and `takkub team status`. "
+        "If bootstrap fails, stop substantive work and report the actual failure; use "
+        "`takkub doctor` for diagnostics rather than continuing as an independent coding agent.",
+        "Honor the effective team setting: solo-lead permits direct implementation and "
+        "self-verification; auto follows task sizing; full delegates through enabled visible "
+        "positions using `takkub assign --mode pane`. Do not change the team setting or "
+        "substitute provider-native subagents for requested cockpit positions. Inspect "
+        "`takkub list`, `takkub inbox` and the sources below before deciding or assigning work. "
+        "Specialists report with `takkub progress` / `takkub done`; Lead coordinates and "
+        "must not call `takkub done` as a specialist or silently duplicate an active task.",
     ]
     transcript = getattr(pane, "_transcript_path", None) if pane is not None else None
     if isinstance(transcript, str) and transcript:
@@ -1009,6 +1020,22 @@ class AutoResumeMixin:
         snap_assign_dirty_snapshot = ps.assign_dirty_snapshot
         snap_assign_non_git = bool(ps.assign_non_git)
         snap_distinct_from = ps.distinct_from
+        # This is the same registered assignment, not a fresh assign. Losing
+        # its identity/scope here disconnects delivery and done from the
+        # durable ledger, and resets its work budget on every quota switch.
+        snap_assignment = {
+            name: getattr(ps, name)
+            for name in (
+                "task_id",
+                "last_assigned_task_file",
+                "last_assigned_scope",
+                "backlog_id",
+                "assign_ts",
+                "budget_task_text",
+                "task_token_total",
+                "task_spec_confirmation_digest",
+            )
+        }
         # A CLI-specific model/effort from the exhausted provider can make
         # the replacement fail at launch (e.g. Claude's model sent to Codex).
         # Same-provider manual replacement may keep those explicit choices.
@@ -1091,7 +1118,11 @@ class AutoResumeMixin:
         # close() pops PaneState. Keep the handover latch on the fresh state
         # until the timer runs, so another × click cannot queue a second
         # replacement while the old Lead is shutting down.
-        self._ps(key).quota_reroute_pending = True
+        recovering = self._ps(key)
+        recovering.quota_reroute_pending = True
+        recovering.last_assigned_task = task
+        for name, value in snap_assignment.items():
+            setattr(recovering, name, value)
         if is_lead and not manual:
             try:
                 self.leadUnavailable.emit(
@@ -1109,6 +1140,8 @@ class AutoResumeMixin:
             _ps_r.model_override = snap_model_override
             _ps_r.effort_override = snap_effort_override
             _ps_r.last_assigned_task = task
+            for name, value in snap_assignment.items():
+                setattr(_ps_r, name, value)
             _ps_r.quota_reroute_count = reroute_count
             _ps_r.quota_reroute_from = "" if manual else hit_provider
             _ps_r.distinct_from = snap_distinct_from

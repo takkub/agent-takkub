@@ -804,12 +804,14 @@ def _delayed_enter_verified(
     the not-ready branch to a pending draft, so it settled in ~1s without a
     single Enter resend (codex task stuck in the composer, #819).
 
-    ``steer`` (#809): in busy-queue mode, submit with Enter first — codex
+    ``steer`` (#809/#841): in busy-queue mode, submit with Enter — codex
     0.160 (proven live 2026-10-06) takes Enter mid-turn as STEER ("Messages
     to be submitted after next tool call", applied inside the running turn)
     while its queue key holds the message until the turn ENDS. A revision
-    sent to a working pane must steer; if no confirm shows (older codex
-    left Enter as a draft, #721) the retries fall back to the queue key.
+    sent to a working pane must steer. Retry Enter without silently moving a
+    correction to the turn-end queue; clients that leave Enter as a draft
+    surface a stuck delivery instead. Some CLIs accept input only for a later
+    turn. Submission evidence does not prove the model applied it.
 
     Sends the submitting CR after ``delay_ms`` (same as `_delayed_enter`), then
     ``_SUBMIT_VERIFY_GRACE_MS`` later checks `is_at_ready_prompt()`. If the pane
@@ -942,20 +944,15 @@ def _delayed_enter_verified(
         else 0.0
     ]
 
-    _steer_tried = [False]  # #809: Enter-to-steer is tried once per delivery
-
     def _send_then_verify(remaining: int, busy_remaining: int) -> None:
         if pane.session is not session:
             _settled()
             return
-        # #721: a busy codex-style pane won't submit with Enter — it needs the
-        # provider's busy-queue key (Tab). Pick the key per-write so a pane
-        # that transitions busy/marker mid-chain switches key with it.
-        # #809: a steer delivery tries Enter once first (steer the live turn).
+        # #841: every retry of a correction must retain its steering intent.
+        # Automatic notices may use the provider's turn-end queue key.
         _submit_key = b"\r"
         if _busy_queue_mode_now():
-            if steer and not _steer_tried[0]:
-                _steer_tried[0] = True
+            if steer:
                 _log_verify_decision(
                     "busy_steer_enter", session=session, payload=payload, is_ready=False
                 )
@@ -1032,17 +1029,31 @@ def _delayed_enter_verified(
                 # #721/#831: if the message is already confirmed in the provider's queue
                 # (e.g. agy "Press up to edit queued messages" or Codex "Queued follow-up inputs"),
                 # verify that immediately without additional resends.
-                if _shows_queue_confirm():
+                queue_confirm = _shows_queue_confirm()
+                pending_draft = False
+                if queue_confirm and payload is not None:
+                    try:
+                        # A queued entry echoes its text near the composer.
+                        # With queue chrome visible, inspect actual composer
+                        # content rather than matching that historical echo.
+                        pending_draft = session.shows_pending_input("") is True
+                    except Exception:
+                        pass
+                # Existing queue chrome can belong to an earlier message. It
+                # cannot acknowledge a new paste still sitting in the composer.
+                if queue_confirm and not pending_draft:
                     _log_verify_decision(
-                        "queued_confirm",
+                        "steer_submit_confirm" if steer else "queued_confirm",
                         session=session,
                         payload=payload,
                         is_ready=False,
                         shows_pending=True,
                     )
-                    if on_queued is not None:
+                    if on_queued is not None and not steer:
                         on_queued()
-                    _settled(SubmitSettleOutcome(queue_submit_used=True, stuck_in_composer=False))
+                    _settled(
+                        SubmitSettleOutcome(queue_submit_used=not steer, stuck_in_composer=False)
+                    )
                     return
                 if _busy_queue_mode_now():
                     if busy_remaining > 0:
@@ -1069,10 +1080,12 @@ def _delayed_enter_verified(
                         shows_pending=payload is not None
                         and session.shows_pending_input(content_fragment),
                     )
-                    _settled(SubmitSettleOutcome(queue_submit_used=True, stuck_in_composer=True))
+                    _settled(
+                        SubmitSettleOutcome(queue_submit_used=not steer, stuck_in_composer=True)
+                    )
                     return
-                _pending_input = False
-                if payload is not None:
+                _pending_input = pending_draft
+                if not queue_confirm and payload is not None:
                     try:
                         _pending = getattr(session, "shows_pending_input", None)
                         if callable(_pending):
@@ -1398,7 +1411,7 @@ class LeadInboxMixin:
             _log_event("inject_lead_prompt", project=project_ns)
             return True
         self._pending_done_notices.setdefault(project_ns, []).append(
-            {"role": "system", "note": "lead prompt", "body": prompt, "queued_ts": time.time()}
+            {"role": "user", "note": "lead prompt", "body": prompt, "queued_ts": time.time()}
         )
         self._save_pending_done_notices(project_ns)
         _log_event("inject_lead_prompt_queued", project=project_ns)
@@ -1489,17 +1502,6 @@ class LeadInboxMixin:
         pane = self._project_panes(project).get(role_name)
         if pane is None:
             return
-        if role_name.split("#", 1)[0] != "shell":
-            try:
-                task = _message_handoff_pointer(task, self._resolve_project(project), role_name)
-            except OSError:
-                self._notify_lead(
-                    self._resolve_project(project),
-                    f"[delivery-failed] {role_name}: บันทึก .md สำหรับส่งงานไม่ได้ — ยังไม่ได้ส่งเข้า pane",
-                    from_role="system",
-                    kind="handoff-write-failed",
-                )
-                return
         # #404: extra continuous-ready polls the ready-streak gate below must
         # accumulate before the FIRST delivery on a fresh spawn/respawn is
         # allowed to paste — see ProviderSpec.post_boot_settle_s's docstring.
@@ -1685,7 +1687,44 @@ class LeadInboxMixin:
             sent[0] = True
             if pane.session is None or not pane.session.is_alive:
                 return
-            pane.set_state("working", note=task[:60])
+            # Quota/account replacements bypass assign()/send()'s policy
+            # injection. Read fallback context at delivery time: admission
+            # may have deferred the actual spawn until after this poll began.
+            context_state = getattr(self, "_pane_state", {}).get(_exit_key(project_ns, role_name))
+            context_fields = (
+                ("pending_lead_context",)
+                if role_name == LEAD.name
+                else (
+                    "pending_task_execution_context",
+                    "pending_lang_directive",
+                    "pending_memory_note",
+                )
+            )
+            pending_context = {
+                name: value
+                for name in context_fields
+                if isinstance(value := getattr(context_state, name, None), str) and value
+            }
+            delivery_task = task
+            if pending_context:
+                delivery_task = (
+                    "[System Cockpit Policy (delivered via fallback)]\n"
+                    + "\n\n".join(pending_context.values())
+                    + "\n\n---\n\n"
+                    + task
+                )
+            if role_name.split("#", 1)[0] != "shell":
+                try:
+                    delivery_task = _message_handoff_pointer(delivery_task, project_ns, role_name)
+                except OSError:
+                    self._notify_lead(
+                        project_ns,
+                        f"[delivery-failed] {role_name}: บันทึก .md สำหรับส่งงานไม่ได้ — ยังไม่ได้ส่งเข้า pane",
+                        from_role="system",
+                        kind="handoff-write-failed",
+                    )
+                    return
+            pane.set_state("working", note=delivery_task[:60])
             # #484: the ONLY point this closure ever actually writes `task`
             # into the pane — mark it recoverable-if-closed-without-done
             # from here on (see PaneState.task_delivered's docstring; a
@@ -1696,7 +1735,7 @@ class LeadInboxMixin:
             except Exception:
                 pass
             _task_sess = pane.session
-            payload = _paste_payload(_sanitize_pane_text(task))
+            payload = _paste_payload(_sanitize_pane_text(delivery_task))
             generation = int(getattr(pane, "_session_generation", 0))
             if "_delivery_manager" not in self.__dict__:
                 self._delivery_manager = DeliveryManager(
@@ -1897,6 +1936,20 @@ class LeadInboxMixin:
                     ps_accepted = getattr(self, "_pane_state", {}).get(
                         _exit_key(project_ns, role_name)
                     )
+                    if confirmed and ps_accepted is context_state:
+                        for name, value in pending_context.items():
+                            if getattr(ps_accepted, name, None) == value:
+                                setattr(ps_accepted, name, None)
+                        if pending_context:
+                            _log_event(
+                                "lead_policy_delivered"
+                                if role_name == LEAD.name
+                                else "pane_policy_delivered",
+                                role=role_name,
+                                project=project_ns,
+                                provider=_provider_deliver,
+                                delivery="ready_prompt_fallback",
+                            )
                     auth_recovery = getattr(ps_accepted, "pending_auth_recovery", None)
                     if confirmed and auth_recovery:
                         ps_accepted.pending_auth_recovery = None
@@ -1992,7 +2045,7 @@ class LeadInboxMixin:
                 _enter_delay_ms(payload),
                 payload=payload,
                 repaste=bool(allow_repaste),
-                content_fragment=task,
+                content_fragment=delivery_task,
                 on_resend=_on_resend,
                 on_repaste=lambda rem, r=role_name, p=project: _log_event(
                     "task_deliver_repaste",
@@ -4913,14 +4966,26 @@ class LeadInboxMixin:
         else:
             if not hasattr(self, "_pending_done_notices"):
                 self._pending_done_notices = {}
-            self._pending_done_notices.setdefault(project_ns, []).append(
+            pending = self._pending_done_notices.setdefault(project_ns, [])
+            insertion = next(
+                (
+                    i
+                    for i, item in enumerate(pending)
+                    if human
+                    and isinstance(item.get("queued_ts"), (int, float))
+                    and item["queued_ts"] > occurred_ts
+                ),
+                len(pending),
+            )
+            pending.insert(
+                insertion,
                 {
                     "role": from_role,
                     "note": note,
                     "body": body,
                     "pane_token": pane_token,
                     "queued_ts": occurred_ts,
-                }
+                },
             )
             self._save_pending_done_notices(project_ns)
             _log_event("done_notice_queued", project=project_ns, role=from_role)
@@ -5008,7 +5073,7 @@ class LeadInboxMixin:
                 b_body, b_pane_token, b_ts = _unwrap_notice_item(b)
                 self._pending_done_notices.setdefault(project_ns, []).append(
                     {
-                        "role": "system",
+                        "role": "user" if _human_notice(b) else "system",
                         "note": "notify",
                         "body": b_body,
                         "pane_token": b_pane_token,
@@ -5062,7 +5127,9 @@ class LeadInboxMixin:
                 project_ns, time.time()
             )
             waited = time.time() - busy_since
-            if waited >= _LEAD_BUSY_DELIVER_AFTER_S and not _prompt_block_reason(lead.session):
+            if (
+                _human_notice(queue[0]) or waited >= _LEAD_BUSY_DELIVER_AFTER_S
+            ) and not _prompt_block_reason(lead.session):
                 _log_event(
                     "lead_notify_busy_deliver",
                     project=project_ns,
@@ -5082,7 +5149,7 @@ class LeadInboxMixin:
                     b_body, b_pane_token, b_ts = _unwrap_notice_item(b)
                     self._pending_done_notices.setdefault(project_ns, []).append(
                         {
-                            "role": "system",
+                            "role": "user" if _human_notice(b) else "system",
                             "note": "notify_spill",
                             "body": b_body,
                             "pane_token": b_pane_token,
@@ -5119,7 +5186,7 @@ class LeadInboxMixin:
                     b_body, b_pane_token, b_ts = _unwrap_notice_item(b)
                     self._pending_done_notices.setdefault(project_ns, []).append(
                         {
-                            "role": "system",
+                            "role": "user" if _human_notice(b) else "system",
                             "note": "notify_draft_spill",
                             "body": b_body,
                             "pane_token": b_pane_token,
@@ -5144,7 +5211,9 @@ class LeadInboxMixin:
         # torn down between the liveness checks above and this write) never
         # drops the item — see HIGH#1,
         # docs/reviews/2026-07-11-full-system-review-codex.md.
-        raw_body, item_pane_token, item_ts = _unwrap_notice_item(queue[0])
+        notice_item = queue[0]
+        raw_body, item_pane_token, item_ts = _unwrap_notice_item(notice_item)
+        human_input = _human_notice(queue[0])
         # #266: re-check delivery-health system notices right before they
         # actually land — see _revalidate_system_notice's docstring for why
         # (the queue can sit for minutes between enqueue and this point).
@@ -5171,15 +5240,7 @@ class LeadInboxMixin:
         ps_lead = self._ps(f"{project_ns}::lead")
         _pending_lead = getattr(ps_lead, "pending_lead_context", None)
         if _pending_lead:
-            ps_lead.pending_lead_context = None
             raw_body = f"[System Cockpit Policy (delivered via fallback)]\n{_pending_lead}\n\n---\n\n{raw_body}"
-            _log_event(
-                "lead_policy_delivered",
-                role="lead",
-                project=project_ns,
-                provider=getattr(getattr(lead, "model", None), "provider_name", "") or "claude",
-                delivery="notice_pump_fallback",
-            )
         body = _sanitize_pane_text(raw_body)
         _notify_sess = lead.session
         notice_expires_at = time.time() + float(
@@ -5213,7 +5274,7 @@ class LeadInboxMixin:
                 b_body, b_pane_token, b_ts = _unwrap_notice_item(b)
                 self._pending_done_notices.setdefault(project_ns, []).append(
                     {
-                        "role": "system",
+                        "role": "user" if _human_notice(b) else "system",
                         "note": "notify_write_failed",
                         "body": b_body,
                         "pane_token": b_pane_token,
@@ -5253,6 +5314,47 @@ class LeadInboxMixin:
                 _log_event("lead_notify_stuck_in_composer", project=project_ns)
             elif lead.session is _notify_sess:
                 self._mark_done_notices_delivered(p, body)
+                if (
+                    _pending_lead
+                    and self._pane_state.get(f"{p}::lead") is ps_lead
+                    and ps_lead.pending_lead_context == _pending_lead
+                    and not _notify_sess.is_at_ready_prompt()
+                ):
+                    ps_lead.pending_lead_context = None
+                    _log_event(
+                        "lead_policy_delivered",
+                        project=p,
+                        role="lead",
+                        delivery="notice_pump_fallback",
+                    )
+            if human_input and (lead.session is not _notify_sess or not _notify_sess.is_alive):
+                # The CLI died before receipt could be verified. Preserve the
+                # original human instruction and priority for its replacement.
+                original_body, original_token, original_ts = _unwrap_notice_item(notice_item)
+                pending = self.__dict__.setdefault("_pending_done_notices", {}).setdefault(p, [])
+                # A later human input may already be durable by the time the
+                # old verification callback observes the dead session.
+                insertion = next(
+                    (
+                        i
+                        for i, item in enumerate(pending)
+                        if isinstance(item.get("queued_ts"), (int, float))
+                        and original_ts is not None
+                        and item["queued_ts"] > original_ts
+                    ),
+                    len(pending),
+                )
+                pending.insert(
+                    insertion,
+                    {
+                        "role": "user",
+                        "note": "notify_session_replaced",
+                        "body": original_body,
+                        "pane_token": original_token,
+                        "queued_ts": original_ts,
+                    },
+                )
+                self._save_pending_done_notices(p)
 
         # Self-healing submit: a done-report whose Enter is swallowed mid-paste-
         # render leaves Lead idle with the report unsubmitted — it "won't run on"
@@ -5261,8 +5363,10 @@ class LeadInboxMixin:
             lead,
             _notify_sess,
             delay,
-            payload=None,
+            payload=payload if human_input else None,
+            repaste=False,
             content_fragment=body,
+            steer=human_input,
             on_resend=lambda rem: _log_event(
                 "lead_notify_enter_resend", project=project_ns, remaining=rem
             ),

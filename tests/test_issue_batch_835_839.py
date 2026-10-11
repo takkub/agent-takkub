@@ -86,7 +86,10 @@ def test_busy_lead_holds_one_digest_and_preserves_human_priority(monkeypatch) ->
     monkeypatch.setenv("TAKKUB_INBOX_DIGEST_MS", "15000")
     orch, lead = _inbox(monkeypatch)
     now = time.time()
-    with patch("agent_takkub.lead_inbox.QTimer.singleShot"):
+    with (
+        patch("agent_takkub.lead_inbox.QTimer.singleShot"),
+        patch("agent_takkub.orchestrator._delayed_enter_verified") as submit,
+    ):
         for i in range(8):
             orch._notify_lead("p", f"[frontend progress] Step {i}", queued_ts=now - 600 + i)
             orch._flush_lead_digest("p")
@@ -96,7 +99,9 @@ def test_busy_lead_holds_one_digest_and_preserves_human_priority(monkeypatch) ->
         orch._enqueue_live_lead_notice("p", "📬 [Lead Inbox Digest — old]")
         orch._enqueue_live_lead_notice("p", "[frontend FAILED] old blocker", front=True)
         orch._notify_lead("p", "Keep this exact user instruction", from_role="user")
-        assert orch._lead_notify_queue["p"][0][0] == "Keep this exact user instruction"
+        assert submit.call_args.kwargs["steer"] is True
+        assert "Keep this exact user instruction" in submit.call_args.kwargs["content_fragment"]
+        assert orch._lead_notify_queue["p"][0][0] == "[frontend FAILED] old blocker"
         lead.session.is_at_ready_prompt.return_value = True
         orch._flush_lead_digest("p", arm_pump=False)
         digest = orch._lead_notify_queue["p"][-1]

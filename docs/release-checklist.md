@@ -1,8 +1,8 @@
 # Release checklist (agent-takkub)
 
 วิธี release จริงของ 1.0.10+ (manual ทุกขั้น) — **ไม่ใช่** `takkub release` (คำสั่งนั้นมีอยู่จริง
-ใน CLI: "bump version + roll CHANGELOG [vNEXT] + git commit" แต่มัน parse heading `## [vNEXT]`
-ซึ่ง CHANGELOG.md ไม่ได้ใช้รูปแบบนั้น — อย่าเรียก)
+ใน CLI: "bump version + roll CHANGELOG [vNEXT] + git commit" แต่ใช้ manual flow นี้
+เพื่อรวม fix และ release metadata ใน commit/push ชุดเดียว)
 
 > **เอกสารนี้เคยเพี้ยนจากของจริงมาก่อน** (ตรวจ 2026-08-20 ตอน release 1.0.79) — ข้อ 2 เคยสั่ง
 > "ห้ามสร้าง heading เวอร์ชัน" ทั้งที่ CHANGELOG.md มี heading อยู่ 77 อัน และหลายที่เคยเขียนว่า
@@ -23,9 +23,9 @@
 (การ์ดที่ issue ปิด/ship ไปแล้ว → verify ใน git แล้ว `takkub backlog done <id>`) · งานไหนเข้า batch นี้ไม่ได้
 จริงๆ ให้ถาม user ก่อน bump — ห้ามออก release แล้วค่อยบอกว่ายังเหลือ (v2.1.42 พลาดแบบนี้ 2026-09-27)
 
-```bash
-takkub qa-gate     # venv-check -> full pytest -> ruff check -> lint-imports, fail-fast + report
-```
+**ไม่รัน full gate ในเครื่อง dev** (root `CLAUDE.md`): ก่อน push ใช้
+`takkub qa-gate --targeted <paths>` รวม guards, issues, core contracts และ tests ของ method/test doubles
+ที่เปลี่ยน ให้ CI รัน full gate และ installed-mode gates หลัง push ชุดเดียว
 
 **ห้ามพิมพ์ `pytest` / `ruff check` / `lint-imports` ดิบเอง** — ตั้งแต่ #325 entrypoint เดียวคือ
 `takkub qa-gate` (root CLAUDE.md บังคับ) มันรัน 4 step เดียวกับที่ CI รัน แล้วเขียน report ลง
@@ -37,10 +37,10 @@ takkub qa-gate     # venv-check -> full pytest -> ruff check -> lint-imports, fa
 > แต่อ่าน pyproject ตอนรันเทส bump คร่อมกันเมื่อไหร่จะตกแบบหลอกๆ (เจอจริงตอน 1.0.79,
 > gate report 2026-08-20 16:50 — report ย้ายไป `<DATA_HOME>/runtime/qa-reports/` แล้ว #436) — รอ gate จบก่อนค่อย bump
 
-- **CI ต้องเขียวครบทุก job** (`.github/workflows/ci.yml`) — **5 job ไม่ใช่ 4**:
+- **CI ต้องเขียวครบทุก job** (`.github/workflows/ci.yml`) — **8 matrix jobs**:
   `lint-and-test` รัน 3 OS (`windows-latest` · `macos-latest` · `ubuntu-latest`) และ
-  `installed-gate` รัน 2 OS (`windows-latest` · `macos-latest`) — ถ้าเพิ่งพุช commit สุดท้าย
-  รอ `gh run watch <id> --exit-status` เขียวก่อนตัดเวอร์ชัน อย่า release ทับ CI ที่ยังไม่จบ
+  `installed-gate` รัน 2 OS (`windows-latest` · `macos-latest`) และ `npm-wrapper` รัน 3 OS
+  ตรวจ workflow ชื่อ `ci` ที่ตรง release commit และต้อง `completed/success` ก่อน publish
 - **installed-mode gate** (`tests/test_installed_mode_gate.py`) proves the ACTUAL packaged behavior
   (DATA_HOME/ASSETS_ROOT/CLI_BIN_DIR/pane-env/CLI wiring) works when running from a real installed
   wheel — not just a dev checkout where `DATA_HOME == REPO_ROOT` masks installed-only bugs
@@ -104,13 +104,13 @@ git log --oneline <last-release-commit>..HEAD           # อะไรเข้�
 ## 2. เขียน CHANGELOG.md (ภาษาไทย)
 
 **สร้าง heading เวอร์ชันใหม่ทุก release** — แทรก `## [X.Y.Z] - YYYY-MM-DD` ไว้**ใต้**
-`## [Unreleased]` (ซึ่งเป็น placeholder ว่างถาวร ไม่ต้องลบ ไม่ต้องเติมอะไรใต้มัน) แล้วเขียน
+`## [vNEXT]` (placeholder ว่างใน repo ปัจจุบัน) แล้วเขียน
 bullet ใต้ `### Fixed (แก้)` / `### Added (เพิ่ม)` / ฯลฯ ของ heading ใหม่นั้น
 
 โครงที่ได้:
 
 ```markdown
-## [Unreleased]
+## [vNEXT]
 
 ## [1.0.79] - 2026-08-20
 
@@ -125,7 +125,7 @@ bullet ใต้ `### Fixed (แก้)` / `### Added (เพิ่ม)` / ฯ�
 
 ตัวอย่างจริงล่าสุด: `git show cf54eee -- CHANGELOG.md` (1.0.79) หรือ `git show 3129b74 -- CHANGELOG.md` (1.0.78)
 
-## 3. Bump เวอร์ชัน — 3 ไฟล์ ต้องตรงกันเป๊ะ
+## 3. Bump เวอร์ชัน — 4 ไฟล์ ต้องตรงกันเป๊ะ
 
 ```bash
 # pyproject.toml
@@ -136,6 +136,9 @@ version = "X.Y.Z"
 
 # src/agent_takkub/__init__.py
 __version__ = "X.Y.Z"
+
+# uv.lock: root package name = "agent-takkub"
+version = "X.Y.Z"
 ```
 
 `tests/test_version_sync.py` บังคับให้ทั้ง 3 ค่าเท่ากัน — รันเช็คเร็วๆ ด้วย
@@ -191,14 +194,14 @@ git tag vX.Y.Z && git push origin vX.Y.Z
 > หมายเหตุ: v1.0.76–78 ถูก tag ทีหลังที่ HEAD ตอนนั้น จึงไม่ได้ชี้ที่ release commit เป๊ะ
 > (`v1.0.78` → `685efc5` ไม่ใช่ `3129b74`) — ตั้งแต่ 1.0.79 เป็นต้นไป tag ที่ release commit เลย
 
-## 6. Push + รอ CI เขียวครบ 5 job
+## 6. Push + รอ CI เขียวครบ 8 matrix jobs
 
 ```bash
 git push origin main
-gh run list --branch main --limit 5    # หา run id ของ workflow ชื่อ `ci`
-gh run watch <id> --exit-status        # รอ 5 job เขียวหมด:
-                                       #   lint-and-test  (windows / macos / ubuntu)
-                                       #   installed-gate (windows / macos)
+gh run list --commit <release-sha> --json databaseId,name,status,conclusion
+gh run view <ci-run-id> --json headSha,status,conclusion,jobs
+# ต้องตรง release-sha และ completed/success:
+# lint-and-test (3 OS), installed-gate (Windows/macOS), npm-wrapper (3 OS)
 ```
 
 **ห้าม publish ก่อน CI เขียว** — ถ้า `installed-gate` แดงโดยเฉพาะ (แม้ `lint-and-test` เขียว) แปลว่า

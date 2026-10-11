@@ -111,12 +111,12 @@ class TestBusyQueueSubmit:
         outcomes, _resends, queued = _run_inline(pane, sess, provider="codex", steer=True)
 
         sess.write.assert_called_once_with(b"\r")
-        assert queued == [True]
+        assert queued == []
+        assert outcomes[0].queue_submit_used is False
         assert outcomes[0].stuck_in_composer is False
 
-    def test_steer_falls_back_to_queue_key_when_enter_does_not_land_809(self) -> None:
-        """Older codex left Enter as a draft (#721): no confirm after the
-        Enter try → every retry uses the queue key."""
+    def test_steer_retries_never_demote_a_correction_to_the_turn_end_queue_841(self) -> None:
+        """A delayed confirmation must not change an instruction's delivery mode."""
         pane, sess = _codex_pane_session()
         sess.shows_busy_queue_confirm.side_effect = [False, True]
 
@@ -124,9 +124,27 @@ class TestBusyQueueSubmit:
             pane, sess, provider="codex", steer=True, busy_max_resends=3
         )
 
-        assert [c.args for c in sess.write.call_args_list] == [(b"\r",), (b"\t",)]
+        assert [c.args for c in sess.write.call_args_list] == [(b"\r",), (b"\r",)]
         assert resends == [3]
         assert outcomes[0].stuck_in_composer is False
+
+    def test_existing_queue_chrome_does_not_confirm_a_new_draft_841(self) -> None:
+        pane, sess = _codex_pane_session()
+        # The old queue is still visible while this correction remains in the composer.
+        outcomes, _resends, queued = _run_inline(
+            pane,
+            sess,
+            provider="codex",
+            steer=True,
+            busy_max_resends=2,
+            payload="new correction",
+            content_fragment="new correction",
+            repaste=False,
+        )
+        assert all(call.args == (b"\r",) for call in sess.write.call_args_list)
+        assert len(sess.write.call_args_list) == 3
+        assert queued == []
+        assert outcomes[0].stuck_in_composer is True
 
     def test_no_busy_queue_provider_keeps_enter_and_not_stuck(self) -> None:
         """A provider without a busy-queue marker (claude/agy/opencode) keeps
@@ -184,3 +202,55 @@ class TestBusyQueueProviderSpec:
         assert busy_queue_marker_for("nope") is None
         assert busy_queue_key_for("nope") == "\r"
         assert busy_queue_confirm_markers_for("nope") == ()
+
+
+def test_real_terminal_screen_distinguishes_existing_queue_from_new_correction():
+    """Exercise actual PTY screen probes with both queue chrome and a draft."""
+    from agent_takkub.pty_session import PtySession
+
+    session = PtySession(cols=120, rows=24)
+
+    def redraw(*lines):
+        session._feed_and_log(("\x1b[2J\x1b[H" + "\r\n".join(lines)).encode())
+
+    redraw(
+        "Working (12s · esc to interrupt)",
+        "Queued follow-up inputs",
+        "  Old instruction",
+        "› New correction",
+        "esc to interrupt · tab to queue message",
+    )
+    assert session.shows_busy_queue_confirm("codex")
+    assert session.shows_pending_input("New correction")
+
+    writes = []
+
+    def write(key):
+        writes.append(key)
+        if len(writes) == 2:
+            redraw(
+                "Working (12s · esc to interrupt)",
+                "Messages to be submitted after next tool call",
+                "  New correction",
+                "› ",
+                "esc to interrupt · tab to queue message",
+            )
+        return True
+
+    session.write = write
+    pane = MagicMock()
+    pane.session = session
+    pane.model.provider_name = "codex"
+    outcomes, _resends, queued = _run_inline(
+        pane,
+        session,
+        provider="codex",
+        steer=True,
+        busy_max_resends=2,
+        payload="New correction",
+        content_fragment="New correction",
+        repaste=False,
+    )
+    assert writes == [b"\r", b"\r"]
+    assert not queued
+    assert not outcomes[0].stuck_in_composer
