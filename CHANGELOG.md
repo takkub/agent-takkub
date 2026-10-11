@@ -4,6 +4,15 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 
 ## [vNEXT]
 
+## [v2.2.14] - 2026-10-11
+
+### Fixed (แก้)
+
+- **คำสั่งแก้งานใหม่ถูกส่งไปท้ายคิวแทนแทรกเข้า turn ที่กำลังทำ (#841):** retry ของ steering เคยเปลี่ยนจาก Enter ไป Tab หลังลองครั้งแรก ทำให้ Codex รอจนจบงานเก่า · ตอนนี้ใช้ Enter ต่อทุก retry, แยกข้อความค้างใน composer ออกจากข้อความเก่าที่แสดงในคิว และส่งคำสั่งจากผู้ใช้ถึง Lead ที่กำลังทำงานโดยไม่รอช่วง prefer-idle พร้อมรักษาลำดับข้อความและ draft/modal guards
+- **สลับ account/provider แล้ว task ledger ปิดทั้งที่งานยังทำต่อ (#840):** recovery close เคยปิด assignment และทิ้ง task ID/ใบงาน/scope/backlog/budget · ตอนนี้รักษา assignment เดิมไว้ตลอด close/spawn gap และคำสั่งใหม่ที่เข้าระหว่างสลับยังผูกกับ task เดิม
+- **ตัวใหม่หลัง quota handover หลุดจากนโยบาย cockpit (#841):** direct handover ส่ง fallback context ที่เกิดตอน spawn ด้วย และล้าง pending policy เฉพาะเมื่อยืนยันการรับแล้ว · Lead takeover ต้องอ่าน `takkub context read`, ตรวจ context/team status และรักษาโหมด solo-lead/auto/full ก่อนทำงานต่อ · เก็บคำสั่งจากผู้ใช้ไว้หาก session เปลี่ยนก่อนยืนยันการรับ
+- **ข้อจำกัดของ provider แสดงชัดเจน:** Gemini/agy ยังใช้ข้อความใหม่หลังจบ turn และ Cursor ยังไม่ได้ยืนยัน steering แบบ live; `takkub send` แจ้งข้อจำกัดขณะ pane busy · การรับเข้า CLI ไม่ใช่หลักฐานว่า model ใช้คำสั่งแล้ว
+
 ## [v2.2.13] - 2026-10-10
 
 ### Added (เพิ่ม)

@@ -54,6 +54,20 @@ handover caused that particular queue entry.
 - Ruff checks and `git diff --check` passed. Recovery/provider tests use test
   doubles; these results are not new live-provider or macOS evidence.
 
+## Pre-push validation
+
+The 185-file selection includes guards, issue/core contracts, references to
+changed methods and orchestrator test doubles. With a temporary Windows user
+profile, 6,273 tests passed and 10 skipped; two host-path isolation guard tests
+correctly required the real home path instead of a directory already under
+Temp. Re-running their five-test file with the ordinary subprocess profile
+passed. Combined unique results: 6,275 passed, 10 skipped. Provider CLIs were
+removed from PATH. The first attempt was deliberately stopped after identifying
+a test scanning the real Codex session store; it is not counted as a pass.
+
+Commit hooks also passed secret scanning, Ruff, docs verification, architecture
+contracts, import collection and depgraph freshness.
+
 ## Provider and release limits
 
 The existing [2026-10-07 live audit](2026-10-07-busy-input-steer-vs-queue.md)
