@@ -45,7 +45,9 @@ def test_live_unrestricted_lead_blocks_policy_tightening() -> None:
     fake = SimpleNamespace(
         _resolve_project=lambda project: project,
         _panes_by_project={"project": {"lead": pane}},
-        _pane_state={"project::lead": SimpleNamespace(lead_enforcement_mode="none")},
+        _pane_state={
+            "project::lead": SimpleNamespace(lead_enforcement_mode="none", session_provider="codex")
+        },
     )
 
     reason = Orchestrator._lead_restriction_transition_block(fake, "project")
@@ -53,3 +55,21 @@ def test_live_unrestricted_lead_blocks_policy_tightening() -> None:
     assert "close the active unrestricted Lead" in reason
     fake._pane_state["project::lead"].lead_enforcement_mode = "codex_sandbox"
     assert Orchestrator._lead_restriction_transition_block(fake, "project") == ""
+
+
+def test_live_claude_lead_does_not_block_policy_tightening() -> None:
+    # Claude's PreToolUse edit guard reads the preset live; no restart needed.
+    pane = SimpleNamespace(
+        session=SimpleNamespace(is_alive=True), model=SimpleNamespace(provider_name="claude")
+    )
+    fake = SimpleNamespace(
+        _resolve_project=lambda project: project,
+        _panes_by_project={"project": {"lead": pane}},
+        _pane_state={"project::lead": SimpleNamespace(lead_enforcement_mode="")},
+    )
+
+    assert Orchestrator._lead_restriction_transition_block(fake, "project") == ""
+    pane.model.provider_name = "gemini"
+    assert "close the active unrestricted Lead" in Orchestrator._lead_restriction_transition_block(
+        fake, "project"
+    )

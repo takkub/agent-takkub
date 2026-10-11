@@ -7624,6 +7624,12 @@ class Orchestrator(
         state = self._pane_state.get(_exit_key(project_ns, LEAD.name))
         if getattr(state, "lead_enforcement_mode", "") == "codex_sandbox":
             return ""
+        provider = getattr(getattr(pane, "model", None), "provider_name", None)
+        if not isinstance(provider, str) or not provider:
+            provider = getattr(state, "session_provider", "") or "claude"
+        if str(provider).lower() == "claude":
+            # Claude's Lead edit guard is a PreToolUse hook that reads the preset live.
+            return ""
         return (
             "close the active unrestricted Lead before selecting a restricted "
             "team preset, then spawn Lead again with the protected runtime"
