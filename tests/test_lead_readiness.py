@@ -72,6 +72,28 @@ def test_bootstrap_allowed_tools() -> None:
     )
 
 
+def test_bootstrap_allows_powershell_and_stderr_merge_not_pipes() -> None:
+    # #854: the guard named a command it then rejected under PowerShell / 2>&1.
+    for tool in ("Bash", "PowerShell"):
+        assert lead_readiness.bootstrap_allowed(tool, {"command": "takkub context read"})
+        assert lead_readiness.bootstrap_allowed(tool, {"command": "takkub context read 2>&1"})
+        assert not lead_readiness.bootstrap_allowed(
+            tool, {"command": "takkub context read 2>&1 | tail -8"}
+        )
+        assert not lead_readiness.bootstrap_allowed(
+            tool, {"command": "takkub context read 2>&1; Remove-Item x"}
+        )
+
+
+def test_context_text_prints_cockpit_claude_md_once(tmp_path: Path) -> None:
+    from agent_takkub.lead_context import ASSETS_ROOT
+
+    _revision, documents, facts = lead_readiness._sources("default", str(tmp_path))
+    text = lead_readiness._context("default", str(tmp_path), documents, facts)
+    assert f"## Required policy: {ASSETS_ROOT / 'CLAUDE.md'}" not in text
+    assert "## Required policy:" in text
+
+
 def test_cli_context_read_and_status(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
 ) -> None:

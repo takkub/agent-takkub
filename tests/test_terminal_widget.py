@@ -202,3 +202,33 @@ class TestCapSnapshotLines:
 
     def test_empty_text(self) -> None:
         assert self._cap("", max_lines=10) == ""
+
+
+class TestPendingWritesBounded:
+    """#862: a discarded hidden pane queued every PTY byte for hours."""
+
+    def test_queue_trims_to_newest_half_behind_notice(self) -> None:
+        from agent_takkub import terminal_widget as tw
+
+        widget = tw.TerminalWidget.__new__(tw.TerminalWidget)
+        widget._pending_writes = []
+        line = "x" * 99 + "\n"
+        for i in range(tw._MAX_PENDING_WRITE_CHARS // 100 * 3):
+            widget._queue_pending(line if i % 1000 else f"mark{i:07d}\n")
+        joined = "".join(widget._pending_writes)
+        assert len(joined) <= tw._MAX_PENDING_WRITE_CHARS + len(tw._PENDING_TRIM_NOTICE)
+        assert joined.startswith(tw._PENDING_TRIM_NOTICE)
+        assert joined[len(tw._PENDING_TRIM_NOTICE) :].split("\n", 1)[0] in {"x" * 99} | {
+            f"mark{i:07d}" for i in range(0, 10**7, 1000)
+        }
+        assert widget._pending_chars == len(joined)
+
+    def test_count_restarts_after_consumer_clears(self) -> None:
+        from agent_takkub import terminal_widget as tw
+
+        widget = tw.TerminalWidget.__new__(tw.TerminalWidget)
+        widget._pending_writes = []
+        widget._queue_pending("a" * 10)
+        widget._pending_writes.clear()
+        widget._queue_pending("b")
+        assert widget._pending_chars == 1 and widget._pending_writes == ["b"]

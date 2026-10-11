@@ -110,6 +110,19 @@ def _transcript_event(event: str, **details) -> None:
         pass
 
 
+def _redact_transcript_chunk(data: bytes, secrets) -> bytes:
+    """Scrub secret values out of one persisted transcript chunk (#853).
+
+    surrogateescape keeps the round trip byte-exact for a chunk that splits a
+    multi-byte character. A value split across two chunks is not caught —
+    PTY output almost always arrives a line at a time, so that is the gap."""
+    from .secret_redact import redact_known_values
+
+    text = data.decode("utf-8", "surrogateescape")
+    out = redact_known_values(text, list(secrets))
+    return data if out is text else out.encode("utf-8", "surrogateescape")
+
+
 _CUP_OR_ED_RE = re.compile(rb"(\x1b\[(\d+);(\d+)[Hf]|\x1b\[[23]J)")
 
 
@@ -2452,6 +2465,10 @@ class PtySession(QObject):
             try:
                 import logging
 
+                from .secret_redact import secret_values
+
+                # #853: values the pane may print verbatim never hit disk.
+                self.__dict__["_transcript_secrets"] = secret_values(env, cwd)
                 self._transcript = open(transcript_path, "wb")
                 self._transcript_last_flush = time.monotonic()
                 self._transcript_pending_bytes = 0
@@ -2545,8 +2562,11 @@ class PtySession(QObject):
                             # it), only the persisted transcript skips the repeat.
                             data = b""
                         elif data:
-                            transcript_data = _normalize_pty_transcript_chunk(
-                                data, self.__dict__.setdefault("_transcript_last_row", [0])
+                            transcript_data = _redact_transcript_chunk(
+                                _normalize_pty_transcript_chunk(
+                                    data, self.__dict__.setdefault("_transcript_last_row", [0])
+                                ),
+                                self.__dict__.get("_transcript_secrets", ()),
                             )
                             self._transcript.write(transcript_data)
                             bytes_written += len(transcript_data)

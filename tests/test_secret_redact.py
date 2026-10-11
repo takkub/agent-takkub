@@ -111,3 +111,40 @@ class TestHops:
         assert "<redacted:DB_PASSWORD>" in rows[0]["text"]
         assert rows[1] == {"text": "ok", "kind": "me"}
         assert rows[2] == {"kind": "sys"}
+
+
+# ── #853: pane env / project .env values scrubbed from the PTY transcript ──
+
+
+def test_secret_values_from_env_and_dotenv(tmp_path) -> None:
+    from agent_takkub.secret_redact import secret_values
+
+    # Built at runtime so the gitleaks pre-commit hook doesn't flag a fixture.
+    byteplus = "bp-" + "fake" * 4
+    (tmp_path / ".env").write_text(
+        f'BYTEPLUS_{"API"}_KEY="{byteplus}"\nDEBUG=1\nOTHER_TOKEN=short\n',
+        encoding="utf-8",
+    )
+    (tmp_path / ".env.example").write_text("EXAMPLE_API_KEY=example-value-long\n")
+    pairs = secret_values(
+        {"GEMINI_API_KEY": "gem-abcdefghijklmnop", "PATH": "x" * 40}, str(tmp_path)
+    )
+    assert dict(pairs) == {
+        "GEMINI_API_KEY": "gem-abcdefghijklmnop",
+        "BYTEPLUS_API_KEY": byteplus,
+    }
+
+
+def test_transcript_chunk_redacts_bare_values_byte_exact() -> None:
+    from agent_takkub.pty_session import _redact_transcript_chunk
+
+    secrets = [("GEMINI_API_KEY", "gem-abcdefghijklmnop")]
+    chunk = b"AssertionError: 'gem-abcdefghijklmnop' != ''\r\n"
+    out = _redact_transcript_chunk(chunk, secrets)
+    assert b"gem-abcdefghijklmnop" not in out
+    assert b"<redacted:GEMINI_API_KEY>" in out
+    google = ("key AIza" + "B" * 35 + "\n").encode()
+    assert b"<redacted:google-api-key>" in _redact_transcript_chunk(google, ())
+    # an untouched chunk (incl. a split multi-byte char) comes back as-is
+    split = "ไทย".encode()[:-1]
+    assert _redact_transcript_chunk(split, secrets) is split

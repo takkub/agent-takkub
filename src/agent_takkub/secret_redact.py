@@ -65,7 +65,69 @@ _LITERAL_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("slack-token", re.compile(r"\bxox[abprs]-[A-Za-z0-9-]{10,}\b")),
     ("aws-access-key", re.compile(r"\b(?:AKIA|ASIA)[0-9A-Z]{16}\b")),
     ("openai-key", re.compile(r"\bsk-(?:proj-|ant-)?[A-Za-z0-9_-]{20,}\b")),
+    ("google-api-key", re.compile(r"\bAIza[0-9A-Za-z_-]{35}\b")),
 )
+
+# Name test for env vars whose *value* must never reach a transcript (#853).
+_SECRET_NAME_RE = re.compile(
+    r"(?i)(?:SECRET|PASSWORD|PASSWD|TOKEN|API_KEY|APIKEY|PRIVATE_KEY|_KEY|ACCESS_KEY)$"
+)
+_ENV_LINE_RE = re.compile(
+    r"^[ \t]*(?:export[ \t]+)?(?P<key>[A-Za-z_][A-Za-z0-9_]*)[ \t]*=[ \t]*(?P<val>.*?)[ \t]*$"
+)
+# Shorter values collide with ordinary words/numbers in pane output.
+_MIN_SECRET_VALUE_LEN = 12
+
+
+def secret_values(env: dict | None = None, cwd: str | None = None) -> list[tuple[str, str]]:
+    """``(name, value)`` pairs a pane could print verbatim: its own env plus
+    the ``.env*`` files at *cwd* (what a project test/script loads). Longest
+    value first so a value that contains another is replaced whole. Never
+    raises — an unreadable file only means fewer values to scrub."""
+    found: dict[str, str] = {}
+
+    def _take(key: str, val: str) -> None:
+        val = val.strip().strip("\"'")
+        if (
+            len(val) >= _MIN_SECRET_VALUE_LEN
+            and _SECRET_NAME_RE.search(key)
+            and not _is_placeholder(val)
+        ):
+            found.setdefault(val, key)
+
+    for key, val in (env or {}).items():
+        if isinstance(key, str) and isinstance(val, str):
+            _take(key, val)
+    if cwd:
+        from pathlib import Path
+
+        try:
+            candidates = sorted(Path(cwd).glob(".env*"))
+        except OSError:
+            candidates = []
+        for path in candidates:
+            if path.name.endswith((".example", ".sample", ".template")):
+                continue
+            try:
+                if not path.is_file() or path.stat().st_size > 256_000:
+                    continue
+                lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+            except OSError:
+                continue
+            for line in lines:
+                m = _ENV_LINE_RE.match(line)
+                if m:
+                    _take(m.group("key"), m.group("val"))
+    return sorted(((k, v) for v, k in found.items()), key=lambda kv: -len(kv[1]))
+
+
+def redact_known_values(text: str, values: list[tuple[str, str]]) -> str:
+    """Replace each known secret *value* wherever it appears (no key needed —
+    an assert message prints the bare value), then the shape-based pass."""
+    for name, value in values:
+        if value in text:
+            text = text.replace(value, REDACTED_FMT.format(name=name))
+    return redact_secrets(text)[0]
 
 
 def _is_placeholder(value: str) -> bool:

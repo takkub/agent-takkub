@@ -71,6 +71,17 @@ _REATTACH_TIMEOUT_MS_DEFAULT = 6_000
 # in case that setting ever grows.
 _MAX_DISCARD_SNAPSHOT_LINES = 5_000
 
+# #862: ceiling on PTY text queued while the page is not ready (a discarded
+# hidden pane). A busy pane left hidden for hours queued every byte, and the
+# cockpit grew to 7.6GB RSS. Past the cap only the newest half is kept (from
+# a line start) behind a notice — xterm.js keeps 500 lines of scrollback, so
+# the dropped head would never have been visible anyway.
+_MAX_PENDING_WRITE_CHARS = 2_000_000
+_PENDING_TRIM_NOTICE = (
+    "\r\n\x1b[2m[cockpit: older output from while this pane was hidden was dropped"
+    " to bound memory (#862)]\x1b[0m\r\n"
+)
+
 
 # ---------------------------------------------------------------------------
 # Pure helpers — no Qt required; tested directly in test_image_input.py
@@ -617,10 +628,26 @@ class TerminalWidget(QWidget):
         if replies and self._osc_reply_enabled:
             self.inputBytes.emit(replies.encode("utf-8"))
         if not self._page_ready:
-            self._pending_writes.append(text)
+            self._queue_pending(text)
             return
         self._write_buf.append(text)
         self._arm_flush()
+
+    def _queue_pending(self, text: str) -> None:
+        # Every consumer empties the list wholesale, so an empty list means
+        # the running count starts over.
+        if not self._pending_writes:
+            self._pending_chars = 0
+        self._pending_writes.append(text)
+        self._pending_chars = getattr(self, "_pending_chars", 0) + len(text)
+        if self._pending_chars <= _MAX_PENDING_WRITE_CHARS:
+            return
+        tail = "".join(self._pending_writes)[-(_MAX_PENDING_WRITE_CHARS // 2) :]
+        line_start = tail.find("\n")
+        if line_start != -1:
+            tail = tail[line_start + 1 :]
+        self._pending_writes[:] = [_PENDING_TRIM_NOTICE, tail]
+        self._pending_chars = len(_PENDING_TRIM_NOTICE) + len(tail)
 
     def _arm_flush(self) -> None:
         if self._write_buf and not self._flush_timer.isActive():

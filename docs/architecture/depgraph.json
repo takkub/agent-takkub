@@ -4257,7 +4257,8 @@
         "agent_takkub._win_console",
         "agent_takkub.job_object_manager",
         "agent_takkub.orchestrator_text",
-        "agent_takkub.provider_spec"
+        "agent_takkub.provider_spec",
+        "agent_takkub.secret_redact"
       ],
       "imported_by": [
         "agent_takkub.agent_pane",
@@ -4272,7 +4273,7 @@
         "agent_takkub.spawn_engine"
       ],
       "fan_in": 10,
-      "fan_out": 5
+      "fan_out": 6
     },
     {
       "module": "agent_takkub.qa_gate",
@@ -4679,12 +4680,13 @@
       "imports": [],
       "imported_by": [
         "agent_takkub.orchestrator",
+        "agent_takkub.pty_session",
         "agent_takkub.remote.notify",
         "agent_takkub.skill_learning.episode",
         "agent_takkub.skill_learning.promoter",
         "agent_takkub.skill_learning.reflector"
       ],
-      "fan_in": 5,
+      "fan_in": 6,
       "fan_out": 0
     },
     {

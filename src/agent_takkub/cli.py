@@ -4886,7 +4886,11 @@ def cmd_context_guard(_: argparse.Namespace) -> dict:
         tool_input = payload.get("tool_input") or {}
         error = lead_readiness.current_reason()
         if error and not lead_readiness.bootstrap_allowed(tool_name, tool_input):
-            print(f"[takkub guard: lead_context] {error}", file=sys.stderr)
+            print(
+                f"[takkub guard: lead_context] {error} "
+                "(as its own command: no pipe; a trailing 2>&1 is fine)",
+                file=sys.stderr,
+            )
             return {"ok": True, "msg": "", "exit_code": 2}
     except Exception as exc:
         print(f"[takkub guard: lead_context] cannot verify readiness: {exc}", file=sys.stderr)

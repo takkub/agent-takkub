@@ -90,7 +90,7 @@ def _sources(project: str, cwd: str) -> tuple[str, dict, dict]:
 
 
 def _context(project: str, cwd: str, documents: dict, facts: dict) -> str:
-    from .lead_context import _build_lead_context_text
+    from .lead_context import ASSETS_ROOT, _build_lead_context_text
 
     rendered = _build_lead_context_text(project, claude_cwd=cwd)
     if not rendered:
@@ -103,7 +103,14 @@ def _context(project: str, cwd: str, documents: dict, facts: dict) -> str:
     else:
         rule = "Delegate implementation/deployment to enabled positions through takkub assign --mode pane."
     parts = [rendered]
-    parts.extend(f"\n## Required policy: {path}\n\n{text}" for path, text in documents.items())
+    # The rendered context already opens with the cockpit CLAUDE.md (#854):
+    # it stays in the revision hash, but printing it twice only bloats the read.
+    cockpit_md = str(ASSETS_ROOT / "CLAUDE.md")
+    parts.extend(
+        f"\n## Required policy: {path}\n\n{text}"
+        for path, text in documents.items()
+        if path != cockpit_md
+    )
     parts.append(
         "\n## Effective session policy (authoritative over generic delegation defaults)\n"
         + json.dumps(facts, ensure_ascii=False, indent=2)
@@ -200,13 +207,17 @@ def invalidate(path: str | Path, event: str) -> None:
 def bootstrap_allowed(tool_name: str, tool_input: dict) -> bool:
     if tool_name in {"Read", "Glob", "Grep"}:
         return True
-    if tool_name == "Bash":
+    if tool_name in {"Bash", "PowerShell"}:
         command = str(tool_input.get("command", "")).strip()
         # No shell separators/substitution: bootstrap cannot disguise a second
-        # substantive action after an allowed read/status command.
+        # substantive action after an allowed read/status command. A trailing
+        # stderr merge is harmless (#854); pipes stay out because a `| tail`
+        # would acknowledge a read the Lead never actually saw.
         return bool(
             re.fullmatch(
-                r"takkub (?:context (?:read|status)|team status|doctor(?: --[\w-]+)*)", command
+                r"takkub (?:context (?:read|status)|team status|doctor(?: --[\w-]+)*)"
+                r"(?: 2>&1)?",
+                command,
             )
         )
     return False
