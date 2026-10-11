@@ -921,6 +921,7 @@ class PaneState:
     # carry the cockpit policy through the first turn/prompt fallback.
     pending_lead_context: str | None = None
     lead_readiness_file: str = ""
+    lead_enforcement_mode: str = ""
     # assign_ts: wall-clock when this pane's current task was dispatched
     # (_assign_dispatch). done() reads this BEFORE popping the PaneState so it
     # can scan the artifacts dir for screenshots newer than the assignment
@@ -3152,6 +3153,12 @@ class SpawnEngineMixin:
                         if _lead_sandboxed
                         else lead_enforcement.MODE_NONE,
                     )
+                if _ps_lead is not None:
+                    _ps_lead.lead_enforcement_mode = (
+                        lead_enforcement.MODE_CODEX_SANDBOX
+                        if _lead_sandboxed
+                        else lead_enforcement.MODE_NONE
+                    )
                 _log_event(
                     "lead_enforcement",
                     project=project_ns,
@@ -4639,6 +4646,43 @@ class SpawnEngineMixin:
                 time_to_exit=time_to_exit,
                 session=session,
             )
+
+        if (
+            role_name == LEAD.name
+            and getattr(_ps_cx, "lead_enforcement_mode", "") == "codex_sandbox"
+        ):
+            # Codex stores tool calls and outcomes in its own rollout. Audit
+            # denied attempts at session exit without persisting command text
+            # or stdout (which may contain secrets). The OS sandbox remains
+            # the boundary if this best-effort audit adapter is unavailable.
+            try:
+                from .codex_helper import (
+                    resolve_codex_jsonl_for_cwd,
+                    resolve_newest_codex_session_for_cwd,
+                )
+                from .lead_enforcement import codex_denial_records
+
+                sid = str(getattr(_ps_cx, "session_uuid", "") or "")
+                rollout = resolve_codex_jsonl_for_cwd(cwd, sid, project=project) if sid else None
+                if rollout is None and spawn_ts is not None:
+                    rollout = resolve_newest_codex_session_for_cwd(
+                        cwd, created_after=spawn_ts, project=project
+                    )
+                if rollout is None:
+                    _log_event("lead_native_audit_unavailable", role=role_name, project=project)
+                else:
+                    for row in codex_denial_records(rollout, cwd):
+                        _log_event(
+                            "lead_native_denied",
+                            role=role_name,
+                            project=project,
+                            task=str(getattr(_ps_cx, "task_id", "") or ""),
+                            tool=row["tool"],
+                            target=row["target"],
+                            reason=row["reason"],
+                        )
+            except Exception:
+                _log_event("lead_native_audit_unavailable", role=role_name, project=project)
 
         self._on_session_exit(role_name, cwd, project, session=session, exit_code=exit_code)
 

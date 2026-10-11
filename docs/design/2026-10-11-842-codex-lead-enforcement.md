@@ -45,6 +45,12 @@ scripts, `spawn_agent` children) could write anywhere. Prompt text was the only 
 * A restricted Codex Lead gets an empty MCP table and disabled plugins/apps.
   The CLI server rejects any `team set`/`clear-override` that would unlock an
   already restricted policy, regardless of caller claims or process ancestry.
+* On protected Codex session exit, the cockpit reads Codex's rollout tool
+  outcomes and emits `lead_native_denied` events with role, project, task,
+  tool, project-relative target and reason. It never copies command input or
+  tool output into the event log. Missing rollout data emits
+  `lead_native_audit_unavailable`; this audit is best-effort and does not
+  replace the sandbox boundary.
 * Readiness records the enforcement mode (`codex_sandbox` / `none`). A restricted policy
   with mode `none` is reported as not ready ("restart Lead to enforce"), so a policy change
   can never leave an unrestricted Lead looking protected.
@@ -77,8 +83,10 @@ Disposable dirs under `C:\Users\monch\takkub-sbx-probe-842`, probe = Python `ope
 ## Residual gaps (not claimed as protected)
 
 * **macOS**: same flags, Seatbelt backend — not run on a Mac yet.
-* **Denied-attempt audit**: OS writes are denied, but structured Cockpit audit
-  events for each attempted tool/target are not yet available.
+* **Denied-attempt audit**: structured events are emitted at session exit for
+  recognized Codex tool failures. It is not a guaranteed record of every
+  denied operation: a missing/truncated rollout or a new error format can omit
+  an event. Existing sessions do not gain this collector until restarted.
 * **Policy flips while an unrestricted Lead runs**: readiness becomes false,
   but that old process must restart to gain the OS sandbox.
 * **Command network egress**: a live Windows TUI denied one direct external
