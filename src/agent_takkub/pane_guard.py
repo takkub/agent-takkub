@@ -852,6 +852,12 @@ def strip_takkub_text_payload(cmd: str) -> str:
     return "".join(parts)
 
 
+# #846: heavy kinds that verify ONE project (not a whole suite).
+_SINGLE_TARGET_VERIFY = frozenset(
+    {"tsc_typecheck", "tsc_project", "next_build", "vite_build", "pm_build"}
+)
+
+
 # #585 round 2: Heavy build and test suite detection for busy-machine gate
 def _is_heavy_build_or_suite(cmd: str) -> tuple[bool, str]:
     """Check if *cmd* is a heavy build or full test suite command (#585 round 2)."""
@@ -4348,7 +4354,10 @@ def classify(
                 name,
                 snapshot_path=snapshot_path,
                 machine_state_path=machine_state_path,
-                check_working_panes=heavy_type != "tsc_typecheck",
+                # #846: a single typecheck/build is the task's own
+                # verification — only real RAM/CPU pressure defers it.
+                # "Another pane is working" still gates the full suites.
+                check_working_panes=heavy_type not in _SINGLE_TARGET_VERIFY,
             )
             if busy:
                 return Verdict(

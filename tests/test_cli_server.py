@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import re
+from typing import ClassVar
 
 import pytest
 from PyQt6.QtCore import QCoreApplication, QTimer
@@ -1415,3 +1416,48 @@ class TestCodexDetection:
         srv = CliServer(_FakeOrch())
         assert srv._is_codex_spawn("codex", None) is True
         assert srv._is_codex_spawn("codex#1", None) is True
+
+
+class TestOwnRoleMessages852:
+    """#852: a pane may read `takkub messages` for its own role (identity
+    from its pane token), never another role's, and never `--drop`."""
+
+    class _Orch(_FakeOrch):
+        _pane_tokens: ClassVar[dict] = {"ptok": ("proj", "reviewer")}
+
+        def role_message_log(self, role, project=None, limit=20):
+            self.log_call = (role, project)
+            return True, "ok", [f"msg for {role}"]
+
+    def _run(self, req: dict) -> tuple[dict, TestOwnRoleMessages852._Orch]:
+        orch = self._Orch()
+        sock = _FakeSock()
+        CliServer(orch)._dispatch(sock, req)
+        return _replies(sock)[0], orch
+
+    def test_own_role_allowed_with_project_from_token(self) -> None:
+        r, orch = self._run(
+            {"cmd": "messages", "role": "reviewer", "from": "reviewer", "auth": "ptok"}
+        )
+        assert r["ok"] is True
+        assert orch.log_call == ("reviewer", "proj")
+
+    def test_other_role_still_lead_only(self) -> None:
+        r, _ = self._run({"cmd": "messages", "role": "backend", "from": "reviewer", "auth": "ptok"})
+        assert r["ok"] is False and "only lead" in r["msg"]
+
+    def test_spoofed_from_without_token_rejected(self) -> None:
+        r, _ = self._run({"cmd": "messages", "role": "reviewer", "from": "reviewer"})
+        assert r["ok"] is False
+
+    def test_drop_needs_lead(self) -> None:
+        r, _ = self._run(
+            {
+                "cmd": "messages",
+                "role": "reviewer",
+                "from": "reviewer",
+                "auth": "ptok",
+                "drop": True,
+            }
+        )
+        assert r["ok"] is False

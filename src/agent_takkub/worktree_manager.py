@@ -1791,6 +1791,24 @@ class WorktreeManager:
         after = self.head_sha(info.path)
         return bool(commit.ok and after and after != before)
 
+    def sibling_dirty_overlap(self, info: WorktreeInfo) -> list[str]:
+        """Repo-relative paths dirty in *info*'s worktree AND in another
+        worktree of the same repository (#849). Empty on any git failure."""
+        mine = set(parse_porcelain_paths(self.status_porcelain(info.path)))
+        if not mine:
+            return []
+        listed = self._run(["-C", info.git_root, "worktree", "list", "--porcelain"], None)
+        if not listed.ok:
+            return []
+        own = os.path.normcase(os.path.abspath(info.path))
+        overlap: set[str] = set()
+        for entry in parse_worktree_list(listed.stdout):
+            path = entry.get("path") or ""
+            if not path or os.path.normcase(os.path.abspath(path)) == own:
+                continue
+            overlap |= mine & set(parse_porcelain_paths(self.status_porcelain(path)))
+        return sorted(overlap)
+
     def snapshot_dirty_worktree(
         self, info: WorktreeInfo, role: str, reason: str
     ) -> tuple[bool, str | None]:
@@ -1821,14 +1839,20 @@ class WorktreeManager:
         every case that isn't a plain successful branch commit.
         """
         message = f"wip({role}): snapshot on {reason}"
+        # #849: when another worktree of the same repo holds the same files
+        # dirty, committing them here forks one change into two branches in
+        # different states. Park the snapshot on a side ref instead — nothing
+        # is lost, and the branch stays where the pane left it.
+        overlap = self.sibling_dirty_overlap(info)
         add = self._run(["-C", info.path, "add", "-A"], None)
         if not add.ok:
             return False, None
         before = self.head_sha(info.path)
-        commit = self._run(["-C", info.path, "commit", "-m", message], None)
-        after = self.head_sha(info.path)
-        if commit.ok and after and after != before:
-            return True, None
+        if not overlap:
+            commit = self._run(["-C", info.path, "commit", "-m", message], None)
+            after = self.head_sha(info.path)
+            if commit.ok and after and after != before:
+                return True, None
         write_tree = self._run(["-C", info.path, "write-tree"], None)
         tree_sha = write_tree.stdout.strip() if write_tree.ok else ""
         if not tree_sha:

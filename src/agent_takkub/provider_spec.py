@@ -1006,6 +1006,10 @@ codex_spec = ProviderSpec(
     busy_queue_confirm_markers=(
         "queued follow-up inputs",
         "messages to be submitted",
+        # #843: with several messages queued the header above scrolls out of
+        # the 6-row ready window; this hint stays next to the composer
+        # (52× in the 2026-10-11 ai-vdo Lead transcript, "shift+← edit …").
+        "edit last queued message",
     ),
     # multiline_newline_seq left at default None: codex's ratatui UI treats a
     # bare ESC as interrupt/clear-composer, not a no-op, so ESC+CR would clear

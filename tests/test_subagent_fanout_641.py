@@ -340,3 +340,21 @@ def test_stamp_env_sets_and_clears():
     assert sf.ENV_SUBAGENT_FANOUT not in env
     _stamp_subagent_fanout_env(env, 3)
     assert env[sf.ENV_SUBAGENT_FANOUT] == "3"
+
+
+class TestBrowserWorkNeverSubagentFanout847:
+    def test_reviewer_ui_audit_refused_with_hint(self) -> None:
+        from agent_takkub.shard_fanout import resolve_shard_fanout
+
+        kind, note = resolve_shard_fanout("reviewer", 3, task="UI audit all pages on 12700")
+        assert kind == "error" and "--mode e2e" in note
+
+    def test_frontend_browser_task_falls_back_to_panes(self) -> None:
+        from agent_takkub.shard_fanout import resolve_shard_fanout
+
+        kind, note = resolve_shard_fanout("frontend", 2, task="verify each page with playwright")
+        assert kind == "pane" and "#848" in note
+        kind, _ = resolve_shard_fanout(
+            "frontend", 2, fanout="subagent", task="take a screenshot of every page"
+        )
+        assert kind == "error"

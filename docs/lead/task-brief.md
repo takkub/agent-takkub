@@ -14,6 +14,7 @@
 - **ขอบเขต:** cwd, ไฟล์/subsystem ที่เกี่ยว, สิ่งที่ห้ามแตะ, งานที่ต้องรอ
 - **การตรวจ:** วิธีเล็กที่สุดที่พิสูจน์พฤติกรรมจริง พร้อม OS/provider ที่เกี่ยวข้อง
 - **การส่งต่อ:** รายงาน STATUS, CHANGED, EVIDENCE และ REMAINING ตาม context ของ pane
+- **commit (#858):** `--isolation shared` (ค่าเริ่มต้น) = pane ห้าม commit/push, Lead commit ให้หลัง done · `--isolation worktree` = pane commit บน branch `wt/<role>-*` ของตัวเองได้ แล้ว Lead merge · assign เตือนเมื่อใบงานสั่ง commit ในโหมด shared
 
 ส่งข้อสรุปที่ Lead ตรวจแล้วลงใบงาน ไม่ให้ pane อ่านไฟล์เดิมซ้ำโดยไม่จำเป็น. อย่าใช้คำสั่งลอยๆ เช่น "แก้ให้ผ่าน" หรือชื่อ issue อย่างเดียว.
 

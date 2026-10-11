@@ -560,6 +560,16 @@ class CliServer(QObject):
         # backlog-assign fires a real assign), so gate them like the rest —
         # exact-set membership can't express the family, so add the prefix.
         _is_lead_only = cmd in _LEAD_ONLY_CMDS or cmd.startswith("backlog-")
+        # #852: a pane may read the messages addressed to ITS OWN role — the
+        # identity comes from its pane token, never the caller-supplied `from`.
+        if cmd == "messages" and not req.get("drop") and not self._caller_is_lead(req):
+            pane_tokens = getattr(self._orch, "_pane_tokens", {})
+            identity = (
+                pane_tokens.get(req.get("auth") or "") if isinstance(pane_tokens, dict) else None
+            )
+            if identity and identity[1] == (req.get("role") or ""):
+                _is_lead_only = False
+                from_project = identity[0]
         if _is_lead_only:
             from_role = (req.get("from") or "").lower().strip()
             if from_role != "lead":

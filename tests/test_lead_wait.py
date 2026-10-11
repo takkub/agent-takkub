@@ -1675,6 +1675,63 @@ class TestCliWaitCommand:
         assert "devops" in out
         assert [c["cmd"] for c in calls] == ["wait-begin", "wait-poll", "wait-end"]
 
+    def test_all_flag_rides_out_outside_report_until_every_role_resolves_856(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+    ) -> None:
+        calls: list[dict] = []
+        polls = {"n": 0}
+
+        def fake_request(payload: dict) -> dict:
+            calls.append(payload)
+            if payload["cmd"] == "wait-begin":
+                return {
+                    "ok": True,
+                    "msg": "watching",
+                    "wait_id": f"w{len(calls)}",
+                    "roles": ["backend", "reviewer"],
+                    "started_ts": time.time(),
+                    "attached": False,
+                }
+            if payload["cmd"] == "wait-poll":
+                polls["n"] += 1
+                if polls["n"] < 4:
+                    return {
+                        "ok": True,
+                        "done": {"reviewer": "done"},
+                        "failed": {},
+                        "gone": {},
+                        "pending": {"backend": "ยังทำงานอยู่"},
+                        "elapsed": 5.0,
+                        "expired": False,
+                        "interrupt": {"role": "devops", "detail": "[devops FAILED] boom"},
+                    }
+                return {
+                    "ok": True,
+                    "done": {"backend": "done", "reviewer": "done"},
+                    "failed": {},
+                    "gone": {},
+                    "pending": {},
+                    "elapsed": 9.0,
+                    "expired": False,
+                    "interrupt": None,
+                }
+            if payload["cmd"] == "wait-end":
+                return {"ok": True, "msg": "wait ended"}
+            raise AssertionError(f"unexpected cmd: {payload['cmd']}")
+
+        monkeypatch.setattr(cli, "_request", fake_request)
+        monkeypatch.setattr(cli, "_request_with_retry", fake_request)
+        monkeypatch.setattr(cli.time, "sleep", lambda _s: None)
+        monkeypatch.delenv("TAKKUB_ROLE", raising=False)
+
+        rc = cli.main(["wait", "--role", "backend", "--role", "reviewer", "--all"])
+        out = capsys.readouterr().out
+
+        assert rc == 0
+        assert out.count("needs attention") == 1  # re-raised notice printed once
+        assert "interrupted" not in out
+        assert polls["n"] == 4
+
     def test_cancel_flag_sends_wait_cancel_and_skips_poll(
         self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
     ) -> None:

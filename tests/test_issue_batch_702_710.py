@@ -469,3 +469,19 @@ class TestCloudflaredInstall:
         )
         local.unlink()
         assert cfi.resolve_cloudflared("", download=True) == str(local) and called == [1]
+
+
+class TestPlainCommitInstructionWarns858:
+    def test_imperative_commit_on_shared_tree_warns(self) -> None:
+        for task in ("แก้ bug แล้ว commit", "run tests, commit when green", "1. fix\n2. commit"):
+            assert "isolation เป็น shared" in cli_mod._self_commit_isolation_warning(task, "shared")
+            assert cli_mod._self_commit_isolation_warning(task, "worktree") == ""
+
+    def test_boilerplate_and_nouns_stay_silent(self) -> None:
+        for task in (
+            "ห้าม commit เอง",
+            "Lead จะ commit ให้",
+            "branch 2 commit ahead",
+            "see commit message",
+        ):
+            assert cli_mod._self_commit_isolation_warning(task, "shared") == ""

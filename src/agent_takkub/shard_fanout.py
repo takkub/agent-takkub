@@ -27,6 +27,8 @@ the orchestrator both call it.
 
 from __future__ import annotations
 
+import re
+
 FANOUT_MODES: tuple[str, ...] = ("auto", "pane", "subagent")
 
 #: Roles whose ``--shards`` panes each get their own browser profile — a
@@ -41,6 +43,20 @@ ENV_SUBAGENT_FANOUT = "TAKKUB_SUBAGENT_FANOUT"
 #: Marker line inside the task text — role prompts point at it as the ONE
 #: exception to "never spawn a subagent yourself".
 TASK_MARKER = "━━ SUBAGENT FAN-OUT"
+
+
+#: #847/#848: the task needs a real browser — the same cue as
+#: `orchestrator_text.is_browser_task`, plus the UI-audit wording that slipped past it.
+_BROWSER_WORK_RE = re.compile(
+    r"\b(?:browser|playwright|puppeteer|cypress|selenium|e2e|smoke\s*test"
+    r"|ui\s*(?:check|test|audit|review)|web\s*test|screenshot)\b"
+    r"|\baudit\b[^\n]{0,40}\bpages?\b|เปิดเว็บ|เปิดเบราว์เซอร์",
+    re.IGNORECASE,
+)
+
+
+def is_browser_work(task: str) -> bool:
+    return bool(_BROWSER_WORK_RE.search(task or ""))
 
 
 def target_base_role(role: str, mode: str | None) -> str:
@@ -80,6 +96,7 @@ def resolve_shard_fanout(
     plan: bool = False,
     provider: str | None = None,
     project: str | None = None,
+    task: str = "",
 ) -> tuple[str, str | None]:
     """Decide how ``--shards N`` runs.
 
@@ -127,6 +144,25 @@ def resolve_shard_fanout(
             )
         return "pane", (
             f"{base} เป็น browser-QA shard → fan-out เป็น pane แยก (browser profile ต่อ shard)"
+        )
+    if task and is_browser_work(task):
+        # #847/#848: native subagents have no browser of their own, so a
+        # browser/UI task "fanned out" to them silently ran serially (or was
+        # BLOCKED outright). Decide here, at assign time, instead.
+        if base == "reviewer":
+            return "error", (
+                "reviewer ไม่มีเบราว์เซอร์ — งาน UI/e2e ที่ต้องเปิดเว็บแบ่ง shard ไม่ได้ (#847): "
+                "ใช้ `--mode e2e` (→ qa) หรือ `--mode ui` (→ critic) ซึ่งได้ browser profile "
+                "ต่อ shard pane หรือ assign ให้ frontend/qa แทน"
+            )
+        if explicit:
+            return "error", (
+                "--fanout subagent ใช้กับงานที่ต้องเปิดเบราว์เซอร์ไม่ได้: subagent ไม่มีเบราว์เซอร์ "
+                "ของตัวเอง (#848) — ใช้ --fanout pane"
+            )
+        return "pane", (
+            f"งานต้องเปิดเบราว์เซอร์ → fan-out เป็น {shards} pane แยก "
+            "(subagent ไม่มีเบราว์เซอร์ของตัวเอง #848)"
         )
     provider_name, hint = effective_provider_hint(base, project, provider)
     if not hint:

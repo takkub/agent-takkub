@@ -153,10 +153,19 @@ def validate_evidence(
 ) -> str:
     if evidence is None:
         return "impact evidence missing; pass --impact-evidence-file"
+    # #845: name both sides — a re-assign mid-task rotates the active task,
+    # and "different task" alone cost the pane a round to work out which.
+    refresh = "; run `takkub task impact` for the current ids and rewrite the evidence"
     if evidence.get("task_id") != task_id:
-        return "impact evidence belongs to a different task"
+        return (
+            f"impact evidence belongs to a different task "
+            f"(evidence {str(evidence.get('task_id'))[:8]}, active {task_id[:8]}){refresh}"
+        )
     if evidence.get("plan_digest") != plan_digest(plan):
-        return "impact evidence belongs to a different plan revision"
+        return (
+            f"impact evidence belongs to a different plan revision "
+            f"(evidence {evidence.get('plan_digest')}, active {plan_digest(plan)}){refresh}"
+        )
     if not revision or evidence.get("revision") != revision:
         return "impact evidence revision differs from the current working tree"
     results = evidence.get("checks")

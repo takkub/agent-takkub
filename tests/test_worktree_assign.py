@@ -485,6 +485,14 @@ class TestFinalizeWorktree:
         assert "ไม่มี commit" in warn
         assert "worktree clean" in warn
 
+    def test_clean_worktree_of_ops_task_stays_quiet_850(self, orch, monkeypatch):
+        fake = _FakeMgr(info=_info(), commits=0, dirty=False)
+        monkeypatch.setattr(wm_mod, "WorktreeManager", lambda *a, **k: fake)
+
+        orch._finalize_worktree("proj", "devops", _info().as_dict(), no_repo_change_expected=True)
+        assert fake.safe_remove_calls == 0  # still kept (#161)
+        assert not orch._notify_lead.called
+
     def test_dirty_worktree_with_no_commits_gets_auto_committed_and_proposed(
         self, orch, monkeypatch
     ):

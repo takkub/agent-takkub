@@ -254,3 +254,19 @@ def test_real_terminal_screen_distinguishes_existing_queue_from_new_correction()
     assert writes == [b"\r", b"\r"]
     assert not queued
     assert not outcomes[0].stuck_in_composer
+
+
+def test_codex_queue_confirm_matches_edit_hint_when_header_scrolled_off_843() -> None:
+    from agent_takkub.pty_session import PtySession
+
+    sess = PtySession.__new__(PtySession)
+    lines = ["• earlier output"] * 30 + [
+        "  ↳ second queued message",
+        "    shift+← edit last queued message",
+        "",
+        "› ",
+        "",
+        "  gpt-6.1 · 42% context left",
+    ]
+    sess.display_lines = lambda: lines  # type: ignore[method-assign]
+    assert sess.shows_busy_queue_confirm("codex")

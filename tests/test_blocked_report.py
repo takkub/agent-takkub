@@ -151,3 +151,34 @@ class TestBlockedCliSurface:
 
         assert sent["failed"] is True
         assert sent["blocked"] is False
+
+
+class TestGuardBlockedNotAFixAttempt855:
+    def test_guard_refusal_is_not_counted(self) -> None:
+        calls: list[str] = []
+
+        def hook(body: str):
+            calls.append(body)
+            raise AssertionError("a guard block must never reach the fix-loop ledger")
+
+        out = Orchestrator._build_verify_fail_handoff(
+            "backend",
+            "BLOCKED-ON-LEAD-COMMIT: [takkub guard: git_lead_only:commit] work is complete",
+            fix_loop_hook=hook,
+        )
+        assert "BLOCKED by guard" in out and "#855" in out
+        assert calls == []
+
+    def test_normal_scope_under_ceiling_is_auto_fire(self) -> None:
+        from types import SimpleNamespace
+
+        loop = SimpleNamespace(
+            stopped=False,
+            text="🔁 fix-loop รอบที่ 1/2",
+            decision=SimpleNamespace(action="auto_retry"),
+        )
+        out = Orchestrator._build_verify_fail_handoff(
+            "qa", "login test failed: 500 on /auth", fix_loop_hook=lambda _b: loop
+        )
+        assert "auto-fire" in out
+        assert "อย่าเพิ่ง fire" not in out

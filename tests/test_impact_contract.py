@@ -294,3 +294,14 @@ def test_rejected_done_keeps_pane_and_delivery_active(monkeypatch, tmp_path: Pat
     assert pane.state == "working"
     assert orch._last_delivery_ids[("p", "backend")] == "delivery-1"
     delivery.mark_done.assert_not_called()
+
+
+def test_wrong_task_rejection_names_both_ids_845() -> None:
+    from agent_takkub.impact_contract import validate_evidence
+
+    plan = {"checks": [{"id": "a", "required": True}]}
+    msg = validate_evidence(
+        plan, {"task_id": "e05150e3-old"}, task_id="9a1b2c3d-new", revision="git:x"
+    )
+    assert "evidence e05150e3" in msg and "active 9a1b2c3d" in msg
+    assert "takkub task impact" in msg

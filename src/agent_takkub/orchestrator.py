@@ -674,6 +674,12 @@ _OUT_OF_SCOPE_RE = re.compile(
     r"|ที่\s*user\s*พักไว้|ถูกพักไว้",
     re.IGNORECASE,
 )
+# #855: a FAIL note whose only blocker is a cockpit guard refusing the last
+# step — the guard's own stderr tag, or the self-report wording panes use.
+_GUARD_BLOCKED_RE = re.compile(
+    r"\[takkub guard:|BLOCKED[-_ ]ON[-_ ]LEAD[-_ ]COMMIT|\bgit_lead_only\b|\bbusy_machine\b",
+    re.IGNORECASE,
+)
 
 # Fallback that arms the forgot-done reminder even when the watchdog never
 # caught the pane mid-turn. The `seen_working` latch (set when a tick observes
@@ -5266,7 +5272,8 @@ class Orchestrator(
                 self._notify_lead(
                     project,
                     f"⚠️ [{role}] worktree `{info.branch}` มี uncommitted changes ตอน "
-                    f"{reason} — pre-commit hook ไม่ผ่าน เก็บ snapshot ไว้ที่ ref แยก "
+                    f"{reason} — ไม่ commit ลง branch (pre-commit hook ไม่ผ่าน หรือไฟล์ชุดเดียวกัน"
+                    f"ค้างอยู่ใน worktree อื่นด้วย #849) เก็บ snapshot ไว้ที่ ref แยก "
                     f"`{wip_ref}` แทน (ไม่แตะ branch หลัก) กู้คืนด้วย "
                     f"`git -C {info.git_root} show {wip_ref}`",
                     from_role=role,
@@ -5290,6 +5297,7 @@ class Orchestrator(
         precomputed: dict | None = None,
         skip_proposal_notice: bool = False,
         note: str = "",
+        no_repo_change_expected: bool = False,
     ) -> None:
         """Wrap up an isolated pane's worktree when it reports done/close.
 
@@ -5467,6 +5475,11 @@ class Orchestrator(
                 state_note = "มี uncommitted changes ในนั้น — ยังกู้ได้"
             else:
                 state_note = "working tree clean ด้วย — เช็คให้ชัวร์ว่างานหายไปจริงหรือแค่ลืม commit"
+            if not dirty and no_repo_change_expected and not worktree.get("never_delivered"):
+                # #850: an ops/investigate task (deploy, docker, audit) is
+                # expected to leave the repo untouched — the done digest
+                # already says so; a "forgot to commit?" alarm is noise.
+                return
             if worktree.get("never_delivered"):
                 action_label = "ปิด pane ก่อนงานส่งถึง (task never delivered)"
             elif note == "close":
@@ -8220,6 +8233,17 @@ class Orchestrator(
         STOP notice; below it the attempt counter + prior attempts are shown.
         """
         body = note.strip() or "(no detail given)"
+        # #855: the pane's work was complete but a cockpit guard refused its
+        # last step (commit under git_lead_only, a build under busy_machine).
+        # That is a hand-off to Lead, not a failed fix attempt — never count it.
+        if _GUARD_BLOCKED_RE.search(body):
+            return (
+                f"[{from_role} BLOCKED by guard] {body}\n\n"
+                "🧱 งานทำเสร็จแล้วแต่ **guard ของ cockpit ไม่ให้ทำขั้นสุดท้าย** "
+                "(เช่น commit ตอน shared tree / build ตอนเครื่องไม่ว่าง) — ไม่ใช่โค้ดพัง "
+                "ไม่นับเป็นรอบ fix-loop (#855)\n"
+                "Lead ทำขั้นนั้นเอง (commit/รัน verify) หรือ assign ใหม่ด้วย `--isolation worktree`"
+            )
         # #296: BLOCKED before FAILED. A pane that couldn't run because
         # something outside the codebase is missing has found no bug, so the
         # whole fix-loop framing is wrong — there is no role to route to, only
@@ -8273,6 +8297,7 @@ class Orchestrator(
         except Exception:
             pass
         loop_text = ""
+        auto_retry = False
         if fix_loop_hook is not None:
             try:
                 _loop = fix_loop_hook(body)
@@ -8282,6 +8307,21 @@ class Orchestrator(
                 if _loop.stopped:
                     return f"[{from_role} FAILED] {body}\n\n{_loop.text}"
                 loop_text = _loop.text + "\n"
+                auto_retry = getattr(_loop.decision, "action", "") == "auto_retry"
+        if auto_retry:
+            # #855: tiny/normal scope under the ceiling is an auto-fire hop
+            # (#585) — demanding propose+confirm here stalled long-run batches.
+            return (
+                f"[{from_role} FAILED] {body}\n\n"
+                f"{loop_text}"
+                "⚠️ verify/QA รายงาน FAIL — เสนอ fix loop แบบ auto-fire (scope ไม่ใช่ deep "
+                "และยังไม่ถึงเพดาน): **แก้ต่อได้เลย** แล้วรายงาน user 1 บรรทัด\n"
+                f"{suggest}"
+                "1. อ่าน failure หา root cause · นอก scope / ของที่ user พักไว้ = รายงาน user "
+                "ห้าม route แก้ (#815)\n"
+                "2. assign role ที่ทำงานนั้นให้แก้ (แนบ failure + ledger ข้างบน)\n"
+                "3. แก้เสร็จ → re-verify (QA ท้ายสุดเสมอ)"
+            )
         return (
             f"[{from_role} FAILED] {body}\n\n"
             f"{loop_text}"
@@ -9714,6 +9754,11 @@ class Orchestrator(
                 precomputed=_worktree_digest_precomputed,
                 skip_proposal_notice=merge_folded_into_notice,
                 note=note,
+                no_repo_change_expected=bool(
+                    not failed
+                    and digest_facts is not None
+                    and (digest_facts.ops_task or digest_facts.investigate_task)
+                ),
             )
         else:
             # graft code-graph refresh (debounced): the pane wrote directly

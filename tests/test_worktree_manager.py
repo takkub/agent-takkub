@@ -3590,3 +3590,55 @@ class TestNamedBranchWorktree813:
         assert info is not None and info.branch.startswith("wt/")
         mgr.force_remove(info)
         assert self.git("branch", "--list", info.branch) == ""
+
+
+class TestSnapshotSiblingOverlap849:
+    """#849: a close-snapshot must not commit files another worktree of the
+    same repo also holds dirty — it parks them on a side ref instead."""
+
+    @pytest.fixture(autouse=True)
+    def _repo(self, tmp_path):
+        import subprocess
+
+        repo = tmp_path / "repo"
+        repo.mkdir()
+
+        def git(*args, cwd=repo):
+            return subprocess.run(
+                ["git", *args], cwd=cwd, check=True, capture_output=True, text=True
+            ).stdout.strip()
+
+        git("init", "-q", "-b", "main")
+        git("config", "user.email", "t@example.com")
+        git("config", "user.name", "t")
+        git("config", "core.hooksPath", str(tmp_path / "nohooks"))
+        (repo / "app.py").write_text("v1\n", encoding="utf-8")
+        git("add", "app.py")
+        git("commit", "-q", "-m", "init")
+        self.wt_a = tmp_path / "a"
+        git("worktree", "add", "-q", "-b", "wt/devops-1", str(self.wt_a))
+        (self.wt_a / "app.py").write_text("v2\n", encoding="utf-8")
+        self.base = git("rev-parse", "HEAD", cwd=self.wt_a)
+        self.info = WorktreeInfo(
+            path=str(self.wt_a), branch="wt/devops-1", base_sha=self.base, git_root=str(repo)
+        )
+        self.repo, self.git, self.tmp = repo, git, tmp_path
+
+    def test_overlap_goes_to_side_ref_and_branch_does_not_move(self):
+        wt_b = self.tmp / "b"
+        self.git("worktree", "add", "-q", "-b", "integration", str(wt_b))
+        (wt_b / "app.py").write_text("v2\n", encoding="utf-8")
+        mgr = WorktreeManager()
+
+        assert mgr.sibling_dirty_overlap(self.info) == ["app.py"]
+        committed, ref = mgr.snapshot_dirty_worktree(self.info, "devops", "close")
+
+        assert committed is False and ref and ref.startswith("refs/wip/")
+        assert self.git("rev-parse", "HEAD", cwd=self.wt_a) == self.base
+        assert self.git("show", f"{ref}:app.py") == "v2"
+
+    def test_no_overlap_commits_on_branch(self):
+        committed, ref = WorktreeManager().snapshot_dirty_worktree(self.info, "devops", "close")
+
+        assert committed is True and ref is None
+        assert self.git("rev-parse", "HEAD", cwd=self.wt_a) != self.base

@@ -591,8 +591,12 @@ def _browser_shard_warning(role: str, shards: int, mode: str | None = None) -> s
 # like a bug. Catching it here, at assign time, beats the pane discovering it
 # mid-task after burning a turn on a denied command.
 _SELF_COMMIT_TASK_RE = re.compile(
-    r"commit\s*(?:the\s+result|it|this)?\s*(?:เอง|ด้วยตัวเอง|yourself)|self[- ]commit",
-    re.I,
+    r"commit\s*(?:the\s+result|it|this)?\s*(?:เอง|ด้วยตัวเอง|yourself)|self[- ]commit"
+    # #858: a plain imperative step ("แก้แล้ว commit", "run tests, commit when
+    # green", "- commit the change") is the same instruction without "เอง".
+    r"|(?:^|[\n,;:(]|แล้ว|จากนั้น|\bthen|\band|\d\.|-)\s*commit\b"
+    r"(?!\s*(?:message|msg|hash|sha|ahead|ล่าสุด|id\b))",
+    re.I | re.M,
 )
 
 # (#682) The standard teammate-policy boilerplate is the PROHIBITION —
@@ -1083,6 +1087,7 @@ def cmd_assign(args: argparse.Namespace) -> dict:
             plan=False,
             provider=provider,
             project=_from_project(),
+            task=args.task or "",
         )
         if fanout_kind == "error":
             return {"ok": False, "msg": fanout_note or "--fanout subagent ใช้กับงานนี้ไม่ได้"}
@@ -2802,7 +2807,8 @@ def cmd_backlog(args: argparse.Namespace) -> dict:
     """`takkub backlog <add|list|show|done|block|defer|status|assign|start|pending|import>`
     — the project backlog (#684): work noticed but not yet done, kept across
     sessions so nothing gets dropped when the Lead session ends."""
-    sub = args.b_cmd
+    # #860: a bare `takkub backlog` lists instead of an argparse error.
+    sub = args.b_cmd or "list"
     if sub == "add":
         payload = {
             "cmd": "backlog-add",
@@ -2818,7 +2824,11 @@ def cmd_backlog(args: argparse.Namespace) -> dict:
     if sub == "list":
         resp = _request(
             _with_project(
-                {"cmd": "backlog-list", "status": args.status or "", "from": _from_role()}
+                {
+                    "cmd": "backlog-list",
+                    "status": getattr(args, "status", "") or "",
+                    "from": _from_role(),
+                }
             )
         )
         if resp.get("ok"):
@@ -2833,6 +2843,19 @@ def cmd_backlog(args: argparse.Namespace) -> dict:
         if resp.get("ok"):
             _utf8_print(resp.get("detail", ""))
         return resp
+    if sub == "defer" and getattr(args, "reason", ""):
+        # #844: the reason is kept on the card and shown in `backlog pending`.
+        return _request(
+            _with_project(
+                {
+                    "cmd": "backlog-status",
+                    "id": args.id,
+                    "status": "deferred",
+                    "reason": args.reason,
+                    "from": _from_role(),
+                }
+            )
+        )
     if sub in ("done", "defer"):
         return _request(
             _with_project({"cmd": f"backlog-{sub}", "id": args.id, "from": _from_role()})
@@ -3148,6 +3171,7 @@ def cmd_wait(args: argparse.Namespace) -> dict:
             f"— ใช้ {int(_WAIT_MAX_TIMEOUT_S)}s (ตั้ง wait ใหม่ต่อได้เมื่อหมด)"
         )
     no_interrupt = getattr(args, "no_interrupt", False)
+    wait_all = getattr(args, "wait_all", False)
     requested_roles = _split_role_args(getattr(args, "role", None))
     _warn_deprecated_role(requested_roles)
 
@@ -3177,6 +3201,7 @@ def cmd_wait(args: argparse.Namespace) -> dict:
     last_pending_keys: set[str] = set(roles)
     last_heartbeat = start
     interrupted_by: dict | None = None
+    seen_interrupts: set[tuple] = set()
     try:
         while True:
             poll = _request_with_retry(
@@ -3241,7 +3266,22 @@ def cmd_wait(args: argparse.Namespace) -> dict:
                 and interrupt.get("reason") == "user_input"
                 and interrupt.get("printable") is False
             )
-            if (
+            # #856: --all rides out every interrupt except real owner typing.
+            ride_out_for_all = (
+                wait_all and interrupt is not None and interrupt.get("reason") != "user_input"
+            )
+            if ride_out_for_all:
+                # The notice stays queued while Lead is blocked here, so the
+                # server re-raises it every poll: report it once.
+                seen_key = (interrupt.get("role"), interrupt.get("detail"))
+                if seen_key not in seen_interrupts:
+                    seen_interrupts.add(seen_key)
+                    print(
+                        f"[wait] [{interrupt.get('role')}] needs attention: "
+                        f"{interrupt.get('detail')} — --all: still waiting on "
+                        f"{', '.join(sorted(pending_keys))}"
+                    )
+            if ride_out_for_all or (
                 interrupt
                 and interrupt.get("reason") == "user_input"
                 and (no_interrupt or ambiguous_echo)
@@ -3274,6 +3314,9 @@ def cmd_wait(args: argparse.Namespace) -> dict:
                 if not rebegin.get("ok"):
                     return {**rebegin, "exit_code": _WAIT_EXIT_ERROR}
                 wait_id = rebegin.get("wait_id")
+                if ride_out_for_all:
+                    time.sleep(min(interval, max(remaining, 0.0)))
+                    interval = min(interval * 1.3, _WAIT_POLL_MAX_INTERVAL_S)
                 continue
             if interrupt:
                 interrupted_by = interrupt
@@ -6436,7 +6479,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     smsg = sub.add_parser(
         "messages",
-        help="(lead) read the `takkub send` audit log for a role — was it actually received? (#277)",
+        help="read the `takkub send` audit log for a role — was it actually received? (#277) · "
+        "Lead: any role; a pane: its own role only (#852)",
     )
     smsg.add_argument("--role", required=True, help="recipient role to look up")
     smsg.add_argument("--limit", type=int, default=20, help="how many recent messages (default 20)")
@@ -6499,7 +6543,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     # #684 — project backlog: cross-session store of noticed-but-not-done work.
     bl = sub.add_parser("backlog", help="project backlog: work noticed but not yet done (#684)")
-    bl_sub = bl.add_subparsers(dest="b_cmd", required=True)
+    bl_sub = bl.add_subparsers(dest="b_cmd")
     bla = bl_sub.add_parser("add", help="add a backlog item")
     bla.add_argument("title", help="short title of the item")
     bla.add_argument("--detail", default="", help="longer description")
@@ -6523,6 +6567,7 @@ def build_parser() -> argparse.ArgumentParser:
     blk.add_argument("reason", help="what it is blocked on")
     blf = bl_sub.add_parser("defer", help="park an item (พักไว้)")
     blf.add_argument("id", help="item id")
+    blf.add_argument("--reason", default="", help="why it was parked (#844)")
     blst = bl_sub.add_parser("status", help="set an item's status explicitly")
     blst.add_argument("id", help="item id")
     blst.add_argument("status", choices=backlog_statuses())
@@ -6668,6 +6713,14 @@ def build_parser() -> argparse.ArgumentParser:
         "stopping — transparently re-attaches to the still-pending roles and keeps "
         "polling until they resolve or --timeout elapses. Does NOT suppress a genuine "
         "blocking report from an outside role (#253) — that still stops the wait.",
+    )
+    swt.add_argument(
+        "--all",
+        action="store_true",
+        dest="wait_all",
+        help="(#856) return only when EVERY listed role resolved: a report from an "
+        "outside role or a delivery notice is printed and the wait keeps going. "
+        "Only text you type into the Lead pane still stops it.",
     )
     swt.set_defaults(func=cmd_wait)
 

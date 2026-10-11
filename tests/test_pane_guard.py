@@ -998,14 +998,6 @@ class TestBusyMachineDenied:
         snap.write_text(json.dumps(data), encoding="utf-8")
 
         for cmd in [
-            "npm run build",
-            "pnpm run build",
-            "yarn run build",
-            "bun run build",
-            "next build",
-            "vite build",
-            "tsc -b",
-            "tsc -p tsconfig.json",
             "pytest",
             "npm test",
             "vitest run",
@@ -1016,6 +1008,21 @@ class TestBusyMachineDenied:
             assert not verdict.allowed, f"Should be blocked: {cmd}"
             assert verdict.rule.startswith("busy_machine:")
             assert "เครื่องกำลังไม่ว่าง" in verdict.reason
+        # #846: a single typecheck/build is the pane's own verification —
+        # another pane working is not a reason to deny it (RAM/CPU still is).
+        for cmd in [
+            "npm run build",
+            "pnpm run build",
+            "yarn run build",
+            "bun run build",
+            "next build",
+            "vite build",
+            "tsc -b",
+            "tsc -p tsconfig.json",
+            "tsc --noEmit",
+        ]:
+            verdict = pane_guard.classify(cmd, "backend", snapshot_path=snap)
+            assert verdict.allowed, f"#846 should allow: {cmd}"
 
     def test_heavy_build_denied_when_overloaded(self, tmp_path) -> None:
         import json
@@ -1114,6 +1121,10 @@ class TestBusyMachineDenied:
         snap.write_text(json.dumps(data), encoding="utf-8")
 
         # Lead running heavy build or full suite is denied (#585 round 4 item 3)
+        # — #846: a single build only under real RAM/CPU pressure.
+        assert pane_guard.classify("npm run build", "lead", snapshot_path=snap).allowed
+        data["ram_percent"] = 90.0
+        snap.write_text(json.dumps(data), encoding="utf-8")
         v1 = pane_guard.classify("npm run build", "lead", snapshot_path=snap)
         assert not v1.allowed
         assert v1.rule == "busy_machine:pm_build"
@@ -2319,8 +2330,9 @@ class TestPythonMAgentTakkubDenied:
 
 
 def _busy_machine_state(tmp_path):
-    """Fresh machine-state.json with another project's pane `working`, so the
-    #585 busy-machine gate is live for every role including Lead."""
+    """Fresh machine-state.json with another project's pane `working` AND the
+    machine overloaded, so the #585 busy-machine gate is live for every role
+    and every heavy kind (#846: a single build needs real pressure)."""
     import json
     import time
 
@@ -2330,7 +2342,7 @@ def _busy_machine_state(tmp_path):
             {
                 "ts": time.time(),
                 "projects": {"other-proj": [{"role": "frontend", "state": "working"}]},
-                "overloaded": False,
+                "overloaded": True,
             }
         ),
         encoding="utf-8",

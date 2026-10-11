@@ -24,7 +24,10 @@ def test_typecheck_can_run_beside_other_panes_but_not_under_overload(tmp_path):
     snapshot = tmp_path / "snapshot.json"
     snapshot.write_text(json.dumps({"working_panes": ["backend@other"], "cpu_percent": 20}))
     assert pane_guard.classify("npx tsc --noEmit", "frontend", snapshot_path=snapshot).allowed
-    assert not pane_guard.classify("npx tsc -b", "frontend", snapshot_path=snapshot).allowed
+    # #846: a project build is the pane's own verification too — only real
+    # RAM/CPU pressure (below) defers it, not another pane being busy.
+    assert pane_guard.classify("npx tsc -b", "frontend", snapshot_path=snapshot).allowed
+    assert not pane_guard.classify("npx vitest run", "frontend", snapshot_path=snapshot).allowed
     snapshot.write_text(json.dumps({"working_panes": [], "overloaded": True}))
     assert not pane_guard.classify("npx tsc --noEmit", "frontend", snapshot_path=snapshot).allowed
 
