@@ -9,6 +9,10 @@ that is read-only everywhere except a short list of cockpit-owned roots.
 Codex hooks are deliberately NOT the boundary — they fail open on error and the
 vendor documents them as a guardrail, not enforcement. See
 ``docs/design/2026-10-11-842-codex-lead-enforcement.md`` for the threat model.
+
+A Claude Lead's boundary is Claude Code's own permission engine in ``dontAsk``
+mode with an allowlist (Claude Code has no OS sandbox on native Windows). See
+``docs/design/2026-10-12-842-claude-lead-enforcement.md``.
 """
 
 from __future__ import annotations
@@ -28,7 +32,20 @@ PROFILE_NAME = "takkub_lead"
 
 #: Enforcement modes recorded on the Lead readiness state.
 MODE_CODEX_SANDBOX = "codex_sandbox"
+MODE_CLAUDE_PERMISSIONS = "claude_permissions"
 MODE_NONE = "none"
+
+#: (provider, mode) pairs that actually enforce a restricted Lead → gate label.
+_ENFORCED = {
+    ("codex", MODE_CODEX_SANDBOX): "os_sandbox",
+    ("claude", MODE_CLAUDE_PERMISSIONS): "permission_allowlist",
+}
+
+#: Providers that can run a restricted Lead at all.
+RESTRICTED_LEAD_PROVIDERS = frozenset(provider for provider, _mode in _ENFORCED)
+
+#: Modes that hold a restricted policy, whichever provider recorded them.
+ENFORCED_MODES = frozenset(mode for _provider, mode in _ENFORCED)
 
 
 def lead_is_restricted(project: str | None) -> bool:
@@ -49,20 +66,25 @@ def lead_scratch_dir(project: str) -> pathlib.Path:
     return RUNTIME_DIR / "lead-tmp" / safe_segment(project or "default")
 
 
-def lead_write_roots(project: str, env: dict) -> list[str]:
+def lead_write_roots(project: str, env: dict, *, sandboxed_cli: bool = True) -> list[str]:
     """Paths a restricted Lead still needs to write: its briefs/evidence, the
     readiness acknowledgement and a scratch/TEMP dir. Directories are created
     so the sandbox can grant them. A development checkout may store its
     cockpit runtime within the repo; only that runtime subtree is exempted.
-    The Lead cannot write the audit event log."""
+    The Lead cannot write the audit event log.
+
+    ``sandboxed_cli=False`` (Claude): the ``takkub`` CLI runs outside any
+    sandbox and writes the readiness acknowledgement itself, so the model's
+    own edit tools get only the briefs/evidence dirs — never the readiness
+    state it could otherwise forge."""
     from .config import RUNTIME_DIR, _project_dict
 
     dirs = [
         env.get("TAKKUB_DOCS_DIR") or "",
         env.get("TAKKUB_ARTIFACTS_DIR") or "",
-        str(RUNTIME_DIR / "lead-readiness"),
-        str(lead_scratch_dir(project)),
     ]
+    if sandboxed_cli:
+        dirs += [str(RUNTIME_DIR / "lead-readiness"), str(lead_scratch_dir(project))]
     roots: list[str] = []
     project_paths = (_project_dict(project).get("paths") or {}).values()
     protected = [pathlib.Path(raw).resolve() for raw in project_paths if raw]
@@ -222,15 +244,102 @@ def verify_codex_boundary(
             raise RuntimeError("Codex sandbox allowed a write outside scoped roots")
 
 
+def _claude_rule_path(path: str) -> str:
+    """Absolute path in Claude Code's permission-rule form. Rules match POSIX
+    paths (``C:\\Users\\x`` is matched as ``/c/Users/x``) and a leading ``//``
+    anchors at the filesystem root rather than at the settings file."""
+    if re.match(r"^[A-Za-z]:", path):
+        win = pathlib.PureWindowsPath(path)
+        return f"//{win.drive[0].lower()}/" + "/".join(win.parts[1:])
+    return "//" + path.lstrip("/")
+
+
+def claude_lead_permissions(write_roots: list[str]) -> dict:
+    """Claude Code ``permissions`` block for a restricted Lead (#842).
+
+    Paired with ``--permission-mode dontAsk``: Claude Code itself denies every
+    call that is neither a built-in read-only action nor allowed here, without
+    a prompt. Edits are allowed only under *write_roots*. Shell is limited to
+    the cockpit control plane (``takkub``) and GitHub reads/issues; any other
+    program — interpreters, redirection into the project, ``git checkout`` —
+    is refused (verified live, Claude Code 2.1.296 on Windows 11).
+
+    ``takkub`` subcommands that run project code or write the project from the
+    CLI process itself are denied: a Codex Lead runs those inside its sandbox,
+    a Claude Lead would not. Bypass and auto modes are disabled so neither the
+    model nor a subagent definition can leave the boundary.
+    """
+    shell_allow = [
+        "takkub *",
+        "gh issue *",
+        "gh pr view *",
+        "gh pr list *",
+        "gh pr checks *",
+        "gh pr diff *",
+        "gh run list *",
+        "gh run view *",
+    ]
+    denied_commands = [
+        "takkub verify",
+        "takkub worktree merge",
+        "takkub worktree clean",
+        "takkub services",
+        "takkub cleanup",
+        # `--checkout` switches the project's working tree to a new branch.
+        "gh issue develop",
+    ]
+    # Both the bare command and the command with arguments.
+    shell_deny = [rule for cmd in denied_commands for rule in (cmd, f"{cmd} *")]
+    allow = [f"{tool}({rule})" for rule in shell_allow for tool in ("Bash", "PowerShell")]
+    allow.extend(f"Edit({_claude_rule_path(root)}/**)" for root in write_roots)
+    deny = [f"{tool}({rule})" for rule in shell_deny for tool in ("Bash", "PowerShell")]
+    return {
+        "defaultMode": "dontAsk",
+        "allow": allow,
+        "deny": deny,
+        "disableBypassPermissionsMode": "disable",
+        "disableAutoMode": "disable",
+    }
+
+
+#: dontAsk plus the "subagent cannot set bypassPermissions" rule (2.1.267).
+CLAUDE_MIN_VERSION = (2, 1, 267)
+
+#: Native Claude tools a restricted Lead may not have: a subagent definition
+#: may carry ``permissionMode: acceptEdits``, which was verified to write
+#: project files from under a dontAsk parent.
+CLAUDE_LEAD_DENIED_TOOLS = ("Agent",)
+
+
+def verify_claude_version(claude_bin: str, env: dict[str, str]) -> None:
+    """Refuse a restricted Lead on a Claude Code too old to hold the boundary."""
+    completed = subprocess.run(
+        [claude_bin, "--version"],
+        env=env,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=20,
+        check=False,
+        creationflags=SUBPROCESS_NO_WINDOW,
+    )
+    match = re.search(r"\b(\d+)\.(\d+)\.(\d+)\b", completed.stdout or "")
+    if completed.returncode or match is None:
+        raise RuntimeError("cannot determine the Claude Code version")
+    if tuple(int(part) for part in match.groups()) < CLAUDE_MIN_VERSION:
+        need = ".".join(map(str, CLAUDE_MIN_VERSION))
+        raise RuntimeError(f"Claude Code {match.group(0)} is older than {need}")
+
+
 def enforcement_gap(provider: str, mode: str | None, restricted: bool) -> str:
     """Why a restricted Lead session is NOT actually restricted, or ``""``.
 
-    Every restricted Lead needs an effective OS boundary. Claude's Edit/Write
-    hooks do not cover shell writes, and other providers have no equivalent
-    boundary. Report these sessions as unavailable instead of ready."""
-    if not restricted:
-        return ""
-    if provider == "codex" and mode == MODE_CODEX_SANDBOX:
+    A restricted Lead needs a boundary the provider itself enforces: Codex's
+    OS sandbox, or Claude Code's dontAsk permission engine. Prompt text and
+    fail-open hooks do not count, and other providers have neither. Report
+    those sessions as unavailable instead of ready."""
+    if not restricted or (provider, mode) in _ENFORCED:
         return ""
     return (
         f"restricted Lead policy is not enforced for {provider or 'unknown'} "
@@ -242,9 +351,7 @@ def gate_label(provider: str, mode: str | None, restricted: bool) -> str:
     """Truthful one-word capability for ``takkub context status``."""
     if not restricted:
         return "not_required"
-    if provider == "codex" and mode == MODE_CODEX_SANDBOX:
-        return "os_sandbox"
-    return "unenforced"
+    return _ENFORCED.get((provider, mode), "unenforced")
 
 
 def codex_denial_records(rollout: pathlib.Path, project_root: str) -> list[dict[str, str]]:

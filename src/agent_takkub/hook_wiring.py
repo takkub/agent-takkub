@@ -175,7 +175,9 @@ def activity_hook_fragment(matcher: str = "mcp__*") -> dict:
     }
 
 
-def _rendered_settings(*, concise: bool = False, remote_control: bool = True) -> dict:
+def _rendered_settings(
+    *, concise: bool = False, remote_control: bool = True, permissions: dict | None = None
+) -> dict:
     """The hook settings for this spawn: the static Stop/Notification/
     SessionStart wiring, the always-on PreToolUse Bash/Edit/Write guards, plus rtk's
     PreToolUse Bash hook when rtk is enabled centrally AND on PATH
@@ -199,7 +201,12 @@ def _rendered_settings(*, concise: bool = False, remote_control: bool = True) ->
     never falls through to Claude Code's own GB-rollout default (which is
     what caused rc to be on for every role in the first place). Defaults to
     ``True`` so `doctor.check_hook_wiring()`'s no-arg call keeps behaving
-    like it always has."""
+    like it always has.
+
+    ``permissions`` (#842) is a restricted Lead's ``permissions`` block. That
+    Lead runs in Claude Code's dontAsk mode, where rtk's rewrite would turn a
+    built-in read-only command (``git status``) into ``rtk git status``,
+    which is no longer read-only and gets denied — so rtk is left out."""
     settings = copy.deepcopy(_HOOK_SETTINGS)
     pre_tool_use: list[dict] = [
         {"matcher": "", "hooks": [{"type": "command", "command": "takkub _context-guard"}]},
@@ -213,7 +220,7 @@ def _rendered_settings(*, concise: bool = False, remote_control: bool = True) ->
     try:
         from . import rtk_helper
 
-        if rtk_helper.rtk_should_inject():
+        if permissions is None and rtk_helper.rtk_should_inject():
             pre_tool_use.append(rtk_helper.rtk_hook_fragment())
     except Exception:
         # rtk is a best-effort optimisation — never let it break the
@@ -226,10 +233,18 @@ def _rendered_settings(*, concise: bool = False, remote_control: bool = True) ->
     if concise:
         settings["outputStyle"] = _CONCISE_OUTPUT_STYLE
     settings["remoteControlAtStartup"] = remote_control
+    if permissions is not None:
+        settings["permissions"] = copy.deepcopy(permissions)
     return settings
 
 
-def ensure_hook_settings_file(*, concise: bool = False, remote_control: bool = True) -> str:
+def ensure_hook_settings_file(
+    *,
+    concise: bool = False,
+    remote_control: bool = True,
+    permissions: dict | None = None,
+    lead_project: str = "",
+) -> str:
     """Write the hook-wiring settings file if missing/stale and return its
     path as a string (for `--settings <path>`).
 
@@ -251,16 +266,23 @@ def ensure_hook_settings_file(*, concise: bool = False, remote_control: bool = T
     that monkeypatch it (as several spawn-argv tests already do) land the
     file under their own tmp dir instead of a stale path cached from
     whichever test happened to import this module first.
+
+    ``permissions`` (#842, restricted Lead) embeds project-specific write
+    roots, so it gets its own ``hook-settings-lead-<project>`` file.
     """
     config.ensure_runtime()
     name = "hook-settings"
+    if permissions is not None:
+        from .path_safe import safe_segment
+
+        name += f"-lead-{safe_segment(lead_project or 'default')}"
     if concise:
         name += "-concise"
     if not remote_control:
         name += "-norc"
     settings_path = config.RUNTIME_DIR / f"{name}.json"
     rendered = json.dumps(
-        _rendered_settings(concise=concise, remote_control=remote_control),
+        _rendered_settings(concise=concise, remote_control=remote_control, permissions=permissions),
         indent=2,
         ensure_ascii=False,
     )

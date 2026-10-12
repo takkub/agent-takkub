@@ -63,10 +63,20 @@ class TestTeamPresetMenuPick:
 class TestTeamPresetClearOverride:
     def test_calls_orchestrator(self) -> None:
         window = _fake_window()
+        window.orch.clear_team_preset_override.return_value = (True, "cleared")
 
         UserActionsMixin._on_team_preset_clear_override(window, "proj-a")
 
         window.orch.clear_team_preset_override.assert_called_once_with("proj-a")
+        window._status.showMessage.assert_not_called()
+
+    def test_refusal_is_shown(self) -> None:
+        window = _fake_window()
+        window.orch.clear_team_preset_override.return_value = (False, "close the active Lead")
+
+        UserActionsMixin._on_team_preset_clear_override(window, "proj-a")
+
+        assert "close the active Lead" in window._status.showMessage.call_args[0][0]
 
 
 class TestTeamPresetChipMenu:

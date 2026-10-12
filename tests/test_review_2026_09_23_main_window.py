@@ -182,6 +182,9 @@ class _Window:
     def _wire_project_tab(self, tab) -> None:
         pass
 
+    def _on_lead_unavailable(self, project: str, reason: str) -> None:
+        self.messages.append(f"Lead for {project} is unavailable; {reason}")
+
     def _wire_lead_composer(self, pane, project: str) -> None:
         pass
 

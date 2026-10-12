@@ -320,7 +320,9 @@ class UserActionsMixin:
             self._status.showMessage(f"ตั้งค่าทีมไม่สำเร็จ: {msg}", 6_000)
 
     def _on_team_preset_clear_override(self, project: str) -> None:
-        self.orch.clear_team_preset_override(project)
+        ok, msg = self.orch.clear_team_preset_override(project)
+        if not ok:
+            self._status.showMessage(f"ล้าง override ไม่สำเร็จ: {msg}", 6_000)
 
     def _open_settings_window(self, initial_view: int) -> None:
         """Single choke point every entry point calls (👥 Team chip →

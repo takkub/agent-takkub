@@ -1127,7 +1127,7 @@ class MainWindow(
         _boot_phase("lead_spawn_ready")
         ok, msg = self.orch.spawn(LEAD.name)
         if not ok:
-            self._status.showMessage(f"⚠ Lead spawn failed: {msg}", 30_000)
+            self._on_lead_unavailable(active_project()[0] or "default", f"spawn failed: {msg}")
 
     def _end_boot_lead_active_wait(self) -> None:
         """Grace timer from `_boot`: from here on `_spawn_lead_when_quiet` no
@@ -1643,6 +1643,7 @@ class MainWindow(
 
         ok, msg = self.orch.spawn(LEAD.name, project=project_name)
         if not ok:
+            self._on_lead_unavailable(project_name, f"spawn failed: {msg}")
             self.orch.unregister_pane(LEAD.name, project=project_name, force=True)
             try:
                 lead._terminal.destroy_terminal()
@@ -1864,7 +1865,7 @@ class MainWindow(
     def _respawn_lead_post_restart(self) -> None:
         ok, msg = self.orch.spawn(LEAD.name)
         if not ok:
-            self._status.showMessage(f"⚠ Lead respawn failed: {msg}", 15_000)
+            self._on_lead_unavailable(active_project()[0] or "default", f"respawn failed: {msg}")
             return
         active = active_project()[0]
         if active:

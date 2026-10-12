@@ -4,6 +4,14 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 
 ## [vNEXT]
 
+## [v2.2.16] - 2026-10-12
+
+### Fixed (แก้)
+
+- **Lead ไม่ขึ้นเลยเมื่อใช้ Claude Lead กับ preset ทีม (`full`) (#866, regression จาก 2.2.15):** #842 ปฏิเสธ Lead ทุก provider ที่ไม่ใช่ Codex เมื่อ policy ห้าม Lead แก้โค้ด เหตุผลขึ้นแค่ status bar 30 วินาที บน prod จึงไม่มี Lead และไม่มีร่องรอยใน log · ตอนนี้ Claude Lead ที่ถูกจำกัดใช้ขอบเขตที่ Claude Code บังคับเอง: `--permission-mode dontAsk` + allowlist (`takkub`, `gh issue`, ดู pr/run และแก้ไฟล์ได้เฉพาะ `$TAKKUB_DOCS_DIR`/`$TAKKUB_ARTIFACTS_DIR`) ปิด bypass/auto mode และถอด Agent tool · ไม่มี prompt ให้กด Enter แต่ปฏิเสธเงียบๆ แทน · ทดสอบจริงกับ Claude Code 2.1.296 บน Windows: Write/redirect/python/PowerShell/`git checkout`/Agent/Skill/`takkub verify` ถูกปฏิเสธ ไฟล์ sentinel ไม่เปลี่ยน ส่วน `git status`, `takkub`, `gh issue` และการเขียน docs dir ยังทำได้ · gap: ไม่มี OS sandbox สำหรับ Claude บน Windows, AskUserQuestion และ Skill ใช้ไม่ได้ใน Lead ที่ถูกจำกัด, macOS ยังไม่ได้ทดสอบ live — รายละเอียด `docs/design/2026-10-12-842-claude-lead-enforcement.md`
+- **Lead spawn ล้มแบบเงียบ:** ทุกครั้งที่ spawn Lead ไม่สำเร็จจะเขียน `lead_spawn_failed` ลง events.log และขึ้นแจ้งเตือน "Lead unavailable" (status bar + tray) แทนข้อความชั่วคราว
+- **เปลี่ยน preset เป็นแบบจำกัดตอน Claude Lead ที่ไม่ถูกจำกัดยังรันอยู่:** ถูกปฏิเสธเหมือน Codex (ปิด Lead → เปลี่ยน preset → เปิดใหม่) เพราะ hook ของ Claude ไม่ครอบคลุมการเขียนผ่าน shell · "ล้าง override" ที่ถูกปฏิเสธเคยโยน error เงียบๆ ใน UI (มีมาตั้งแต่ 2.2.15 กับ Codex Lead) ตอนนี้แสดงเหตุผลบน status bar
+
 ## [v2.2.15] - 2026-10-11
 
 ### Fixed (แก้)

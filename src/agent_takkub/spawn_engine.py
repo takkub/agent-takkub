@@ -2414,6 +2414,31 @@ class SpawnEngineMixin:
         _shard_total: int = 0,
         resume_uuid: str | None = None,
     ) -> tuple[bool, str]:
+        ok, msg = self._spawn_once(
+            role_name,
+            cwd=cwd,
+            project=project,
+            _from_auto_respawn=_from_auto_respawn,
+            _shard_total=_shard_total,
+            resume_uuid=resume_uuid,
+        )
+        if not ok and role_name == LEAD.name:
+            # A refused Lead spawn used to leave only a 30 s status-bar line:
+            # 2.2.15 prod had no Lead and nothing in events.log said why.
+            _from_orch("_log_event")(
+                "lead_spawn_failed", project=self._resolve_project(project), msg=str(msg)[:300]
+            )
+        return ok, msg
+
+    def _spawn_once(
+        self,
+        role_name: str,
+        cwd: str | None = None,
+        project: str | None = None,
+        _from_auto_respawn: bool = False,
+        _shard_total: int = 0,
+        resume_uuid: str | None = None,
+    ) -> tuple[bool, str]:
         # Resolve test-mockable deps from orchestrator's live namespace so that
         # tests using `patch("agent_takkub.orchestrator.PtySession")` etc. work.
         PtySession = _from_orch("PtySession")
@@ -2811,9 +2836,12 @@ class SpawnEngineMixin:
                 _ps_initial.lead_readiness_file = str(readiness)
             except Exception as exc:
                 return False, f"Lead context bootstrap failed: {exc}"
-            from .lead_enforcement import lead_is_restricted
+            from .lead_enforcement import RESTRICTED_LEAD_PROVIDERS, lead_is_restricted
 
-            if lead_is_restricted(project_ns) and effective_provider != "codex":
+            if (
+                lead_is_restricted(project_ns)
+                and effective_provider not in RESTRICTED_LEAD_PROVIDERS
+            ):
                 return False, (
                     f"restricted Lead cannot start with {effective_provider}: "
                     "no enforceable read-only execution boundary"
@@ -3906,6 +3934,24 @@ class SpawnEngineMixin:
         # `remoteControlAtStartup` (#458) — without it Claude Code 2.1.251
         # defaults rc to on for every pane, not just Lead.
         settings_argv: list[str] = []
+        permission_argv: list[str] = ["--dangerously-skip-permissions"]
+        # #842: a Lead that may not implement runs in Claude Code's dontAsk
+        # mode with an allowlist instead of the bypass flag — Claude Code then
+        # refuses every edit/command outside it, no prompt. Fail closed: no
+        # verified settings file → no restricted Lead.
+        _lead_permissions: dict | None = None
+        if role_name == LEAD.name:
+            from . import lead_enforcement
+
+            if lead_enforcement.lead_is_restricted(project_ns):
+                try:
+                    lead_enforcement.verify_claude_version(claude, env)
+                    _lead_permissions = lead_enforcement.claude_lead_permissions(
+                        lead_enforcement.lead_write_roots(project_ns, env, sandboxed_cli=False)
+                    )
+                except Exception as exc:
+                    return False, f"restricted Lead permissions could not be prepared: {exc}"
+                permission_argv = ["--permission-mode", "dontAsk"]
         try:
             from .hook_wiring import (
                 ensure_hook_settings_file,
@@ -3919,11 +3965,30 @@ class SpawnEngineMixin:
             settings_argv.extend(
                 [
                     "--settings",
-                    ensure_hook_settings_file(concise=_concise, remote_control=_remote_control),
+                    ensure_hook_settings_file(
+                        concise=_concise,
+                        remote_control=_remote_control,
+                        permissions=_lead_permissions,
+                        lead_project=project_ns,
+                    ),
                 ]
             )
-        except Exception:
-            pass  # hook wiring must never block a spawn
+        except Exception as exc:
+            if _lead_permissions is not None:
+                return False, f"restricted Lead permissions could not be written: {exc}"
+            # hook wiring must never block an ordinary spawn
+        if role_name == LEAD.name:
+            from . import lead_enforcement, lead_readiness
+
+            _claude_mode = (
+                lead_enforcement.MODE_CLAUDE_PERMISSIONS
+                if _lead_permissions is not None
+                else lead_enforcement.MODE_NONE
+            )
+            if _ps_initial.lead_readiness_file:
+                lead_readiness.record_enforcement(_ps_initial.lead_readiness_file, _claude_mode)
+            _ps_initial.lead_enforcement_mode = _claude_mode
+            _log_event("lead_enforcement", project=project_ns, provider=CLAUDE, mode=_claude_mode)
 
         # Teammate model tier — picked PER ROLE (see _ROLE_MODEL_TIERS above),
         # not one flat tier for everyone. Lead does orchestration and stays on
@@ -4187,6 +4252,10 @@ class SpawnEngineMixin:
             denied.append(CLAUDE_SUBAGENT_TOOL)
         if role_name != LEAD.name:
             denied.append("AskUserQuestion")
+        if _lead_permissions is not None:
+            from .lead_enforcement import CLAUDE_LEAD_DENIED_TOOLS
+
+            denied.extend(t for t in CLAUDE_LEAD_DENIED_TOOLS if t not in denied)
         denied_tools_argv: list[str] = []
         if denied:
             # Comma-join, NOT space: a space inside this single argv element
@@ -4332,6 +4401,7 @@ class SpawnEngineMixin:
             resume_argv=resume_argv,
             autocompact_argv=autocompact_argv,
             tools_argv=tools_argv,
+            permission_argv=permission_argv,
         )
 
         # #476: generalizes #444's worktree-only pre-trust to any claude cwd —

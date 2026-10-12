@@ -98,6 +98,17 @@ def test_context_text_prints_cockpit_claude_md_once(tmp_path: Path) -> None:
     assert "## Required policy:" in text
 
 
+def test_restricted_claude_context_names_its_boundary(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _revision, documents, facts = lead_readiness._sources("default", str(tmp_path))
+    facts["team"].update(preset="full", lead_may_implement=False)
+    claude = lead_readiness._context("default", str(tmp_path), documents, facts, "claude")
+    codex = lead_readiness._context("default", str(tmp_path), documents, facts, "codex")
+    assert "dontAsk" in claude and "AskUserQuestion" in claude
+    assert "dontAsk" not in codex
+
+
 def test_cli_context_read_and_status(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
 ) -> None:
@@ -160,6 +171,22 @@ def test_restricted_unsupported_provider_is_not_ready_842() -> None:
     for provider in ("claude", "gemini", "opencode", "cursor"):
         assert gate_label(provider, None, True) == "unenforced"
         assert "not enforced" in enforcement_gap(provider, None, True)
+    # A mode only counts for the provider that can actually enforce it.
+    assert gate_label("gemini", "claude_permissions", True) == "unenforced"
+    assert gate_label("claude", "codex_sandbox", True) == "unenforced"
+
+
+def test_restricted_claude_lead_with_permissions_is_ready_842(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from agent_takkub import lead_enforcement
+
+    monkeypatch.setattr("agent_takkub.config.RUNTIME_DIR", tmp_path / "runtime")
+    path = lead_readiness.prepare("default", "claude", str(tmp_path))
+    lead_readiness.record_enforcement(path, lead_enforcement.MODE_CLAUDE_PERMISSIONS)
+    state = lead_readiness.read_state(path)
+    restricted = {"team": {"lead_may_implement": False}}
+    assert lead_readiness.enforcement_status(state, restricted) == ("permission_allowlist", "")
 
 
 def test_codex_lead_argv_is_read_only_base_plus_roots_842() -> None:

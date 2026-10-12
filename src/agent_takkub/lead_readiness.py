@@ -89,7 +89,7 @@ def _sources(project: str, cwd: str) -> tuple[str, dict, dict]:
     return revision, documents, facts
 
 
-def _context(project: str, cwd: str, documents: dict, facts: dict) -> str:
+def _context(project: str, cwd: str, documents: dict, facts: dict, provider: str = "") -> str:
     from .lead_context import ASSETS_ROOT, _build_lead_context_text
 
     rendered = _build_lead_context_text(project, claude_cwd=cwd)
@@ -102,6 +102,16 @@ def _context(project: str, cwd: str, documents: dict, facts: dict) -> str:
         rule = "Lead may implement and self-verify. Honor the configured checker and disabled development positions."
     else:
         rule = "Delegate implementation/deployment to enabled positions through takkub assign --mode pane."
+        if provider == "claude":
+            # #842: what Claude Code's dontAsk boundary refuses, so the Lead
+            # works with it instead of retrying denied calls.
+            rule += (
+                "\nThis Claude Lead runs in Claude Code dontAsk mode: edits outside "
+                "$TAKKUB_DOCS_DIR and $TAKKUB_ARTIFACTS_DIR, shell "
+                "commands other than built-in read-only ones, takkub, gh issue and "
+                "gh pr/run views, and the Agent, Skill and AskUserQuestion tools are refused "
+                "without a prompt. Ask the user in plain text; run read-only git without rtk."
+            )
     parts = [rendered]
     # The rendered context already opens with the cockpit CLAUDE.md (#854):
     # it stays in the revision hash, but printing it twice only bloats the read.
@@ -126,7 +136,7 @@ def prepare(project: str, provider: str, cwd: str) -> Path:
     from .config import RUNTIME_DIR
 
     revision, documents, facts = _sources(project, cwd)
-    text = _context(project, cwd, documents, facts)
+    text = _context(project, cwd, documents, facts, provider)
     path = RUNTIME_DIR / "lead-readiness" / f"{uuid.uuid4().hex}.json"
     _write(
         path,
@@ -208,7 +218,10 @@ def refresh(path: str | Path) -> tuple[dict, str]:
     revision, documents, facts = _sources(state["project"], state["cwd"])
     if revision != state["revision"]:
         state.update(
-            revision=revision, text=_context(state["project"], state["cwd"], documents, facts)
+            revision=revision,
+            text=_context(
+                state["project"], state["cwd"], documents, facts, str(state.get("provider") or "")
+            ),
         )
         state["epoch"] += 1
         state["read_epoch"] = None

@@ -36,8 +36,10 @@ scripts, `spawn_agent` children) could write anywhere. Prompt text was the only 
   Loopback network stays on: the `takkub` CLI talks to the cockpit over TCP.
   The TUI also enables Codex's network proxy.
 * Applies only when the policy at spawn is restricted. `solo-lead`/`pair` keep the old flags.
-  Unsupported restricted providers refuse to spawn, including Claude (its hooks
-  do not cover shell writes). Codex uses `--no-daemon` and `--strict-config`.
+  Unsupported restricted providers (gemini/opencode/cursor) refuse to spawn.
+  2.2.15 also refused Claude, which left the default Claude Lead + `full`
+  setup with no Lead (#866); since 2.2.16 Claude uses Claude Code's dontAsk
+  permission engine — see `2026-10-12-842-claude-lead-enforcement.md`. Codex uses `--no-daemon` and `--strict-config`.
 * Before Codex spawn, reject legacy `sandbox_mode` in user/project configs,
   then run a disposable command under the installed Codex sandbox. It must
   write its scoped scratch root and fail to alter a protected sentinel. This

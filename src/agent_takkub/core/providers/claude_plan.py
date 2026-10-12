@@ -52,12 +52,14 @@ def assemble_claude_argv(
     resume_argv: Sequence[str] = (),
     autocompact_argv: Sequence[str] = (),
     tools_argv: Sequence[str] = (),
+    permission_argv: Sequence[str] = ("--dangerously-skip-permissions",),
 ) -> list[str]:
     """Pure re-assembly of the claude branch's argv, same order the branch
     builds it in (`spawn_engine.py` ~2639-2947):
 
-    1. `claude_bin`, `--dangerously-skip-permissions`, `--setting-sources`,
-       `setting_sources`
+    1. `claude_bin`, `permission_argv` (`--dangerously-skip-permissions`, or
+       `--permission-mode dontAsk` for a restricted Lead, #842),
+       `--setting-sources`, `setting_sources`
     2. `settings_argv` — Stop/Notification hook wiring (`--settings <path>`)
     3. `model_argv` — `--model` (Lead's or a teammate's, whichever branch ran)
     4. `effort_argv` — `--effort`-equivalent flag (provider-gated, may be empty)
@@ -77,7 +79,7 @@ def assemble_claude_argv(
     """
     return [
         claude_bin,
-        "--dangerously-skip-permissions",
+        *permission_argv,
         "--setting-sources",
         setting_sources,
         *settings_argv,

@@ -7621,14 +7621,12 @@ class Orchestrator(
         session = getattr(pane, "session", None)
         if not session or not session.is_alive:
             return ""
+        from .lead_enforcement import ENFORCED_MODES
+
         state = self._pane_state.get(_exit_key(project_ns, LEAD.name))
-        if getattr(state, "lead_enforcement_mode", "") == "codex_sandbox":
-            return ""
-        provider = getattr(getattr(pane, "model", None), "provider_name", None)
-        if not isinstance(provider, str) or not provider:
-            provider = getattr(state, "session_provider", "") or "claude"
-        if str(provider).lower() == "claude":
-            # Claude's Lead edit guard is a PreToolUse hook that reads the preset live.
+        # Both boundaries (Codex sandbox, Claude dontAsk allowlist) are fixed
+        # at spawn; Claude's live PreToolUse hook does not cover shell writes.
+        if getattr(state, "lead_enforcement_mode", "") in ENFORCED_MODES:
             return ""
         return (
             "close the active unrestricted Lead before selecting a restricted "
@@ -7637,11 +7635,15 @@ class Orchestrator(
 
     def clear_team_preset_override(self, project: str | None = None) -> tuple[bool, str]:
         """Clear this project's active per-task team-preset override (#512
-        item 4), restoring the standing preset. Always succeeds."""
+        item 4), restoring the standing preset. Refused (like `set_team_preset`)
+        when that would tighten policy under a live unrestricted Lead (#842)."""
         from . import team_preset
 
         project_ns = self._resolve_project(project)
-        cfg = team_preset.clear_override(project_ns)
+        try:
+            cfg = team_preset.clear_override(project_ns)
+        except ValueError as exc:
+            return False, str(exc)
 
         panes = self._panes_by_project.get(project_ns, {})
         lead = panes.get(LEAD.name)
