@@ -81,10 +81,10 @@ class TestPollLoopAllowed:
         assert classify("takkub status && git status --short", "lead").allowed is True
 
     def test_the_sanctioned_primitive_is_never_blocked(self) -> None:
-        """`takkub wait` is the escape hatch the denial text points at — it
-        must not itself trip a rule, including when a `sleep` sits nearby."""
-        assert classify("takkub wait --role backend --timeout 600", "lead").allowed is True
-        assert classify("sleep 5 && takkub wait --role backend", "lead").allowed is True
+        """`takkub wait --hold` is the escape hatch the denial text points at —
+        it must not itself trip a rule, including when a `sleep` sits nearby."""
+        assert classify("takkub wait --hold --role backend --timeout 600", "lead").allowed is True
+        assert classify("sleep 5 && takkub wait --hold --role backend", "lead").allowed is True
 
     def test_naming_the_pattern_in_prose_is_allowed(self) -> None:
         """Writing ABOUT the rule (a task spec, a doc edit) must not be

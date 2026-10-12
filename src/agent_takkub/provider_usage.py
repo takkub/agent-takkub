@@ -1727,6 +1727,11 @@ class ProviderUsageStore:
         # (both provider-level, unchanged since before Phase 3b) never see
         # an account-scoped entry mixed in.
         self._account_cache: dict[tuple[str, str], ProviderUsage] = {}
+        # #865: discovered account homes per provider. Discovery globs and
+        # resolves home dirs and reads identity files — 0.5-3 s per call on
+        # prod — so it only ever runs off the UI thread; readers use this.
+        self._targets: dict[str, tuple[UsageAccountTarget, ...]] = {}
+        self._targets_pending: set[str] = set()
         self._running = False
         self._wake = threading.Event()
 
@@ -1761,6 +1766,14 @@ class ProviderUsageStore:
         except OSError:
             want = Path(home)
         with self._lock:
+            # Discovered homes are stored resolved, so the string lookup
+            # nearly always hits — resolving every key on each call cost
+            # seconds on the UI thread (#865). The loop is the fallback for a
+            # key written from an unresolved `refresh_now(config_dir=...)`.
+            for key in (str(want), str(home)):
+                hit = self._account_cache.get((provider, key))
+                if hit is not None:
+                    return hit
             items = list(self._account_cache.items())
         for (prov, key), usage in items:
             if prov != provider:
@@ -1790,21 +1803,50 @@ class ProviderUsageStore:
                 if usage is not None:
                     rows.append(usage)
                 continue
-            if provider == "claude":
-                targets = claude_usage_targets()
-                if not targets:  # no discoverable account: keep the provider-level row
-                    usage = provider_cache.get("claude")
-                    if usage is not None:
-                        rows.append(usage)
-                    continue
-            else:
-                targets = codex_usage_targets()
+            targets = self._known_targets(provider)
+            if not targets:  # not discovered yet / none: keep the provider-level row
+                usage = provider_cache.get(provider)
+                if usage is not None:
+                    rows.append(usage)
+                continue
             for target in targets:
                 usage = account_cache.get(_account_key(provider, target))
                 if usage is None:
                     usage = ProviderUsage(provider=provider, status=STATUS_LOADING)
                 rows.append(dataclasses.replace(usage, account=target.account))
         return _merge_identical_account_rows(rows)
+
+    def _discover_targets(self, provider: str) -> tuple[UsageAccountTarget, ...]:
+        """Run account discovery (slow — background threads only) and keep
+        the result for :meth:`_known_targets`."""
+        targets = claude_usage_targets() if provider == "claude" else codex_usage_targets()
+        with self._lock:
+            self._targets[provider] = targets
+        return targets
+
+    def _known_targets(self, provider: str) -> tuple[UsageAccountTarget, ...]:
+        """Last discovered targets, never discovering on the caller's thread.
+        A provider not discovered yet gets a one-off background discovery
+        (the poll loop may be off when auto-fetch is disabled)."""
+        with self._lock:
+            targets = self._targets.get(provider)
+            if targets is not None or provider in self._targets_pending:
+                return targets or ()
+            self._targets_pending.add(provider)
+
+        def _run() -> None:
+            try:
+                self._discover_targets(provider)
+            except Exception:
+                _log.exception("usage account discovery failed for %s", provider)
+                with self._lock:
+                    self._targets.setdefault(provider, ())
+            finally:
+                with self._lock:
+                    self._targets_pending.discard(provider)
+
+        threading.Thread(target=_run, daemon=True, name=f"usage-targets-{provider}").start()
+        return ()
 
     def refresh_now(self, provider: str, config_dir: Path | str | None = None) -> None:
         """Fire a background fetch for one provider (or, with *config_dir*,
@@ -1895,7 +1937,7 @@ class ProviderUsageStore:
         if provider not in ("claude", "codex"):
             self._fetch_one(provider)
             return
-        targets = claude_usage_targets() if provider == "claude" else codex_usage_targets()
+        targets = self._discover_targets(provider)
         if not targets:
             self._fetch_one(provider)
             return

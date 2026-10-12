@@ -6711,6 +6711,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="release the active wait registration for this project (#249) instead of blocking",
     )
     swt.add_argument(
+        "--hold",
+        action="store_true",
+        help="deliberately block this turn (no other work, must act the moment the report "
+        "lands). Required for a Lead pane — the default after assign is to end the turn",
+    )
+    swt.add_argument(
         "--no-interrupt",
         action="store_true",
         dest="no_interrupt",

@@ -77,7 +77,7 @@ Teammates: frontend · backend · mobile · devops · qa · reviewer · critic �
 2. **fix loop มีเพดานที่โค้ดบังคับ (#762)**: tiny/normal FAILED → notice นับ `รอบ n/2` (ยัง propose-then-fire ไม่ auto-dispatch) · **รอบ 3 = 🛑 CEILING หยุด แจ้ง user** พร้อมหลักฐาน — ship ที่ผ่านแล้ว + เปิด issue ที่เหลือ · re-verify แค่ยืนยัน finding เดิม · ใช้ `--backlog <id>` เดิมตอน re-assign เพื่อให้ ledger ติด brief · รายละเอียด `docs/lead/fix-loop.md`
 3. **สรุปถึง user ครั้งเดียวตอนจบ batch**: done ระหว่างทางลง digest/audit log ไม่เด้งหา user ทุกใบ (#464)
 4. **Quota-hit reroute (#514) ทำงานจริง**: pane ตันเพราะโควตา orchestrator ย้าย provider ให้เอง ไม่ต้องรอ user
-5. **Lead ห้ามหยุดรอแบบ block** (กฎ #287/#242): ใช้ `takkub wait` เท่านั้น จบ turn ให้ระบบ delivery ปลุก
+5. **Lead ห้ามหยุดรอแบบ block** (#287/#242): assign แล้ว**จบเทิร์น** — ดูข้อ 2 ด้านล่าง
 6. **Backlog บังคับก่อนเริ่มงาน (#714, ระบบบังคับ):** assign ทุกครั้งวิ่งใต้ใบ (`--backlog <id>` หรือระบบสร้างให้) · Lead แก้ไฟล์เองต้อง `takkub backlog start --title "…"` ก่อน · ไม่เตือนงานค้างทุกครั้ง (user รำคาญ) — ดูเมื่อถูกถาม → `takkub backlog pending`
 
 ### Done-handoff rules
@@ -122,7 +122,7 @@ frontend/mobile self-verify ด้วย screenshot จริง:
 
 ### 2. ห้าม block wait (#287/#242)
 - **ค่าเริ่มต้นคือ "ไม่ต้องรอ" (#287):** ยิงงานเสร็จแล้ว **จบเทิร์นไปเลย** — รายงาน done/FAILED จะส่งเข้า pane ของ Lead แล้วปลุกเทิร์นใหม่ให้เอง ห้าม loop เฝ้า (บล็อกโดย `pane_guard` ที่ PreToolUse hook)
-- **ห้ามกอง background waiter (#242):** ถ้าจำเป็นต้องรอจริง ให้ใช้ `takkub wait [--role <r>]... [--timeout <s>]` เท่านั้น ห้ามเขียน loop เอง (มีได้ทีละ 1 waiter ต่อ project, timeout สูงสุด 30 นาที)
+- **ยกเว้นเดียว (#242):** ไม่มีงานอื่นเลย **และ**ต้องขยับทันทีที่รายงานถึง → `takkub wait --hold [--role <r>]` (ไม่มี `--hold` หรือ pipe เข้า filter = guard deny · 1 waiter/project · ≤30 นาที)
 
 ### 3. ❌ ห้าม one-shot `takkub codex` / `takkub gemini`
 - user ต้องเห็นทำงานสดใน pane → ใส่เป็น row ใน propose table → fire `takkub assign --role codex/gemini`

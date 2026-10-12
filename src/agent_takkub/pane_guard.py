@@ -661,8 +661,47 @@ POLL_LOOP_RULE_TEXT = (
     "ค่าเริ่มต้นคือ **ไม่ต้องรอ — จบเทิร์นไปเลย** รายงาน done/FAILED จะถูกส่งเข้า pane ของ Lead "
     "แล้วปลุกเทิร์นใหม่เอง (นั่นคือหน้าที่ของ delivery pipeline ทั้งอัน). "
     "ถ้าจำเป็นต้องคาไว้จริงๆ (ไม่มีงานอื่นทำเลย และต้องขยับทันทีที่รายงานถึง) ใช้ "
-    "`takkub wait [--role <r>]... [--timeout <s>]` — ตัวเดียวต่อ project, ตื่นเองเมื่อมี blocking report."
+    "`takkub wait --hold [--role <r>]... [--timeout <s>]` — ตัวเดียวต่อ project, ตื่นเองเมื่อมี blocking report."
 )
+
+# Lead `takkub wait` without an explicit `--hold` (2026-10-12): a Lead assigned
+# a task and then sat in `takkub wait --timeout 1500 2>&1 | Select-Object -Last
+# 30` for the whole turn — the docs called wait "the" way to wait, so it became
+# the step after every assign. `args` stops at the next command but keeps a
+# `2>&1` redirect; `pipe` catches a filter that buffers every heartbeat until
+# the wait exits. Anchored at a command start so a quoted string or script
+# line that merely mentions `takkub wait` (a grep pattern, a test) is inert.
+_LEAD_WAIT = re.compile(
+    rf"(?:{_CMD_START}|\b(?:do|then)\s+)takkub(?:\.(?:exe|cmd|bat))?\s+wait(?![\w-])"
+    r"(?P<args>(?:[^|;&\n]|(?<=>)&)*)"
+    r"(?P<pipe>\|(?!\|)\s*(?:Select-Object|select|tail|head|grep|rg|findstr|more|sort|Out-String)(?![\w-]))?",
+    re.I | re.M,
+)
+_LEAD_WAIT_EXEMPT_FLAG = re.compile(r"(?<![\w-])(?:--hold|--cancel|--help|-h)(?![\w-])")
+LEAD_WAIT_RULE_TEXT = (
+    "assign แล้วจบเทิร์นไปเลย — รายงาน done/FAILED ถูกส่งเข้า pane ของ Lead แล้วปลุกเทิร์นใหม่เอง. "
+    "ถ้าไม่มีงานอื่นทำจริงๆ และต้องขยับทันทีที่รายงานถึง ใช้ "
+    "`takkub wait --hold [--role <r>]... [--timeout <s>]` และห้าม pipe ผลเข้า filter "
+    "(Select-Object/tail/head บัฟเฟอร์จนจบ ไม่เห็น heartbeat)."
+)
+
+
+def _lead_wait_verdict(code: str) -> Verdict | None:
+    for match in _LEAD_WAIT.finditer(code):
+        if match.group("pipe"):
+            return Verdict(
+                False,
+                rule="lead_wait:piped",
+                reason=f"ห้าม pipe ผลของ `takkub wait` เข้า filter. {LEAD_WAIT_RULE_TEXT}",
+            )
+        if not _LEAD_WAIT_EXEMPT_FLAG.search(match.group("args")):
+            return Verdict(
+                False,
+                rule="lead_wait:no-hold",
+                reason=f"`takkub wait` ไม่ใช่ขั้นตอนปกติหลัง assign. {LEAD_WAIT_RULE_TEXT}",
+            )
+    return None
+
 
 # pip/python -m pip install with -e/--editable, any target (#202): rewrites
 # __editable__*.pth in the SHARED venv's site-packages to point at the
@@ -4342,6 +4381,11 @@ def classify(
                     f"{POLL_LOOP_RULE_TEXT}"
                 ),
             )
+        # `shell` is the user's own terminal — only the Lead pane is held to it.
+        if name == "lead":
+            wait_verdict = _lead_wait_verdict(code)
+            if wait_verdict is not None:
+                return wait_verdict
 
     # #585 round 2/4: Deny heavy build or full suite when machine is busy
     # (other pane working or RAM/CPU overloaded).

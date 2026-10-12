@@ -1,9 +1,12 @@
-"""2.2.16: a restricted Claude Lead spawns under Claude Code's dontAsk boundary.
+"""A restricted Claude Lead spawns like every Claude pane (2.2.17).
 
 2.2.15 (#842) refused every non-Codex Lead under a restricted preset (`full`),
-so a Claude Lead never came up on prod. Every existing spawn test patched
-`lead_is_restricted` to False, which is why CI never saw it. These tests drive
-the real spawn path with the restriction ON.
+so a Claude Lead never came up on prod; 2.2.16 (#866) ran it under Claude
+Code's dontAsk allowlist, which left the Lead unusable on other machines.
+2.2.17 reverts to --dangerously-skip-permissions plus the cockpit's PreToolUse
+guards. Every other spawn test patches `lead_is_restricted` to False, which is
+why CI never saw either regression; these drive the real spawn path with the
+restriction ON.
 """
 
 from __future__ import annotations
@@ -59,7 +62,6 @@ def _spawn_lead(orch: Orchestrator, *, restricted: bool, provider: str = "claude
     fake_session = MagicMock()
     with (
         patch("agent_takkub.lead_enforcement.lead_is_restricted", return_value=restricted),
-        patch("agent_takkub.lead_enforcement.verify_claude_version", return_value=None),
         patch.object(orch, "effective_provider_for", return_value=provider, create=True),
         patch.object(orch_mod.PtySession, "__new__", return_value=fake_session),
         patch.object(
@@ -77,64 +79,26 @@ def _settings(argv: list[str]) -> dict:
     return json.loads(pathlib.Path(path).read_text(encoding="utf-8"))
 
 
-def test_restricted_claude_lead_spawns_under_dontask(orch: Orchestrator) -> None:
-    ok, msg, argv = _spawn_lead(orch, restricted=True)
-
-    assert ok, msg
-    assert "--dangerously-skip-permissions" not in argv
-    assert argv[argv.index("--permission-mode") + 1] == "dontAsk"
-    denied = argv[argv.index("--disallowed-tools") + 1].split(",")
-    assert "Agent" in denied
-    perms = _settings(argv)["permissions"]
-    assert perms["defaultMode"] == "dontAsk"
-    assert perms["disableBypassPermissionsMode"] == "disable"
-    edit_rules = [rule for rule in perms["allow"] if rule.startswith("Edit(")]
-    assert edit_rules
-    # The takkub CLI writes the readiness ack itself; the model must not be
-    # able to forge it with its own edit tools.
-    assert not any("lead-readiness" in rule or "lead-tmp" in rule for rule in edit_rules)
-    state = orch._pane_state[_exit_key(_PROJECT, "lead")]
-    assert state.lead_enforcement_mode == "claude_permissions"
-
-
-def test_restricted_claude_lead_settings_skip_rtk_rewrite(orch: Orchestrator) -> None:
-    with patch("agent_takkub.rtk_helper.rtk_should_inject", return_value=True):
-        ok, msg, argv = _spawn_lead(orch, restricted=True)
-
-    assert ok, msg
-    commands = [
-        hook["command"]
-        for entry in _settings(argv)["hooks"]["PreToolUse"]
-        for hook in entry["hooks"]
-    ]
-    assert not any("rtk" in command for command in commands)
-
-
-def test_unrestricted_claude_lead_keeps_bypass(orch: Orchestrator) -> None:
-    ok, msg, argv = _spawn_lead(orch, restricted=False)
+@pytest.mark.parametrize("restricted", [True, False])
+def test_claude_lead_spawns_with_bypass_and_hooks(orch: Orchestrator, restricted: bool) -> None:
+    ok, msg, argv = _spawn_lead(orch, restricted=restricted)
 
     assert ok, msg
     assert "--dangerously-skip-permissions" in argv
     assert "--permission-mode" not in argv
-    assert "permissions" not in _settings(argv)
+    settings = _settings(argv)
+    assert "permissions" not in settings
+    commands = [
+        hook["command"] for entry in settings["hooks"]["PreToolUse"] for hook in entry["hooks"]
+    ]
+    assert "takkub _context-guard" in commands
     state = orch._pane_state[_exit_key(_PROJECT, "lead")]
-    assert state.lead_enforcement_mode == "none"
+    assert state.lead_enforcement_mode == "claude_hooks"
 
 
-def test_restricted_claude_lead_fails_closed_on_old_cli(orch: Orchestrator) -> None:
-    fake_pane = MagicMock()
-    fake_pane.session = None
-    orch._panes_by_project.setdefault(_PROJECT, {})["lead"] = fake_pane
-    with (
-        patch("agent_takkub.lead_enforcement.lead_is_restricted", return_value=True),
-        patch(
-            "agent_takkub.lead_enforcement.verify_claude_version",
-            side_effect=RuntimeError("Claude Code 2.1.200 is older than 2.1.267"),
-        ),
-        patch.object(orch_mod.PtySession, "__new__") as new_session,
-    ):
-        ok, msg = orch.spawn("lead", cwd=str(config.RUNTIME_DIR.parent), project=_PROJECT)
+def test_restricted_claude_lead_keeps_agent_tool(orch: Orchestrator) -> None:
+    ok, msg, argv = _spawn_lead(orch, restricted=True)
 
-    assert not ok
-    assert "older than" in msg
-    new_session.assert_not_called()
+    assert ok, msg
+    if "--disallowed-tools" in argv:
+        assert "Agent" not in argv[argv.index("--disallowed-tools") + 1].split(",")

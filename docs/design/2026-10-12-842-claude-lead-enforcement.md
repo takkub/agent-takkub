@@ -1,5 +1,10 @@
 # #842 / #866 — Restricted Lead enforcement for Claude (threat model + design)
 
+> **Superseded in 2.2.17 (#867):** the dontAsk + allowlist boundary below left the Claude Lead
+> unusable on other machines and was reverted at the user's call. A Claude Lead runs with
+> `--dangerously-skip-permissions` again; its boundary is the cockpit's PreToolUse guards
+> (gate label `pretooluse_guard` — a guardrail, not an OS sandbox). Kept as the record of why.
+
 Companion to `2026-10-11-842-codex-lead-enforcement.md`. Same policy and asset:
 under `lead_may_implement: false` (preset `full`, …) the Lead may read, brief,
 assign and report, and must not change project files.

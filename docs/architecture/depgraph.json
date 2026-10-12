@@ -3032,7 +3032,6 @@
       "module": "agent_takkub.hook_wiring",
       "imports": [
         "agent_takkub.config",
-        "agent_takkub.path_safe",
         "agent_takkub.rtk_helper"
       ],
       "imported_by": [
@@ -3040,7 +3039,7 @@
         "agent_takkub.spawn_engine"
       ],
       "fan_in": 2,
-      "fan_out": 3
+      "fan_out": 2
     },
     {
       "module": "agent_takkub.impact_contract",
@@ -3758,7 +3757,6 @@
       "imported_by": [
         "agent_takkub.backlog",
         "agent_takkub.fix_loop",
-        "agent_takkub.hook_wiring",
         "agent_takkub.lead_enforcement",
         "agent_takkub.project_memory",
         "agent_takkub.project_nav",
@@ -3766,7 +3764,7 @@
         "agent_takkub.task_ledger",
         "agent_takkub.worktree_reuse"
       ],
-      "fan_in": 9,
+      "fan_in": 8,
       "fan_out": 0
     },
     {

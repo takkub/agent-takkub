@@ -4,6 +4,15 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 
 ## [vNEXT]
 
+## [v2.2.17] - 2026-10-12
+
+### Fixed (แก้)
+
+- **Claude Lead ใช้งานไม่ได้บนเครื่องอื่น (#867, regression จาก 2.2.16):** 2.2.16 ให้ Claude Lead แบบ restricted รันใน `--permission-mode dontAsk` + allowlist ซึ่งบนเครื่องอื่น Lead ไม่ทำงานเลย (`verify_claude_version` ปิด Lead ทิ้งถ้า Claude Code เก่ากว่า 2.1.267 หรืออ่าน version ไม่ได้ · allowlist ปฏิเสธเครื่องมือปกติโดยไม่ถาม) · กลับไปแบบก่อน #842: Claude Lead รัน `--dangerously-skip-permissions` เหมือนทุก pane ส่วนขอบเขตเป็น PreToolUse guard ของ cockpit (`pane_guard` + Lead edit guard ที่อ่าน preset สด) → แถบ `don't ask on` หายไป, rtk กลับมา, Agent/Skill/AskUserQuestion กลับมา · `takkub context status` บอก `pretooluse_guard` (guardrail ไม่ใช่ OS sandbox) · เปลี่ยน preset ระหว่างที่ Claude Lead รันอยู่ไม่ต้อง restart เหมือนเดิม · Codex Lead sandbox ไม่เปลี่ยน
+- **UI ค้างบ่อย (#865):** `get_all_account_usages` (meter + `/api/usage`) สแกนหา account ของ codex/claude (glob home + resolve + อ่าน identity) บน UI thread ทุกครั้งที่วาด — วัดบน prod ~10 นาทีสะสมใน 6 ชม. · discovery ย้ายไป background (poll loop / thread ครั้งเดียว) ส่วน reader ใช้ผลที่เก็บไว้ · `get_account_usage` เลิก resolve ทุก key ต่อการเรียก
+- **Lead ค้างทั้งเทิร์นด้วย `takkub wait` หลัง assign:** คู่มือ Lead เขียนว่า "ใช้ `takkub wait` เท่านั้น" จน Lead รัน wait หลังทุก assign (เคสจริง `takkub wait --timeout 1500 2>&1 | Select-Object -Last 30`) · คู่มือแก้ให้ค่าเริ่มต้น = จบเทิร์น · `pane_guard` ปฏิเสธ `takkub wait` ของ Lead ที่ไม่มี `--hold` (`lead_wait:no-hold`) และที่ pipe เข้า filter (`lead_wait:piped` — บัฟเฟอร์จนจบ ไม่เห็น heartbeat) · `takkub wait --hold` = ตั้งใจ block จริง · gap: guard ผ่าน PreToolUse hook ของ Claude — Lead provider อื่นได้แค่คู่มือ
+- **CodeQL `py/clear-text-storage-sensitive-data` (alert 61):** transcript เขียนข้อความที่ redact แล้ว แต่ชื่อ `secret_values`/`secrets` ทำให้ถูกตีเป็นความลับ · เปลี่ยนชื่อเป็น `redaction_pairs`
+
 ## [v2.2.16] - 2026-10-12
 
 ### Fixed (แก้)

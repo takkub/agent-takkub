@@ -79,7 +79,7 @@ _ENV_LINE_RE = re.compile(
 _MIN_SECRET_VALUE_LEN = 12
 
 
-def secret_values(env: dict | None = None, cwd: str | None = None) -> list[tuple[str, str]]:
+def redaction_pairs(env: dict | None = None, cwd: str | None = None) -> list[tuple[str, str]]:
     """``(name, value)`` pairs a pane could print verbatim: its own env plus
     the ``.env*`` files at *cwd* (what a project test/script loads). Longest
     value first so a value that contains another is replaced whole. Never

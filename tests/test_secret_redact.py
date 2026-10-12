@@ -117,7 +117,7 @@ class TestHops:
 
 
 def test_secret_values_from_env_and_dotenv(tmp_path) -> None:
-    from agent_takkub.secret_redact import secret_values
+    from agent_takkub.secret_redact import redaction_pairs
 
     # Built at runtime so the gitleaks pre-commit hook doesn't flag a fixture.
     byteplus = "bp-" + "fake" * 4
@@ -126,7 +126,7 @@ def test_secret_values_from_env_and_dotenv(tmp_path) -> None:
         encoding="utf-8",
     )
     (tmp_path / ".env.example").write_text("EXAMPLE_API_KEY=example-value-long\n")
-    pairs = secret_values(
+    pairs = redaction_pairs(
         {"GEMINI_API_KEY": "gem-abcdefghijklmnop", "PATH": "x" * 40}, str(tmp_path)
     )
     assert dict(pairs) == {

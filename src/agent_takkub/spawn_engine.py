@@ -3934,24 +3934,6 @@ class SpawnEngineMixin:
         # `remoteControlAtStartup` (#458) — without it Claude Code 2.1.251
         # defaults rc to on for every pane, not just Lead.
         settings_argv: list[str] = []
-        permission_argv: list[str] = ["--dangerously-skip-permissions"]
-        # #842: a Lead that may not implement runs in Claude Code's dontAsk
-        # mode with an allowlist instead of the bypass flag — Claude Code then
-        # refuses every edit/command outside it, no prompt. Fail closed: no
-        # verified settings file → no restricted Lead.
-        _lead_permissions: dict | None = None
-        if role_name == LEAD.name:
-            from . import lead_enforcement
-
-            if lead_enforcement.lead_is_restricted(project_ns):
-                try:
-                    lead_enforcement.verify_claude_version(claude, env)
-                    _lead_permissions = lead_enforcement.claude_lead_permissions(
-                        lead_enforcement.lead_write_roots(project_ns, env, sandboxed_cli=False)
-                    )
-                except Exception as exc:
-                    return False, f"restricted Lead permissions could not be prepared: {exc}"
-                permission_argv = ["--permission-mode", "dontAsk"]
         try:
             from .hook_wiring import (
                 ensure_hook_settings_file,
@@ -3968,22 +3950,19 @@ class SpawnEngineMixin:
                     ensure_hook_settings_file(
                         concise=_concise,
                         remote_control=_remote_control,
-                        permissions=_lead_permissions,
-                        lead_project=project_ns,
                     ),
                 ]
             )
-        except Exception as exc:
-            if _lead_permissions is not None:
-                return False, f"restricted Lead permissions could not be written: {exc}"
+        except Exception:
             # hook wiring must never block an ordinary spawn
+            pass
         if role_name == LEAD.name:
             from . import lead_enforcement, lead_readiness
 
+            # The Lead edit guard and pane_guard are wired through
+            # --settings; without that file the Lead has no guard at all.
             _claude_mode = (
-                lead_enforcement.MODE_CLAUDE_PERMISSIONS
-                if _lead_permissions is not None
-                else lead_enforcement.MODE_NONE
+                lead_enforcement.MODE_CLAUDE_HOOKS if settings_argv else lead_enforcement.MODE_NONE
             )
             if _ps_initial.lead_readiness_file:
                 lead_readiness.record_enforcement(_ps_initial.lead_readiness_file, _claude_mode)
@@ -4252,10 +4231,6 @@ class SpawnEngineMixin:
             denied.append(CLAUDE_SUBAGENT_TOOL)
         if role_name != LEAD.name:
             denied.append("AskUserQuestion")
-        if _lead_permissions is not None:
-            from .lead_enforcement import CLAUDE_LEAD_DENIED_TOOLS
-
-            denied.extend(t for t in CLAUDE_LEAD_DENIED_TOOLS if t not in denied)
         denied_tools_argv: list[str] = []
         if denied:
             # Comma-join, NOT space: a space inside this single argv element
@@ -4401,7 +4376,6 @@ class SpawnEngineMixin:
             resume_argv=resume_argv,
             autocompact_argv=autocompact_argv,
             tools_argv=tools_argv,
-            permission_argv=permission_argv,
         )
 
         # #476: generalizes #444's worktree-only pre-trust to any claude cwd —

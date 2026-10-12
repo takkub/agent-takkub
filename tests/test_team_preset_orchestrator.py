@@ -330,8 +330,8 @@ class TestSetTeamPresetBroadcast:
         team_preset.set_override("solo-lead", TEST_PROJECT)
         lead = _make_lead()
         orch._panes_by_project[TEST_PROJECT] = {LEAD.name: lead}
-        # This Lead was spawned under the dontAsk boundary (#842/#866).
-        orch._ps(_exit_key(TEST_PROJECT, LEAD.name)).lead_enforcement_mode = "claude_permissions"
+        # A Claude Lead's PreToolUse guards read the preset live.
+        orch._ps(_exit_key(TEST_PROJECT, LEAD.name)).lead_enforcement_mode = "claude_hooks"
 
         ok, _ = orch.clear_team_preset_override(project=TEST_PROJECT)
         assert ok is True
@@ -339,12 +339,14 @@ class TestSetTeamPresetBroadcast:
         assert lead.session.write.called
 
     def test_clear_override_refused_under_live_unrestricted_lead(self, orch: Orchestrator) -> None:
-        # solo-lead override → Lead spawned with the bypass flag; going back
-        # to `full` would leave it unenforced, so the cockpit refuses instead
-        # of raising into the UI slot.
+        # solo-lead override → a Codex Lead spawned without its sandbox; going
+        # back to `full` would leave it unenforced, so the cockpit refuses
+        # instead of raising into the UI slot.
         team_preset.set_current("full", TEST_PROJECT)
         team_preset.set_override("solo-lead", TEST_PROJECT)
-        orch._panes_by_project[TEST_PROJECT] = {LEAD.name: _make_lead()}
+        lead = _make_lead()
+        lead.model.provider_name = "codex"
+        orch._panes_by_project[TEST_PROJECT] = {LEAD.name: lead}
         orch._ps(_exit_key(TEST_PROJECT, LEAD.name)).lead_enforcement_mode = "none"
 
         ok, msg = orch.clear_team_preset_override(project=TEST_PROJECT)

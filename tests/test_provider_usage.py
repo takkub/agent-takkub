@@ -122,6 +122,7 @@ class TestCodexUsageTargets:
         store._account_cache[("codex", str(third))] = pu.ProviderUsage(
             provider="codex", status="active", plan="plus", utilization=0
         )
+        store._discover_targets("codex")  # what the background poll does
         rows = [row for row in store.get_all_account_usages() if row.provider == "codex"]
         assert [(row.account, row.utilization) for row in rows] == [
             ("default + local (~/.codex)", 100),
@@ -142,11 +143,33 @@ class TestCodexUsageTargets:
         store._account_cache[("codex", str(second))] = pu.ProviderUsage(
             provider="codex", status="active", utilization=34
         )
+        store._discover_targets("codex")  # what the background poll does
         rows = [row for row in store.get_all_account_usages() if row.provider == "codex"]
         assert [(row.account, row.utilization) for row in rows] == [
             ("personal", 12),
             ("work", 34),
         ]
+
+    def test_reader_never_discovers_on_its_own_thread_865(self, monkeypatch):
+        """#865: discovery globs/resolves homes (seconds on prod) — the meter
+        repaint on the UI thread must only read what a background run found."""
+        import threading
+
+        callers: list[str] = []
+        done = threading.Event()
+
+        def fake_targets():
+            callers.append(threading.current_thread().name)
+            done.set()
+            return ()
+
+        monkeypatch.setattr(pu, "codex_usage_targets", fake_targets)
+        monkeypatch.setattr(pu, "claude_usage_targets", fake_targets)
+        store = pu.ProviderUsageStore()
+        store.get_all_account_usages()
+        assert done.wait(5)
+        main = threading.current_thread().name
+        assert callers and main not in callers
 
 
 # ── claude adapter ────────────────────────────────────────────────────────

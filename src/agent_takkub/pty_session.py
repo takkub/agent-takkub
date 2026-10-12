@@ -110,7 +110,7 @@ def _transcript_event(event: str, **details) -> None:
         pass
 
 
-def _redact_transcript_chunk(data: bytes, secrets) -> bytes:
+def _redact_transcript_chunk(data: bytes, pairs) -> bytes:
     """Scrub secret values out of one persisted transcript chunk (#853).
 
     surrogateescape keeps the round trip byte-exact for a chunk that splits a
@@ -119,7 +119,7 @@ def _redact_transcript_chunk(data: bytes, secrets) -> bytes:
     from .secret_redact import redact_known_values
 
     text = data.decode("utf-8", "surrogateescape")
-    out = redact_known_values(text, list(secrets))
+    out = redact_known_values(text, list(pairs))
     return data if out is text else out.encode("utf-8", "surrogateescape")
 
 
@@ -2465,10 +2465,10 @@ class PtySession(QObject):
             try:
                 import logging
 
-                from .secret_redact import secret_values
+                from .secret_redact import redaction_pairs
 
                 # #853: values the pane may print verbatim never hit disk.
-                self.__dict__["_transcript_secrets"] = secret_values(env, cwd)
+                self.__dict__["_transcript_redaction_pairs"] = redaction_pairs(env, cwd)
                 self._transcript = open(transcript_path, "wb")
                 self._transcript_last_flush = time.monotonic()
                 self._transcript_pending_bytes = 0
@@ -2566,7 +2566,7 @@ class PtySession(QObject):
                                 _normalize_pty_transcript_chunk(
                                     data, self.__dict__.setdefault("_transcript_last_row", [0])
                                 ),
-                                self.__dict__.get("_transcript_secrets", ()),
+                                self.__dict__.get("_transcript_redaction_pairs", ()),
                             )
                             self._transcript.write(transcript_data)
                             bytes_written += len(transcript_data)
