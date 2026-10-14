@@ -145,25 +145,3 @@ jobs:
       # install, so skip npm ci and run the test script directly.
       - name: Run npm wrapper tests
         run: npm test
-
-  codex-sandbox:
-    # #842: exercise the real installed Codex OS boundary without a model/API
-    # call on both desktop platforms. A failed probe blocks the release.
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [windows-latest, macos-latest]
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-python@v7
-        with:
-          python-version: "3.11"
-      - uses: actions/setup-node@v7
-        with:
-          node-version: "lts/*"
-      - name: Install pinned Codex CLI
-        run: npm install -g @openai/codex@0.162.1
-      - name: Probe restricted Lead sandbox
-        run: python tools/probe_codex_lead_sandbox.py

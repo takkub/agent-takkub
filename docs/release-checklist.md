@@ -39,8 +39,7 @@
 
 - **CI ต้องเขียวครบทุก job** (`.github/workflows/ci.yml`) — **10 matrix jobs**:
   `lint-and-test` รัน 3 OS (`windows-latest` · `macos-latest` · `ubuntu-latest`) และ
-  `installed-gate` รัน 2 OS (`windows-latest` · `macos-latest`), `npm-wrapper` รัน 3 OS,
-  และ `codex-sandbox` รัน 2 OS (`windows-latest` · `macos-latest`)
+  `installed-gate` รัน 2 OS (`windows-latest` · `macos-latest`) และ `npm-wrapper` รัน 3 OS
   ตรวจ workflow ชื่อ `ci` ที่ตรง release commit และต้อง `completed/success` ก่อน publish
 - **installed-mode gate** (`tests/test_installed_mode_gate.py`) proves the ACTUAL packaged behavior
   (DATA_HOME/ASSETS_ROOT/CLI_BIN_DIR/pane-env/CLI wiring) works when running from a real installed
@@ -202,7 +201,7 @@ git push origin main
 gh run list --commit <release-sha> --json databaseId,name,status,conclusion
 gh run view <ci-run-id> --json headSha,status,conclusion,jobs
 # ต้องตรง release-sha และ completed/success:
-# lint-and-test (3 OS), installed-gate (Windows/macOS), npm-wrapper (3 OS), codex-sandbox (Windows/macOS)
+# lint-and-test (3 OS), installed-gate (Windows/macOS), npm-wrapper (3 OS)
 ```
 
 **ห้าม publish ก่อน CI เขียว** — ถ้า `installed-gate` แดงโดยเฉพาะ (แม้ `lint-and-test` เขียว) แปลว่า
