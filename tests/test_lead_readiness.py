@@ -103,8 +103,8 @@ def test_cli_context_read_and_status(
 ) -> None:
     monkeypatch.setattr("agent_takkub.config.RUNTIME_DIR", tmp_path / "runtime")
     path = lead_readiness.prepare("default", "codex", str(tmp_path))
-    # spawn records the boundary it actually applied (#842)
-    lead_readiness.record_enforcement(path, "codex_sandbox")
+    # spawn records what actually holds the policy (#842)
+    lead_readiness.record_enforcement(path, "codex_prompt")
 
     monkeypatch.setenv(lead_readiness.ENV_FILE, str(path))
     monkeypatch.setenv("TAKKUB_ROLE", "lead")
@@ -116,7 +116,7 @@ def test_cli_context_read_and_status(
     status = json.loads(out)
     assert status["ready"] is False
     assert status["provider"] == "codex"
-    assert status["native_tool_gate"] in ("os_sandbox", "not_required")
+    assert status["native_tool_gate"] in ("prompt_only", "not_required")
 
     # Read context
     assert cli.main(["context", "read"]) == 0
@@ -131,7 +131,7 @@ def test_cli_context_read_and_status(
     assert status2["reason"] == ""
 
 
-def test_restricted_codex_lead_without_sandbox_is_never_ready_842(
+def test_restricted_codex_lead_needs_a_recorded_mode_842(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from agent_takkub import lead_enforcement
@@ -149,9 +149,10 @@ def test_restricted_codex_lead_without_sandbox_is_never_ready_842(
     assert gate == "unenforced" and "restart Lead" in gap
     assert lead_readiness.enforcement_status(state, unrestricted) == ("not_required", "")
 
-    lead_readiness.record_enforcement(path, lead_enforcement.MODE_CODEX_SANDBOX)
+    # Codex Lead OS sandbox removed (2026-10-14): the policy text holds it.
+    lead_readiness.record_enforcement(path, lead_enforcement.MODE_CODEX_PROMPT)
     state = lead_readiness.read_state(path)
-    assert lead_readiness.enforcement_status(state, restricted) == ("os_sandbox", "")
+    assert lead_readiness.enforcement_status(state, restricted) == ("prompt_only", "")
 
 
 def test_restricted_unsupported_provider_is_not_ready_842() -> None:
@@ -162,7 +163,7 @@ def test_restricted_unsupported_provider_is_not_ready_842() -> None:
         assert "not enforced" in enforcement_gap(provider, None, True)
     # A mode only counts for the provider that can actually enforce it.
     assert gate_label("gemini", "claude_hooks", True) == "unenforced"
-    assert gate_label("claude", "codex_sandbox", True) == "unenforced"
+    assert gate_label("claude", "codex_prompt", True) == "unenforced"
 
 
 def test_restricted_claude_lead_with_hooks_is_ready(
@@ -176,17 +177,3 @@ def test_restricted_claude_lead_with_hooks_is_ready(
     state = lead_readiness.read_state(path)
     restricted = {"team": {"lead_may_implement": False}}
     assert lead_readiness.enforcement_status(state, restricted) == ("pretooluse_guard", "")
-
-
-def test_codex_lead_argv_is_read_only_base_plus_roots_842() -> None:
-    from agent_takkub import lead_enforcement
-
-    argv = lead_enforcement.codex_lead_argv([r"C:\rt\docs", "/rt/events.log"])
-    joined = " ".join(argv)
-    assert "--dangerously-bypass-approvals-and-sandbox" not in argv
-    assert "-s" not in argv  # never mixed with the legacy sandbox keys
-    assert 'extends=":read-only"' in joined
-    assert '"C:/rt/docs"="write"' in joined and '"/rt/events.log"="write"' in joined
-    assert 'default_permissions="takkub_lead"' in joined
-    assert '"127.0.0.1"="allow"' in joined
-    assert "features.network_proxy=true" in argv

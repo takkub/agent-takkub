@@ -1,49 +1,33 @@
-"""OS-level enforcement of a restricted Lead (#842).
+"""How a restricted Lead's policy is held (#842).
 
 When the effective team policy says ``lead_may_implement: false`` the Lead may
-read, brief, assign and report but must not change project files. Prompt text
-alone never held that line for a Codex Lead (it ran with the sandbox bypassed),
-so the boundary is Codex's own OS sandbox: a session-scoped permission profile
-that is read-only everywhere except a short list of cockpit-owned roots.
-
-Codex hooks are deliberately NOT the boundary — they fail open on error and the
-vendor documents them as a guardrail, not enforcement. See
-``docs/design/2026-10-11-842-codex-lead-enforcement.md`` for the threat model.
+read, brief, assign and report but must not change project files.
 
 A Claude Lead runs with ``--dangerously-skip-permissions`` like every Claude
 pane; its boundary is the cockpit's own PreToolUse guards (``pane_guard``, the
 Lead edit guard), which read the preset live. 2.2.16 put a restricted Claude
 Lead under Claude Code's ``dontAsk`` allowlist instead; that left the Lead
 unusable on other machines and was reverted (2.2.17).
+
+A Codex Lead runs with the same autonomy flags as every Codex pane. 2.2.15 ran
+a restricted Codex Lead inside Codex's OS sandbox; that was removed
+(2026-10-14) — its Windows admin setup popped a UAC prompt on every new
+machine and a Mac Lead never opened. Its restriction is the Lead policy text
+only, and readiness says so (``prompt_only``) instead of claiming a boundary.
 """
 
 from __future__ import annotations
 
-import json
-import pathlib
-import re
-import subprocess
-import sys
-import tempfile
-import time
-import tomllib
-import uuid
-
-from ._win_console import SUBPROCESS_NO_WINDOW
-
-PROFILE_NAME = "takkub_lead"
-
 #: Enforcement modes recorded on the Lead readiness state.
-MODE_CODEX_SANDBOX = "codex_sandbox"
 MODE_CLAUDE_HOOKS = "claude_hooks"
+MODE_CODEX_PROMPT = "codex_prompt"
 MODE_NONE = "none"
 
-#: (provider, mode) pairs that can run a restricted Lead → gate label. The
-#: Claude entry is a guardrail (fail-open hooks), not an OS boundary — the
-#: label says so.
+#: (provider, mode) pairs that can run a restricted Lead → gate label. Neither
+#: is an OS boundary — the labels say what actually holds the policy.
 _ENFORCED = {
-    ("codex", MODE_CODEX_SANDBOX): "os_sandbox",
     ("claude", MODE_CLAUDE_HOOKS): "pretooluse_guard",
+    ("codex", MODE_CODEX_PROMPT): "prompt_only",
 }
 
 #: Providers that can run a restricted Lead at all.
@@ -64,265 +48,17 @@ def lead_is_restricted(project: str | None) -> bool:
         return True
 
 
-def lead_scratch_dir(project: str) -> pathlib.Path:
-    from .config import RUNTIME_DIR
-    from .path_safe import safe_segment
-
-    return RUNTIME_DIR / "lead-tmp" / safe_segment(project or "default")
-
-
-def lead_write_roots(project: str, env: dict) -> list[str]:
-    """Paths a restricted Lead still needs to write: its briefs/evidence, the
-    readiness acknowledgement and a scratch/TEMP dir. Directories are created
-    so the sandbox can grant them. A development checkout may store its
-    cockpit runtime within the repo; only that runtime subtree is exempted.
-    The Lead cannot write the audit event log."""
-    from .config import RUNTIME_DIR, _project_dict
-
-    dirs = [
-        env.get("TAKKUB_DOCS_DIR") or "",
-        env.get("TAKKUB_ARTIFACTS_DIR") or "",
-        str(RUNTIME_DIR / "lead-readiness"),
-        str(lead_scratch_dir(project)),
-    ]
-    roots: list[str] = []
-    project_paths = (_project_dict(project).get("paths") or {}).values()
-    protected = [pathlib.Path(raw).resolve() for raw in project_paths if raw]
-    runtime_root = RUNTIME_DIR.resolve()
-    for raw in dirs:
-        if not raw:
-            continue
-        path = pathlib.Path(raw)
-        resolved = path.resolve()
-        if any(
-            resolved == root
-            or root.is_relative_to(resolved)
-            or (resolved.is_relative_to(root) and not resolved.is_relative_to(runtime_root))
-            for root in protected
-        ):
-            raise ValueError(f"restricted Lead write root overlaps a project root: {resolved}")
-        path.mkdir(parents=True, exist_ok=True)
-        roots.append(str(resolved))
-    return roots
-
-
-def _toml_str(value: str) -> str:
-    return '"' + value.replace("\\", "/").replace('"', '\\"') + '"'
-
-
-def codex_lead_argv(write_roots: list[str]) -> list[str]:
-    """Codex flags for a restricted Lead: approvals off, sandbox ON with a
-    read-only base plus *write_roots*, loopback network for the takkub CLI.
-    Replaces the platform autonomy flags (never combined with ``-s``/
-    ``sandbox_workspace_write`` — Codex documents the two as exclusive)."""
-    grants = ", ".join(f'{_toml_str(root)}="write"' for root in write_roots)
-    profile = (
-        f'{{extends=":read-only", filesystem={{{grants}}}, '
-        'network={enabled=true, domains={"127.0.0.1"="allow", "localhost"="allow"}}}'
-    )
-    # Windows: Codex's default "elevated" sandbox runs a one-time admin setup
-    # (codex-windows-sandbox-setup.exe → UAC prompt, creates the
-    # CodexSandboxOffline/Online accounts) for every fresh CODEX_HOME — and
-    # the cockpit gives Codex its own home, so a new machine got a UAC popup
-    # mid-spawn on the Lead's first open. "unelevated" is a restricted token
-    # of the current user with ACL write boundaries: no setup, no prompt, and
-    # the boundary probe still refuses a write outside `write_roots`
-    # (verified on Windows with a fresh CODEX_HOME, 2026-10-14).
-    platform_argv = ["-c", 'windows.sandbox="unelevated"'] if sys.platform == "win32" else []
-    return [
-        "--ask-for-approval",
-        "never",
-        "--no-daemon",
-        "--strict-config",
-        "-c",
-        f"permissions.{PROFILE_NAME}={profile}",
-        "-c",
-        f'default_permissions="{PROFILE_NAME}"',
-        "-c",
-        "features.network_proxy=true",
-        "--disable",
-        "apps",
-        *platform_argv,
-    ]
-
-
-def verify_codex_boundary(
-    provider_bin: str, cwd: str, env: dict[str, str], write_roots: list[str]
-) -> None:
-    """Refuse launch unless this Codex installation enforces the exact profile.
-
-    The disposable probe checks both allowed and denied writes without a model
-    call. It cannot certify MCP/connector surfaces, which are disabled at spawn.
-    """
-    config_files = [
-        pathlib.Path(env.get("CODEX_HOME") or pathlib.Path.home() / ".codex") / "config.toml"
-    ]
-    here = pathlib.Path(cwd).resolve()
-    config_files.extend(parent / ".codex" / "config.toml" for parent in (here, *here.parents))
-    for path in config_files:
-        if not path.is_file():
-            continue
-        config = tomllib.loads(path.read_text(encoding="utf-8"))
-        if "sandbox_mode" in config or "sandbox_workspace_write" in config:
-            raise RuntimeError(
-                f"legacy sandbox configuration overrides permission profiles: {path}"
-            )
-        if any(
-            isinstance(profile, dict) and "sandbox_mode" in profile
-            for profile in (config.get("profiles") or {}).values()
-        ):
-            raise RuntimeError(f"legacy sandbox profile may override permissions: {path}")
-
-    key = _probe_cache_key(provider_bin, cwd, env, write_roots, config_files)
-    passed_at = _VERIFIED.get(key) if key is not None else None
-    if passed_at is not None and time.monotonic() - passed_at < _VERIFIED_TTL_S:
-        return
-    _run_codex_boundary_probes(provider_bin, cwd, env, write_roots)
-    if key is not None:
-        _VERIFIED[key] = time.monotonic()
-
-
-# #871: the probes below are three blocking `codex` launches (~2 s each) on the
-# Qt thread during every restricted Lead spawn — a 6 s UI freeze in prod. A
-# pass is remembered in memory only, keyed on everything the verdict depends
-# on: the binary's identity, the config files that could override the
-# profile, cwd, CODEX_HOME and the write roots. An npm shim's own stat does
-# not change when the package under it is upgraded, so a pass also expires.
-_VERIFIED: dict[tuple, float] = {}
-_VERIFIED_TTL_S = 3600.0
-
-
-def _probe_cache_key(
-    provider_bin: str,
-    cwd: str,
-    env: dict[str, str],
-    write_roots: list[str],
-    config_files: list[pathlib.Path],
-) -> tuple | None:
-    try:
-        st = pathlib.Path(provider_bin).stat()
-        configs = tuple(
-            (str(p), p.stat().st_mtime_ns, p.stat().st_size) for p in config_files if p.is_file()
-        )
-    except OSError:
-        return None  # can't fingerprint → always probe
-    return (
-        provider_bin,
-        st.st_mtime_ns,
-        st.st_size,
-        str(pathlib.Path(cwd).resolve()),
-        env.get("CODEX_HOME") or "",
-        tuple(write_roots),
-        configs,
-    )
-
-
-def _codex_detail(result: subprocess.CompletedProcess) -> str:
-    """` (rc=N: <stderr tail>)` — why codex refused, for the logged reason."""
-    tail = (result.stderr or b"").decode("utf-8", errors="replace").strip()[-300:]
-    return f" (rc={result.returncode}: {tail})" if tail else f" (rc={result.returncode})"
-
-
-def _run_codex_boundary_probes(
-    provider_bin: str, cwd: str, env: dict[str, str], write_roots: list[str]
-) -> None:
-    mcp = subprocess.run(
-        [
-            provider_bin,
-            "-c",
-            "mcp_servers={}",
-            "-c",
-            "features.plugins=false",
-            "mcp",
-            "list",
-            "--json",
-        ],
-        cwd=cwd,
-        env=env,
-        capture_output=True,
-        timeout=20,
-        check=False,
-        creationflags=SUBPROCESS_NO_WINDOW,
-    )
-    try:
-        if mcp.returncode or json.loads(mcp.stdout) != []:
-            raise RuntimeError(
-                "restricted Codex Lead still exposes MCP servers" + _codex_detail(mcp)
-            )
-    except (ValueError, TypeError) as exc:
-        raise RuntimeError("cannot verify restricted Codex MCP table" + _codex_detail(mcp)) from exc
-
-    from .config import RUNTIME_DIR
-
-    probe_parent = RUNTIME_DIR / "lead-enforcement-probes"
-    probe_parent.mkdir(parents=True, exist_ok=True)
-    with tempfile.TemporaryDirectory(prefix="probe-", dir=probe_parent) as disposable:
-        protected = pathlib.Path(disposable) / "protected.bin"
-        protected.write_bytes(b"protected")
-        writable = pathlib.Path(write_roots[-1]) / f"boundary-probe-{uuid.uuid4().hex}.bin"
-        # The last root is the Lead scratch directory; never probe a source tree.
-        config_argv = codex_lead_argv(write_roots)
-        overrides = [item for i, item in enumerate(config_argv) if i and config_argv[i - 1] == "-c"]
-        prefix = [
-            provider_bin,
-            "sandbox",
-            "-P",
-            PROFILE_NAME,
-            "-C",
-            cwd,
-            "--include-managed-config",
-            *(part for value in overrides for part in ("-c", value)),
-            "--",
-            sys.executable,
-            "-c",
-        ]
-        allowed = subprocess.run(
-            [
-                *prefix,
-                "import pathlib,sys; pathlib.Path(sys.argv[1]).write_bytes(b'yes')",
-                str(writable),
-            ],
-            cwd=cwd,
-            env=env,
-            capture_output=True,
-            timeout=60,
-            check=False,
-            creationflags=SUBPROCESS_NO_WINDOW,
-        )
-        if allowed.returncode or not writable.exists() or writable.read_bytes() != b"yes":
-            raise RuntimeError(
-                "Codex sandbox did not demonstrate its scoped writable root"
-                + _codex_detail(allowed)
-            )
-        writable.unlink()
-        denied = subprocess.run(
-            [
-                *prefix,
-                "import pathlib,sys; pathlib.Path(sys.argv[1]).write_bytes(b'changed')",
-                str(protected),
-            ],
-            cwd=cwd,
-            env=env,
-            capture_output=True,
-            timeout=60,
-            check=False,
-            creationflags=SUBPROCESS_NO_WINDOW,
-        )
-        if denied.returncode == 0 or protected.read_bytes() != b"protected":
-            raise RuntimeError("Codex sandbox allowed a write outside scoped roots")
-
-
 def enforcement_gap(provider: str, mode: str | None, restricted: bool) -> str:
     """Why a restricted Lead session is NOT actually restricted, or ``""``.
 
-    A restricted Lead needs a recorded boundary: Codex's OS sandbox, or the
-    cockpit's PreToolUse guards on a Claude Lead. Other providers have
-    neither, so report those sessions as unavailable instead of ready."""
+    A restricted Lead needs a recorded mode: the cockpit's PreToolUse guards
+    on a Claude Lead, or the policy text on a Codex Lead. Other providers
+    record neither, so report those sessions as unavailable instead of ready."""
     if not restricted or (provider, mode) in _ENFORCED:
         return ""
     return (
         f"restricted Lead policy is not enforced for {provider or 'unknown'} "
-        "in this session — restart Lead with a supported protected runtime"
+        "in this session — restart Lead with a supported runtime"
     )
 
 
@@ -331,92 +67,3 @@ def gate_label(provider: str, mode: str | None, restricted: bool) -> str:
     if not restricted:
         return "not_required"
     return _ENFORCED.get((provider, mode), "unenforced")
-
-
-def codex_denial_records(rollout: pathlib.Path, project_root: str) -> list[dict[str, str]]:
-    """Read Codex's own completed tool records without copying commands or output.
-
-    This is an audit adapter, not the enforcement boundary. A missing or
-    truncated rollout may omit records; the OS sandbox still denies writes.
-    Only a small allowlist of denial signatures is recorded. Targets outside
-    the project are reduced to ``<outside-project>`` to avoid logging secrets.
-    """
-    pending: dict[str, dict[str, str]] = {}
-    denied: list[dict[str, str]] = []
-    root = pathlib.Path(project_root).resolve()
-    try:
-        lines = rollout.open("r", encoding="utf-8", errors="replace")
-    except OSError:
-        return denied
-    with lines:
-        for line in lines:
-            try:
-                record = json.loads(line)
-            except ValueError:
-                continue
-            if record.get("type") != "response_item":
-                continue
-            payload = record.get("payload") or {}
-            call_id = str(payload.get("call_id") or "")
-            if not call_id:
-                continue
-            if payload.get("type") == "custom_tool_call":
-                raw = str(payload.get("input") or "")
-                tool = "apply_patch" if "tools.apply_patch" in raw else "exec_command"
-                match = re.search(r"\*\*\* (?:Update|Add|Delete) File:\s*(.*?)(?:\\n|\r?\n)", raw)
-                target = match.group(1).strip() if match else ""
-                pending[call_id] = {"tool": tool, "target": target, "input": raw}
-                continue
-            if payload.get("type") != "custom_tool_call_output":
-                continue
-            call = pending.pop(call_id, None)
-            if call is None:
-                continue
-            parts = payload.get("output") or []
-            texts = []
-            exit_code = None
-            for part in parts:
-                if not isinstance(part, dict):
-                    continue
-                value = str(part.get("text") or "")
-                try:
-                    nested = json.loads(value)
-                    if isinstance(nested, dict) and isinstance(nested.get("output"), str):
-                        value = nested["output"]
-                        exit_code = nested.get("exit_code")
-                except ValueError:
-                    pass
-                texts.append(value)
-            output = "\n".join(texts)
-            lower = output.lower()
-            if "patch rejected:" in lower:
-                reason = "patch_permission_denied"
-            elif "connect_ex=10013" in lower or "network access is denied" in lower:
-                reason = "network_permission_denied"
-                ip = re.search(r"\b(?:\d{1,3}\.){3}\d{1,3}(?::\d{1,5})?\b", call["input"])
-                call["target"] = ip.group(0) if ip else "<network>"
-            elif any(
-                marker in lower
-                for marker in ("access to the path", "permissionerror", "permission denied")
-            ):
-                if exit_code == 0:
-                    continue
-                reason = "filesystem_permission_denied"
-                path_match = re.search(r"Access to the path '([^']+)' is denied", output)
-                if path_match:
-                    call["target"] = path_match.group(1)
-            else:
-                continue
-            target = call["target"]
-            if reason != "network_permission_denied":
-                try:
-                    resolved = pathlib.Path(target).resolve()
-                    target = (
-                        str(resolved.relative_to(root))
-                        if resolved.is_relative_to(root)
-                        else "<outside-project>"
-                    )
-                except (OSError, ValueError):
-                    target = "<unresolved>"
-            denied.append({"tool": call["tool"], "target": target[:200], "reason": reason})
-    return denied

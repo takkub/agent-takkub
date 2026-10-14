@@ -1,5 +1,11 @@
 # #842 — Restricted Lead enforcement for Codex (threat model + design)
 
+> **ถอดออกแล้ว (2026-10-14, user สั่ง):** sandbox นี้ทำให้ Codex Lead ใช้งานไม่ได้บนเครื่องอื่น
+> — Windows เครื่องใหม่เด้ง UAC (setup ของ elevated sandbox ต่อ `CODEX_HOME` ใหม่ทุกอัน) และ Mac เปิด
+> Lead ไม่ขึ้น · ตอนนี้ Codex Lead รันด้วย autonomy flag ปกติเหมือน Codex pane อื่น ข้อห้ามของ preset
+> ไปถึงทาง policy text เท่านั้น readiness บันทึกเป็น `codex_prompt` / gate `prompt_only`
+> (ไม่อ้างว่ามี boundary) · เอกสารด้านล่างเก็บไว้เป็นประวัติ
+
 ## Asset and policy
 
 When the effective team policy says `lead_may_implement: false` (presets `full`, …),

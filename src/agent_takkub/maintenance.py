@@ -55,7 +55,6 @@ _SEVERE_EVENTS: dict[str, str] = {
     "task_deliver_account_pending": "ส่งใบงานไม่ได้เพราะ provider ยังไม่ผ่าน account verification (ไม่ใช่ auth)",
     "account_pending_warned": "provider ติด account verification gate (#346)",
     "rate_limit_detected": "ชน rate limit",
-    "lead_sandbox_refused": "Codex Lead เปิดไม่ได้ — เตรียม sandbox ไม่ผ่าน (ดู error ใน events.log)",
     "verify_failed": "QA/verify รายงาน FAIL",
     "verify_blocked": "QA/verify รายงานติด blocker (ต้องให้เจ้าของทำ)",
     "pane_limit_parked": "pane ถูกพักเพราะชนเพดาน",

@@ -437,6 +437,9 @@ class TestCliGateLeadOnlyCommandsRegression:
         sent: list = []
         monkeypatch.setattr(cli, "_request", lambda p: sent.append(p) or {"ok": True, "msg": "x"})
         monkeypatch.setenv("TAKKUB_ROLE", "lead")
+        # Run from inside a live Lead pane, that pane's readiness file would
+        # gate this fake Lead's assign on the real session's state.
+        monkeypatch.delenv("TAKKUB_LEAD_READINESS_FILE", raising=False)
         rc = cli.main(["assign", "--role", "backend", "do work"])
         assert rc == 0
         assert sent[-1]["cmd"] == "assign"

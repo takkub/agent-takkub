@@ -7629,8 +7629,10 @@ class Orchestrator(
         provider = getattr(getattr(pane, "model", None), "provider_name", None)
         if not isinstance(provider, str) or not provider:
             provider = getattr(state, "session_provider", "") or "claude"
-        if str(provider).lower() == "claude":
-            # Claude's Lead edit guard is a PreToolUse hook that reads the preset live.
+        if str(provider).lower() in ("claude", "codex"):
+            # Claude's Lead edit guard is a PreToolUse hook that reads the
+            # preset live; a Codex Lead has no spawn-time boundary any more
+            # (sandbox removed 2026-10-14) — a restart would change nothing.
             return ""
         return (
             "close the active unrestricted Lead before selecting a restricted "

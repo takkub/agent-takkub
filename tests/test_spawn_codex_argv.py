@@ -111,7 +111,6 @@ def _spawn_codex_and_capture_argv(
         patch("agent_takkub.codex_agents_md.ensure_agents_md", return_value=(True, "planted")),
         patch("agent_takkub.orchestrator.inject_user_profile_env"),
         patch("agent_takkub.mcp_bridge._codex_resolved_mcp_names", return_value=[]),
-        patch("agent_takkub.lead_enforcement.verify_codex_boundary"),
     ):
         mock_pty = MagicMock()
         mock_pty.spawn.side_effect = lambda **kw: pty_spawn_calls.append(kw)
@@ -175,24 +174,19 @@ class TestCodexArgvNetworkAccess:
             output_env={"TAKKUB_ARTIFACTS_DIR": artifacts, "TAKKUB_DOCS_DIR": docs},
         )
         add_dirs = [argv[i + 1] for i, arg in enumerate(argv[:-1]) if arg == "--add-dir"]
-        if role == "lead":
-            assert add_dirs == []
-            profile = next(
-                value for value in argv if str(value).startswith("permissions.takkub_lead=")
-            )
-            assert artifacts.replace("\\", "/") in profile
-            assert docs.replace("\\", "/") in profile
-        else:
-            assert add_dirs == [artifacts, docs]
+        assert add_dirs == [artifacts, docs]
 
-    def test_lead_spawn_uses_provider_trust_argv(self, qapp, monkeypatch, tmp_path):
-        argv = _spawn_codex_and_capture_argv(qapp, monkeypatch, tmp_path, "win32", role="lead")
-        assert argv[:3] == ["codex", "--ask-for-approval", "never"]
-        assert "--dangerously-bypass-approvals-and-sandbox" not in argv
+    def test_restricted_lead_spawns_without_os_sandbox(self, qapp, monkeypatch, tmp_path):
+        """The Codex Lead OS sandbox was removed (2026-10-14): a restricted
+        Lead gets the same autonomy argv as any Codex pane — no permission
+        profile, no Windows sandbox setup, no boundary probes."""
+        argv = _spawn_codex_and_capture_argv(
+            qapp, monkeypatch, tmp_path, "win32", role="lead", restricted_lead=True
+        )
+        assert argv[:2] == ["codex", "--dangerously-bypass-approvals-and-sandbox"]
+        assert not any("takkub_lead" in str(value) for value in argv)
+        assert not any("windows.sandbox" in str(value) for value in argv)
         assert any('trust_level="trusted"' in str(value) for value in argv)
-        assert "mcp_servers={}" in argv
-        assert "features.plugins=false" in argv
-        assert not any(str(value).startswith("mcp_servers.") for value in argv)
 
     def test_unrestricted_lead_keeps_legacy_argv(self, qapp, monkeypatch, tmp_path):
         argv = _spawn_codex_and_capture_argv(

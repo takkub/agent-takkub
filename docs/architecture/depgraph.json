@@ -78,7 +78,6 @@
         "agent_takkub.graft_autobuild",
         "agent_takkub.impact_contract",
         "agent_takkub.issues",
-        "agent_takkub.lead_enforcement",
         "agent_takkub.limit_status",
         "agent_takkub.maintenance",
         "agent_takkub.mcp_bridge",
@@ -116,7 +115,7 @@
         "agent_takkub.verify",
         "agent_takkub.worktree_manager"
       ],
-      "fan_in": 53,
+      "fan_in": 52,
       "fan_out": 0
     },
     {
@@ -773,7 +772,6 @@
         "agent_takkub.issues",
         "agent_takkub.lead_bash_audit",
         "agent_takkub.lead_context",
-        "agent_takkub.lead_enforcement",
         "agent_takkub.lead_inbox",
         "agent_takkub.lead_readiness",
         "agent_takkub.limit_autoresume",
@@ -853,7 +851,7 @@
         "agent_takkub.worktree_manager",
         "agent_takkub.worktree_reuse"
       ],
-      "fan_in": 126,
+      "fan_in": 125,
       "fan_out": 2
     },
     {
@@ -3167,9 +3165,6 @@
     {
       "module": "agent_takkub.lead_enforcement",
       "imports": [
-        "agent_takkub._win_console",
-        "agent_takkub.config",
-        "agent_takkub.path_safe",
         "agent_takkub.team_preset"
       ],
       "imported_by": [
@@ -3179,7 +3174,7 @@
         "agent_takkub.spawn_engine"
       ],
       "fan_in": 4,
-      "fan_out": 4
+      "fan_out": 1
     },
     {
       "module": "agent_takkub.lead_inbox",
@@ -3759,14 +3754,13 @@
       "imported_by": [
         "agent_takkub.backlog",
         "agent_takkub.fix_loop",
-        "agent_takkub.lead_enforcement",
         "agent_takkub.project_memory",
         "agent_takkub.project_nav",
         "agent_takkub.role_memory",
         "agent_takkub.task_ledger",
         "agent_takkub.worktree_reuse"
       ],
-      "fan_in": 8,
+      "fan_in": 7,
       "fan_out": 0
     },
     {

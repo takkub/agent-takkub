@@ -3153,57 +3153,30 @@ class SpawnEngineMixin:
             autonomy_argv = list(
                 spec.autonomy_flags.get(sys.platform, spec.autonomy_flags.get("default", []))
             )
-            _lead_sandboxed = False
             if _is_lead and spec.name == "codex":
-                # #842: a Lead that may not implement runs inside Codex's own
-                # OS sandbox (read-only + cockpit-owned roots) instead of the
-                # bypass flags. Fail closed: no profile → no restricted Lead.
+                # A Codex Lead runs with the same autonomy flags as every
+                # Codex pane. The #842 OS sandbox for a restricted Lead was
+                # removed (2026-10-14): its Windows admin setup popped a UAC
+                # prompt on every new machine and a Mac Lead never opened.
+                # A restricted policy now reaches it through the Lead policy
+                # text only — recorded truthfully as `codex_prompt`.
                 from . import lead_enforcement
 
-                if lead_enforcement.lead_is_restricted(project_ns):
-                    try:
-                        _roots = lead_enforcement.lead_write_roots(project_ns, env)
-                        autonomy_argv = lead_enforcement.codex_lead_argv(_roots)
-                        _scratch = str(lead_enforcement.lead_scratch_dir(project_ns))
-                        env["TEMP"] = env["TMP"] = env["TMPDIR"] = _scratch
-                        lead_enforcement.verify_codex_boundary(provider_bin, spawn_cwd, env, _roots)
-                        _lead_sandboxed = True
-                    except Exception as exc:
-                        # The UI only shows this for 15 s and drops the tab —
-                        # keep the reason where `takkub ma`/a bug report can
-                        # find it (a Mac Codex Lead "never opens" left no trace).
-                        _log_event(
-                            "lead_sandbox_refused",
-                            project=project_ns,
-                            provider=spec.name,
-                            platform=sys.platform,
-                            error=str(exc)[:400],
-                        )
-                        return False, f"restricted Lead sandbox could not be prepared: {exc}"
+                _mode = (
+                    lead_enforcement.MODE_CODEX_PROMPT
+                    if lead_enforcement.lead_is_restricted(project_ns)
+                    else lead_enforcement.MODE_NONE
+                )
                 _ps_lead = self._pane_state.get(_exit_key(project_ns, role_name))
                 _readiness_file = getattr(_ps_lead, "lead_readiness_file", None)
                 if _readiness_file:
                     from . import lead_readiness
 
-                    lead_readiness.record_enforcement(
-                        _readiness_file,
-                        lead_enforcement.MODE_CODEX_SANDBOX
-                        if _lead_sandboxed
-                        else lead_enforcement.MODE_NONE,
-                    )
+                    lead_readiness.record_enforcement(_readiness_file, _mode)
                 if _ps_lead is not None:
-                    _ps_lead.lead_enforcement_mode = (
-                        lead_enforcement.MODE_CODEX_SANDBOX
-                        if _lead_sandboxed
-                        else lead_enforcement.MODE_NONE
-                    )
-                _log_event(
-                    "lead_enforcement",
-                    project=project_ns,
-                    provider=spec.name,
-                    mode="codex_sandbox" if _lead_sandboxed else "none",
-                )
-            if spec.name == "codex" and not _lead_sandboxed:
+                    _ps_lead.lead_enforcement_mode = _mode
+                _log_event("lead_enforcement", project=project_ns, provider=spec.name, mode=_mode)
+            if spec.name == "codex":
                 # #784: central evidence/docs live outside the workspace.
                 # Grant only this project's two directories, including resume.
                 for env_key in ("TAKKUB_ARTIFACTS_DIR", "TAKKUB_DOCS_DIR"):
@@ -3300,20 +3273,15 @@ class SpawnEngineMixin:
             from .mcp_bridge import McpResolutionError, mcp_argv_for_provider
 
             try:
-                if _lead_sandboxed:
-                    # MCP server processes do not inherit Codex's local command
-                    # sandbox. No Lead MCP may cross this boundary (#842).
-                    mcp_argv = ["-c", "mcp_servers={}", "-c", "features.plugins=false"]
-                else:
-                    mcp_argv = mcp_argv_for_provider(
-                        spec.name,
-                        base_role,
-                        shard_idx,
-                        project_ns,
-                        provider_bin=provider_bin,
-                        cwd=spawn_cwd,
-                        env=env,
-                    )
+                mcp_argv = mcp_argv_for_provider(
+                    spec.name,
+                    base_role,
+                    shard_idx,
+                    project_ns,
+                    provider_bin=provider_bin,
+                    cwd=spawn_cwd,
+                    env=env,
+                )
             except McpResolutionError as exc:
                 return False, (
                     f"could not verify {spec.name}'s inherited MCP servers, so "
@@ -4700,68 +4668,6 @@ class SpawnEngineMixin:
                 time_to_exit=time_to_exit,
                 session=session,
             )
-
-        if (
-            role_name == LEAD.name
-            and getattr(_ps_cx, "lead_enforcement_mode", "") == "codex_sandbox"
-        ):
-            # Codex stores tool calls and outcomes in its own rollout. Audit
-            # denied attempts at session exit without persisting command text
-            # or stdout (which may contain secrets). The OS sandbox remains
-            # the boundary if this best-effort audit adapter is unavailable.
-            try:
-                from .codex_helper import (
-                    read_codex_session_meta,
-                    resolve_codex_jsonl_for_cwd,
-                    resolve_newest_codex_session_for_cwd,
-                )
-                from .lead_enforcement import codex_denial_records
-
-                sid = str(getattr(_ps_cx, "session_uuid", "") or "")
-                rollout = resolve_codex_jsonl_for_cwd(cwd, sid, project=project) if sid else None
-                if rollout is None and not sid and spawn_ts is not None:
-                    # Codex chooses its own session ID after launch. Accept a
-                    # rollout discovered by cwd/time only if it is the sole
-                    # parent session in the window; another pane in the same
-                    # cwd makes attribution ambiguous, so skip the audit.
-                    candidate = resolve_newest_codex_session_for_cwd(
-                        cwd, not_before=spawn_ts, created_after=spawn_ts, project=project
-                    )
-                    if candidate is not None:
-                        meta = read_codex_session_meta(candidate)
-                        candidate_id = str(meta.get("id") or meta.get("session_id") or "")
-                        raw_stamp = str(meta.get("timestamp") or "")
-                        try:
-                            started = datetime.fromisoformat(
-                                raw_stamp.replace("Z", "+00:00")
-                            ).timestamp()
-                        except ValueError:
-                            started = 0.0
-                        if candidate_id and started >= spawn_ts - 2.0:
-                            peer = resolve_newest_codex_session_for_cwd(
-                                cwd,
-                                not_before=spawn_ts,
-                                created_after=spawn_ts,
-                                exclude_ids=frozenset({candidate_id}),
-                                project=project,
-                            )
-                            if peer is None:
-                                rollout = candidate
-                if rollout is None:
-                    _log_event("lead_native_audit_unavailable", role=role_name, project=project)
-                else:
-                    for row in codex_denial_records(rollout, cwd):
-                        _log_event(
-                            "lead_native_denied",
-                            role=role_name,
-                            project=project,
-                            task=str(getattr(_ps_cx, "task_id", "") or ""),
-                            tool=row["tool"],
-                            target=row["target"],
-                            reason=row["reason"],
-                        )
-            except Exception:
-                _log_event("lead_native_audit_unavailable", role=role_name, project=project)
 
         self._on_session_exit(role_name, cwd, project, session=session, exit_code=exit_code)
 
