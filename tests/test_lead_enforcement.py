@@ -73,3 +73,49 @@ def test_live_claude_lead_may_tighten_without_restart() -> None:
     assert "close the active unrestricted Lead" in Orchestrator._lead_restriction_transition_block(
         fake, "project"
     )
+
+
+def test_boundary_probe_pass_is_cached_until_binary_changes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#871: the three blocking `codex` probes ran on the Qt thread on every
+    restricted Lead spawn (6 s freeze). A pass is reused; a changed binary,
+    config file or expired TTL probes again; a failure is never cached."""
+    codex = tmp_path / "codex.exe"
+    codex.write_bytes(b"v1")
+    home = tmp_path / "home"
+    home.mkdir()
+    env = {"CODEX_HOME": str(home)}
+    calls: list[str] = []
+    monkeypatch.setattr(lead_enforcement, "_VERIFIED", {})
+    monkeypatch.setattr(
+        lead_enforcement, "_run_codex_boundary_probes", lambda *a: calls.append("probe")
+    )
+    verify = lambda: lead_enforcement.verify_codex_boundary(  # noqa: E731
+        str(codex), str(tmp_path), env, [str(tmp_path)]
+    )
+    verify()
+    verify()
+    assert calls == ["probe"]
+
+    codex.write_bytes(b"v2-upgraded")
+    verify()
+    assert calls == ["probe", "probe"]
+
+    (home / "config.toml").write_text("model = 'x'\n", encoding="utf-8")
+    verify()
+    assert len(calls) == 3
+
+    monkeypatch.setattr(lead_enforcement, "_VERIFIED_TTL_S", 0.0)
+    verify()
+    assert len(calls) == 4
+
+    def _fail(*_a):
+        raise RuntimeError("Codex sandbox allowed a write outside scoped roots")
+
+    monkeypatch.setattr(lead_enforcement, "_VERIFIED_TTL_S", 3600.0)
+    monkeypatch.setattr(lead_enforcement, "_VERIFIED", {})
+    monkeypatch.setattr(lead_enforcement, "_run_codex_boundary_probes", _fail)
+    for _ in range(2):
+        with pytest.raises(RuntimeError, match="outside scoped roots"):
+            verify()

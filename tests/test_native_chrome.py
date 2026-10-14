@@ -116,6 +116,13 @@ def test_launches_native_headless_chrome_and_waits_for_cdp(tmp_path, monkeypatch
 
     assert ok
     assert "launched" in msg
+    # #871: readiness is awaited off the calling (Qt) thread.
+    manager._waiter.join(timeout=5)
+    assert manager._process is process
+    # A spawn landing while ours is still booting must not launch a second one.
+    monkeypatch.setattr(manager, "_cdp_ready", lambda: False)
+    assert manager.ensure_started() == (True, "native Chrome CDP 9222 still starting")
+    assert popen.call_count == 1
     assert browser_chrome.START_URL in popen.call_args.args[0]  # #807 labelled tab
     argv = popen.call_args.args[0]
     assert argv[0] == str(chrome)
@@ -189,3 +196,27 @@ def test_sanitize_win32_mb_shims_renames_extensionless_mb(tmp_path, monkeypatch)
     assert not mb_posix.exists()
     assert (npm_dir / "mb.sh").exists()
     assert len(cleaned) == 1
+
+
+def test_chrome_that_never_exposes_cdp_is_closed_in_background(tmp_path, monkeypatch) -> None:
+    """#871: the CDP wait moved off the Qt thread — a Chrome that never comes
+    up must still be torn down, just by the waiter instead of the caller."""
+    chrome = tmp_path / "chrome.exe"
+    chrome.write_bytes(b"stub")
+    process = MagicMock(pid=99)
+    process.poll.side_effect = [None, None, 1, 1, 1]
+    manager = browser_chrome.NativeChromeManager()
+    monkeypatch.setattr(browser_chrome.sys, "platform", "win32")
+    monkeypatch.setattr(browser_chrome.config, "RUNTIME_DIR", tmp_path / "runtime")
+    monkeypatch.setattr(browser_chrome, "find_chrome_executable", lambda: str(chrome))
+    monkeypatch.setattr(manager, "_cdp_ready", lambda: False)
+    monkeypatch.setattr(manager, "_port_held_on_ipv6", lambda: False)
+    monkeypatch.setattr(browser_chrome.subprocess, "Popen", MagicMock(return_value=process))
+    closed = []
+    monkeypatch.setattr(manager, "close", lambda: closed.append(True))
+
+    ok, _msg = manager.ensure_started()
+    manager._waiter.join(timeout=5)
+
+    assert ok
+    assert closed == [True]

@@ -702,6 +702,23 @@ class TestStallTracker:
         rec = t.update(0.0, False)
         assert rec["busy_threads"] == ["worker-1: orchestrator.py:_run:42"]
 
+    def test_watchdog_oversleep_marks_whole_process_pause(self) -> None:
+        """#871: when the watchdog's own poll overslept through most of the
+        episode, the process as a whole was paused — not the Qt thread."""
+        t = self._t()
+        t.update(16.0, False, loop_gap=15.8)
+        rec = t.update(0.0, False)
+        assert rec["whole_process"] is True
+        assert rec["watchdog_gap_ms"] == 15800
+
+    def test_on_time_watchdog_is_a_main_thread_stall(self) -> None:
+        t = self._t()
+        t.update(6.0, False, loop_gap=0.01)
+        rec = t.update(0.0, False)
+        assert "whole_process" not in rec
+        t.update(1.0, False)
+        assert "watchdog_gap_ms" not in t.update(0.0, False)
+
     def test_busy_threads_resets_between_episodes(self) -> None:
         t = self._t()
         t.update(1.0, False)
@@ -790,6 +807,21 @@ class TestFormatStallThreads:
         finally:
             stop.set()
             t.join(timeout=5)
+
+    def test_excludes_an_idle_thread_pool_worker(self) -> None:
+        """#871: an idle ThreadPoolExecutor worker blocks in C
+        (`SimpleQueue.get`), so its top frame is `thread.py:_worker` — it was
+        named as the busy culprit of a 16 s stall while doing nothing."""
+        import concurrent.futures
+
+        pool = concurrent.futures.ThreadPoolExecutor(1, thread_name_prefix="idle-pool-871")
+        try:
+            pool.submit(lambda: None).result(timeout=5)
+            time.sleep(0.05)
+            entries = app_mod._format_stall_threads()
+            assert not any("idle-pool-871" in e for e in entries)
+        finally:
+            pool.shutdown(wait=True)
 
     def test_excludes_the_main_thread_and_the_calling_thread_itself(self) -> None:
         # Called directly from the test's own thread (pytest's main thread

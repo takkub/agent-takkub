@@ -51,6 +51,32 @@ class TestScanEvents:
         assert check.data["severe"] == {"stuck_pane_recover": 1, "verify_failed": 1}
         assert check.data["warn"] == {"main_thread_stall": 1}
 
+    def test_routine_delivery_failure_is_not_severe(self, tmp_path: Path) -> None:
+        """#870: a teammate's own `takkub done --fail` logs
+        `task_delivery_failed reason=agent_reported_failed` — the task did
+        reach the pane, so the sweep must not call it 🔴. A real delivery
+        failure (any other reason) still is."""
+        now = datetime(2026, 8, 18, 12, 0, 0)
+        ts = (now - timedelta(minutes=5)).isoformat()
+        log = _write_events(
+            tmp_path / "events.log",
+            [
+                {"ts": ts, "event": "task_delivery_failed", "reason": "agent_reported_failed"},
+                {"ts": ts, "event": "task_delivery_failed", "reason": "pane_closed"},
+            ],
+        )
+        check = maintenance.scan_events(log, since_hours=1, now=now)
+        assert check.status == "ok"
+        assert check.data["severe"] == {}
+        assert any("agent_reported_failed" in d for d in check.details)
+
+        _write_events(
+            log,
+            [{"ts": ts, "event": "task_delivery_failed", "reason": "boot_timeout"}],
+        )
+        check = maintenance.scan_events(log, since_hours=1, now=now)
+        assert check.data["severe"] == {"task_delivery_failed": 1}
+
     def test_events_outside_the_window_are_ignored(self, tmp_path: Path) -> None:
         now = datetime(2026, 8, 18, 12, 0, 0)
         log = _write_events(

@@ -18,6 +18,7 @@ import pathlib
 import shutil
 import subprocess
 import sys
+import threading
 import time
 import urllib.request
 from collections.abc import Mapping
@@ -170,6 +171,11 @@ class NativeChromeManager:
         if self._process is not None and self._process.poll() is not None:
             self._process = None
             self._owns_process = False
+        if self._process is not None and self._owns_process:
+            # #871: ours is alive but CDP isn't answering yet — it is still
+            # booting (the waiter thread below owns the outcome). Never launch
+            # a second Chrome onto the same port.
+            return True, "native Chrome CDP 9222 still starting"
 
         chrome = find_chrome_executable()
         if not chrome:
@@ -208,16 +214,32 @@ class NativeChromeManager:
             self._owns_process = False
             return False, f"could not launch Chrome: {exc}"
 
+        # #871: this runs on the Qt thread inside spawn — polling CDP here
+        # froze the UI ~1–1.5 s on every frontend spawn (prod events.log:
+        # `socket.create_connection` stalls right after `native_chrome`). The
+        # pane boots for seconds before its first mb call, so nothing needs
+        # CDP up at this point: wait for it on a daemon thread instead.
+        self._waiter = threading.Thread(
+            target=self._await_cdp, args=(self._process,), daemon=True, name="native-chrome-wait"
+        )
+        self._waiter.start()
+        return True, "launched native Chrome CDP 9222 (readiness checked in background)"
+
+    def _await_cdp(self, process: subprocess.Popen) -> bool:
+        """Wait for *process* to expose CDP; close it if it never does."""
         deadline = time.monotonic() + _START_TIMEOUT_SEC
         while time.monotonic() < deadline:
             if self._cdp_ready():
-                return True, "launched native Chrome CDP 9222"
-            if self._process.poll() is not None:
+                return True
+            if process.poll() is not None:
                 break
             time.sleep(0.05)
-
-        self.close()
-        return False, "Chrome did not expose CDP 9222"
+        if self._process is process:
+            self.close()
+        orch = sys.modules.get("agent_takkub.orchestrator")
+        if orch is not None:
+            orch._log_event("native_chrome_start_failed", msg="Chrome did not expose CDP 9222")
+        return False
 
     def close(self) -> None:
         """Stop only the Chrome process tree launched by this cockpit."""

@@ -4,6 +4,13 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 
 ## [vNEXT]
 
+### Fixed (แก้)
+
+- **UI ค้างตอน spawn (#871):** สาเหตุจริงไม่ใช่ skill-learning — `skill-learning_0`/`cockpit-bg_*` ที่ถูกรายงานว่า "busy" ทุกครั้งคือ pool worker ที่ว่างอยู่ (บล็อกใน `SimpleQueue.get` ซึ่งเป็น C ไม่มี Python frame) · (1) Codex Lead แบบ restricted รัน `codex` 3 ครั้ง (mcp list + probe เขียนได้/ถูกปฏิเสธ) บน UI thread ทุก spawn = ค้าง 6 วิ → จำผลที่ผ่านไว้ใน memory ผูกกับ binary/config/roots/cwd หมดอายุ 1 ชม. (ล้มไม่จำ) (2) spawn frontend รอ Chrome CDP บน UI thread 1–1.5 วิทุกครั้ง → รอใน background thread ถ้า CDP ไม่ขึ้นปิด Chrome ทิ้งเหมือนเดิม และ spawn ที่มาระหว่าง Chrome กำลังบูตไม่เปิดตัวที่สอง (3) watchdog วัดว่าตัวเองหลับเกินด้วย → stall ที่ทั้ง process หยุด (sleep/OS throttle/native ถือ GIL) ติด `whole_process` ไม่ถูกนับว่า main thread ติด I/O (4) ตัด frame ที่ว่างออกจาก `busy_threads` และ stack ของ main thread ต่อ frame แรกของ cockpit เมื่อ 5 frame แรกเป็น stdlib ล้วน (เดิมเห็นแค่ `subprocess.run` ไม่รู้ใครเรียก) (5) auto-issue ใหม่ `main_thread_stall_long`: ค้าง ≥10 วิครั้งเดียวก็เปิดใบ (ไม่นับ whole_process) · gap: ครั้งแรกของ Codex Lead restricted ยังค้างอยู่ (การย้าย spawn ออกจาก UI thread ใหญ่เกิน batch นี้) · `user_profile` อ่าน skill บน UI thread ตอน spawn ยังไม่แก้
+- **`takkub ma` นับ FAILED ปกติของ teammate เป็น 🔴 (#870):** `task_delivery_failed` ที่ `reason=agent_reported_failed`/`pane_closed` ไม่ใช่ delivery พัง · ใช้ตาราง reason เดียวกับ auto-issue (`maintenance.ROUTINE_EVENT_REASONS`) แสดงแยกเป็นบรรทัด "ปกติ"
+- **impact plan บังคับผิดงาน (#869):** ตัวตรวจนับเฉพาะประโยคที่มีคำเสี่ยง**และ**คำสั่งเปลี่ยน · ไม่นับ inline code ที่เป็นค่า (`` `audio_mode:'hybrid'` ``) และข้อความในวงเล็บ · error บอกประโยคที่ trigger · opt-out `[no-impact: <เหตุผล ≥12 ตัว>]` (เหตุผลอยู่ใน ledger)
+- **Dark theme: ตัวหนังสือดำบนพื้นเข้มใน dialog (#868):** `color` ที่ตั้งบน `QDialog#cockpitDialog` ไม่ cascade ไป QLabel/QRadioButton ใน Qt QSS · เพิ่ม rule ระดับ type (ไม่ทับ `QLabel#…`) และปุ่มที่ไม่มีชื่อใน `CockpitDialog` ได้สไตล์ของ theme (default = gold) · ตรวจด้วย render จริงทั้ง dark/light ของ Remote Control dialog
+
 ## [v2.2.17] - 2026-10-12
 
 ### Fixed (แก้)

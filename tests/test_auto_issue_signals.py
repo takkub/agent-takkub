@@ -57,6 +57,21 @@ class TestThresholds:
         log = _log(tmp_path / "events.log", _stalls(now, 500, 900))
         assert sig.scan_for_signals(log, now=now) == []
 
+    def test_one_long_stall_fires(self, tmp_path: Path) -> None:
+        """#871: 2.2.17's single 16.2 s stall sat far below the count bar and
+        stayed silent — one stall that long is user-visible on its own."""
+        now = datetime(2026, 8, 18, 12, 0, 0)
+        log = _log(tmp_path / "events.log", _stalls(now, 1, 16234) + _stalls(now, 12, 2500))
+        hits = sig.scan_for_signals(log, now=now)
+        assert [h.rule.key for h in hits] == ["main_thread_stall_long"]
+
+    def test_long_whole_process_pause_does_not_fire(self, tmp_path: Path) -> None:
+        """A pause the watchdog slept through too is the machine, not us."""
+        now = datetime(2026, 8, 18, 12, 0, 0)
+        rec = _stalls(now, 1, 16234)[0] | {"whole_process": True}
+        log = _log(tmp_path / "events.log", [rec])
+        assert sig.scan_for_signals(log, now=now) == []
+
     def test_repeated_watchdog_respawn_fires(self, tmp_path: Path) -> None:
         now = datetime(2026, 8, 18, 12, 0, 0)
         log = _log(

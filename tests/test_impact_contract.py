@@ -305,3 +305,35 @@ def test_wrong_task_rejection_names_both_ids_845() -> None:
     )
     assert "evidence e05150e3" in msg and "active 9a1b2c3d" in msg
     assert "takkub task impact" in msg
+
+
+@pytest.mark.parametrize(
+    "task",
+    [
+        # #869 live-run wave30: request-body literal + state description.
+        "POST /exports with settings `audio_mode:'hybrid'` then poll until done",
+        "export version 1 audio_mode native เลือกใช้อยู่",
+        # #869 wave18: parenthetical context about another role's work.
+        "แก้ label thumbnail (backend wave 18 สลับ identity ref เป็น panel หน้า)",
+        # Lead's explicit opt-out with a reason.
+        "switch identity ref label [no-impact: UI label only, no flow touched]",
+    ],
+)
+def test_context_and_literals_do_not_require_plan(task: str) -> None:
+    assert plan_from_task(task) == (None, "")
+
+
+@pytest.mark.parametrize(
+    "task",
+    [
+        "set `audio_mode` to hybrid for every export",
+        "change audio_mode default to hybrid",
+        "เปลี่ยนโหมดเสียงเป็น hybrid",
+        # A bare marker without a reason is not an opt-out.
+        "change audio_mode [no-impact: x]",
+    ],
+)
+def test_real_mode_changes_still_require_plan_and_name_the_clause(task: str) -> None:
+    plan, error = plan_from_task(task)
+    assert plan is None and "required" in error
+    assert "triggered by" in error

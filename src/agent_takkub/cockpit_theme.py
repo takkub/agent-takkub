@@ -1004,6 +1004,24 @@ def build_stylesheet(sans_family: str, mono_family: str) -> str:
         color: {TEXT_FAINT};
         border: 1px solid {BORDER_HAIRLINE};
     }}
+    /* #868: unnamed buttons inside a CockpitDialog (Browse…, 👁, Log out all
+       devices …) — secondary look, compact padding so a fixed-width icon
+       button still has room for its glyph. */
+    QPushButton#dialogButton {{
+        background: transparent;
+        border: 1px solid {BORDER_STRONG};
+        color: {TEXT_SECONDARY};
+        border-radius: {RADIUS_SM}px;
+        padding: 5px 8px;
+    }}
+    QPushButton#dialogButton:hover {{
+        background: {HOVER_WEAK};
+        color: {TEXT_PRIMARY};
+    }}
+    QPushButton#dialogButton:disabled {{
+        color: {TEXT_FAINT};
+        border: 1px solid {BORDER_HAIRLINE};
+    }}
     QWidget#panel {{
         background: {GROUND_PANEL};
         border: 1px solid {BORDER_HAIRLINE};
@@ -1229,6 +1247,17 @@ def build_stylesheet(sans_family: str, mono_family: str) -> str:
         color: {ACCENT_GOLD_TEXT};
         border-bottom: 2px solid {ACCENT_GOLD};
     }}
+    /* #868: `color` on QDialog#cockpitDialog above does NOT cascade to child
+       widgets in Qt QSS — a bare QLabel / QRadioButton fell back to the OS
+       palette's WindowText (black on GROUND_WINDOW in the dark variant).
+       Type-only selectors so every `QLabel#…` rule above still wins. */
+    QLabel {{
+        color: {TEXT_PRIMARY};
+    }}
+    QRadioButton {{
+        color: {TEXT_SECONDARY};
+        spacing: 8px;
+    }}
     QCheckBox {{
         color: {TEXT_SECONDARY};
         spacing: 8px;
@@ -1402,6 +1431,30 @@ class CockpitDialog(QDialog):
     def retheme(self) -> None:
         fonts = ensure_fonts_loaded()
         self.setStyleSheet(build_stylesheet(str(fonts["sans"]), str(fonts["mono"])))
+
+    def showEvent(self, event) -> None:
+        self._theme_plain_buttons()
+        super().showEvent(event)
+
+    def _theme_plain_buttons(self) -> None:
+        """#868: a ``QPushButton`` with no object name matches no rule in
+        :func:`build_stylesheet`, so it drew as a native light button on the
+        dark dialog (Browse… / Enable / Close in Remote Settings). Give each
+        one the design system's look — the default button gold, the rest
+        ``dialogButton`` — without touching buttons a dialog already named."""
+        changed = False
+        for btn in self.findChildren(QPushButton):
+            if btn.objectName():
+                continue
+            btn.setObjectName("goldButton" if btn.isDefault() else "dialogButton")
+            btn.style().unpolish(btn)
+            btn.style().polish(btn)
+            btn.updateGeometry()
+            changed = True
+        if changed and self.layout() is not None:
+            # Size hints were measured with the native style; re-measure.
+            self.layout().invalidate()
+            self.layout().activate()
 
 
 def color_dot(color: str, parent: QWidget | None = None, size: int = 8) -> QWidget:

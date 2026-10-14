@@ -234,14 +234,15 @@
         "agent_takkub",
         "agent_takkub.auto_issue_capture",
         "agent_takkub.config",
-        "agent_takkub.issues"
+        "agent_takkub.issues",
+        "agent_takkub.maintenance"
       ],
       "imported_by": [
         "agent_takkub.app",
         "agent_takkub.settings_window"
       ],
       "fan_in": 2,
-      "fan_out": 4
+      "fan_out": 5
     },
     {
       "module": "agent_takkub.auto_migrate_boot",
@@ -3355,10 +3356,11 @@
         "agent_takkub.task_ledger"
       ],
       "imported_by": [
+        "agent_takkub.auto_issue_signals",
         "agent_takkub.cli",
         "agent_takkub.doctor"
       ],
-      "fan_in": 2,
+      "fan_in": 3,
       "fan_out": 4
     },
     {

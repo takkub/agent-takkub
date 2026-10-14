@@ -34,6 +34,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 from .config import EVENTS_LOG
+from .maintenance import ROUTINE_EVENT_REASONS
 
 # How far back each scan looks, and how often it runs. A 6h window is long
 # enough that a genuine defect clears the bar and short enough that yesterday's
@@ -115,6 +116,9 @@ class SignalRule:
     # to STUCK_RECOVER_MAX for the same pane — three events, one problem.
     chain_field: str | None = None
     chain_window_s: float = 0.0
+    # #871: skip this rule when the named rule fired in the same scan — two
+    # rules on one event must not file two issues about one problem.
+    superseded_by: str | None = None
 
 
 # Each `min_count` is stated against what the reference box actually produced,
@@ -143,8 +147,9 @@ RULES: tuple[SignalRule, ...] = (
             "นับเฉพาะที่ใบงานไปไม่ถึง pane จริงๆ: #331 เปิดเป็น false positive จาก "
             "`takkub done --failed` ธรรมดา 4 ใบ ซึ่ง delivery สำเร็จทุกใบ"
         ),
-        ignore_field="reason",
-        ignore_values=frozenset({"agent_reported_failed", "pane_closed"}),
+        # #870: same routine-reason table `takkub ma` uses, so they never drift.
+        ignore_field=ROUTINE_EVENT_REASONS["task_delivery_failed"][0],
+        ignore_values=ROUTINE_EVENT_REASONS["task_delivery_failed"][1],
     ),
     SignalRule(
         key="delivery_boot_timeout_failed",
@@ -171,6 +176,21 @@ RULES: tuple[SignalRule, ...] = (
             "ก่อนแก้ #291 วัดได้ 1,448 ครั้ง/6 ชม. สูงสุด 21s — หลังแก้เหลือ 13 ครั้ง/ชม. "
             "สูงสุด 3.3s เกณฑ์นี้จึงเงียบตอนปกติ และดังตอนที่ #291 กลับมา"
         ),
+    ),
+    SignalRule(
+        key="main_thread_stall_long",
+        event="main_thread_stall",
+        min_count=1,
+        field="duration_ms",
+        field_min=10000,
+        title="UI ค้างนานเกิน 10 วิ",
+        why=(
+            "#871: 2.2.17 ค้าง 16.2 วิ แต่ไม่ถึงเกณฑ์จำนวน (≥40/6 ชม.) จึงเงียบ — ครั้งเดียวที่นานขนาดนี้ "
+            "ผู้ใช้เห็นแน่นอน · ไม่นับ whole_process (watchdog หยุดไปด้วย = เครื่อง sleep/OS throttle)"
+        ),
+        ignore_field="whole_process",
+        ignore_values=frozenset({"True"}),
+        superseded_by="main_thread_stall_severe",
     ),
     SignalRule(
         key="auto_migrate_rolled_back",
@@ -285,7 +305,8 @@ def scan_for_signals(
         for rule in rules
         if counts[rule.key] >= rule.min_count
     ]
-    return hits
+    fired = {h.rule.key for h in hits}
+    return [h for h in hits if h.rule.superseded_by not in fired]
 
 
 def build_issue(hit: SignalHit, *, window_hours: float | None = None) -> tuple[str, str]:

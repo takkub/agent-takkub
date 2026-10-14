@@ -25,6 +25,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import time
 import tomllib
 import uuid
 
@@ -162,6 +163,53 @@ def verify_codex_boundary(
         ):
             raise RuntimeError(f"legacy sandbox profile may override permissions: {path}")
 
+    key = _probe_cache_key(provider_bin, cwd, env, write_roots, config_files)
+    passed_at = _VERIFIED.get(key) if key is not None else None
+    if passed_at is not None and time.monotonic() - passed_at < _VERIFIED_TTL_S:
+        return
+    _run_codex_boundary_probes(provider_bin, cwd, env, write_roots)
+    if key is not None:
+        _VERIFIED[key] = time.monotonic()
+
+
+# #871: the probes below are three blocking `codex` launches (~2 s each) on the
+# Qt thread during every restricted Lead spawn — a 6 s UI freeze in prod. A
+# pass is remembered in memory only, keyed on everything the verdict depends
+# on: the binary's identity, the config files that could override the
+# profile, cwd, CODEX_HOME and the write roots. An npm shim's own stat does
+# not change when the package under it is upgraded, so a pass also expires.
+_VERIFIED: dict[tuple, float] = {}
+_VERIFIED_TTL_S = 3600.0
+
+
+def _probe_cache_key(
+    provider_bin: str,
+    cwd: str,
+    env: dict[str, str],
+    write_roots: list[str],
+    config_files: list[pathlib.Path],
+) -> tuple | None:
+    try:
+        st = pathlib.Path(provider_bin).stat()
+        configs = tuple(
+            (str(p), p.stat().st_mtime_ns, p.stat().st_size) for p in config_files if p.is_file()
+        )
+    except OSError:
+        return None  # can't fingerprint → always probe
+    return (
+        provider_bin,
+        st.st_mtime_ns,
+        st.st_size,
+        str(pathlib.Path(cwd).resolve()),
+        env.get("CODEX_HOME") or "",
+        tuple(write_roots),
+        configs,
+    )
+
+
+def _run_codex_boundary_probes(
+    provider_bin: str, cwd: str, env: dict[str, str], write_roots: list[str]
+) -> None:
     mcp = subprocess.run(
         [
             provider_bin,

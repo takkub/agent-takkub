@@ -81,6 +81,43 @@ _WARN_EVENTS: dict[str, str] = {
         "ไม่ส่ง notice ให้ Lead"
     ),
 }
+# Per-event values of one field that mean "this occurrence is routine": the
+# event fired, but nothing in the cockpit broke. One event name can cover
+# outcomes that are nothing alike (#331/#870: `task_delivery_failed` is emitted
+# both when the task never reached the pane AND when a teammate simply ran
+# `takkub done --fail`). Shared with `auto_issue_signals` so the sweep and the
+# auto-issue scanner read the same event the same way.
+ROUTINE_EVENT_REASONS: dict[str, tuple[str, frozenset[str]]] = {
+    "task_delivery_failed": ("reason", frozenset({"agent_reported_failed", "pane_closed"})),
+}
+
+
+def is_routine_event(rec: dict) -> bool:
+    """True when *rec* is a listed event fired for a routine reason (#870)."""
+    rule = ROUTINE_EVENT_REASONS.get(str(rec.get("event") or ""))
+    if rule is None:
+        return False
+    field_name, values = rule
+    return str(rec.get(field_name) or "") in values
+
+
+# #871: top frames of threads that are blocked in C (idle), mirroring the
+# entries app.py's `_STALL_KNOWN_WAIT_FRAMES` gained for the same bug.
+_IDLE_THREAD_FRAMES = (
+    "thread.py:_worker:",
+    "_event_writer_loop:",
+    "tunnel.py:_drain:",
+    "subprocess.py:_readerthread:",
+)
+
+
+def _idle_thread_entry(entry: str) -> bool:
+    """True for a `busy_threads` entry ("name: top < next") whose top frame
+    is an idle wait — kept out of the stall culprit attribution."""
+    top = entry.partition(": ")[2].split(" < ", 1)[0]
+    return any(marker in top for marker in _IDLE_THREAD_FRAMES)
+
+
 # Stall durations at or above this are worth naming individually rather than
 # just counting — below it, a stall is background noise on a busy box.
 _STALL_CALLOUT_MS = 2000
@@ -363,6 +400,8 @@ def scan_events(log_path: Path, since_hours: float = 24.0, now: datetime | None 
     stall_top_frames: Counter[str] = Counter()  # #452: closest frame of ≥2s stalls
     stall_top_busy_thread: Counter[str] = Counter()  # #452 follow-up: culprit thread
     recover_reasons: Counter[str] = Counter()  # #422: `<event>:<reason>` buckets
+    routine: Counter[str] = Counter()  # #870: `<event>:<reason>` not counted as 🔴/🟡
+    whole_process_stalls: list[int] = []  # #871: duration_ms of process-wide pauses
     total = 0
     try:
         with log_path.open(encoding="utf-8", errors="replace") as fh:
@@ -379,13 +418,20 @@ def scan_events(log_path: Path, since_hours: float = 24.0, now: datetime | None 
                     continue
                 total += 1
                 name = str(rec.get("event") or "")
-                if name in _SEVERE_EVENTS:
+                if is_routine_event(rec):
+                    routine[f"{name}:{rec.get(ROUTINE_EVENT_REASONS[name][0])}"] += 1
+                elif name in _SEVERE_EVENTS:
                     severe[name] += 1
                     if name.endswith("_pane_recover"):
                         recover_reasons[str(rec.get("reason") or "unclassified")] += 1
                 elif name in _WARN_EVENTS:
                     warn[name] += 1
-                if name == "main_thread_stall":
+                if name == "main_thread_stall" and rec.get("whole_process"):
+                    # #871: the watchdog itself was paused too — the process
+                    # as a whole stopped (sleep / OS throttling / native GIL
+                    # hold), so no thread snapshot taken on wake names a culprit.
+                    whole_process_stalls.append(int(rec.get("duration_ms") or 0))
+                elif name == "main_thread_stall":
                     ms = int(rec.get("duration_ms") or 0)
                     worst_stall = max(worst_stall, ms)
                     if ms >= _STALL_CALLOUT_MS:
@@ -393,8 +439,12 @@ def scan_events(log_path: Path, since_hours: float = 24.0, now: datetime | None 
                             f"{ts:%H:%M} UI ค้าง {ms / 1000:.1f}s (pane {rec.get('active_panes')})"
                         )
                         busy_threads = rec.get("busy_threads")
-                        if isinstance(busy_threads, list) and busy_threads:
-                            stall_top_busy_thread[str(busy_threads[0])] += 1
+                        if isinstance(busy_threads, list):
+                            # #871: records written before app.py learned these
+                            # idle-wait frames list idle pool workers first.
+                            busy = [str(t) for t in busy_threads if not _idle_thread_entry(str(t))]
+                            if busy:
+                                stall_top_busy_thread[busy[0]] += 1
                         stack = rec.get("stack")
                         if isinstance(stack, list) and stack:
                             stall_top_frames[str(stack[0])] += 1
@@ -415,6 +465,15 @@ def scan_events(log_path: Path, since_hours: float = 24.0, now: datetime | None 
             + " · ".join(f"{k} ×{v}" for k, v in recover_reasons.most_common())
         )
     details += [f"🟡 {_WARN_EVENTS[k]} ×{v}" for k, v in warn.most_common()]
+    if routine:
+        details.append(
+            "ปกติ (ไม่นับเป็นปัญหา): " + " · ".join(f"{k} ×{v}" for k, v in routine.most_common())
+        )
+    if whole_process_stalls:
+        details.append(
+            f"ทั้ง process หยุด (sleep/OS throttle/native ถือ GIL — ไม่ใช่ main thread ติด I/O)"
+            f" ×{len(whole_process_stalls)} นานสุด {max(whole_process_stalls) / 1000:.1f}s"
+        )
     details += stall_callouts[-5:]
     if stall_top_busy_thread:
         entry, count = stall_top_busy_thread.most_common(1)[0]

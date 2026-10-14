@@ -33,13 +33,42 @@ _RISK = re.compile(
 )
 
 
+_CHANGE_VERB = re.compile(
+    r"\b(?:change|switch|update|modify|set|enable|disable|replace|migrate|swap|fix)\b|"
+    r"เปลี่ยน|สลับ|แก้|ตั้งค่า|ปรับ|ย้าย",
+    re.I,
+)
+# #869: Lead's explicit opt-out — `[no-impact: <one-line reason>]`. The reason
+# is required (a bare marker would just become muscle memory) and it stays in
+# the task text, so the ledger detail file records why no plan was attached.
+_NO_IMPACT = re.compile(r"\[no-impact\s*:\s*([^\]\n]{12,})\]", re.I)
+
+
 def needs_plan(task: str, scope: str = "normal") -> bool:
     """Flag cross-flow tasks; a caller can also opt in with a plan block."""
+    return risk_trigger(task, scope) is not None
+
+
+def risk_trigger(task: str, scope: str = "normal") -> str | None:
+    """The clause that makes *task* need an impact plan, or None (#869).
+
+    Returned so the refusal can name the exact sentence and Lead can fix the
+    brief in one turn instead of guessing which word tripped the check.
+    """
     text = task or ""
     if "[impact-required]" in text.lower():
-        return True
+        return "[impact-required]"
+    if _NO_IMPACT.search(text):
+        return None
     # Classify instructions rather than quoted diagnostics/historical evidence.
     text = re.sub(r"```[^\n]*\n.*?```", "", text, flags=re.S)
+    # #869: an inline-code literal (`audio_mode:'hybrid'` in a request body) is
+    # data to send, and a parenthetical is context about other work ("(backend
+    # wave 18 swapped the identity ref …)") — neither is this task's
+    # instruction. A bare identifier in backticks (`set `audio_mode` to …`) is
+    # kept: there the backticks only name what the instruction changes.
+    text = re.sub(r"`[^`\n]*[:=/{}'\"][^`\n]*`", "", text)
+    text = re.sub(r"\([^()\n]*\)|（[^（）\n]*）", "", text)
     for clause in re.split(
         r"[\n.;]|\bthen\b|\band (?=(?:change|switch|update|modify)\b)", text, flags=re.I
     ):
@@ -57,14 +86,13 @@ def needs_plan(task: str, scope: str = "normal") -> bool:
             r"\b(?:already|previously|historical|completed)\b|ก่อนหน้า|เสร็จแล้ว", prefix, re.I
         ):
             continue
-        if re.search(
-            r"\b(?:verify|inspect|check|read.only)\b|ตรวจสอบ|ยืนยัน", prefix, re.I
-        ) and not re.search(
-            r"\b(?:change|switch|update|modify|set|enable|disable)\b|เปลี่ยน|สลับ|แก้", clause, re.I
-        ):
+        # #869: a risk word alone ("audio_mode native in use", "verify the
+        # identity ref") describes state; only a clause that also asks for a
+        # change is a cross-flow instruction.
+        if not _CHANGE_VERB.search(clause):
             continue
-        return True
-    return False
+        return clause.strip()[:160]
+    return None
 
 
 def _block(text: str, kind: str) -> tuple[dict | None, str]:
@@ -91,10 +119,13 @@ def plan_from_task(task: str, scope: str = "normal") -> tuple[dict | None, str]:
     if error:
         return None, error
     if plan is None:
-        if needs_plan(task, scope):
+        trigger = risk_trigger(task, scope)
+        if trigger is not None:
             return (
                 None,
-                "impact plan required: pass --impact-plan-file with trigger, before/after, source_of_truth, upstream/downstream and checks for every flow",
+                "impact plan required: pass --impact-plan-file with trigger, before/after, source_of_truth, upstream/downstream and checks for every flow"
+                f" · triggered by: {trigger!r} · not a mode/identity/shared-state change?"
+                " reword it, or add [no-impact: <reason>] to the brief",
             )
         return None, ""
     for key in ("trigger", "before", "after", "source_of_truth"):

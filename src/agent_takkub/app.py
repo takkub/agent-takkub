@@ -346,6 +346,11 @@ def _watchdog_should_exit(heartbeat_ts: float, now: float, timeout_s: float) -> 
     return (now - heartbeat_ts) > timeout_s
 
 
+# #871: a stall is tagged `whole_process` when the watchdog's own oversleep
+# covers at least this share of it (see `_StallTracker.update`).
+_WHOLE_PROCESS_GAP_RATIO = 0.8
+
+
 class _StallTracker:
     """Episode tracker for sub-hard-kill main-thread stalls (pure, testable).
 
@@ -372,14 +377,21 @@ class _StallTracker:
         self._active = False
         self._peak = 0.0
         self._saw_spawn = False
+        self._max_gap = 0.0
         self._stack: list[str] = []
         self._stack_age = 0.0
         self._busy_threads: list[str] = []
 
-    def update(self, age: float, spawn_in_progress: bool) -> dict | None:
+    def update(self, age: float, spawn_in_progress: bool, loop_gap: float = 0.0) -> dict | None:
+        """*loop_gap* (#871): how far the watchdog's own poll overslept on
+        this tick. A main-thread stall leaves the watchdog running on time;
+        when the watchdog ALSO missed most of the episode, the whole process
+        was paused (system sleep / OS throttling of a background app, or a
+        native call holding the GIL) — not the Qt thread stuck on I/O."""
         if age > self._th:
             self._active = True
             self._peak = max(self._peak, age)
+            self._max_gap = max(self._max_gap, loop_gap)
             self._saw_spawn = self._saw_spawn or bool(spawn_in_progress)
             return None
         if self._active:
@@ -387,6 +399,11 @@ class _StallTracker:
                 "duration_ms": round(self._peak * 1000),
                 "spawn_in_progress": self._saw_spawn,
             }
+            if self._max_gap > 0:
+                rec["watchdog_gap_ms"] = round(self._max_gap * 1000)
+                if self._max_gap >= _WHOLE_PROCESS_GAP_RATIO * self._peak:
+                    rec["whole_process"] = True
+            self._max_gap = 0.0
             if self._stack:
                 rec["stack"] = self._stack
             if self._busy_threads:
@@ -469,13 +486,25 @@ def _format_main_thread_frames(max_frames: int = _STALL_STACK_MAX_FRAMES) -> lis
         root = Path(__file__).resolve().parent.parent
         frame = sys._current_frames().get(threading.main_thread().ident)
         frames: list[str] = []
-        while frame is not None and len(frames) < max_frames:
+        own_seen = False
+        while frame is not None:
             path = Path(frame.f_code.co_filename)
             try:
                 rel = path.resolve().relative_to(root).as_posix()
             except ValueError:
                 rel = path.name
-            frames.append(f"{rel}:{frame.f_code.co_name}:{frame.f_lineno}")
+            own = rel.startswith("agent_takkub/")
+            if len(frames) < max_frames:
+                frames.append(f"{rel}:{frame.f_code.co_name}:{frame.f_lineno}")
+                own_seen = own_seen or own
+            elif own_seen:
+                break
+            elif own:
+                # #871: a stall inside stdlib (`subprocess.run` → `communicate`
+                # → `join`) filled all five frames with stdlib and never named
+                # the cockpit call site — append the first frame of ours.
+                frames.append(f"… {rel}:{frame.f_code.co_name}:{frame.f_lineno}")
+                break
             frame = frame.f_back
         return frames
     except Exception:
@@ -505,6 +534,17 @@ _STALL_KNOWN_WAIT_FRAMES: tuple[tuple[str, str | None], ...] = (
     # threads of a GIL convoy they were not part of, sending the diagnosis
     # after the wrong suspect.
     ("ptyprocess.py", None),
+    # #871: an idle ThreadPoolExecutor worker blocks in `SimpleQueue.get` — C
+    # code with no Python frame — so its top frame is `thread.py:_worker`
+    # itself (a running job would show the job's own frames on top). Both
+    # loops below block the same way (`SimpleQueue.get` / a pipe read). All
+    # three were reported as the "busy" culprits of 2.2.17's 16 s stall while
+    # every one of them was idle.
+    ("thread.py", "_worker"),
+    ("orchestrator_text.py", "_event_writer_loop"),
+    ("tunnel.py", "_drain"),
+    # `subprocess.run`'s pipe readers — a blocking read, same shape.
+    ("subprocess.py", "_readerthread"),
 )
 # Threads other than the watchdog itself that are named, not this-thread
 # excluded — kept as a name fallback in case this is ever called from a
@@ -631,11 +671,14 @@ def _start_deadman_watchdog(window: MainWindow, _stop: threading.Event | None = 
         hard_dumped = False
         stall_tracker = _StallTracker(_WATCHDOG_STALL_LOG_S)
         last_hard_stall_rearm = time.monotonic()
+        last_tick = time.monotonic()
         while not (_stop is not None and _stop.is_set()):
             time.sleep(_WATCHDOG_POLL_S)
             if _stop is not None and _stop.is_set():
                 return
             now = time.monotonic()
+            loop_gap = max(0.0, now - last_tick - _WATCHDOG_POLL_S)  # #871
+            last_tick = now
             age = now - window._heartbeat_ts
             # Kick the HARD-stall dead-man's switch (#313) on a coarse
             # cadence while the heartbeat is healthy, pushing its deadline
@@ -672,7 +715,7 @@ def _start_deadman_watchdog(window: MainWindow, _stop: threading.Event | None = 
                     if frames:
                         busy_threads = _format_stall_threads()
                         stall_tracker.record_stack(frames, age, busy_threads)
-                rec = stall_tracker.update(age, spawn_active)
+                rec = stall_tracker.update(age, spawn_active, loop_gap)
                 if rec is not None:
                     try:
                         recorder = getattr(
