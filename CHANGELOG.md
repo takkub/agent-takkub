@@ -4,6 +4,8 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 
 ## [vNEXT]
 
+## [v2.2.18] - 2026-10-14
+
 ### Fixed (แก้)
 
 - **ถอด OS sandbox ของ Codex Lead ออกทั้งหมด (#842):** sandbox ที่ 2.2.15 ใส่ให้ Codex Lead ตอน preset ห้าม Lead แก้โค้ด ทำให้ใช้งานไม่ได้บนเครื่องอื่น — Windows เครื่องใหม่เด้ง popup UAC ให้กด OK (setup ของ elevated sandbox ต้องใช้สิทธิ์ admin ครั้งแรกของทุก `CODEX_HOME` และ cockpit ใช้ home ของตัวเอง) ระหว่างนั้น UI ค้าง · Mac เปิด Lead ไม่ขึ้น (spawn ถูกปฏิเสธแล้วแท็บหาย) · ตอนนี้ Codex Lead รันด้วย autonomy flag ปกติเหมือน Codex pane อื่น (`--add-dir` docs/artifacts เหมือนเดิม) ไม่มี boundary probe, ไม่มี permission profile, ไม่มี audit การถูกปฏิเสธตอนปิด session · readiness บันทึก `codex_prompt` / `takkub context status` บอก `prompt_only` · เปลี่ยน preset ระหว่าง Codex Lead รันอยู่ไม่ต้อง restart · gap: ข้อห้ามของ preset ไปถึง Codex Lead ทาง policy text เท่านั้น ถ้า Codex ไม่ทำตามก็แก้โค้ดได้
