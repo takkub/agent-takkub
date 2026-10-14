@@ -119,3 +119,16 @@ def test_boundary_probe_pass_is_cached_until_binary_changes(
     for _ in range(2):
         with pytest.raises(RuntimeError, match="outside scoped roots"):
             verify()
+
+
+@pytest.mark.parametrize("platform", ["win32", "darwin", "linux"])
+def test_windows_lead_sandbox_is_unelevated(monkeypatch: pytest.MonkeyPatch, platform) -> None:
+    """Codex's default elevated Windows sandbox runs an admin setup (UAC
+    popup) for every fresh CODEX_HOME — the cockpit's own home made that hit
+    a Codex Lead's first open on a new machine. Windows must ask for the
+    unelevated sandbox; other platforms must not get a Windows-only key."""
+    monkeypatch.setattr(lead_enforcement.sys, "platform", platform)
+    argv = lead_enforcement.codex_lead_argv(["C:/scratch"])
+    has_key = 'windows.sandbox="unelevated"' in argv
+    assert has_key is (platform == "win32")
+    assert argv[:2] == ["--ask-for-approval", "never"]

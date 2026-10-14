@@ -3169,6 +3169,16 @@ class SpawnEngineMixin:
                         lead_enforcement.verify_codex_boundary(provider_bin, spawn_cwd, env, _roots)
                         _lead_sandboxed = True
                     except Exception as exc:
+                        # The UI only shows this for 15 s and drops the tab —
+                        # keep the reason where `takkub ma`/a bug report can
+                        # find it (a Mac Codex Lead "never opens" left no trace).
+                        _log_event(
+                            "lead_sandbox_refused",
+                            project=project_ns,
+                            provider=spec.name,
+                            platform=sys.platform,
+                            error=str(exc)[:400],
+                        )
                         return False, f"restricted Lead sandbox could not be prepared: {exc}"
                 _ps_lead = self._pane_state.get(_exit_key(project_ns, role_name))
                 _readiness_file = getattr(_ps_lead, "lead_readiness_file", None)

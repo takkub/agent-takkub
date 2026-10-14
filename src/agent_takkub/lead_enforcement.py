@@ -120,6 +120,15 @@ def codex_lead_argv(write_roots: list[str]) -> list[str]:
         f'{{extends=":read-only", filesystem={{{grants}}}, '
         'network={enabled=true, domains={"127.0.0.1"="allow", "localhost"="allow"}}}'
     )
+    # Windows: Codex's default "elevated" sandbox runs a one-time admin setup
+    # (codex-windows-sandbox-setup.exe → UAC prompt, creates the
+    # CodexSandboxOffline/Online accounts) for every fresh CODEX_HOME — and
+    # the cockpit gives Codex its own home, so a new machine got a UAC popup
+    # mid-spawn on the Lead's first open. "unelevated" is a restricted token
+    # of the current user with ACL write boundaries: no setup, no prompt, and
+    # the boundary probe still refuses a write outside `write_roots`
+    # (verified on Windows with a fresh CODEX_HOME, 2026-10-14).
+    platform_argv = ["-c", 'windows.sandbox="unelevated"'] if sys.platform == "win32" else []
     return [
         "--ask-for-approval",
         "never",
@@ -133,6 +142,7 @@ def codex_lead_argv(write_roots: list[str]) -> list[str]:
         "features.network_proxy=true",
         "--disable",
         "apps",
+        *platform_argv,
     ]
 
 
@@ -207,6 +217,12 @@ def _probe_cache_key(
     )
 
 
+def _codex_detail(result: subprocess.CompletedProcess) -> str:
+    """` (rc=N: <stderr tail>)` — why codex refused, for the logged reason."""
+    tail = (result.stderr or b"").decode("utf-8", errors="replace").strip()[-300:]
+    return f" (rc={result.returncode}: {tail})" if tail else f" (rc={result.returncode})"
+
+
 def _run_codex_boundary_probes(
     provider_bin: str, cwd: str, env: dict[str, str], write_roots: list[str]
 ) -> None:
@@ -230,9 +246,11 @@ def _run_codex_boundary_probes(
     )
     try:
         if mcp.returncode or json.loads(mcp.stdout) != []:
-            raise RuntimeError("restricted Codex Lead still exposes MCP servers")
+            raise RuntimeError(
+                "restricted Codex Lead still exposes MCP servers" + _codex_detail(mcp)
+            )
     except (ValueError, TypeError) as exc:
-        raise RuntimeError("cannot verify restricted Codex MCP table") from exc
+        raise RuntimeError("cannot verify restricted Codex MCP table" + _codex_detail(mcp)) from exc
 
     from .config import RUNTIME_DIR
 
@@ -272,7 +290,10 @@ def _run_codex_boundary_probes(
             creationflags=SUBPROCESS_NO_WINDOW,
         )
         if allowed.returncode or not writable.exists() or writable.read_bytes() != b"yes":
-            raise RuntimeError("Codex sandbox did not demonstrate its scoped writable root")
+            raise RuntimeError(
+                "Codex sandbox did not demonstrate its scoped writable root"
+                + _codex_detail(allowed)
+            )
         writable.unlink()
         denied = subprocess.run(
             [
