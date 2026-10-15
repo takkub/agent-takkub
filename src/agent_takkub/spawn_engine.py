@@ -3153,17 +3153,22 @@ class SpawnEngineMixin:
             autonomy_argv = list(
                 spec.autonomy_flags.get(sys.platform, spec.autonomy_flags.get("default", []))
             )
-            if _is_lead and spec.name == "codex":
+            if _is_lead:
                 # A Codex Lead runs with the same autonomy flags as every
                 # Codex pane. The #842 OS sandbox for a restricted Lead was
                 # removed (2026-10-14): its Windows admin setup popped a UAC
                 # prompt on every new machine and a Mac Lead never opened.
                 # A restricted policy now reaches it through the Lead policy
-                # text only — recorded truthfully as `codex_prompt`.
+                # text only — recorded truthfully as `codex_prompt`. Gemini/agy,
+                # OpenCode and Cursor Leads are held the same way (`policy_prompt`).
                 from . import lead_enforcement
 
                 _mode = (
-                    lead_enforcement.MODE_CODEX_PROMPT
+                    (
+                        lead_enforcement.MODE_CODEX_PROMPT
+                        if spec.name == "codex"
+                        else lead_enforcement.MODE_POLICY_PROMPT
+                    )
                     if lead_enforcement.lead_is_restricted(project_ns)
                     else lead_enforcement.MODE_NONE
                 )

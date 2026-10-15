@@ -21,13 +21,16 @@ from __future__ import annotations
 #: Enforcement modes recorded on the Lead readiness state.
 MODE_CLAUDE_HOOKS = "claude_hooks"
 MODE_CODEX_PROMPT = "codex_prompt"
+#: Gemini/agy, OpenCode and Cursor Leads: held by the Lead policy text, like Codex.
+MODE_POLICY_PROMPT = "policy_prompt"
 MODE_NONE = "none"
 
-#: (provider, mode) pairs that can run a restricted Lead → gate label. Neither
+#: (provider, mode) pairs that can run a restricted Lead → gate label. None
 #: is an OS boundary — the labels say what actually holds the policy.
 _ENFORCED = {
     ("claude", MODE_CLAUDE_HOOKS): "pretooluse_guard",
     ("codex", MODE_CODEX_PROMPT): "prompt_only",
+    **{(p, MODE_POLICY_PROMPT): "prompt_only" for p in ("gemini", "opencode", "cursor")},
 }
 
 #: Providers that can run a restricted Lead at all.

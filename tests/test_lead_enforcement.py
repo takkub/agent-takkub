@@ -40,3 +40,15 @@ def test_codex_lead_is_a_supported_restricted_lead_labelled_prompt_only() -> Non
     assert lead_enforcement.enforcement_gap("codex", mode, True) == ""
     assert lead_enforcement.gate_label("codex", mode, True) == "prompt_only"
     assert "not enforced" in lead_enforcement.enforcement_gap("codex", "none", True)
+
+
+def test_gemini_opencode_cursor_lead_can_open_restricted_like_codex() -> None:
+    """A full-preset project whose Lead routes to gemini must open (prod
+    unirecon 2026-10-15 refused every spawn) — held by policy text, like Codex."""
+    mode = lead_enforcement.MODE_POLICY_PROMPT
+    for provider in ("gemini", "opencode", "cursor"):
+        assert provider in lead_enforcement.RESTRICTED_LEAD_PROVIDERS
+        assert lead_enforcement.enforcement_gap(provider, mode, True) == ""
+        assert lead_enforcement.gate_label(provider, mode, True) == "prompt_only"
+        assert "not enforced" in lead_enforcement.enforcement_gap(provider, "none", True)
+    assert lead_enforcement.gate_label("claude", mode, True) == "unenforced"

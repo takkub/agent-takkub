@@ -4,6 +4,10 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 
 ## [vNEXT]
 
+### Fixed (แก้)
+
+- **เปิดโปรเจค preset ทีมเต็มที่ Lead route ไป gemini ไม่ได้ (prod unirecon 2026-10-15):** spawn ถูกปฏิเสธ `restricted Lead cannot start with gemini` ทุกครั้งเพราะ restricted Lead รองรับแค่ claude/codex · ตอนนี้ gemini/agy, opencode, cursor เป็น restricted Lead ได้แบบเดียวกับ Codex — readiness บันทึก `policy_prompt` / `takkub context status` บอก `prompt_only` · gap: ข้อห้ามไปถึง Lead เหล่านี้ทาง policy text เท่านั้น (ไม่มี PreToolUse guard แบบ Claude)
+
 ## [v2.2.18] - 2026-10-14
 
 ### Fixed (แก้)
