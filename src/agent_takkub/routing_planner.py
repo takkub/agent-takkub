@@ -531,6 +531,25 @@ _FAILURE_RULES: list[tuple[re.Pattern, str, str]] = [
         "devops",
         "infra/stack signature (container/port/healthcheck)",
     ),
+    # #879: a 4xx VALIDATION rejection ("property numFmt should not exist",
+    # forbidNonWhitelisted, "must be a string") is the API doing its job on a
+    # payload the CALLER built — the fix lives where the request is made
+    # (frontend), not in the server. Must sit ABOVE the server rule: that
+    # one's "endpoint ... fail"/"api error" wording matches these notes too
+    # and used to route a frontend payload bug back to backend (unirecon,
+    # 2026-10-15). Infra stays above both — a 400 from a half-up stack is
+    # still the stack's fault.
+    (
+        re.compile(
+            r"(\b400\b|\b422\b|bad\s*request|unprocessable|validation\s*(error|fail(ed|ure)?)|"
+            r"should\s+not\s+exist|must\s+be\s+(a|an|one|of|shorter|longer|valid)\b|"
+            r"is\s+not\s+allowed|whitelist|forbidnonwhitelisted|class-validator|"
+            r"invalid\s+(payload|body|request|field))",
+            re.IGNORECASE,
+        ),
+        "frontend",
+        "client payload validation (400/422 — API rejected the request shape, fix the caller)",
+    ),
     (
         re.compile(
             r"(\b50[0-4]\b|\b40[13]\b|api\s*(error|fail)|exception|traceback|"

@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -88,6 +89,33 @@ def read_codex_session_meta(path: Path) -> dict:
     return payload if rec.get("type") == "session_meta" and isinstance(payload, dict) else {}
 
 
+# #882/#874: `resolve_codex_jsonl_for_cwd` opened EVERY rollout in the store
+# to read its first line — on the Qt main thread, from the spawn path
+# (`_resume_uuid_matches_provider_cwd`), 19–25 s on a prod store with a few
+# thousand sessions. Codex names every rollout `rollout-<ts>-<session
+# uuid>.jsonl` (`rollout.rs`), so the id is in the filename: open the file(s)
+# named for the wanted id, plus any rollout whose name carries NO uuid at all
+# (older/hand-made files — the archived-store tests), and never the ones
+# named for a different session.
+_UUID_IN_NAME_RE = re.compile(
+    r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
+)
+
+
+def _rollout_candidates(base: Path, wanted_id: str) -> list[Path]:
+    """Rollouts under *base* worth opening for *wanted_id* — named for it
+    first, then the ones whose name carries no session uuid at all."""
+    named: list[Path] = []
+    unnamed: list[Path] = []
+    for path in base.rglob("rollout-*.jsonl"):
+        name = path.name
+        if wanted_id and wanted_id in name:
+            named.append(path)
+        elif _UUID_IN_NAME_RE.search(name) is None:
+            unnamed.append(path)
+    return named + unnamed
+
+
 def resolve_codex_jsonl_for_cwd(
     cwd: str,
     session_id: str,
@@ -124,7 +152,7 @@ def resolve_codex_jsonl_for_cwd(
         if not base.is_dir():
             continue
         try:
-            candidates = base.rglob("rollout-*.jsonl")
+            candidates = _rollout_candidates(base, wanted_id)
             for path in candidates:
                 meta = read_codex_session_meta(path)
                 meta_id = str(meta.get("id") or meta.get("session_id") or "").strip()

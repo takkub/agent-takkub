@@ -358,8 +358,14 @@ def account_for_spawn(project: str, provider: str) -> str | None:
     """The account a NEW pane should start on instead of the project's own,
     while the project's account is still known to be spent (a done() closes
     the switched pane, so the next task would otherwise boot straight back
-    onto the limit). None = use the project's account."""
+    onto the limit). None = use the project's account.
+
+    Under the `park` policy (no `account_failover` opt-in) this is always
+    None (#875): the user asked to wait on their own account, so a fresh
+    pane starts there too and parks like the one before it."""
     if provider not in ACCOUNT_SWITCH_PROVIDERS:
+        return None
+    if not auto_resume.account_switch_allowed(project):
         return None
     try:
         from .user_profile import profile_for, profile_home
@@ -826,9 +832,12 @@ class AutoResumeMixin:
         # Another logged-in account of the SAME provider first (user request
         # 2026-10-08): same CLI, same model/effort, only the quota changes —
         # the provider ring below is the fallback when every account is spent.
-        # Runs under the "park" policy too: park means "don't move my task to
-        # another provider", and this doesn't.
-        if ps.quota_reroute_count < auto_resume.MAX_REROUTE_ROUNDS:
+        # NOT under "park" (#875): park means "wait for MY reset, right
+        # here" — an account hop is still the task moving somewhere the user
+        # did not ask for. `account_switch_allowed` carries the opt-in.
+        if ps.quota_reroute_count < auto_resume.MAX_REROUTE_ROUNDS and (
+            auto_resume.account_switch_allowed(project)
+        ):
             account = pick_reroute_account(
                 project, hit_provider, self._running_account(project, role, ps), reset_at
             )
@@ -856,6 +865,7 @@ class AutoResumeMixin:
                 role=role,
                 project=project,
                 hit_provider=hit_provider,
+                account_failover=auto_resume.park_account_failover_enabled(project),
             )
             self._park_pane_for_limit(project, role, ps)
             return

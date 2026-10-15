@@ -1265,6 +1265,28 @@ class TestClassifyFailure:
         assert role == "qa"
         assert "test" in why
 
+    def test_400_validation_routes_to_the_caller_not_backend(self):
+        # #879 (unirecon 2026-10-15): the API rejected a payload the frontend
+        # built — "server/API signature" sent the fix loop to backend.
+        note = (
+            "QA FAILED: POST /report-templates/preview 400 "
+            "'layout.columns.2/3/4.property numFmt should not exist' (forbidNonWhitelisted)"
+        )
+        role, why = classify_failure(note, source_role="qa")
+        assert role == "frontend"
+        assert "validation" in why
+        assert "5xx" not in why
+
+    def test_422_unprocessable_is_also_the_callers_payload(self):
+        role, _ = classify_failure(
+            "PUT /users 422 unprocessable entity: email must be a valid email"
+        )
+        assert role == "frontend"
+
+    def test_400_from_a_dead_stack_is_still_infra(self):
+        role, _ = classify_failure("got 400 bad request — container ยังไม่ขึ้น ECONNREFUSED :5310")
+        assert role == "devops"
+
     def test_unknown_returns_none(self):
         role, why = classify_failure("ผลไม่ตรง spec นิดหน่อย")
         assert role is None and why == ""

@@ -316,6 +316,60 @@ def test_account_switch_does_not_mark_the_whole_provider_spent(accounts, monkeyp
     assert recorded == []
 
 
+def test_park_policy_keeps_the_task_on_its_own_account(accounts, monkeypatch) -> None:
+    """#875: park = wait for MY reset. The account-first hop (2026-10-08) ran
+    under park too, so a parked qa pane still jumped to the `company`
+    profile. Under park: no account hop, no spawn-time account swap — unless
+    `account_failover` is opted in."""
+    from agent_takkub import auto_resume, provider_state
+    from agent_takkub.spawn_engine import PaneState
+
+    monkeypatch.setattr(provider_state, "set_quota_reset_at", lambda p, t: None)
+    monkeypatch.setattr(auto_resume, "effective_quota_policy", lambda project=None: "park")
+    monkeypatch.setattr(auto_resume, "park_account_failover_enabled", lambda project=None: False)
+    moved: list = []
+    parked: list = []
+    host = SimpleNamespace(
+        _running_account=lambda project, role, ps: None,
+        _reroute_pane_to_provider=lambda *a, **k: moved.append(k.get("account")),
+        _schedule_provider_quota_reset_notice=lambda *a: None,
+        _park_pane_for_limit=lambda project, role, ps: parked.append(role),
+    )
+
+    def _hit() -> PaneState:
+        ps = PaneState()
+        ps.quota_provider = "codex"
+        ps.rate_limited_until = time.time() + 3600
+        return ps
+
+    limit_autoresume.AutoResumeMixin._reroute_or_park(host, "p", "qa", _hit())
+    assert moved == []
+    assert parked == ["qa"]
+    assert limit_autoresume.account_for_spawn("p", "codex") is None
+
+    # Explicit opt-in: same provider's other account is fine, still no provider hop.
+    monkeypatch.setattr(auto_resume, "park_account_failover_enabled", lambda project=None: True)
+    limit_autoresume.AutoResumeMixin._reroute_or_park(host, "p", "qa", _hit())
+    assert moved == ["b"]
+    assert parked == ["qa"]
+
+
+def test_park_account_failover_setting_round_trips(tmp_path, monkeypatch) -> None:
+    from agent_takkub import auto_resume
+
+    monkeypatch.setattr(auto_resume, "_quota_policy_path", lambda: tmp_path / "quota-policy.json")
+    auto_resume.set_quota_policy("park")
+    assert auto_resume.park_account_failover_enabled() is False
+    assert auto_resume.account_switch_allowed() is False
+    auto_resume.set_park_account_failover_enabled(True)
+    assert auto_resume.park_account_failover_enabled() is True
+    assert auto_resume.account_switch_allowed() is True
+    assert auto_resume.quota_policy() == "park"  # the flag write kept the policy
+    auto_resume.set_quota_policy("reroute")
+    auto_resume.set_park_account_failover_enabled(False)
+    assert auto_resume.account_switch_allowed() is True  # reroute never consults the flag
+
+
 def test_providers_without_account_knob_never_switch(accounts) -> None:
     for provider in ("gemini", "opencode", "cursor"):
         assert limit_autoresume.pick_reroute_account("p", provider, None, time.time()) is None

@@ -26,6 +26,7 @@ phase has a faithful starting point instead of having to rediscover it.
 from __future__ import annotations
 
 import os
+import re
 import sys
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -46,6 +47,27 @@ PICKER_SCREEN_MARKERS: dict[str, tuple[tuple[str, ...], ...]] = {
     ),
 }
 PICKER_SCREEN_TAIL_LINES = 40
+
+# #877: Claude Code's tool-permission dialog with a deny countdown ("Claude
+# will automatically deny this request in 1:49" — the rm guard hook's
+# deny-by-default prompt) renders the same "Esc to cancel" chrome as a
+# question picker, so `picker_question_on_screen` reads it as "waiting for
+# the user". Nobody has to answer it: it denies itself and the pane carries
+# on. Claude wording only — codex/agy/opencode/cursor have no such countdown
+# prompt the cockpit knows of (#103 gap, not assumed coverage).
+AUTO_DENY_PROMPT_RE = re.compile(r"automatically\s+deny|auto-?deny", re.IGNORECASE)
+
+
+def auto_deny_prompt_on_screen(session) -> str | None:
+    """The countdown line of a self-denying permission prompt, or None."""
+    try:
+        lines = [line for line in session.display_lines() if line.strip()]
+    except Exception:
+        return None
+    for line in reversed(lines[-PICKER_SCREEN_TAIL_LINES:]):
+        if AUTO_DENY_PROMPT_RE.search(line):
+            return line.strip()
+    return None
 
 
 def picker_question_on_screen(session, provider: str | None) -> bool:
@@ -307,6 +329,14 @@ class ProviderSpec:
     # subagent the cockpit knows of → `shard_fanout.resolve_shard_fanout`
     # falls back to the legacy N-pane fan-out for that provider.
     native_subagent_hint: str = ""
+    # #878: how the LEAD on this provider dispatches ONE native subagent for
+    # `assign --mode subagent` — the tool + agent-type spelling its own CLI
+    # accepts. The old message said `subagent_type='<role>'`, which no CLI
+    # has (Claude Code's Agent tool knows general-purpose/Explore/Plan, not
+    # 'reviewer'); the capsule defines the role, the dispatcher only needs a
+    # type that exists. Empty = no native subagent (cursor) → the Lead runs
+    # the capsule itself; see `subagent_dispatch_hint`.
+    native_subagent_dispatch: str = ""
     model_flag: str | None = None
     tools_flag: str | None = None
     autocompact_flag: str | None = None
@@ -799,6 +829,12 @@ claude_spec = ProviderSpec(
         "Agent tool — เรียกหลายตัวในเทิร์นเดียว (หรือ run_in_background=true) "
         'ไม่ใช้ subagent_type="fork" (fork copy context แม่ทั้งก้อน)'
     ),
+    # Claude Code's Agent tool lists claude/general-purpose/Explore/Plan/...
+    # — never a cockpit role name (#878, probed 2026-10-15).
+    native_subagent_dispatch=(
+        "the Agent tool with subagent_type='general-purpose' "
+        "(no per-role agent type exists — the capsule defines the role)"
+    ),
     tools_flag="--tools",  # #581 Phase 1: teammate built-in tool schema filtering
     autocompact_flag="--autocompact",  # #582: compact at 200k instead of ~1M
     compact_command="/compact",  # live 2.1.292: compact_boundary 50k → 4k
@@ -869,6 +905,7 @@ codex_spec = ProviderSpec(
     native_subagent_hint=(
         "spawn_agent ทีละตัวจนครบ แล้ว wait_agent รวมผล (multi_agent เปิดอยู่แล้วใน codex 0.154)"
     ),
+    native_subagent_dispatch="spawn_agent (then wait_agent for its result)",
     install_instructions=(
         "codex binary not on PATH. Install with "
         "`npm install -g @openai/codex`, then run `codex login` once."
@@ -1184,6 +1221,9 @@ gemini_spec = ProviderSpec(
     # per `agy changelog`); the fan-out block tells the pane to fall back to
     # sequential work if its build exposes no subagent tool.
     native_subagent_hint="subagent ของ agy (run_subagent) — ถ้า build นี้ไม่มี ให้ทำทีละชิ้นเอง",
+    native_subagent_dispatch=(
+        "run_subagent (agy) — if this build has no subagent tool, run the capsule yourself"
+    ),
     install_instructions=(
         "agy binary not on PATH. Install the Antigravity CLI from "
         "https://antigravity.google/download, then run `agy` once to sign in."
@@ -1423,6 +1463,7 @@ opencode_spec = ProviderSpec(
     # opencode 1.18: built-in subagents `general` + `explore` via the task
     # tool (`opencode agent list`, 2026-09-16).
     native_subagent_hint='task tool subagent_type="general" (opencode agent list มี general/explore)',
+    native_subagent_dispatch="the task tool with subagent_type='general'",
     install_instructions=(
         "opencode binary not on PATH. Install with `npm install -g opencode-ai`, "
         "then run `opencode auth login` once to connect a model provider."
@@ -1764,6 +1805,21 @@ PROVIDER_REGISTRY: dict[str, ProviderSpec] = {
     "opencode": opencode_spec,
     "cursor": cursor_spec,
 }
+
+
+def subagent_dispatch_hint(provider: str | None, role: str) -> str:
+    """How the Lead on *provider* should dispatch the `assign --mode subagent`
+    capsule for *role* (#878) — its own CLI's tool + an agent type that
+    exists there, never `subagent_type='<role>'`. A provider with no native
+    subagent gets told to run the capsule itself, so the Lead never guesses."""
+    spec = PROVIDER_REGISTRY.get((provider or "").strip().casefold())
+    text = (getattr(spec, "native_subagent_dispatch", "") or "").strip() if spec else ""
+    if text:
+        return text
+    return (
+        f"no native subagent tool on {provider or 'this provider'} — read the capsule and do "
+        f"the '{role}' work yourself in this session, then run its completion command"
+    )
 
 
 # ── legacy compat layer: ordered concat, NOT set() (design §5.5 + review 2-A) ──

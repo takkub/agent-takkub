@@ -47,8 +47,57 @@ def test_subagent_assign_creates_capsule_without_pane(orch: Orchestrator, tmp_pa
     text = capsule.read_text(encoding="utf-8")
     assert "--mode subagent" in text
     assert "subagent-done --role reviewer" in text
-    assert "subagent_type='reviewer'" in message
+    # #878: the dispatch line names a tool/agent type the Lead's own CLI has,
+    # never the cockpit role as a `subagent_type` (no CLI knows 'reviewer').
+    from agent_takkub.provider_spec import subagent_dispatch_hint
+
+    assert "subagent_type='reviewer'" not in message
+    assert subagent_dispatch_hint(state["provider"], "reviewer") in message
     assert task_ledger.open_subagent_roles("subtest") == ("reviewer",)
+
+
+def test_subagent_dispatch_hint_names_a_real_agent_type_per_provider() -> None:
+    from agent_takkub.provider_spec import PROVIDER_REGISTRY, subagent_dispatch_hint
+
+    assert "subagent_type='general-purpose'" in subagent_dispatch_hint("claude", "reviewer")
+    assert "spawn_agent" in subagent_dispatch_hint("codex", "reviewer")
+    assert "run_subagent" in subagent_dispatch_hint("gemini", "reviewer")
+    assert "subagent_type='general'" in subagent_dispatch_hint("opencode", "reviewer")
+    # cursor has no native subagent → the Lead is told to do the work itself.
+    assert PROVIDER_REGISTRY["cursor"].native_subagent_dispatch == ""
+    assert "no native subagent" in subagent_dispatch_hint("cursor", "reviewer")
+    assert "'reviewer'" in subagent_dispatch_hint("cursor", "reviewer")
+    for name in PROVIDER_REGISTRY:
+        assert "subagent_type='reviewer'" not in subagent_dispatch_hint(name, "reviewer")
+
+
+def test_subagent_assign_refuses_while_the_roles_pane_is_mid_task(
+    orch: Orchestrator, tmp_path: Path
+) -> None:
+    """#876: the reviewer pane was running task 87ab0bfc; a `--mode subagent`
+    registration for the same role superseded its ledger row, so the pane's
+    `takkub done` was rejected three times ("impact evidence does not match
+    the active task"). Refuse up front while that pane has an active task."""
+    from agent_takkub.orchestrator import PaneState
+
+    orch._panes_by_project.setdefault("subtest", {})["reviewer"] = MagicMock()
+    orch._pane_state["subtest::reviewer"] = PaneState(task_id="87ab0bfc5555")
+
+    ok, message = orch.assign(
+        "reviewer", str(tmp_path), "audit auth defaults", mode="subagent", project="subtest"
+    )
+    assert ok is False
+    assert "busy with task 87ab0bfc" in message
+    assert "#876" in message
+    assert ("subtest", "reviewer") not in getattr(orch, "_subagent_assignments", {})
+    assert task_ledger.open_subagent_roles("subtest") == ()
+
+    # The same pane with no active task is not in the way.
+    orch._pane_state["subtest::reviewer"] = PaneState()
+    ok, _ = orch.assign(
+        "reviewer", str(tmp_path), "audit auth defaults", mode="subagent", project="subtest"
+    )
+    assert ok is True
 
 
 def test_subagent_assign_capsule_includes_language_directive(

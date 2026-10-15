@@ -25,6 +25,33 @@ from dataclasses import dataclass, field
 
 from .worktree_manager import parse_porcelain_paths
 
+# #880: paths the cockpit or the pane's own CLI writes for ITSELF inside a
+# project checkout — Claude Code's `.claude/settings.local.json` permission
+# grants, skill-learning patches under `.claude/skills/`, agent files — and
+# the same per-CLI state dirs of the other providers (#103). Never a pane's
+# deliverable, so never "ไฟล์ที่แตะ" and never "ยังไม่ commit" of the task
+# (a verify-only frontend task reported "ไฟล์ที่แตะ:4 (.claude)").
+COCKPIT_OWNED_PREFIXES: tuple[str, ...] = (
+    ".claude/",
+    ".codex/",
+    ".gemini/",
+    ".agy/",
+    ".opencode/",
+    ".cursor/",
+    ".takkub/",
+)
+
+
+def is_cockpit_owned_path(path: str) -> bool:
+    """True for a repo-relative *path* under one of `COCKPIT_OWNED_PREFIXES`
+    (top level only — `src/.claude/x` is somebody's real file)."""
+    p = (path or "").replace("\\", "/")
+    if p.startswith("./"):
+        p = p[2:]
+    if not p.endswith("/"):
+        p += "/"
+    return any(p.startswith(prefix) for prefix in COCKPIT_OWNED_PREFIXES)
+
 
 @dataclass(frozen=True)
 class DigestFacts:
@@ -89,6 +116,11 @@ class DigestFacts:
     # Only ever computed for a shared-tree pane (worktree isolation has its
     # own dirty tree, nothing to attribute to a sibling); see `_uncommitted_bit`.
     uncommitted_unrelated: bool = False
+    # #880: of `uncommitted`, how many are THIS task's own doing (dirty state
+    # changed since the assign snapshot; cockpit-owned paths excluded). None
+    # = unknown (no baseline). Lets the bullet split "⚠1 ของงานนี้" from
+    # "อีก 6 dirty อยู่ก่อน assign" instead of one alarming "⚠7".
+    uncommitted_own: int | None = None
     # #859: which CLI actually ran the pane ("codex", "claude/opus" ...) — a
     # role is served by different providers across a day (failover, reroute).
     provider: str | None = None
@@ -238,6 +270,12 @@ def _uncommitted_bit(facts: DigestFacts) -> str | None:
         # here — that glyph means "this pane's own doing", which is exactly
         # what `uncommitted_unrelated` disproves.
         return f"{facts.uncommitted} ไฟล์ยังไม่ commit (dirty ที่มีอยู่ก่อน assign แล้ว — ไม่ใช่ของงานนี้)"
+    own = facts.uncommitted_own
+    if own is not None and 0 < own < facts.uncommitted:
+        # #880: only the task's own share carries the ⚠ — the rest was dirty
+        # before the assignment and belongs to a sibling pane / the Lead.
+        rest = facts.uncommitted - own
+        return f"⚠{own} ไฟล์ยังไม่ commit (ของงานนี้) · อีก {rest} ไฟล์ dirty อยู่ก่อน assign แล้ว"
     return f"⚠{facts.uncommitted} ไฟล์ยังไม่ commit"
 
 
@@ -287,7 +325,10 @@ def collect_touched_paths(diffstat_text: str, uncommitted: str | Iterable[str]) 
     uncommitted_paths = (
         parse_porcelain_paths(uncommitted) if isinstance(uncommitted, str) else uncommitted
     )
-    return {p for p in committed_paths if p} | {p for p in uncommitted_paths if p}
+    # #880: the cockpit's own writes (`.claude/` ...) are nobody's deliverable.
+    return {p for p in committed_paths if p and not is_cockpit_owned_path(p)} | {
+        p for p in uncommitted_paths if p and not is_cockpit_owned_path(p)
+    }
 
 
 def union_files_touched(

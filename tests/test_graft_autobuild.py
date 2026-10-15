@@ -1331,6 +1331,104 @@ def test_live_resync_skips_the_walk_when_tree_fingerprint_unchanged(tmp_path, mo
     assert len(walks) == 2  # a real change → full pass again
 
 
+def _arm_delta_resync(monkeypatch, tmp_path):
+    """#874 scaffolding: a two-file repo whose mirror already holds both
+    files, a fake fingerprint that ALSO feeds the raw `status -z` the real
+    one caches, and recorders on the full-sync and per-file stage seams."""
+    target = _arm_live_resync(monkeypatch, tmp_path)
+    (target / "other.py").write_text("x", encoding="utf-8")
+    staging = gab.staging_dir_for(target)
+    staging.mkdir(parents=True)
+    for name in ("main.py", "other.py"):
+        (staging / name).write_text("old", encoding="utf-8")
+    gab._last_tree_listing.clear()
+    gab._last_full_resync.clear()
+    gab._tree_status_raw.clear()
+    state = {"head": b"HEAD-1\n", "status": b""}
+
+    def fake_fp(t):
+        gab._tree_status_raw[str(t)] = (state["head"], state["status"])
+        return "fp-" + state["head"].decode() + state["status"].decode()
+
+    monkeypatch.setattr(gab, "_tree_fingerprint", fake_fp)
+    monkeypatch.setattr(gab, "_git_nonignored_files", lambda t: ["main.py", "other.py"])
+    full: list = []
+    staged: list = []
+    monkeypatch.setattr(gab, "_sync_staging", lambda t, rels, s: full.append(list(rels)))
+    monkeypatch.setattr(gab, "_stage_files", lambda t, rels, s: staged.append(list(rels)))
+    return target, state, full, staged
+
+
+def test_live_resync_restages_only_the_changed_paths_while_head_is_unchanged(tmp_path, monkeypatch):
+    """#874: prod 2026-10-14 — 40 UI stalls in 6 h, each with the live
+    resync thread walking the whole tree because SOMETHING had changed. The
+    `git status` that detected the change already names the path: stage
+    that path only, no walk."""
+    target, state, full, staged = _arm_delta_resync(monkeypatch, tmp_path)
+
+    gab.resync_staging_only(str(target))
+    assert full == [["main.py", "other.py"]]  # first visit: full pass
+    assert staged == []
+
+    state["status"] = b" M main.py\0"
+    gab._last_live_resync.clear()
+    gab.resync_staging_only(str(target))
+    assert full == [["main.py", "other.py"]]  # no second walk
+    assert staged == [["main.py"]]  # only the path whose entry changed
+
+    state["status"] = b""  # main.py committed/restored → its entry is gone
+    gab._last_live_resync.clear()
+    gab.resync_staging_only(str(target))
+    assert staged == [["main.py"], ["main.py"]]  # re-staged from HEAD content
+    assert full == [["main.py", "other.py"]]
+
+
+def test_live_resync_head_change_or_stale_listing_forces_the_full_pass(tmp_path, monkeypatch):
+    target, state, full, staged = _arm_delta_resync(monkeypatch, tmp_path)
+    gab.resync_staging_only(str(target))
+    assert len(full) == 1
+
+    state["head"] = b"HEAD-2\n"  # a commit landed → entries no longer comparable
+    gab._last_live_resync.clear()
+    gab.resync_staging_only(str(target))
+    assert len(full) == 2
+    assert staged == []
+
+    state["status"] = b" M other.py\0"
+    gab._last_full_resync[str(target)] -= gab._FULL_RESYNC_EVERY_S + 1  # periodic full pass due
+    gab._last_live_resync.clear()
+    gab.resync_staging_only(str(target))
+    assert len(full) == 3
+    assert staged == []
+
+
+def test_live_resync_delta_removes_a_path_that_left_the_tree(tmp_path, monkeypatch):
+    target, state, full, staged = _arm_delta_resync(monkeypatch, tmp_path)
+    gab.resync_staging_only(str(target))
+    staging = gab.staging_dir_for(target)
+
+    (target / "other.py").unlink()
+    monkeypatch.setattr(gab, "_git_nonignored_files", lambda t: ["main.py"])
+    state["status"] = b" D other.py\0"
+    gab._last_live_resync.clear()
+    gab.resync_staging_only(str(target))
+    assert len(full) == 1
+    assert staged == []  # nothing to re-stage — the deleted path was unlinked
+    assert not (staging / "other.py").exists()
+    assert (staging / "main.py").exists()
+
+
+def test_parse_porcelain_z_keeps_rename_sources_visible():
+    raw = b" M a.py\0R  new.py\0old.py\0?? new_dir/f.txt\0"
+    assert gab._parse_porcelain_z(raw) == {
+        "a.py": " M",
+        "new.py": "R ",
+        "old.py": "src:R ",
+        "new_dir/f.txt": "??",
+    }
+    assert gab._parse_porcelain_z(b"") == {}
+
+
 def test_live_resync_unknown_fingerprint_always_does_the_full_pass(tmp_path, monkeypatch):
     target = _arm_live_resync(monkeypatch, tmp_path)
     walks: list = []

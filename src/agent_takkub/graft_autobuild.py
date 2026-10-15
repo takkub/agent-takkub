@@ -794,7 +794,9 @@ def _staging_relpaths(staging: Path) -> set[str]:
     return out
 
 
-def _new_stageable_rels(target: Path, rel_paths: list[str], staging: Path) -> set[str]:
+def _new_stageable_rels(
+    target: Path, rel_paths: list[str], staging: Path, *, staged: set[str] | None = None
+) -> set[str]:
     """The subset of *rel_paths* that are missing from *staging*, pass the
     SOURCE-side `_stageable` gate (H1, 2026-08-06 — rules out a submodule,
     broken symlink, dir symlink, or a source Windows refuses to `stat`), and
@@ -804,8 +806,13 @@ def _new_stageable_rels(target: Path, rel_paths: list[str], staging: Path) -> se
     `_stageable` structurally cannot see, since it only ever looks at the
     source path). Shared by `_has_new_files` (bool view) and
     `resync_staging_only` (needs the actual set to hand to `_build_one` for
-    post-build convergence checking)."""
-    staged = _staging_relpaths(staging)
+    post-build convergence checking).
+
+    *staged* (#874): the caller may pass the set of *rel_paths* already
+    present in *staging* when it knows it (the delta pass stats only the
+    few changed paths) — default is the full mirror walk."""
+    if staged is None:
+        staged = _staging_relpaths(staging)
     with _lock:
         given_up = _unresolvable_rels.get(str(target), frozenset())
     return {
@@ -876,6 +883,78 @@ _last_live_resync: dict[str, float] = {}
 # A `git status --porcelain` + HEAD (one subprocess, no GIL) tells us in
 # ~50ms whether anything could have changed; unchanged → skip the walk.
 _last_tree_fp: dict[str, str] = {}
+# #874 (prod 2026-10-14: 40 UI stalls / 6 h, every one with a
+# `graft-live-resync-*` thread inside `os._walk`): the fingerprint only
+# skips the walk when NOTHING changed — in a live session something changes
+# every pass, so every pass re-walked the whole tree AND the whole staging
+# mirror (thousands of Python-level stats, GIL re-taken each) to relink a
+# handful of files. The same `git status -z` that feeds the fingerprint
+# already names the paths that differ: keep the last listing per target and,
+# while HEAD is unchanged, touch only the paths whose entry changed (plus the
+# ls-files delta). A full pass still runs on the first visit, after a HEAD
+# change, when the mirror is missing, and at least every
+# `_FULL_RESYNC_EVERY_S`, so a rename-over-write of an ALREADY-modified file
+# (same porcelain entry, new inode) can never stay stale for long.
+_FULL_RESYNC_EVERY_S = 300.0
+# key → (HEAD, raw `status -z`) captured by the most recent `_tree_fingerprint`
+_tree_status_raw: dict[str, tuple[bytes, bytes]] = {}
+# key → (HEAD, porcelain entries, non-ignored set) as of the last completed pass
+_last_tree_listing: dict[str, tuple[bytes, dict[str, str], frozenset[str]]] = {}
+_last_full_resync: dict[str, float] = {}
+
+
+def _parse_porcelain_z(raw: bytes) -> dict[str, str]:
+    """`git status --porcelain -z` → ``{path: XY}``. A rename/copy entry is
+    followed by its SOURCE path as a separate NUL field; that source is kept
+    under a ``src:`` marker so its disappearance next pass shows as a change
+    (the old name has to leave the mirror)."""
+    out: dict[str, str] = {}
+    tokens = raw.split(b"\0")
+    i = 0
+    while i < len(tokens):
+        tok = tokens[i]
+        i += 1
+        if len(tok) < 4:
+            continue
+        xy = tok[:2].decode("ascii", "replace")
+        path = tok[3:].decode("utf-8", "replace")
+        out[path] = xy
+        if "R" in xy or "C" in xy:
+            if i < len(tokens) and tokens[i]:
+                out[tokens[i].decode("utf-8", "replace")] = "src:" + xy
+            i += 1
+    return out
+
+
+def _sync_staging_delta(
+    target: Path, changed: set[str], desired: frozenset[str], staging: Path
+) -> None:
+    """`_sync_staging` for the paths in *changed* only (#874) — no walk of
+    *staging*. A changed path that left the non-ignored set is unlinked
+    (empty parents pruned); the rest are re-staged."""
+    try:
+        staging.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        return
+    to_stage: list[str] = []
+    for rel in sorted(changed):
+        if rel in desired:
+            to_stage.append(rel)
+            continue
+        full = staging / rel
+        try:
+            full.unlink()
+        except OSError:
+            continue
+        parent = full.parent
+        while parent != staging and parent.is_relative_to(staging):
+            try:
+                parent.rmdir()
+            except OSError:
+                break
+            parent = parent.parent
+    if to_stage:
+        _stage_files(target, to_stage, staging)
 
 
 def _tree_fingerprint(target: Path) -> str | None:
@@ -912,10 +991,13 @@ def _tree_fingerprint(target: Path) -> str | None:
         return None
     import hashlib
 
+    head_bytes = head.stdout if head.returncode == 0 else b"?"
     h = hashlib.sha256()
-    h.update(head.stdout if head.returncode == 0 else b"?")
+    h.update(head_bytes)
     h.update(b"\0")
     h.update(status.stdout)
+    with _live_resync_lock:
+        _tree_status_raw[str(target)] = (head_bytes, status.stdout)  # #874 delta input
     return h.hexdigest()
 
 
@@ -954,15 +1036,43 @@ def resync_staging_only(cwd: str | None) -> None:
 
     def _do() -> None:
         fp = _tree_fingerprint(target)
+        staging = staging_dir_for(target)
+        tick = time.monotonic()
         with _live_resync_lock:
             unchanged = fp is not None and _last_tree_fp.get(key) == fp
-        if unchanged and staging_dir_for(target).is_dir():
+            raw = _tree_status_raw.get(key)
+            prev = _last_tree_listing.get(key)
+            full_due = tick - _last_full_resync.get(key, 0.0) >= _FULL_RESYNC_EVERY_S
+        if unchanged and staging.is_dir():
             return  # nothing could have changed since the last pass — skip the walk
         rel_paths = _git_nonignored_files(target)
         if rel_paths is None:
             return
-        staging = staging_dir_for(target)
-        new_rels = _new_stageable_rels(target, rel_paths, staging)
+        now_set = frozenset(rel_paths)
+        entries = _parse_porcelain_z(raw[1]) if raw is not None else None
+        # #874: with the last listing on hand and HEAD unchanged, only the
+        # paths whose status entry (or ls-files membership) moved need work.
+        delta: set[str] | None = None
+        if (
+            prev is not None
+            and raw is not None
+            and entries is not None
+            and not full_due
+            and prev[0] == raw[0]
+            and staging.is_dir()
+        ):
+            delta = {p for p in prev[1].keys() | entries.keys() if prev[1].get(p) != entries.get(p)}
+            delta |= set(now_set ^ prev[2])
+        if delta is None:
+            new_rels = _new_stageable_rels(target, rel_paths, staging)
+        else:
+            touched = sorted(delta & now_set)
+            new_rels = _new_stageable_rels(
+                target,
+                touched,
+                staging,
+                staged={rel for rel in touched if (staging / rel).is_file()},
+            )
         if new_rels:
             # A file the graph has never seen needs a real build, not just a
             # mirror sync (`_has_new_files`). `_spawn_build` -> `_build_one`
@@ -977,10 +1087,17 @@ def resync_staging_only(cwd: str | None) -> None:
                 _pending_escalation[key] = frozenset(new_rels)
             _spawn_build(target)
             return
-        _sync_staging(target, rel_paths, staging)
-        if fp is not None:
-            with _live_resync_lock:
+        if delta is None:
+            _sync_staging(target, rel_paths, staging)
+        else:
+            _sync_staging_delta(target, delta, now_set, staging)
+        with _live_resync_lock:
+            if delta is None:
+                _last_full_resync[key] = tick
+            if fp is not None:
                 _last_tree_fp[key] = fp
+            if raw is not None and entries is not None:
+                _last_tree_listing[key] = (raw[0], entries, now_set)
 
     threading.Thread(target=_do, name=f"graft-live-resync-{target.name}", daemon=True).start()
 

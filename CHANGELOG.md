@@ -4,6 +4,23 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 
 ## [vNEXT]
 
+## [v2.2.20] - 2026-10-15
+
+### Fixed (แก้)
+
+- **UI ค้าง 19–25 วิตอน spawn pane codex (#882, #874 ครึ่งแรก):** `_resume_uuid_matches_provider_cwd` → `resolve_codex_jsonl_for_cwd` เปิดอ่านบรรทัดแรกของ rollout **ทุกไฟล์** ใน store (หลายพันไฟล์) บน UI thread ทุกครั้งที่จะ resume codex · codex ตั้งชื่อไฟล์ `rollout-<ts>-<session uuid>.jsonl` อยู่แล้ว → เปิดเฉพาะไฟล์ที่ชื่อมี uuid ที่หา (+ ไฟล์ที่ชื่อไม่มี uuid เลย) ไม่แตะไฟล์ที่ชื่อเป็น session อื่น
+- **UI ค้างถี่ 40 ครั้ง/6 ชม. (#874):** ทุกครั้งมี thread `graft-live-resync-*` เดิน `os.walk` อยู่ — fingerprint (2026-08-28) ข้ามการเดินได้เฉพาะตอน **ไม่มีอะไรเปลี่ยน** แต่ระหว่างทำงานมีไฟล์เปลี่ยนทุกรอบ จึงเดินทั้ง tree + staging mirror (stat หลายพันครั้งใน Python, แย่ง GIL กับ UI) เพื่อ relink ไฟล์ไม่กี่ไฟล์ · ตอนนี้เก็บ listing ของ `git status -z` รอบก่อนไว้ ถ้า HEAD ไม่เปลี่ยนทำเฉพาะ path ที่ entry เปลี่ยน (+ ส่วนต่าง ls-files) · ยังเดินเต็มรอบแรก/หลัง commit/mirror หาย/ทุก 5 นาที กัน rename-over-write ของไฟล์ที่ modified อยู่แล้วค้าง
+- **quota policy `park` ยังสลับบัญชี (#875):** กฎ "ลองบัญชีอื่นของ provider เดิมก่อน" (2026-10-08) รันใต้ทุก policy → qa ที่ตั้ง park โดดไปบัญชี `company` · ตอนนี้ park = จอดรอ reset ของบัญชีเดิมจริง ไม่ย้าย provider ไม่สลับบัญชี (รวม spawn pane ใหม่ด้วย) · opt-in ได้ด้วย `{"policy":"park","account_failover":true}` ใน `quota-policy.json` หรือ per-project `quota_reroute.account_failover` + checkbox ใน Settings · คำอธิบายใน Settings ตรงกับพฤติกรรม
+- **`assign --mode subagent` ทับงาน pane ที่กำลังทำ (#876):** pane reviewer รัน task อยู่ แล้ว Lead ลงทะเบียน subagent role เดียวกัน → แถว ledger ของ pane ถูก supersede, `takkub done` ของ pane ถูกปฏิเสธ "impact evidence does not match the active task" 3 รอบ · ตอนนี้ปฏิเสธตั้งแต่ assign ถ้า pane ของ role นั้นมี task ค้าง (บอกให้รอ done / ใช้ `role#1` / close ก่อน)
+- **permission prompt ที่ auto-deny ถูกรายงานว่า "รอผู้ใช้ตอบคำถาม" (#877):** prompt ของ rm guard ("will automatically deny this request in 1:49") มี chrome "Esc to cancel" เหมือน picker · ตอนนี้แยกเป็น notice `🛡 … auto-deny เอง — ไม่ต้องมีใครตอบ` พร้อมบรรทัด countdown + ชี้ `takkub tail --role` (event `permission_prompt_auto_deny`) · gap: รู้จักเฉพาะ wording ของ Claude Code
+- **ข้อความ subagent บอก `subagent_type='reviewer'` ซึ่งไม่มีจริง (#878):** `ProviderSpec.native_subagent_dispatch` ต่อ provider — claude = Agent tool `subagent_type='general-purpose'`, codex = `spawn_agent`, agy = `run_subagent`, opencode = task tool `general`, cursor = ไม่มี subagent ให้ Lead ทำเอง
+- **fix-loop ชี้ backend ทั้งที่เป็น 400 validation จาก payload ของ frontend (#879):** เพิ่มกฎ "client payload validation" (400/422/bad request/should not exist/must be …/forbidNonWhitelisted/class-validator) → frontend อยู่เหนือกฎ server (5xx/auth/db) แต่ใต้กฎ infra
+- **done digest นับ `.claude/` เป็นไฟล์ที่แตะ และนับ untracked เดิมเป็นยังไม่ commit (#880):** path ที่ cockpit/CLI เขียนเอง (`.claude/`, `.codex/`, `.gemini/`, `.agy/`, `.opencode/`, `.cursor/`, `.takkub/` ระดับบนสุด) ไม่นับทั้ง "ไฟล์ที่แตะ" และ "ยังไม่ commit" · แยกยอด: `⚠1 ไฟล์ยังไม่ commit (ของงานนี้) · อีก 6 ไฟล์ dirty อยู่ก่อน assign แล้ว` (ฟิลด์ใหม่ `uncommitted_own`) · gap: worktree pane ยังนับจาก `real_uncommitted_count` เดิม
+
+### Changed (เปลี่ยน)
+
+- deps: ruff 0.16.10 → 0.17.0 (#873, + pre-commit rev/uv.lock) · codeql-action 4.38.2 → 4.38.3 (#872)
+
 ## [v2.2.19] - 2026-10-15
 
 ### Fixed (แก้)

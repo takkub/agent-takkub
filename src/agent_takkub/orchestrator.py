@@ -2493,6 +2493,21 @@ class Orchestrator(
                 False,
                 f"subagent assignment already pending for {role_name}; use {role_name}#N for fan-out",
             )
+        # #876: a live pane of this role mid-task owns the ledger's open row
+        # for the role. Registering a subagent under the same name would
+        # supersede that row (`create_assignment`), so the pane's later
+        # `takkub done` fails "impact evidence does not match the active
+        # task" and `takkub task impact --role` answers for the subagent.
+        # Refuse instead of hijacking — a shard name keeps both apart.
+        live_pane = self._project_panes(project_ns).get(role_name)
+        live_ps = getattr(self, "_pane_state", {}).get(f"{project_ns}::{role_name}")
+        live_task = getattr(live_ps, "task_id", None) if live_pane is not None else None
+        if live_task:
+            return False, (
+                f"pane '{role_name}' is busy with task {str(live_task)[:8]} — a subagent registered "
+                f"under the same role would replace that pane's active task (#876). Wait for its "
+                f"done, use `--role {role_name}#1` (shard name), or `takkub close --role {role_name}` first."
+            )
 
         base_role = _split_shard(role_name)[0]
         run_cwd = cwd or default_cwd_for_role(base_role, project=project_ns)
@@ -2634,9 +2649,15 @@ class Orchestrator(
             capsule=str(capsule_path),
         )
         forward = str(capsule_path).replace(os.sep, "/")
+        # #878: name a dispatcher the Lead's OWN CLI actually has (Claude Code
+        # has no 'reviewer' agent type — the capsule defines the role).
+        from .provider_spec import subagent_dispatch_hint
+
+        dispatch = subagent_dispatch_hint(parent_provider, role_name)
         return True, (
             f"subagent registered for {role_name} (provider={parent_provider}, no pane). "
-            f"Dispatch one native subagent with subagent_type={role_name!r} and task capsule: {forward}; completion command is inside. "
+            f"Dispatch one native subagent via {dispatch}, with task capsule: {forward}; "
+            "completion command is inside. "
             "This mode is same-provider only and is not a cross-model check."
         )
 
@@ -8624,12 +8645,24 @@ class Orchestrator(
                 ),
                 None,
             )
-        uncommitted = len(parse_porcelain_paths(porcelain))
+        # #880: `.claude/` & co are the cockpit's / the CLI's own writes
+        # (permission grants, skill-learning patches) — never this task's.
+        from .digest_facts import is_cockpit_owned_path
+
+        dirty_now = [p for p in parse_porcelain_paths(porcelain) if not is_cockpit_owned_path(p)]
+        uncommitted = len(dirty_now)
         current_dirty_snapshot = mgr.dirty_snapshot(assign_git_root, porcelain)
-        changed_uncommitted = changed_dirty_paths(
-            assign_dirty_snapshot if assign_dirty_snapshot is not None else {},
-            current_dirty_snapshot,
-        )
+        changed_uncommitted = [
+            p
+            for p in changed_dirty_paths(
+                assign_dirty_snapshot if assign_dirty_snapshot is not None else {},
+                current_dirty_snapshot,
+            )
+            if not is_cockpit_owned_path(p)
+        ]
+        # Of the dirty paths right now, the ones whose state changed since
+        # assign are this task's own share; the rest predate it (#880).
+        uncommitted_own = len(set(changed_uncommitted) & set(dirty_now))
         diffstat = (
             str(shared_gf.get("diffstat", ""))
             if shared_gf is not None
@@ -8703,6 +8736,7 @@ class Orchestrator(
             uncommitted_unrelated=(
                 bool(uncommitted) and not changed_uncommitted and not no_dirty_baseline
             ),
+            uncommitted_own=None if no_dirty_baseline else uncommitted_own,
         )
         return facts, None
 
@@ -16514,13 +16548,37 @@ class Orchestrator(
         if ps is None and waiting:
             ps = self._ps(key)
         if waiting and not ps.picker_wait_notice_active and role != LEAD.name:
-            self._notify_lead(
-                project,
-                f"⏳ {role} รอผู้ใช้ตอบคำถาม",
-                from_role=role,
-                note="question-picker-waiting-user",
-                kind="question-picker-waiting-user",
-            )
+            from .provider_spec import auto_deny_prompt_on_screen
+
+            auto_deny = auto_deny_prompt_on_screen(getattr(pane, "session", None))
+            if auto_deny:
+                # #877: a deny-countdown permission prompt is not a question
+                # for a person — it denies itself and the pane rewrites the
+                # command. Say what it is (with the countdown line) instead
+                # of "waiting for the user", which sent people to answer it.
+                _log_event(
+                    "permission_prompt_auto_deny",
+                    role=role,
+                    project=project,
+                    line=auto_deny[:160],
+                )
+                self._notify_lead(
+                    project,
+                    f"🛡 {role} ติด permission prompt ที่จะ auto-deny เอง — ไม่ต้องมีใครตอบ "
+                    f'("{auto_deny[:120]}") pane จะเขียนคำสั่งใหม่เมื่อหมดเวลา · '
+                    f"ดูคำสั่งที่ถูกกัน: `takkub tail --role {role}`",
+                    from_role=role,
+                    note="permission-prompt-auto-deny",
+                    kind="permission-prompt-auto-deny",
+                )
+            else:
+                self._notify_lead(
+                    project,
+                    f"⏳ {role} รอผู้ใช้ตอบคำถาม",
+                    from_role=role,
+                    note="question-picker-waiting-user",
+                    kind="question-picker-waiting-user",
+                )
         if ps is not None:
             ps.picker_wait_notice_active = waiting
         return waiting

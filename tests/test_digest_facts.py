@@ -7,8 +7,52 @@ from agent_takkub.digest_facts import (
     detect_investigate_task,
     detect_ops_task,
     format_digest_fact_line,
+    is_cockpit_owned_path,
     union_files_touched,
 )
+
+
+class TestCockpitOwnedPaths:
+    """#880: a verify-only frontend task reported "ไฟล์ที่แตะ:4 (.claude)" and
+    "⚠7 ไฟล์ยังไม่ commit" — the 4 were Claude Code's own `.claude/` writes
+    and 6 of the 7 were dirty before the assignment."""
+
+    def test_claude_dir_is_cockpit_owned(self):
+        assert is_cockpit_owned_path(".claude/settings.local.json")
+        assert is_cockpit_owned_path(".claude/")
+        assert is_cockpit_owned_path(".claude")
+        assert is_cockpit_owned_path("./.claude/skills/learned/x.md")
+        assert is_cockpit_owned_path(".claude\\agents\\qa.md")  # Windows separators
+        assert is_cockpit_owned_path(".codex/config.toml")
+
+    def test_lookalikes_and_real_files_are_not(self):
+        assert not is_cockpit_owned_path(".claude-notes/x.md")
+        assert not is_cockpit_owned_path("src/.claude/x.md")  # top level only
+        assert not is_cockpit_owned_path("web/page.tsx")
+        assert not is_cockpit_owned_path("")
+
+    def test_union_files_touched_skips_cockpit_owned_paths(self):
+        count, dirs = union_files_touched(
+            " .claude/agents/qa.md | 2 +-\n",
+            "?? .claude/skills/learned/x.md\n M web/page.tsx\n",
+        )
+        assert (count, dirs) == (1, ["web"])
+
+    def test_uncommitted_split_renders_own_share_apart_from_pre_existing(self):
+        facts = DigestFacts(role="frontend", uncommitted=7, uncommitted_own=1)
+        line = format_digest_fact_line(facts)
+        assert "⚠1 ไฟล์ยังไม่ commit (ของงานนี้) · อีก 6 ไฟล์ dirty อยู่ก่อน assign แล้ว" in line
+        assert "⚠7" not in line
+
+    def test_uncommitted_all_own_keeps_the_plain_wording(self):
+        facts = DigestFacts(role="qa", uncommitted=4, uncommitted_own=4)
+        line = format_digest_fact_line(facts)
+        assert "⚠4 ไฟล์ยังไม่ commit" in line
+        assert "ของงานนี้" not in line
+
+    def test_uncommitted_own_unknown_keeps_the_plain_wording(self):
+        facts = DigestFacts(role="qa", uncommitted=4)  # no baseline → None
+        assert "⚠4 ไฟล์ยังไม่ commit" in format_digest_fact_line(facts)
 
 
 class TestInvestigateTaskZeroFiles:

@@ -161,7 +161,9 @@ def _quota_policy_path() -> Path:
 
 
 def quota_policy(project: str | None = None) -> str:
-    """Return 'reroute' (auto-switch provider) or 'park' (wait for token reset).
+    """Return 'reroute' (auto-switch provider) or 'park' (wait for token reset
+    on the SAME account — no provider hop and, unless `account_failover` is
+    opted in, no account hop either; #875).
     Checks per-project settings first, then global settings. Defaults to 'reroute'."""
     if project:
         try:
@@ -283,6 +285,78 @@ def set_quota_exclude_providers(
 
 def effective_quota_policy(project: str | None = None) -> str:
     return quota_policy(project)
+
+
+# #875: `park` promised "wait for token reset" but the limit handler still
+# hopped to another logged-in account of the same provider first (the
+# account-first rule of 2026-10-08 ran under every policy). A user who picked
+# park wants the task to stay put — same CLI, same account, wake on reset —
+# so under park the account hop is OFF unless `account_failover` is opted in
+# (global `quota-policy.json` or per-project `quota_reroute`). The reroute
+# policy ignores this flag: there, another account always comes before
+# another provider.
+_ACCOUNT_FAILOVER_KEY = "account_failover"
+
+
+def park_account_failover_enabled(project: str | None = None) -> bool:
+    """True when a parked pane may still hop to another account of the SAME
+    provider. Per-project setting wins over the global file; default False."""
+    if project:
+        try:
+            from .config import _project_dict
+
+            p_cfg = _project_dict(project).get("quota_reroute", {})
+            if isinstance(p_cfg, dict) and isinstance(p_cfg.get(_ACCOUNT_FAILOVER_KEY), bool):
+                return p_cfg[_ACCOUNT_FAILOVER_KEY]
+        except Exception:
+            pass
+    path = _quota_policy_path()
+    if path.exists():
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(data, dict) and isinstance(data.get(_ACCOUNT_FAILOVER_KEY), bool):
+                return data[_ACCOUNT_FAILOVER_KEY]
+        except (OSError, json.JSONDecodeError):
+            pass
+    return False
+
+
+def set_park_account_failover_enabled(flag: bool, project: str | None = None) -> None:
+    """Persist the park-time account-hop opt-in (global, or per project)."""
+    if project:
+        try:
+            from .config import load_projects, save_projects
+
+            data = load_projects()
+            p = data.get("projects", {}).setdefault(project, {})
+            q = p.setdefault("quota_reroute", {})
+            q[_ACCOUNT_FAILOVER_KEY] = bool(flag)
+            save_projects(data)
+            return
+        except Exception:
+            pass
+    path = _quota_policy_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    existing = {}
+    if path.exists():
+        try:
+            existing = json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(existing, dict):
+                existing = {}
+        except Exception:
+            existing = {}
+    existing[_ACCOUNT_FAILOVER_KEY] = bool(flag)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(json.dumps(existing, indent=2) + "\n", encoding="utf-8")
+    tmp.replace(path)
+
+
+def account_switch_allowed(project: str | None = None) -> bool:
+    """May a limit-hit task move to ANOTHER ACCOUNT of the same provider?
+    Always under `reroute`; under `park` only with the opt-in (#875)."""
+    if effective_quota_policy(project) != QUOTA_POLICY_PARK:
+        return True
+    return park_account_failover_enabled(project)
 
 
 def effective_quota_exclude_providers(project: str | None = None) -> set[str]:

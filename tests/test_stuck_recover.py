@@ -339,6 +339,35 @@ class TestCheckStuckPanes:
             "⏳ backend รอผู้ใช้ตอบคำถาม",
         ]
 
+    def test_auto_deny_permission_prompt_is_not_reported_as_waiting_for_user(self) -> None:
+        """#877: Claude Code's rm-guard prompt ("will automatically deny this
+        request in 1:49") shares the picker's "Esc to cancel" chrome. Nobody
+        has to answer it — the pane got reported as "รอผู้ใช้ตอบคำถาม" twice
+        and the user went to answer a prompt that denies itself."""
+        fake = _FakeOrch()
+        pane = _FakePane(last_out=1.0)
+        pane.model.provider_name = "claude"
+        pane.session.display_lines.return_value = [
+            "Bash command",
+            "  rm -rf $OUT/*mobile*",
+            "Dangerous rm operation on possibly-empty variable path: $OUT/*mobile*",
+            "Claude will automatically deny this request in 1:49",
+            "❯ 1. Yes",
+            "  2. No, and tell Claude what to do differently (esc)",
+            "Esc to cancel",
+        ]
+        fake._panes_by_project["p"] = {"qa": pane}
+
+        assert fake._question_menu_waiting("qa", "p", pane) is True  # still defers watchdogs
+        fake._question_menu_waiting("qa", "p", pane)
+
+        notices = [notice for _, notice, _ in fake.notify_calls]
+        assert not any("รอผู้ใช้ตอบคำถาม" in n for n in notices)
+        auto_deny = [n for n in notices if "auto-deny" in n]
+        assert len(auto_deny) == 1  # once per prompt, like the picker notice
+        assert "automatically deny this request in 1:49" in auto_deny[0]
+        assert "takkub tail --role qa" in auto_deny[0]
+
     def test_stuck_recovery_restores_assign_provider_model_and_effort(self, monkeypatch) -> None:
         import agent_takkub.orchestrator as orchestrator_module
 

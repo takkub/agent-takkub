@@ -18,7 +18,7 @@ from PyQt6.QtCore import QCoreApplication, QObject
 
 from agent_takkub import orchestrator as orch_mod
 from agent_takkub import worktree_manager as wm_mod
-from agent_takkub.digest_facts import DigestFacts
+from agent_takkub.digest_facts import DigestFacts, format_digest_fact_line
 from agent_takkub.orchestrator import LEAD, Orchestrator, PaneState
 from agent_takkub.worktree_manager import WorktreeInfo
 
@@ -713,6 +713,64 @@ class TestSharedTreePaneDigestFacts:
         facts = next(kw["digest_facts"] for notice, kw in captured if notice.startswith("[backend"))
         assert facts.uncommitted == 1
         assert facts.uncommitted_unrelated is False
+
+    def test_cockpit_owned_paths_and_pre_assign_dirt_are_not_this_tasks(self, orch, monkeypatch):
+        """#880 (unirecon 2026-10-15): a verify-only frontend task on a shared
+        tree reported `⚠7 ไฟล์ยังไม่ commit · ไฟล์ที่แตะ:4 (.claude)`. The
+        `.claude/` paths were Claude Code's own writes and the untracked
+        screenshot was dirty before assign — neither is the task's."""
+        proj = "proj"
+        _register_pane(orch, LEAD.name, proj, _make_alive_session())
+        _register_pane(orch, "frontend", proj, _make_alive_session(), cwd="/repo/web")
+        orch._pane_state[f"{proj}::frontend"] = PaneState(
+            last_assigned_task="verify the preview page renders",
+            worktree=None,
+            assign_base_sha="abc123",
+            assign_git_root="/repo",
+            assign_dirty_snapshot={"docs/shot.png": ("??", None, None)},
+        )
+
+        class _Fake:
+            def current_branch(self, cwd):
+                return "Tak-Temp-Main"
+
+            def diffstat_since(self, cwd, base_sha):
+                return ""
+
+            def commits_since(self, cwd, base_sha):
+                return 0
+
+            def shared_tree_status_porcelain(self, cwd):
+                return (
+                    "?? docs/shot.png\n"
+                    " M .claude/settings.local.json\n"
+                    "?? .claude/skills/learned/x.md\n"
+                    " M web/page.tsx\n"
+                )
+
+            def dirty_snapshot(self, git_root, porcelain):
+                return wm_mod.snapshot_porcelain_paths(git_root, porcelain)
+
+        monkeypatch.setattr(wm_mod, "WorktreeManager", lambda *a, **k: _Fake())
+
+        captured: list[tuple[str, dict]] = []
+        orch._notify_lead = lambda ns, notice, **kw: captured.append((notice, kw))  # type: ignore[assignment]
+
+        # `[no-ui]`: a verify-only task has no screen to shoot (#433 gate).
+        ok, msg = orch.done("frontend", note="verified. CHANGED: None [no-ui]", project=proj)
+        assert ok, msg
+
+        facts = next(
+            kw["digest_facts"] for notice, kw in captured if notice.startswith("[frontend")
+        )
+        assert facts.uncommitted == 2  # shot.png + page.tsx — `.claude/*` never counted
+        assert facts.uncommitted_own == 1  # only page.tsx changed since assign
+        assert facts.uncommitted_unrelated is False
+        assert facts.files_touched == 1
+        assert facts.files_dirs == ("web",)
+        line = format_digest_fact_line(facts)
+        assert "⚠1 ไฟล์ยังไม่ commit (ของงานนี้) · อีก 1 ไฟล์ dirty อยู่ก่อน assign แล้ว" in line
+        assert ".claude" not in line
 
     def test_sibling_pane_files_excluded_from_readonly_pane_count(self, orch, monkeypatch):
         """#601: a real incident — a read-only reviewer's done note showed

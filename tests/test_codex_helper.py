@@ -46,6 +46,44 @@ class TestCodexSessionStore:
 
         assert codex_helper.resolve_codex_jsonl_for_cwd(str(cwd), "uuid-1", root=root) == path
 
+    def test_resolve_never_opens_rollouts_named_for_another_session(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """#882/#874: the spawn path resolved a codex resume by opening every
+        rollout in the store (19–25 s on the UI thread). The session uuid is
+        in the filename — a rollout named for another session is never
+        opened; a rollout named for no session at all still is."""
+        cwd = tmp_path / "project"
+        cwd.mkdir()
+        root = tmp_path / "sessions"
+        a = "019a1b2c-1111-4aaa-8bbb-000000000001"
+        b = "019a1b2c-2222-4aaa-8bbb-000000000002"
+        path_a = root / "2026" / "10" / "15" / f"rollout-2026-10-15T12-00-00-{a}.jsonl"
+        path_a.parent.mkdir(parents=True)
+        path_a.write_text(
+            json.dumps({"type": "session_meta", "payload": {"id": a, "cwd": str(cwd)}}) + "\n",
+            encoding="utf-8",
+        )
+        legacy = root / "rollout-legacy.jsonl"  # no uuid in the name → must be read
+        legacy.write_text(
+            json.dumps({"type": "session_meta", "payload": {"id": "old-1", "cwd": str(cwd)}})
+            + "\n",
+            encoding="utf-8",
+        )
+        opened: list[str] = []
+        real = codex_helper.read_codex_session_meta
+        monkeypatch.setattr(
+            codex_helper, "read_codex_session_meta", lambda p: opened.append(p.name) or real(p)
+        )
+
+        assert codex_helper.resolve_codex_jsonl_for_cwd(str(cwd), b, root=root) is None
+        assert opened == ["rollout-legacy.jsonl"]  # rollout for `a` never opened
+        opened.clear()
+        assert codex_helper.resolve_codex_jsonl_for_cwd(str(cwd), a, root=root) == path_a
+        assert opened == [path_a.name]  # exact-name hit, nothing else read
+        opened.clear()
+        assert codex_helper.resolve_codex_jsonl_for_cwd(str(cwd), "old-1", root=root) == legacy
+
     def test_wrong_cwd_or_id_never_resolves(self, tmp_path: Path) -> None:
         cwd = tmp_path / "project"
         cwd.mkdir()

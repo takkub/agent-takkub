@@ -2034,6 +2034,16 @@ class SettingsWindow(
         self._park_fallback_chk.toggled.connect(auto_resume.set_park_fallback_enabled)
         park_lay.addWidget(self._park_fallback_chk)
 
+        # #875: park = wait on the SAME account by default; this is the
+        # explicit opt-in for "another account of the same provider is fine,
+        # just never another provider".
+        self._park_account_chk = QCheckBox(
+            "ตอนหยุดรอ: ยังสลับไปบัญชีอื่นของ provider เดิมได้ (ไม่ย้าย provider)", park_panel
+        )
+        self._park_account_chk.setChecked(auto_resume.park_account_failover_enabled())
+        self._park_account_chk.toggled.connect(auto_resume.set_park_account_failover_enabled)
+        park_lay.addWidget(self._park_account_chk)
+
         exclude_label = QLabel(
             "ยกเว้น provider เหล่านี้ไม่ให้สลับไปหา (Exclude providers from reroute):",
             park_panel,
@@ -2068,10 +2078,11 @@ class SettingsWindow(
 
         park_hint = QLabel(
             "กำหนดพฤติกรรมเมื่อใช้งานจนชน limit ของ provider · "
-            "ทุกโหมด: ถ้า Claude/Codex มีบัญชีอื่นที่ login ไว้และยังไม่ติด limit "
-            "จะสลับไปบัญชีนั้นก่อน (provider เดิม) · "
-            "สลับ provider: ถ้าทุกบัญชีติดหมด จะย้ายงานไป provider อื่นที่โควตายังเหลือและไม่ถูก exclude · "
-            "หยุดรอ: จะคง session/browser เดิมไว้ และปลุกอัตโนมัติเมื่อครบเวลาคูลดาวน์ · "
+            "สลับ provider: ถ้า Claude/Codex มีบัญชีอื่นที่ login ไว้และยังไม่ติด limit "
+            "จะสลับไปบัญชีนั้นก่อน (provider เดิม) ถ้าทุกบัญชีติดหมดจึงย้ายงานไป provider อื่น"
+            "ที่โควตายังเหลือและไม่ถูก exclude · "
+            "หยุดรอ: จอดรอ reset ของบัญชีเดิม ไม่ย้าย provider และไม่สลับบัญชี "
+            "(เว้นแต่ติ๊กช่องด้านบน) คง session/browser เดิมไว้ และปลุกอัตโนมัติเมื่อครบเวลาคูลดาวน์ · "
             "บันทึกทันที มีผลเมื่อชน limit ครั้งถัดไป",
             park_panel,
         )
