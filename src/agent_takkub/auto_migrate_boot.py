@@ -395,6 +395,52 @@ class BootMigrationResult:
     validate_reports: list[StepReport] = field(default_factory=list)
 
 
+def _pending_copy_work(engine, applied_before: set[str]) -> bool:
+    """Will this `apply_pending()` pass copy real data (#883)? True for a
+    ladder step this machine never applied (a step added since it promoted),
+    or `promote-v2-root` / `archive-v1-legacy` still holding candidates on
+    disk. False = every step is journal-applied and the two movers have
+    nothing left, so the disk-space walk has nothing to protect. Fail-safe:
+    any probe error answers True (run the gate)."""
+    try:
+        for s in getattr(engine, "_steps", []):
+            step_id = getattr(s, "step_id", "")
+            if step_id and step_id not in applied_before:
+                return True
+        for step_id, probes in (
+            ("promote-v2-root", ("_promote_candidates",)),
+            ("archive-v1-legacy", ("_archive_candidates", "_shared_dir_legacy_candidates")),
+        ):
+            try:
+                step = engine.get_step(step_id)
+            except KeyError:
+                continue
+            for name in probes:
+                probe = getattr(step, name, None)
+                if callable(probe) and probe():
+                    return True
+    except Exception:
+        return True
+    return False
+
+
+def _log_pending_check_timing(engine, stage_t0: float, gate_ms: float, steps_run: int) -> None:
+    """One `auto_migrate_pending_checked` event per boot (#883): how long the
+    steady-state pass took, how much of it was the disk gate, and the
+    slowest `validate()` calls — so a slow boot names its culprit."""
+    import time as _time
+
+    timings = getattr(engine, "last_validate_timings_ms", {}) or {}
+    slowest = sorted(timings.items(), key=lambda kv: -kv[1])[:6]
+    _log_boot_event(
+        "auto_migrate_pending_checked",
+        duration_ms=int((_time.perf_counter() - stage_t0) * 1000.0),
+        disk_gate_ms=int(gate_ms),
+        steps_run=steps_run,
+        validate_ms={k: int(v) for k, v in slowest},
+    )
+
+
 def _run_apply_pending(
     progress_cb: Callable[[str], None] | None,
     *,
@@ -434,8 +480,25 @@ def _run_apply_pending(
             except Exception:
                 return  # swallow-ok: an observer failure must never affect migration.
 
+    import time as _time
+
     from . import __version__ as app_version
     from .core.migration.engine import MigrationEngine
+
+    stage_t0 = _time.perf_counter()
+    # #883: `deep_validate=False` — this pass runs on EVERY boot of every
+    # migrated machine; `ArchiveV1LegacyStep.validate()` would otherwise
+    # re-hash the whole archived V1 home (prod: 191k files / 11 GB).
+    engine = MigrationEngine(
+        on_entry=on_entry,
+        on_file_progress=on_file_progress,
+        on_step=on_step,
+        on_validate_step=on_validate_step,
+        deep_validate=False,
+    )
+    applied_before = set(engine.applied_step_ids())
+    guard = load_state().get("rolled_back_steps", {})
+    guarded_now = {step_id for step_id, ver in guard.items() if ver == app_version}
 
     # #504 H4 (acceptance review): the "v2"/"mixed" branch used to jump
     # straight here without ever reaching the disk-space gate the "v1"
@@ -445,22 +508,25 @@ def _run_apply_pending(
     # path even with the check patched to always fail. `PromoteV2RootStep`
     # copies real data on exactly this path (a pre-existing nested `v2/`),
     # so it needs the same preflight the "v1" ladder gets.
-    if not _disk_has_room(config.DATA_HOME):
-        _report("พื้นที่ดิสก์ไม่พอสำหรับ pending migration step(s) — ข้ามรอบนี้")
-        return BootMigrationResult("skipped", "disk-space", messages)
+    #
+    # #883: ... but ONLY when this pass will actually copy something. The
+    # gate's size estimate walks `runtime/` plus every top-level name an
+    # archive could restore into (`_estimate_copy_bytes` +
+    # `_live_preimage_bytes`) — minutes on a real home — and prod paid it
+    # on every single boot with nothing pending at all, which is the
+    # "กำลังตรวจสอบโครงสร้างข้อมูล… จน timeout 180 วิ" every user saw.
+    gate_ms = 0.0
+    if _pending_copy_work(engine, applied_before):
+        t0 = _time.perf_counter()
+        has_room = _disk_has_room(config.DATA_HOME)
+        gate_ms = (_time.perf_counter() - t0) * 1000.0
+        if not has_room:
+            _report("พื้นที่ดิสก์ไม่พอสำหรับ pending migration step(s) — ข้ามรอบนี้")
+            return BootMigrationResult("skipped", "disk-space", messages)
 
     _report("ตรวจ pending migration step(s)…")
-    engine = MigrationEngine(
-        on_entry=on_entry,
-        on_file_progress=on_file_progress,
-        on_step=on_step,
-        on_validate_step=on_validate_step,
-    )
-    applied_before = set(engine.applied_step_ids())
-    guard = load_state().get("rolled_back_steps", {})
-    guarded_now = {step_id for step_id, ver in guard.items() if ver == app_version}
-
     reports = engine.apply_pending(skip_step_ids=guarded_now)
+    _log_pending_check_timing(engine, stage_t0, gate_ms, len(reports))
     if not reports:
         _report("ไม่มี step ที่ต้องรัน")
         return BootMigrationResult("pending_applied", messages=messages)

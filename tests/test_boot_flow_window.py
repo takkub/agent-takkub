@@ -1621,6 +1621,60 @@ class TestBootGateDeadline:
 # ---------------------------------------------------------------------------
 
 
+class TestStructureCheckRunsInParallel:
+    """#883: the structure check (plan → steady-state stage) used to start
+    only after the person answered page A and then froze that page with
+    every button disabled until it came back — 2–3 minutes on prod, every
+    boot. It now starts the moment the wizard opens and is consumed on the
+    click; a check still running at that point shows a live counter."""
+
+    def test_structure_check_starts_at_open_not_after_the_click(self) -> None:
+        flow = _FakeFlow(items=_two_providers_one_update(), plan=None)
+        w = bfw.BootFlowWindow(flow=flow)
+        received: list[bool] = []
+        w.flowFinished.connect(received.append)
+        w.start()
+        # Page A is up and nobody has clicked — the steady-state stage already ran.
+        assert w._stack.currentIndex() == bfw.PAGE_MAIN
+        assert flow.run_migration_calls == 1
+        assert w._structure_state == "done"
+        assert received == []
+        w._on_main_skip_clicked()
+        assert received == [True]
+        assert flow.run_migration_calls == 1  # consumed once, never re-run
+
+    def test_plan_found_at_open_opens_page_b_only_after_the_click(self) -> None:
+        flow = _FakeFlow(items=_two_providers_one_update(), plan=_plan())
+        w = bfw.BootFlowWindow(flow=flow)
+        w.start()
+        assert w._stack.currentIndex() == bfw.PAGE_MAIN  # parked behind page A
+        w._on_main_skip_clicked()
+        assert w._stack.currentIndex() == bfw.PAGE_PREMIGRATE
+        assert flow.run_migration_calls == 0
+
+    def test_waiting_on_a_slow_structure_check_shows_a_live_counter(self) -> None:
+        import re
+
+        flow = _FakeFlow(items=[], plan=None)
+        w = bfw.BootFlowWindow(flow=flow)
+        w._flow = flow
+        received: list[bool] = []
+        w.flowFinished.connect(received.append)
+        # A check still running when the person answers page A.
+        w._structure_state = "running"
+        w._structure_started = time.monotonic() - 7
+        w._proceed_to_migration_check()
+        assert w._awaiting_structure is True
+        assert w._structure_tick.isActive()
+        assert "กำลังตรวจสอบโครงสร้างข้อมูล…" in w._subtitle_label.text()
+        assert re.search(r"\(\d+ วิ\)", w._subtitle_label.text())
+        assert received == []
+        w._finish_structure(("steady", _outcome()))
+        assert received == [True]
+        assert w._awaiting_structure is False
+        assert not w._structure_tick.isActive()
+
+
 class TestSteadyStateStageOnPlanNone:
     """`_on_plan_ready(None)` used to `accept()` straight away, so a GUI boot
     on an already-migrated (v2) install never ran `run_boot_stage()` at all —
@@ -1767,8 +1821,11 @@ class TestWorkerLifetimeOutlivesTheWizard:
             w.show()
             w.start()
             _pump_until(app, lambda: any(t.isRunning() for t in workers))
-            assert workers and workers[0].isRunning(), "worker never started"
-            worker = workers[0]
+            # #883: the structure-check workers (plan → steady state) are
+            # started first and finish at once; the blocked provider check
+            # is the one still running.
+            worker = next((t for t in workers if t.isRunning()), None)
+            assert worker is not None, "worker never started"
             assert worker.parent() is None
             assert worker in bfw._BOOT_WORKERS
 
@@ -1791,7 +1848,10 @@ class TestWorkerLifetimeOutlivesTheWizard:
                 app.processEvents()
 
         assert worker not in bfw._BOOT_WORKERS
-        assert plan_calls == [], "a late provider-check result must not drive the flow on"
+        # #883: the structure check starts at open, in parallel — that is
+        # the ONE plan_migration call; the late provider-check result must
+        # not add another (nor drive the flow on at all).
+        assert plan_calls == [1], "a late provider-check result must not drive the flow on"
         gc.collect()
         assert all(wiz is not ref() for wiz in bfw._LINGERING_WIZARDS)
 
@@ -1899,6 +1959,8 @@ from PyQt6.QtWidgets import QApplication
 app = QApplication([sys.argv[0]])
 import agent_takkub.boot_flow_window as bfw
 
+gate_done = False
+
 class Flow:
     def check_provider_updates(self, timeout_s):
         time.sleep(2.0)  # the gate's 0.3 s deadline fires while this runs
@@ -1906,13 +1968,24 @@ class Flow:
     def remembered_provider_choice(self):
         return None
     def plan_migration(self):
-        print("CHAIN", flush=True)  # a late result must not drive the flow on
+        # #883: runs at open (before the gate is gone) by design; a call
+        # AFTER the gate returned would mean a late result drove the flow on.
+        if gate_done:
+            print("CHAIN", flush=True)
         return None
     def run_migration(self, cb):
         return None
 
+_real_consume = bfw.BootFlowWindow._consume_structure_result
+def _consume(self):
+    if gate_done:
+        print("CHAIN", flush=True)  # a late result must not drive the flow on
+    return _real_consume(self)
+bfw.BootFlowWindow._consume_structure_result = _consume
+
 bfw.BootFlowWindow._resolve_flow = lambda self: Flow()
 window = bfw.run_boot_flow_gate(lambda: "main")
+gate_done = True
 assert window == "main", window
 # run_boot_flow_gate's frame is gone: the wizard was its only holder, and
 # the provider-check worker is still sleeping.

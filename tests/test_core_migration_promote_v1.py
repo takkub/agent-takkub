@@ -463,6 +463,40 @@ def test_archive_moves_the_emptied_legacy_v2_folder_into_the_archive(tmp_path, j
     assert (manifest_path.parent / "v2").is_dir()
 
 
+def test_archive_validate_shallow_skips_the_rehash_but_still_needs_every_file(
+    tmp_path, journal_backups
+):
+    """#883: `validate()` re-hashed every archived file on every boot (prod:
+    191k files / 11 GB; even a stat-only walk is ~30 s). `deep_validate=
+    False` — what the boot-time steady-state pass uses — only requires each
+    archived ENTRY to be present; the per-file byte check stays with
+    doctor/`migrate validate` (default True)."""
+    journal, backups = journal_backups
+    data_home = tmp_path / "data_home"
+    data_home.mkdir()
+    (data_home / "projects.json").write_text('{"projects": {}}', encoding="utf-8")
+    step = ArchiveV1LegacyStep(journal=journal, backups=backups, data_home=data_home)
+    assert step.apply().ok
+    archived = _find_latest_manifest(data_home).parent / "projects.json"
+    archived.write_text('{"projects": {"tampered": 1}}', encoding="utf-8")
+
+    deep = step.validate()
+    assert deep.ok is False
+    assert "checksum mismatch" in deep.summary
+
+    shallow = ArchiveV1LegacyStep(
+        journal=journal, backups=backups, data_home=data_home, deep_validate=False
+    )
+    report = shallow.validate()
+    assert report.ok, report.summary
+    assert "not re-verified" in report.summary
+
+    archived.unlink()
+    report = shallow.validate()
+    assert report.ok is False
+    assert "missing" in report.summary
+
+
 def test_archive_undoes_partial_move_on_failure(tmp_path, journal_backups, monkeypatch):
     journal, backups = journal_backups
     data_home = tmp_path / "data_home"

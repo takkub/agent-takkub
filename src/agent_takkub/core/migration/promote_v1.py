@@ -1519,14 +1519,25 @@ def _all_archive_generation_dirs(data_home: Path) -> list[Path]:
         return []
 
 
-def _archive_entry_problems(archive_root: Path, manifest: dict) -> list[str]:
+def _archive_entry_problems(
+    archive_root: Path, manifest: dict, *, verify_hashes: bool = True
+) -> list[str]:
     """Every problem (missing file / checksum mismatch) found while checking
     *manifest*'s ``archived`` entries against what's actually under
     *archive_root* — shared by `ArchiveV1LegacyStep.validate()` (H9, which
     only needs to know the archive is intact) and `.rollback()` (#504 H2
     residual: which must refuse the ENTIRE restore, touching nothing at
     `data_home`, the moment ANY archived member turns out missing or
-    corrupt). Empty return means the archive is fully intact."""
+    corrupt). Empty return means the archive is fully intact.
+
+    *verify_hashes=False* (#883): entry-level presence only — each recorded
+    archived entry (a top-level V1 file or directory) must still exist;
+    neither its member files nor their sha256 are re-checked. A real
+    archive is the whole V1 home (prod: 191k files / 11 GB): re-hashing it
+    is minutes, and even stat'ing every member is ~30 s on Windows — the
+    boot-time steady-state pass uses this form (29 entries, instant), and
+    the full per-file byte check stays with `takkub doctor
+    --storage-layout`, `takkub migrate validate` and `rollback()`."""
     problems: list[str] = []
     for entry in manifest.get("archived", []):
         rel = entry.get("path")
@@ -1534,6 +1545,10 @@ def _archive_entry_problems(archive_root: Path, manifest: dict) -> list[str]:
         if not rel or not digests:
             continue
         base = archive_root / rel
+        if not verify_hashes:
+            if not base.exists():
+                problems.append(f"missing: {base}")
+            continue
         for file_rel, expected in digests.items():
             target = base / file_rel if base.is_dir() else base
             if not target.is_file():
@@ -2383,6 +2398,15 @@ class ArchiveV1LegacyStep:
     # Best-effort WITHIN-entry progress observer (#574 round11 item 3) —
     # see `PromoteV2RootStep.on_file_progress`'s twin docstring.
     on_file_progress: Callable[[str, int, int, str], None] | None = None
+    # #883: False = `validate()` checks every archived ENTRY is present but
+    # does not walk/re-hash its files (`_archive_entry_problems(
+    # verify_hashes=False)`).
+    # The boot-time steady-state pass (`MigrationEngine(deep_validate=
+    # False)`, via `auto_migrate_boot._run_apply_pending`) runs this
+    # method on every start — re-hashing an 11 GB archive there is what
+    # `run_boot_stage`'s "cheap existence-ish check" contract forbids.
+    # `rollback()` never consults this flag: a restore always verifies.
+    deep_validate: bool = True
 
     _run_id: ClassVar[str] = ""  # unused; timestamp is computed per apply()
 
@@ -3116,7 +3140,7 @@ class ArchiveV1LegacyStep:
                     f"archive manifest for generation {gen.name} has no ownership record for "
                     "content actually present in its directory",
                 )
-            problems = _archive_entry_problems(gen, manifest)
+            problems = _archive_entry_problems(gen, manifest, verify_hashes=self.deep_validate)
             if problems:
                 return StepReport(
                     self.step_id,
@@ -3124,6 +3148,13 @@ class ArchiveV1LegacyStep:
                     False,
                     f"archived file {problems[0]} (generation {gen.name})",
                 )
+        if not self.deep_validate:
+            return StepReport(
+                self.step_id,
+                "validate",
+                True,
+                "no V1 leftovers remain (archive entries present — files not re-verified, #883)",
+            )
         return StepReport(self.step_id, "validate", True, "no V1 leftovers remain")
 
     def rollback(self, archive_ts: str | None = None) -> StepReport:

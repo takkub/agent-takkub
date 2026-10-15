@@ -873,6 +873,21 @@ class BootFlowWindow(QDialog):
         self._phase_labels: dict[str, QLabel] = {}
         self._phase_count_labels: dict[str, QLabel] = {}
         self._next_phase_slot = 0
+        # #883: the structure check (plan_migration → steady-state
+        # run_boot_stage) used to START only after the person had answered
+        # page A, then held the page with every button disabled until it
+        # returned — on prod that was the disk gate's 2–3 minute walk, every
+        # boot. It now starts the moment the wizard opens, in parallel with
+        # the provider-version check, and its result is parked here;
+        # `_proceed_to_migration_check` consumes it if ready, else waits
+        # with a visible elapsed-seconds counter.
+        self._structure_state = "idle"  # "idle" | "running" | "done"
+        self._structure_result: tuple[str, Any] | None = None  # ("plan"|"steady"|"error", x)
+        self._awaiting_structure = False
+        self._structure_started = 0.0
+        self._structure_tick = QTimer(self)
+        self._structure_tick.setInterval(1000)
+        self._structure_tick.timeout.connect(self._refresh_structure_header)
 
         self.setWindowTitle("Takkub Cockpit")
         self.setFixedSize(640, 540)
@@ -2212,6 +2227,10 @@ class BootFlowWindow(QDialog):
         worker thread and shows page A once they arrive."""
         flow = self._resolve_flow()
         self._flow = flow
+        # #883: kick the structure check off NOW, alongside whatever page A
+        # does — by the time the person has read the provider list and
+        # clicked, it is normally already finished.
+        self._begin_structure_check()
         if not boot_update_enabled():
             self._proceed_to_migration_check()
             return
@@ -2490,10 +2509,86 @@ class BootFlowWindow(QDialog):
             )
             msg_lay.addWidget(msg_lbl)
             self._provider_card_lay.addWidget(msg_row)
+        if self._structure_state == "done":
+            self._consume_structure_result()
+            return
+        # Still running (or never started — the direct-call paths): wait
+        # for it visibly. The counter is what tells a person "alive, not
+        # frozen" — the old page sat on one static line for minutes.
+        self._awaiting_structure = True
+        self._begin_structure_check()
+        self._refresh_structure_header()
+        self._structure_tick.start()
+
+    # ── #883: structure check, started at open, consumed on demand ──
+    def _begin_structure_check(self) -> None:
+        if self._structure_state != "idle":
+            return
+        self._structure_state = "running"
+        self._structure_started = time.monotonic()
         flow = self._flow
         worker = _CallWorker(lambda: flow.plan_migration())
-        worker.resultReady.connect(self._on_plan_ready)
+        worker.resultReady.connect(self._on_structure_plan_ready)
         self._track_worker(worker)
+
+    def _on_structure_plan_ready(self, plan: Any) -> None:
+        if isinstance(plan, _WorkerError):
+            self._finish_structure(("error", plan))
+            return
+        if plan is not None:
+            self._finish_structure(("plan", plan))
+            return
+        # Nothing to migrate: the steady-state stage (`apply_pending()`,
+        # version-marker re-pin, disk gate only when something will move —
+        # see `auto_migrate_boot._run_apply_pending`) runs right away too.
+        flow = self._flow
+        worker = _CallWorker(lambda: flow.run_migration(None))
+        worker.resultReady.connect(self._on_structure_steady_done)
+        self._track_worker(worker)
+
+    def _on_structure_steady_done(self, outcome: Any) -> None:
+        self._finish_structure(("steady", outcome))
+
+    def _finish_structure(self, result: tuple[str, Any]) -> None:
+        self._structure_state = "done"
+        self._structure_result = result
+        try:
+            from .orchestrator_text import _log_event
+
+            _log_event(
+                "boot_structure_check_done",
+                kind=result[0],
+                duration_ms=int((time.monotonic() - self._structure_started) * 1000),
+                awaited=self._awaiting_structure,
+            )
+        except Exception:
+            pass
+        if self._awaiting_structure:
+            self._consume_structure_result()
+
+    def _consume_structure_result(self) -> None:
+        """Act on the parked result exactly as the old sequential flow did:
+        a plan opens page B, a steady-state outcome logs and accepts, a
+        probe failure never blocks boot."""
+        self._structure_tick.stop()
+        self._awaiting_structure = False
+        result = self._structure_result
+        if result is None:
+            self._proceed = True
+            self.accept()
+            return
+        kind, value = result
+        if kind == "steady":
+            self._on_steady_state_done(value)
+            return
+        self._on_plan_ready(value)  # "plan" → page B; "error" → proceed
+
+    def _refresh_structure_header(self) -> None:
+        if not self._awaiting_structure:
+            return
+        elapsed = int(time.monotonic() - self._structure_started)
+        suffix = f" ({elapsed} วิ)" if elapsed >= 2 else ""
+        self._set_header(f"กำลังตรวจสอบโครงสร้างข้อมูล…{suffix}", theme.TEXT_MUTED, None)
 
     def _on_plan_ready(self, plan: Any) -> None:
         if isinstance(plan, _WorkerError):
@@ -2584,6 +2679,7 @@ class BootFlowWindow(QDialog):
         still dismissed the dialog and emitted `flowFinished(True)`)."""
         if self._stack.currentIndex() == PAGE_MIGRATING:
             return
+        self._structure_tick.stop()  # #883: never outlive the dialog
         super().done(result)
         self.flowFinished.emit(self._proceed)
 

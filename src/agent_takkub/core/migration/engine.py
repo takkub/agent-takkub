@@ -264,8 +264,18 @@ class MigrationEngine:
         on_file_progress: Callable[[str, str, int, int, str], None] | None = None,
         on_step: Callable[[str, str], None] | None = None,
         on_validate_step: Callable[[str, bool], None] | None = None,
+        deep_validate: bool = True,
     ) -> None:
-        """*on_entry* (#574): best-effort ``(step_id, entry_name)``
+        """*deep_validate* (#883): False = the ladder's `validate()` calls
+        may skip byte-level re-verification that scales with the size of
+        the data home (today: `ArchiveV1LegacyStep` re-hashing every
+        archived file). The boot-time steady-state pass passes False —
+        `run_boot_stage` runs it on EVERY start and promises "cheap
+        existence-ish checks"; `takkub doctor` / `takkub migrate validate`
+        keep the default True. Applied to a hand-built *steps* list too,
+        for any step exposing a `deep_validate` attribute.
+
+        *on_entry* (#574): best-effort ``(step_id, entry_name)``
         progress observer, forwarded ONLY into the three steps whose
         `apply()` moves real, possibly-large file trees
         (`pre-migrate-backup`, `promote-v2-root`, `archive-v1-legacy`) —
@@ -333,8 +343,17 @@ class MigrationEngine:
         # (a monkeypatched/overridden `validate()` must still be able to
         # catch something `apply()`'s own inline checks did not).
         self.last_validate_reports: list[StepReport] = []
+        # #883: wall time of every `validate()` this engine ran, per step —
+        # `auto_migrate_boot` logs the slowest ones so the next "boot sits
+        # on กำลังตรวจสอบโครงสร้างข้อมูล" has its culprit in events.log.
+        self.last_validate_timings_ms: dict[str, float] = {}
+        self._deep_validate = deep_validate
         if steps is not None:
             self._steps: list[MigrationStep] = list(steps)
+            if not deep_validate:
+                for s in self._steps:
+                    if hasattr(s, "deep_validate"):
+                        s.deep_validate = False  # type: ignore[attr-defined]
             # Only known when the caller opts in explicitly — a hand-built
             # step list (e.g. unit-test fakes with no real filesystem) must
             # not have `rollback()` reach for a real V2 root it never wrote.
@@ -397,6 +416,7 @@ class MigrationEngine:
                     data_home=home,
                     on_entry=_bound("archive-v1-legacy"),
                     on_file_progress=_bound_file("archive-v1-legacy"),
+                    deep_validate=deep_validate,
                 ),
             ]
 
@@ -537,9 +557,10 @@ class MigrationEngine:
         has_pending_real = (
             getattr(archive_step, "_pending_real_data", lambda: False)() if archive_step else False
         )
+        self.last_validate_timings_ms = {}
         v1_retired = archive_step is not None and (
             (_ARCHIVE_V1_STEP_ID in applied_before and not has_pending_real)
-            or archive_step.validate().ok
+            or self._timed_validate(archive_step).ok
         )
         version_marker_step = next(
             (s for s in self._steps if getattr(s, "step_id", "") == _VERSION_MARKER_STEP_ID), None
@@ -622,7 +643,7 @@ class MigrationEngine:
                 # (the original #576 fix) double-counted the validate call and
                 # broke callers asserting each step's call log (regression
                 # caught by TestApplyPending::test_applied_and_still_valid_step_is_skipped_entirely).
-                _validated = s.validate()
+                _validated = self._timed_validate(s)
                 if _validated.ok:
                     # still count this step for validated_steps, even though
                     # it's already applied and doesn't need re-apply
@@ -963,7 +984,21 @@ class MigrationEngine:
                 True,
                 "V1 source archived (#504) — target present, readable, correctly shaped",
             )
-        return s.validate()
+        return self._timed_validate(s)
+
+    def _timed_validate(self, s: MigrationStep) -> StepReport:
+        """`s.validate()` with its wall time accumulated into
+        `last_validate_timings_ms` (#883) — one call site for every real
+        validate this engine makes, so the timing can never miss one."""
+        step_id = getattr(s, "step_id", "")
+        t0 = time.perf_counter()
+        try:
+            return s.validate()
+        finally:
+            self.last_validate_timings_ms[step_id] = (
+                self.last_validate_timings_ms.get(step_id, 0.0)
+                + (time.perf_counter() - t0) * 1000.0
+            )
 
     def validate_ok_steps(self, step_ids: Iterable[str]) -> list[StepReport]:
         """Real, v1_retired-aware `validate()` for just *step_ids* — #504/

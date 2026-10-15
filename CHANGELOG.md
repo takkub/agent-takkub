@@ -4,6 +4,13 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 
 ## [vNEXT]
 
+## [v2.2.21] - 2026-10-15
+
+### Fixed (แก้)
+
+- **เปิดโปรแกรมค้างที่ "กำลังตรวจสอบโครงสร้างข้อมูล…" 75–188 วิทุกครั้ง จน timeout 180 วิ (#883):** วัดบน prod จริง — ขั้น steady-state (`run_boot_stage` → `apply_pending`) จ่ายค่า **disk gate** ทุก boot: `_estimate_copy_bytes` (เดิน `runtime/`) 97 วิ + `_live_preimage_bytes` (เดินทุกโฟลเดอร์ที่ archive restore ได้) 34 วิ ทั้งที่ไม่มีอะไรต้องคัดลอกเลย · ตอนนี้ disk gate รันเฉพาะเมื่อ pass นั้นจะคัดลอกจริง (มี ladder step ที่เครื่องนี้ยังไม่เคย apply หรือ promote/archive ยังมี candidate) · ระเบิดลูกที่สอง: `ArchiveV1LegacyStep.validate()` re-hash ทุกไฟล์ใน archive (prod 191k ไฟล์ / 11 GB) ทุกครั้งที่ `_pending()` เป็นจริง → boot ใช้ `MigrationEngine(deep_validate=False)` เช็คแค่ไฟล์ครบ ส่วน hash เต็มยังอยู่ที่ `takkub doctor --storage-layout` / `takkub migrate validate` / rollback · event ใหม่ `auto_migrate_pending_checked` (duration, disk_gate_ms, validate_ms ต่อ step) บอกตัวช้าครั้งหน้าทันที
+- **dialog boot ค้างทั้งหน้าระหว่างตรวจโครงสร้าง (#883):** การตรวจเริ่มพร้อมกับการเช็คเวอร์ชัน provider ตั้งแต่เปิดหน้าต่าง (ไม่ใช่หลังกดปุ่ม) ผลถูกเก็บไว้แล้วใช้ตอนกด · ถ้ายังไม่เสร็จตอนกด แสดงตัวนับวินาที "กำลังตรวจสอบโครงสร้างข้อมูล… (N วิ)" ให้เห็นว่าไม่ได้ค้าง · event `boot_structure_check_done`
+
 ## [v2.2.20] - 2026-10-15
 
 ### Fixed (แก้)

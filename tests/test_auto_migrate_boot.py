@@ -167,6 +167,110 @@ class TestRunBootStageGates:
         assert result.reason == "disk-space"
 
 
+class TestBootPendingPassIsCheap:
+    """#883 (prod 2026-10-12 → 10-15, every boot): the steady-state pass sat
+    on "กำลังตรวจสอบโครงสร้างข้อมูล…" for 75–188 s and hit the 180 s gate
+    timeout. Two walks of the whole data home were paid with NOTHING
+    pending: the disk gate's size estimate (runtime/ + every name an
+    archive could restore into — 130 s measured on prod) and, whenever
+    `_pending()` flips true, the archive step re-hashing 11 GB."""
+
+    def test_engine_deep_validate_flag_reaches_the_archive_step(self) -> None:
+        from types import SimpleNamespace
+
+        assert MigrationEngine().get_step("archive-v1-legacy").deep_validate is True
+        assert (
+            MigrationEngine(deep_validate=False).get_step("archive-v1-legacy").deep_validate
+            is False
+        )
+        fake = SimpleNamespace(step_id="x", deep_validate=True)
+        MigrationEngine([fake], deep_validate=False)
+        assert fake.deep_validate is False
+        untouched = SimpleNamespace(step_id="y", deep_validate=True)
+        MigrationEngine([untouched])  # default keeps a hand-built step as is
+        assert untouched.deep_validate is True
+
+    def test_pending_copy_work_only_when_something_will_actually_move(self) -> None:
+        from types import SimpleNamespace
+
+        steps = [
+            SimpleNamespace(step_id="version-marker"),
+            SimpleNamespace(step_id="promote-v2-root", _promote_candidates=lambda: []),
+            SimpleNamespace(
+                step_id="archive-v1-legacy",
+                _archive_candidates=lambda: [],
+                _shared_dir_legacy_candidates=lambda: [],
+            ),
+        ]
+
+        class _Engine:
+            _steps = steps
+
+            def get_step(self, step_id):
+                for s in steps:
+                    if s.step_id == step_id:
+                        return s
+                raise KeyError(step_id)
+
+        engine = _Engine()
+        applied = {"version-marker", "promote-v2-root", "archive-v1-legacy"}
+        assert auto_migrate_boot._pending_copy_work(engine, applied) is False
+        # a ladder step this machine never applied → real copy work
+        assert auto_migrate_boot._pending_copy_work(engine, applied - {"version-marker"}) is True
+        steps[1]._promote_candidates = lambda: ["v2/accounts"]
+        assert auto_migrate_boot._pending_copy_work(engine, applied) is True
+        steps[1]._promote_candidates = lambda: []
+        steps[2]._shared_dir_legacy_candidates = lambda: ["config/old.json"]
+        assert auto_migrate_boot._pending_copy_work(engine, applied) is True
+
+    def test_v2_steady_boot_skips_the_disk_walk_and_logs_its_timing(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import agent_takkub.core.storage.layout as layout_mod
+
+        monkeypatch.setattr(layout_mod, "layout_state", lambda *a, **k: "v2")
+        monkeypatch.setattr(auto_migrate_boot, "_pending_copy_work", lambda engine, applied: False)
+        gate_calls: list = []
+        monkeypatch.setattr(
+            auto_migrate_boot, "_disk_has_room", lambda home: gate_calls.append(home) or False
+        )
+        events: list[tuple[str, dict]] = []
+        monkeypatch.setattr(
+            auto_migrate_boot, "_log_boot_event", lambda ev, **d: events.append((ev, d))
+        )
+        seen_kwargs: dict = {}
+        real_init = MigrationEngine.__init__
+
+        def _init(self, *a, **kw):
+            seen_kwargs.update(kw)
+            real_init(self, *a, **kw)
+
+        monkeypatch.setattr(MigrationEngine, "__init__", _init)
+
+        result = auto_migrate_boot.run_boot_stage()
+
+        assert result.action == "pending_applied"
+        assert gate_calls == []  # nothing to copy → no 130 s walk
+        assert seen_kwargs.get("deep_validate") is False  # no 11 GB re-hash either
+        checked = [d for ev, d in events if ev == "auto_migrate_pending_checked"]
+        assert len(checked) == 1
+        assert checked[0]["disk_gate_ms"] == 0
+        assert isinstance(checked[0]["validate_ms"], dict)
+        assert checked[0]["duration_ms"] >= 0
+
+    def test_v2_steady_boot_with_copy_work_still_pays_the_disk_gate(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import agent_takkub.core.storage.layout as layout_mod
+
+        monkeypatch.setattr(layout_mod, "layout_state", lambda *a, **k: "v2")
+        monkeypatch.setattr(auto_migrate_boot, "_pending_copy_work", lambda engine, applied: True)
+        monkeypatch.setattr(auto_migrate_boot, "_disk_has_room", lambda home: False)
+        result = auto_migrate_boot.run_boot_stage()
+        assert result.action == "skipped"
+        assert result.reason == "disk-space"
+
+
 class TestRunBootStageMixedPendingApply:
     """#362: a `"mixed"` boot must never re-run the full ladder, but it also
     must not be limited to the old step-1-only fast path — any ladder step
@@ -236,7 +340,7 @@ class TestRunBootStageMixedPendingApply:
         monkeypatch.setattr(
             auto_migrate_boot,
             "_log_boot_event",
-            lambda ev, **kw: events.append({"event": ev, **kw}),
+            _record_bookkeeping(events),
         )
 
         result = auto_migrate_boot.run_boot_stage()
@@ -349,7 +453,7 @@ class TestRunBootStageMixedPendingApply:
         monkeypatch.setattr(
             auto_migrate_boot,
             "_log_boot_event",
-            lambda ev, **kw: events.append({"event": ev, **kw}),
+            _record_bookkeeping(events),
         )
 
         result = auto_migrate_boot.run_boot_stage()
@@ -419,7 +523,7 @@ class TestRunBootStageMixedPendingApply:
         monkeypatch.setattr(
             auto_migrate_boot,
             "_log_boot_event",
-            lambda ev, **kw: events.append({"event": ev, **kw}),
+            _record_bookkeeping(events),
         )
 
         result = auto_migrate_boot.run_boot_stage()
@@ -498,7 +602,7 @@ class TestRunBootStageMixedPendingApply:
         monkeypatch.setattr(
             auto_migrate_boot,
             "_log_boot_event",
-            lambda ev, **kw: events.append({"event": ev, **kw}),
+            _record_bookkeeping(events),
         )
 
         result = auto_migrate_boot.run_boot_stage()
@@ -532,7 +636,7 @@ class TestRunBootStageHappyPath:
         monkeypatch.setattr(
             auto_migrate_boot,
             "_log_boot_event",
-            lambda ev, **kw: events.append({"event": ev, **kw}),
+            _record_bookkeeping(events),
         )
 
         progress: list[str] = []
@@ -563,7 +667,7 @@ class TestRunBootStageRollback:
         monkeypatch.setattr(
             auto_migrate_boot,
             "_log_boot_event",
-            lambda ev, **kw: events.append({"event": ev, **kw}),
+            _record_bookkeeping(events),
         )
 
         result = auto_migrate_boot.run_boot_stage()
@@ -633,6 +737,20 @@ class TestState:
 # 2.1.0 and the archive+promote pair runs automatically via run_boot_stage()
 # — verified end to end, not by hand-invoking the steps.
 # ---------------------------------------------------------------------------
+
+
+def _record_bookkeeping(events: list[dict]):
+    """`_log_boot_event` stand-in that keeps the migration BOOKKEEPING
+    events the tests below assert on (applied/rolled-back/stale) and drops
+    the per-boot `auto_migrate_pending_checked` timing telemetry (#883),
+    which every pending pass now emits regardless of outcome."""
+
+    def _record(ev: str, **kw) -> None:
+        if ev == "auto_migrate_pending_checked":
+            return
+        events.append({"event": ev, **kw})
+
+    return _record
 
 
 def _build_old_machine(data_home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
