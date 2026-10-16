@@ -57,8 +57,341 @@ class _RulesGeneratorThread(QThread):
                 pass
 
 
+_GIT_URL_PREFIXES = ("http://", "https://", "git@", "ssh://", "git://", "file://")
+
+
+def looks_like_git_url(text: str) -> bool:
+    """Cheap heuristic used to prefill the clone dialog from the clipboard.
+
+    Accepts the usual remote forms (``https://…``, ``git@host:owner/repo``,
+    ``ssh://``, ``git://``, ``file://``) plus anything ending in ``.git``.
+    Deliberately loose — it only decides whether to *prefill*, never whether
+    to run ``git clone`` (git itself is the authority on that).
+    """
+    t = (text or "").strip()
+    if not t or any(ch.isspace() for ch in t):
+        return False
+    return t.startswith(_GIT_URL_PREFIXES) or t.endswith(".git")
+
+
+def repo_dir_name_from_url(url: str) -> str:
+    """Folder name ``git clone <url>`` would create — last path segment minus ``.git``.
+
+    Handles ``https://host/owner/repo(.git)``, ``git@host:owner/repo.git``,
+    trailing slashes and Windows ``file://`` / local paths. Returns ``""``
+    when nothing usable is left so the caller can keep the field empty.
+    """
+    u = (url or "").strip().rstrip("/").rstrip("\\")
+    if not u:
+        return ""
+    # scp-like `git@host:owner/repo.git` → everything after the last ':' that
+    # isn't a drive letter / scheme separator.
+    tail = u.replace("\\", "/")
+    for sep in ("/", ":"):
+        if sep in tail:
+            tail = tail.rsplit(sep, 1)[1]
+    if tail.endswith(".git"):
+        tail = tail[: -len(".git")]
+    return tail.strip()
+
+
+class _GitCloneThread(QThread):
+    """Background ``git clone --progress`` so the UI stays responsive.
+
+    Signals
+    -------
+    progress(str) — one progress/status line from git (stderr merged)
+    cloned(str)   — the destination path on success
+    failed(str)   — error text on failure (incl. cancel); a partial clone
+                    directory this thread created is removed first.
+    """
+
+    progress: pyqtSignal = pyqtSignal(str)
+    cloned: pyqtSignal = pyqtSignal(str)
+    failed: pyqtSignal = pyqtSignal(str)
+
+    def __init__(self, url: str, dest: Path, parent=None) -> None:
+        super().__init__(parent)
+        self._url = url
+        self._dest = dest
+        self._proc = None
+        self._cancelled = False
+
+    def run(self) -> None:
+        import os
+        import shutil
+        import subprocess
+
+        from ._win_console import SUBPROCESS_NO_WINDOW
+
+        git = shutil.which("git")
+        if not git:
+            self.failed.emit("ไม่พบ git ใน PATH — ติดตั้ง git ก่อนแล้วลองใหม่")
+            return
+        existed_before = self._dest.exists()
+        env = dict(os.environ)
+        # Never hang on an interactive credential prompt — fail fast with a
+        # readable error instead (the user can set up a credential helper).
+        env["GIT_TERMINAL_PROMPT"] = "0"
+        tail: list[str] = []
+        try:
+            proc = subprocess.Popen(
+                [git, "clone", "--progress", self._url, str(self._dest)],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                env=env,
+                creationflags=SUBPROCESS_NO_WINDOW,
+            )
+            self._proc = proc
+            buf = ""
+            assert proc.stdout is not None
+            # git reports progress with '\r' (same line rewrite), so split on
+            # both '\r' and '\n' instead of readline().
+            while True:
+                chunk = proc.stdout.read(256)
+                if not chunk:
+                    break
+                buf += chunk
+                while True:
+                    cut = min([i for i in (buf.find("\r"), buf.find("\n")) if i >= 0], default=-1)
+                    if cut < 0:
+                        break
+                    line, buf = buf[:cut].strip(), buf[cut + 1 :]
+                    if line:
+                        tail = ([*tail, line])[-8:]
+                        self.progress.emit(line)
+            if buf.strip():
+                tail = ([*tail, buf.strip()])[-8:]
+                self.progress.emit(buf.strip())
+            rc = proc.wait()
+        except Exception as exc:
+            rc = -1
+            tail.append(str(exc))
+        finally:
+            self._proc = None
+        if rc == 0 and not self._cancelled:
+            self.cloned.emit(str(self._dest))
+            return
+        if not existed_before:
+            shutil.rmtree(self._dest, ignore_errors=True)
+        if self._cancelled:
+            self.failed.emit("ยกเลิกแล้ว")
+        else:
+            self.failed.emit("\n".join(tail) or f"git clone exited with {rc}")
+
+    def cancel(self) -> None:
+        """Kill the git subprocess if it's still running."""
+        self._cancelled = True
+        proc = self._proc
+        if proc is not None:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+
+
 class ProjectWizardMixin:
     """Mixin for new/import project wizard and project editing."""
+
+    def _clone_project_from_url(self) -> None:
+        """Clone flow: repo URL + destination → ``git clone`` → map paths → save/open.
+
+        Lands in the same place as *Import โฟลเดอร์* once the clone is on
+        disk, so path mapping / registry / tab open are shared code.
+        """
+        from .config import slugify_project_name
+
+        target = self._ask_clone_target()
+        if target is None:
+            return
+        url, dest = target
+
+        if not self._run_git_clone_with_ui(url, dest):
+            return
+
+        name = slugify_project_name(dest.name)
+        paths = self._run_map_paths_dialog(dest, project_name=name)
+        if paths is None:
+            return
+        self._save_and_open_project(name, dest, paths, rules_content=None, description=dest.name)
+
+    def _default_clone_parent(self) -> Path:
+        """Parent folder to suggest: next to the active project, else home."""
+        from .config import load_projects
+
+        try:
+            data = load_projects()
+            active = (data.get("projects") or {}).get(data.get("active") or "", {})
+            for v in (active.get("paths") or {}).values():
+                parent = Path(v).parent
+                if parent.is_dir():
+                    return parent
+        except Exception:
+            pass
+        return Path.home()
+
+    def _ask_clone_target(self) -> tuple[str, Path] | None:
+        """Dialog: repo URL / parent folder / folder name.  Returns (url, dest) or None."""
+        from PyQt6.QtWidgets import (
+            QApplication,
+            QDialogButtonBox,
+            QFileDialog,
+            QFormLayout,
+            QHBoxLayout,
+            QLabel,
+            QLineEdit,
+            QMessageBox,
+            QPushButton,
+            QVBoxLayout,
+        )
+
+        from . import cockpit_theme
+
+        dialog = cockpit_theme.CockpitDialog(self)
+        dialog.setWindowTitle("Clone โปรเจคจาก repo")
+        dialog.resize(560, 220)
+        layout = QVBoxLayout(dialog)
+        layout.addWidget(QLabel("กรอก URL ของ repo (https / ssh) แล้วเลือกโฟลเดอร์ที่จะ clone ลง"))
+        form = QFormLayout()
+        layout.addLayout(form)
+
+        url_edit = QLineEdit()
+        url_edit.setPlaceholderText(
+            "https://github.com/owner/repo.git  หรือ  git@github.com:owner/repo.git"
+        )
+        try:
+            clip = QApplication.clipboard().text()
+        except Exception:
+            clip = ""
+        if looks_like_git_url(clip):
+            url_edit.setText(clip.strip())
+        form.addRow("Repo URL", url_edit)
+
+        parent_edit = QLineEdit(str(self._default_clone_parent()))
+        btn_browse = QPushButton("เลือก…")
+        row = QHBoxLayout()
+        row.addWidget(parent_edit, 1)
+        row.addWidget(btn_browse)
+        form.addRow("Clone ลงใน", row)
+
+        name_edit = QLineEdit(repo_dir_name_from_url(url_edit.text()))
+        name_edit.setPlaceholderText("ชื่อโฟลเดอร์ (เติมให้จาก URL)")
+        form.addRow("ชื่อโฟลเดอร์", name_edit)
+
+        name_touched = {"v": False}
+
+        def _on_url_changed(text: str) -> None:
+            if not name_touched["v"]:
+                name_edit.blockSignals(True)
+                name_edit.setText(repo_dir_name_from_url(text))
+                name_edit.blockSignals(False)
+
+        def _on_name_edited(_text: str) -> None:
+            name_touched["v"] = True
+
+        url_edit.textChanged.connect(_on_url_changed)
+        name_edit.textEdited.connect(_on_name_edited)
+
+        def _browse() -> None:
+            d = QFileDialog.getExistingDirectory(dialog, "เลือกโฟลเดอร์ปลายทาง", parent_edit.text())
+            if d:
+                parent_edit.setText(d)
+
+        btn_browse.clicked.connect(_browse)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.button(QDialogButtonBox.StandardButton.Ok).setText("Clone")
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+
+        def _validate() -> None:
+            url = url_edit.text().strip()
+            parent = Path(parent_edit.text().strip() or "")
+            folder = name_edit.text().strip()
+            if not url:
+                QMessageBox.warning(dialog, "ขาด URL", "กรอก URL ของ repo ก่อน")
+                return
+            if not parent_edit.text().strip() or not parent.is_dir():
+                QMessageBox.warning(dialog, "โฟลเดอร์ไม่ถูกต้อง", "โฟลเดอร์ปลายทางต้องมีอยู่จริง")
+                return
+            if not folder or folder in (".", "..") or "/" in folder or "\\" in folder:
+                QMessageBox.warning(dialog, "ชื่อโฟลเดอร์ไม่ถูกต้อง", "ใส่ชื่อโฟลเดอร์ที่ไม่มี / หรือ \\")
+                return
+            if (parent / folder).exists():
+                QMessageBox.warning(
+                    dialog,
+                    "โฟลเดอร์มีอยู่แล้ว",
+                    f"'{parent / folder}' มีอยู่แล้ว — ใช้ Import โฟลเดอร์ หรือเปลี่ยนชื่อ",
+                )
+                return
+            dialog.accept()
+
+        buttons.accepted.connect(_validate)
+
+        if dialog.exec() != cockpit_theme.CockpitDialog.DialogCode.Accepted:
+            return None
+        return url_edit.text().strip(), Path(parent_edit.text().strip()) / name_edit.text().strip()
+
+    def _run_git_clone_with_ui(self, url: str, dest: Path) -> bool:
+        """Run ``git clone`` on a worker thread behind a busy dialog.  True on success."""
+        from PyQt6.QtWidgets import QDialog, QLabel, QMessageBox, QPushButton, QVBoxLayout
+
+        busy = QDialog(self)
+        busy.setWindowTitle("กำลัง clone…")
+        busy.setModal(True)
+        busy.resize(480, 140)
+        lay = QVBoxLayout(busy)
+        lay.addWidget(QLabel(f"git clone {url}\n→ {dest}"))
+        prog = QLabel("เริ่ม clone…")
+        prog.setWordWrap(True)
+        lay.addWidget(prog)
+        btn_cancel = QPushButton("ยกเลิก")
+        lay.addWidget(btn_cancel)
+
+        thread = _GitCloneThread(url, dest, parent=self)
+        ok_holder: list[bool] = [False]
+        error_holder: list[str | None] = [None]
+
+        def on_cloned(_path: str) -> None:
+            ok_holder[0] = True
+            busy.accept()
+
+        def on_failed(msg: str) -> None:
+            error_holder[0] = msg
+            busy.reject()
+
+        def on_cancel() -> None:
+            thread.cancel()
+            thread.wait(3000)
+            busy.reject()
+
+        thread.progress.connect(prog.setText)
+        thread.cloned.connect(on_cloned)
+        thread.failed.connect(on_failed)
+        btn_cancel.clicked.connect(on_cancel)
+
+        thread.start()
+        busy.exec()
+        # Same hazard as the rules generator: Esc / window-close bypasses
+        # on_cancel, so always cancel + join before deleteLater().
+        if thread.isRunning():
+            thread.cancel()
+            if not thread.wait(10000):
+                thread.terminate()
+                thread.wait()
+        thread.deleteLater()
+
+        if ok_holder[0]:
+            self._status.showMessage(f"Cloned: {dest.name}", 4_000)
+            return True
+        if error_holder[0] and error_holder[0] != "ยกเลิกแล้ว":
+            QMessageBox.warning(self, "Clone ไม่สำเร็จ", error_holder[0])
+        return False
 
     def _import_existing_project(self) -> None:
         """Original add-project flow: select folder → map paths → save."""

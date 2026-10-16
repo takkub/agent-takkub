@@ -149,6 +149,9 @@ class _NewTabHost(QWidget):
     def _import_existing_project(self):
         self.calls.append(("import_existing",))
 
+    def _clone_project_from_url(self):
+        self.calls.append(("clone_from_url",))
+
 
 def _stub_dialog(monkeypatch, pick_text_substr):
     """Make QMessageBox.exec() a no-op and clickedButton() return the
@@ -173,7 +176,7 @@ def _stub_dialog(monkeypatch, pick_text_substr):
     return picked
 
 
-def test_new_tab_dialog_has_exactly_three_action_buttons(monkeypatch):
+def test_new_tab_dialog_has_exactly_four_action_buttons(monkeypatch):
     monkeypatch.setattr("agent_takkub.main_window.list_project_names", lambda: [])
     host = _NewTabHost()
     picked = _stub_dialog(monkeypatch, None)
@@ -181,11 +184,151 @@ def test_new_tab_dialog_has_exactly_three_action_buttons(monkeypatch):
     MainWindow._on_new_tab_clicked(host)
 
     labels = [b.text() for b in picked["box"].buttons()]
-    assert len(labels) == 4  # existing / new-with-rules / import / cancel
+    assert len(labels) == 5  # existing / new-with-rules / import / clone / cancel
     assert any("เปิดโปรเจคที่ตั้งไว้" in t for t in labels)
     assert any("AI rules" in t for t in labels)
     assert any("Import" in t for t in labels)
+    assert any("Clone" in t for t in labels)
     assert host.calls == []  # cancelled → no downstream action fired
+
+
+def test_new_tab_dialog_routes_clone_to_clone_flow(monkeypatch):
+    monkeypatch.setattr("agent_takkub.main_window.list_project_names", lambda: [])
+    host = _NewTabHost()
+    _stub_dialog(monkeypatch, "Clone")
+
+    MainWindow._on_new_tab_clicked(host)
+
+    assert host.calls == [("clone_from_url",)]
+
+
+# ---------------------------------------------------------------------------
+# Clone from repo URL (2026-10-16)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "url, expected",
+    [
+        ("https://github.com/owner/repo.git", "repo"),
+        ("https://github.com/owner/repo", "repo"),
+        ("https://github.com/owner/repo/", "repo"),
+        ("git@github.com:owner/repo.git", "repo"),
+        ("ssh://git@host:2222/owner/my-repo.git", "my-repo"),
+        ("C:\\src\\local-repo", "local-repo"),
+        ("file:///C:/src/local.git", "local"),
+        ("", ""),
+        ("   ", ""),
+    ],
+)
+def test_repo_dir_name_from_url(url, expected):
+    from agent_takkub.project_wizard import repo_dir_name_from_url
+
+    assert repo_dir_name_from_url(url) == expected
+
+
+@pytest.mark.parametrize(
+    "text, expected",
+    [
+        ("https://github.com/owner/repo.git", True),
+        ("git@github.com:owner/repo.git", True),
+        ("owner/repo.git", True),
+        ("hello world", False),
+        ("some clipboard text", False),
+        ("", False),
+    ],
+)
+def test_looks_like_git_url(text, expected):
+    from agent_takkub.project_wizard import looks_like_git_url
+
+    assert looks_like_git_url(text) is expected
+
+
+def _make_local_repo(path):
+    """A real git repo with one commit — the clone source for the e2e test."""
+    import shutil
+    import subprocess
+
+    git = shutil.which("git")
+    if not git:
+        pytest.skip("git not on PATH")
+    path.mkdir()
+    env = {
+        "GIT_AUTHOR_NAME": "t",
+        "GIT_AUTHOR_EMAIL": "t@t",
+        "GIT_COMMITTER_NAME": "t",
+        "GIT_COMMITTER_EMAIL": "t@t",
+        "PATH": __import__("os").environ.get("PATH", ""),
+    }
+    kw = dict(cwd=str(path), env=env, check=True, capture_output=True)
+    subprocess.run([git, "init", "-q"], **kw)
+    (path / "api").mkdir()
+    (path / "README.md").write_text("hi\n", encoding="utf-8")
+    subprocess.run([git, "add", "."], **kw)
+    subprocess.run([git, "commit", "-q", "-m", "init"], **kw)
+    return path
+
+
+def test_clone_flow_clones_then_maps_and_saves(tmp_path, monkeypatch, seed_projects):
+    """End-to-end on a local repo: the worker really runs `git clone`, the
+    busy dialog closes on its own, then the import tail (map paths → save →
+    open tab) runs on the cloned folder."""
+    from PyQt6.QtWidgets import QDialog
+
+    src = _make_local_repo(tmp_path / "src-repo")
+    dest = tmp_path / "cloned-repo"
+    seed_projects(tmp_path, {})
+    host = _ImportHost()
+    monkeypatch.setattr(host, "_ask_clone_target", lambda: (str(src), dest))
+
+    def _fake_exec(self):
+        # Map-paths dialog: accept with the default (blank) keys → "main".
+        if self.windowTitle().startswith("Configure"):
+            return QDialog.DialogCode.Accepted
+        return _run_modal(self)  # busy dialog: let the worker close it
+
+    monkeypatch.setattr(QDialog, "exec", _fake_exec)
+
+    host._clone_project_from_url()
+
+    assert (dest / ".git").is_dir()
+    assert (dest / "README.md").read_text(encoding="utf-8") == "hi\n"
+    assert host.opened == ["cloned-repo"]
+    proj = config.load_projects()["projects"]["cloned-repo"]
+    assert proj["paths"] == {"main": dest.resolve().as_posix()}
+
+
+def _run_modal(dialog):
+    """Spin the event loop until the busy dialog is closed by its worker."""
+    from PyQt6.QtCore import QEventLoop, QTimer
+    from PyQt6.QtWidgets import QApplication
+
+    loop = QEventLoop()
+    dialog.finished.connect(loop.quit)
+    QTimer.singleShot(60_000, loop.quit)  # hard stop so a hung clone can't wedge CI
+    dialog.show()
+    loop.exec()
+    QApplication.processEvents()
+    return dialog.result()
+
+
+def test_clone_flow_reports_failure_and_cleans_partial_dir(tmp_path, monkeypatch, seed_projects):
+    from PyQt6.QtWidgets import QDialog, QMessageBox
+
+    dest = tmp_path / "never-cloned"
+    seed_projects(tmp_path, {})
+    host = _ImportHost()
+    monkeypatch.setattr(host, "_ask_clone_target", lambda: (str(tmp_path / "no-such-repo"), dest))
+    monkeypatch.setattr(QDialog, "exec", _run_modal)
+    warned: list[str] = []
+    monkeypatch.setattr(QMessageBox, "warning", lambda *a, **k: warned.append(a[1]))
+
+    host._clone_project_from_url()
+
+    assert warned and warned[0] == "Clone ไม่สำเร็จ"
+    assert not dest.exists()
+    assert host.opened == []
+    assert "never-cloned" not in config.load_projects()["projects"]
 
 
 def test_new_tab_dialog_routes_new_to_rules_wizard(monkeypatch):

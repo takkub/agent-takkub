@@ -90,6 +90,7 @@
         "agent_takkub.project_explorer",
         "agent_takkub.project_file_index",
         "agent_takkub.project_rules",
+        "agent_takkub.project_wizard",
         "agent_takkub.provider_install",
         "agent_takkub.provider_model_refresh",
         "agent_takkub.provider_probe",
@@ -115,7 +116,7 @@
         "agent_takkub.verify",
         "agent_takkub.worktree_manager"
       ],
-      "fan_in": 52,
+      "fan_in": 53,
       "fan_out": 0
     },
     {
@@ -4008,6 +4009,7 @@
     {
       "module": "agent_takkub.project_wizard",
       "imports": [
+        "agent_takkub._win_console",
         "agent_takkub.cockpit_theme",
         "agent_takkub.config",
         "agent_takkub.project_rules",
@@ -4017,7 +4019,7 @@
         "agent_takkub.main_window"
       ],
       "fan_in": 1,
-      "fan_out": 4
+      "fan_out": 5
     },
     {
       "module": "agent_takkub.provider_bootstrap",

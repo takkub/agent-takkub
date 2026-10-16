@@ -1479,16 +1479,18 @@ class MainWindow(
             self._status.showMessage(f"⚠ failed to persist open tabs: {e}", 8_000)
 
     def _on_new_tab_clicked(self) -> None:
-        """New-project entry point — a single dialog, 3 buttons:
+        """New-project entry point — a single dialog, 4 buttons:
 
           1. **เปิดโปรเจคที่ตั้งไว้** — open a project already configured in
              projects.json (excludes already-open ones).
           2. **โปรเจคใหม่ (AI rules)** — `_new_project_with_rules()`.
           3. **Import โฟลเดอร์** — `_import_existing_project()`.
+          4. **Clone จาก repo** — `_clone_project_from_url()` (2026-10-16):
+             paste a git URL → clone → same map-paths/open as Import.
 
         Collapses what used to be two sequential "new vs existing" dialogs
         (this one, then a second one asking "New with AI rules vs Import")
-        into one — same three end behaviors, one fewer dialog hop.
+        into one — same end behaviors, one fewer dialog hop.
         """
         from PyQt6.QtWidgets import QMessageBox
 
@@ -1502,11 +1504,13 @@ class MainWindow(
         box.setWindowTitle("โปรเจคใหม่")
         box.setText("เปิดโปรเจคที่ตั้งไว้ หรือเพิ่มโปรเจคใหม่?")
         box.setInformativeText(
-            "เลือกจากที่เคยตั้งไว้ในระบบ — หรือเพิ่มโปรเจคใหม่ (สร้างใหม่ด้วย AI rules / import โฟลเดอร์ที่มีอยู่)"
+            "เลือกจากที่เคยตั้งไว้ในระบบ — หรือเพิ่มโปรเจคใหม่ "
+            "(สร้างใหม่ด้วย AI rules / import โฟลเดอร์ที่มีอยู่ / clone จาก repo URL)"
         )
         btn_existing = box.addButton("📂 เปิดโปรเจคที่ตั้งไว้", QMessageBox.ButtonRole.AcceptRole)
         btn_new = box.addButton("✨ โปรเจคใหม่ (AI rules)", QMessageBox.ButtonRole.AcceptRole)
         btn_import = box.addButton("📁 Import โฟลเดอร์", QMessageBox.ButtonRole.AcceptRole)
+        btn_clone = box.addButton("🔗 Clone จาก repo", QMessageBox.ButtonRole.AcceptRole)
         box.addButton("ยกเลิก", QMessageBox.ButtonRole.RejectRole)
         # No existing-but-unopened project → steer straight to "add new".
         if not available:
@@ -1519,7 +1523,7 @@ class MainWindow(
         # spacer stretched across the layout's full column span is the
         # standard Qt workaround: it forces the dialog itself wide enough
         # for the button row to lay out unclipped, in both themes.
-        spacer = QSpacerItem(560, 0, QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Expanding)
+        spacer = QSpacerItem(720, 0, QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Expanding)
         grid = box.layout()
         grid.addItem(spacer, grid.rowCount(), 0, 1, grid.columnCount())
         box.exec()
@@ -1530,6 +1534,9 @@ class MainWindow(
             return
         if clicked is btn_import:
             self._import_existing_project()
+            return
+        if clicked is btn_clone:
+            self._clone_project_from_url()
             return
         if clicked is not btn_existing:
             return  # cancelled / closed

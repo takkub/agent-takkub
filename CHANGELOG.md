@@ -4,6 +4,12 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 
 ## [vNEXT]
 
+## [v2.2.22] - 2026-10-16
+
+### Added (เพิ่ม)
+
+- **โปรเจคใหม่ → "🔗 Clone จาก repo":** กรอก URL ของ repo (https/ssh) เลือกโฟลเดอร์ปลายทาง (ค่าเริ่มต้น = ข้างโปรเจคที่เปิดอยู่) ชื่อโฟลเดอร์เติมให้จาก URL (แก้ได้) แล้ว `git clone --progress` บน worker thread พร้อม progress + ปุ่มยกเลิก · clone เสร็จเข้า flow เดิมของ Import (map paths → บันทึก → เปิดแท็บ) · ล้มเหลว/ยกเลิก = ลบโฟลเดอร์ที่ clone ค้างไว้ทิ้ง ไม่แตะ registry · `GIT_TERMINAL_PROMPT=0` กันค้างรอรหัสผ่าน (ใช้ credential helper/ssh key ของเครื่อง) · clipboard ที่เป็น git URL ถูกเติมให้อัตโนมัติ · desktop เท่านั้น (มือถือไม่มีหน้า new project อยู่แล้ว)
+
 ## [v2.2.21] - 2026-10-15
 
 ### Fixed (แก้)
