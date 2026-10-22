@@ -21,6 +21,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import socket
 import sys
 import time
@@ -3586,6 +3587,166 @@ def _skill_scope(path, *, global_dir, project_central, repo_root) -> str:
     return "repo"
 
 
+def cmd_ccc(args: argparse.Namespace) -> dict:
+    """`takkub ccc index|status|env|serve|provision` — the sanctioned way to build the
+    cocoindex-code index for a project: pins the root, relocates the DB under
+    DATA_HOME, writes the local-embedding global settings `ccc init` cannot
+    write without a console, and streams `ccc index` progress. Panes receive
+    the `ccc` MCP only for projects that went through `index` here
+    (shared_dev_tools.browser_profile_mcp_config_path → ccc_store.index_ready).
+    """
+    import subprocess
+
+    from . import ccc_store
+    from ._win_console import SUBPROCESS_NO_WINDOW
+    from .config import lead_cwd
+
+    raw_root = args.cwd or lead_cwd(args.project or _from_project() or None) or os.getcwd()
+    root = Path(raw_root).expanduser().resolve()
+    env = {**os.environ, **ccc_store.env_for_root(root)}
+    if args.ccc_cmd == "serve":
+        launcher = ccc_store.ccc_server_path()
+        if launcher is None:
+            return {
+                "ok": False,
+                "msg": "cocoindex-code server launcher is not installed",
+                "quiet": True,
+            }
+        if not ccc_store.index_ready(root):
+            return {"ok": False, "msg": f"ccc index is not ready for {root}", "quiet": True}
+        return {
+            "ok": subprocess.call(
+                [launcher, "serve"], cwd=str(root), env=env, creationflags=SUBPROCESS_NO_WINDOW
+            )
+            == 0,
+            "msg": "",
+            "quiet": True,
+        }
+    if args.ccc_cmd == "env":
+        for key, value in ccc_store.env_for_root(root).items():
+            _utf8_print(f"{key}={value}")
+        return {"ok": True, "msg": "", "quiet": True}
+
+    if args.ccc_cmd == "provision":
+        runner = ccc_store.runner_mcp_config()
+        runner_command = str(runner["command"])
+        runner_args = [str(value) for value in runner["args"]]
+        runner_env = [f"{key}={value}" for key, value in dict(runner["env"]).items()]
+        results: list[str] = []
+        for provider, argv in (
+            (
+                "agy",
+                [
+                    "agy",
+                    "mcp",
+                    "add",
+                    *(item for pair in (("--env", value) for value in runner_env) for item in pair),
+                    "ccc",
+                    runner_command,
+                    *runner_args,
+                ],
+            ),
+            (
+                "opencode",
+                [
+                    "opencode",
+                    "mcp",
+                    "add",
+                    "ccc",
+                    *(item for pair in (("--env", value) for value in runner_env) for item in pair),
+                    "--",
+                    runner_command,
+                    *runner_args,
+                ],
+            ),
+        ):
+            provider_bin = shutil.which(f"{provider}.cmd") or shutil.which(provider)
+            if provider_bin is None:
+                results.append(f"{provider}: not installed (skipped)")
+                continue
+            try:
+                proc = subprocess.run(
+                    [provider_bin, *argv[1:]],
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    creationflags=SUBPROCESS_NO_WINDOW,
+                )
+            except OSError as exc:
+                results.append(f"{provider}: could not start ({exc})")
+                continue
+            detail = (proc.stdout or proc.stderr).strip().replace("\n", " ")
+            results.append(f"{provider}: {'ok' if proc.returncode == 0 else detail or 'failed'}")
+        cursor_ok, cursor_msg = ccc_store.ensure_cursor_mcp()
+        results.append(f"cursor: {cursor_msg}")
+        _utf8_print("\n".join(results))
+        return {
+            "ok": cursor_ok
+            and all(": ok" in item or "not installed" in item for item in results[:2]),
+            "msg": "",
+            "quiet": True,
+        }
+
+    launcher = ccc_store.ccc_cli_path()
+    if launcher is None:
+        return {
+            "ok": False,
+            "msg": 'ccc not installed — `uv tool install "cocoindex-code[full]"` (≈1.1 GB, local embeddings, no API key)',
+        }
+    if args.ccc_cmd == "status":
+        ready = ccc_store.index_ready(root)
+        _utf8_print(f"root:  {root}")
+        _utf8_print(f"db:    {ccc_store.db_dir(root)}")
+        _utf8_print(f"ready: {ready}")
+        proc = subprocess.run(
+            [launcher, "status"],
+            cwd=str(root),
+            env=env,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            creationflags=SUBPROCESS_NO_WINDOW,
+        )
+        _utf8_print((proc.stdout or proc.stderr).strip())
+        return {"ok": True, "msg": "", "quiet": True}
+
+    # index
+    if not root.is_dir():
+        return {"ok": False, "msg": f"not a directory: {root}"}
+    ccc_store.ensure_global_settings()
+    steps: list[list[str]] = []
+    if not ccc_store.project_settings_path(root).is_file():
+        steps.append([launcher, "init", "--force"])
+    steps.append([launcher, "index"])
+    _utf8_print(f"root: {root}\ndb:   {ccc_store.db_dir(root)}")
+    for argv in steps:
+        _utf8_print(f"$ {' '.join(argv[1:])}")
+        sys.stdout.flush()
+        proc = subprocess.run(
+            argv,
+            cwd=str(root),
+            env=env,
+            stdin=subprocess.DEVNULL,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            creationflags=SUBPROCESS_NO_WINDOW,
+        )
+        if proc.returncode != 0:
+            return {"ok": False, "msg": f"`ccc {argv[1]}` exited {proc.returncode}"}
+    ready = ccc_store.index_ready(root)
+    return {
+        "ok": ready,
+        "msg": (
+            "index ready — panes of this project get the `ccc` MCP on their next spawn"
+            if ready
+            else "ccc finished but no index found where the cockpit expects it"
+        ),
+    }
+
+
 def cmd_skills(args: argparse.Namespace) -> dict:
     """`takkub skills list|effective` (#422 item 4) — what skills exist and
     which ones a role actually receives, from the CLI instead of Settings.
@@ -6890,6 +7051,26 @@ def build_parser() -> argparse.ArgumentParser:
 
     _add_learned_parser(ssk_sub)
     ssk.set_defaults(func=cmd_skills)
+
+    sccc = sub.add_parser(
+        "ccc",
+        help="cocoindex-code semantic code search: build/inspect a project's index "
+        "(the `ccc` MCP reaches panes only for projects indexed here)",
+    )
+    sccc_sub = sccc.add_subparsers(dest="ccc_cmd", required=True)
+    for _name, _help in (
+        ("index", "run `ccc init` (if needed) + `ccc index` for the project, DB under DATA_HOME"),
+        ("status", "is the project indexed where the cockpit expects it, plus `ccc status`"),
+        ("env", "print the env the cockpit gives `ccc` for the project (for manual runs)"),
+        ("serve", "internal MCP runner; resolves the pane project and starts cocoindex-code"),
+        ("provision", "configure agy, OpenCode, and Cursor to invoke the safe ccc runner"),
+    ):
+        _p = sccc_sub.add_parser(_name, help=_help)
+        _p.add_argument("--project", default=None, help="project name (default: this pane's)")
+        _p.add_argument(
+            "--cwd", default=None, help="project root (default: the project's lead cwd)"
+        )
+    sccc.set_defaults(func=cmd_ccc)
 
     sms = sub.add_parser(
         "migrate-skills",

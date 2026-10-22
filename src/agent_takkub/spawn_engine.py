@@ -51,6 +51,7 @@ from .config import (
 from .headless_pane import HeadlessPane
 from .lead_context import (
     BIG_FILE_GUARD,
+    CCC_TOOL_CAVEATS,
     GRAFT_TOOL_CAVEATS,
     STALE_FILE_GUARD,
     _allowed_project_roots,
@@ -3715,8 +3716,11 @@ class SpawnEngineMixin:
                 try:
                     from .shared_dev_tools import role_mcp_allowlist
 
-                    if "graft" in (role_mcp_allowlist(base_role) or frozenset()):
+                    _granted = role_mcp_allowlist(base_role) or frozenset()
+                    if "graft" in _granted:
                         _appendix += GRAFT_TOOL_CAVEATS
+                    if "ccc" in _granted:
+                        _appendix += CCC_TOOL_CAVEATS
                 except Exception:
                     _log.exception(
                         "could not resolve graft MCP policy for %s; omitting graft guard",

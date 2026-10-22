@@ -391,7 +391,7 @@ class TestDenyItem:
         assert "qa" in policy
         assert "playwright" not in policy["qa"]["mcps"]
         # The role's other default MCPs are preserved, not wiped out.
-        assert set(policy["qa"]["mcps"]) == {"chrome-devtools", "graft"}
+        assert set(policy["qa"]["mcps"]) == {"chrome-devtools", "graft", "ccc"}
         effective = pane_tools_policy.effective_mcps("qa")
         assert effective is not None
         assert "playwright" not in effective

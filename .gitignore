@@ -159,3 +159,5 @@ project-skills/
 # `src/agent_takkub/core/providers/` (already-tracked files kept working, so it
 # only surfaced when `git add` refused a change in there).
 /providers/
+# CocoIndex Code (ccc)
+/.cocoindex_code/

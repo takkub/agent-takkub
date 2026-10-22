@@ -1710,6 +1710,16 @@ class Orchestrator(
             warm_graft_mcp()
         except Exception as e:
             _log_event("graft_mcp_init_error", error=repr(e))
+        # cocoindex-code (semantic code search MCP, 2026-10-22 pilot): entry
+        # exists only while the `ccc` launcher is installed; per-pane writer
+        # drops it for projects nobody ran `takkub ccc index` for.
+        try:
+            from .shared_dev_tools import ensure_ccc_mcp
+
+            ok, msg = ensure_ccc_mcp()
+            _log_event("ccc_mcp_init", ok=ok, msg=msg)
+        except Exception as e:
+            _log_event("ccc_mcp_init_error", error=repr(e))
         # #732: `codex --version` + `codex mcp list` run synchronously inside
         # every codex spawn on the Qt main thread (1-6s stalls) — fill their
         # caches in the background now so the first codex spawn is a hit.

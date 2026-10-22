@@ -2,6 +2,12 @@
 
 All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses [SemVer](https://semver.org/).
 
+## [v2.2.24] - 2026-10-22
+
+### Added (เพิ่ม)
+
+- **`ccc` — semantic code search MCP ตัวที่สองคู่กับ graft (pilot 2026-10-22, dev trial):** cocoindex-code (AST-chunk + embedding ในเครื่อง ไม่มี API key) ตอบคำถามแบบ "โค้ดที่ทำเรื่อง X" โดยไม่ต้องรู้ชื่อ symbol — วัดจริง 12 คำถามที่คำไม่ตรงโค้ด: ติด top-3 10/12 เทียบ graft `ask` 5/12 · ราคาเป็นเครื่องไม่ใช่เงิน: ติดตั้ง 1.1 GB, daemon ค้าง ~800 MB, index ครั้งแรก 47 นาที/repo นี้บน CPU (incremental 4 วิ) → `docs/audit/2026-10-22-cocoindex-code-pilot.md` · **ไม่ index เองเด็ดขาด**: pane ได้ MCP เฉพาะโปรเจคที่ผ่าน `takkub ccc index` แล้ว (root ถูก pin, DB อยู่ `DATA_HOME/cocoindex-db/`, telemetry ปิด, worktree pane ค้น main checkout ของโปรเจค) · role เดียวกับ graft (frontend/backend/mobile/devops/reviewer/qa/critic) + caveat ในระบบ prompt ว่าเมื่อไหร่ใช้ `search` เมื่อไหร่ใช้ graft · ไม่มี `ccc` ติดตั้ง = ไม่มี entry (ถอนได้ด้วย `uv tool uninstall cocoindex-code`) · ยังไม่ทำ: auto-index, macOS, `takkub doctor` row
+
 ## [v2.2.23] - 2026-10-22
 
 ### Fixed (แก้)

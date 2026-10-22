@@ -116,8 +116,11 @@ class TestEnsureGraftMcp:
 
 class TestManagedMcpNamesProtection:
     def test_managed_mcp_names_is_union_of_browser_and_graft(self) -> None:
-        assert MANAGED_MCP_NAMES == _BROWSER_MCP_NAMES | frozenset(GRAFT_MCP.keys())
+        assert MANAGED_MCP_NAMES == (
+            _BROWSER_MCP_NAMES | frozenset(GRAFT_MCP.keys()) | frozenset(sdt.CCC_MCP.keys())
+        )
         assert "graft" in MANAGED_MCP_NAMES
+        assert "ccc" in MANAGED_MCP_NAMES
 
     def test_add_mcp_server_cannot_override_graft(self, isolated_mcp_file: pathlib.Path) -> None:
         ok, _ = ensure_graft_mcp()
@@ -220,7 +223,7 @@ class TestCodexDenyByDefaultWithGraftPolicy:
         for role in ("backend", "frontend", "mobile", "devops", "reviewer"):
             allowlist = role_mcp_allowlist(role)
             assert allowlist is not None, f"{role} lost its explicit MCP policy"
-            assert allowlist == frozenset({"graft"})
+            assert allowlist == frozenset({"graft", "ccc"})
 
 
 class TestRegisteredRoleNeverPassthrough:
@@ -471,3 +474,84 @@ class TestGraftInjectionGate:
         data = json.loads(pathlib.Path(path).read_text(encoding="utf-8"))
         assert "graft" in data["mcpServers"]
         assert "--dir" in data["mcpServers"]["graft"]["args"]
+
+
+class TestCccMcp:
+    """cocoindex-code (`ccc`) — second code MCP, 2026-10-22 pilot. Same
+    contract as graft: managed name, same roles, and a per-pane gate that
+    drops the server unless the project was indexed through `takkub ccc
+    index` — because `ccc mcp` would otherwise seed a brand-new project in
+    the pane's cwd and start a first index that runs for tens of minutes."""
+
+    def test_not_written_when_launcher_missing(self, isolated_mcp_file, monkeypatch) -> None:
+        monkeypatch.setattr(sdt, "ccc_cli_path", lambda: None)
+        ok, msg = sdt.ensure_ccc_mcp()
+        assert ok and "not installed" in msg
+        assert not isolated_mcp_file.exists() or "ccc" not in _read(isolated_mcp_file).get(
+            "mcpServers", {}
+        )
+
+    def test_written_when_installed_and_removed_when_gone(
+        self, isolated_mcp_file, monkeypatch
+    ) -> None:
+        monkeypatch.setattr(sdt, "ccc_cli_path", lambda: r"C:\fake\ccc.exe")
+        ok, _ = sdt.ensure_ccc_mcp()
+        assert ok
+        assert _read(isolated_mcp_file)["mcpServers"]["ccc"] == sdt.CCC_MCP["ccc"]
+        ok, msg = sdt.ensure_ccc_mcp()
+        assert ok and "already present" in msg
+        monkeypatch.setattr(sdt, "ccc_cli_path", lambda: None)
+        ok, msg = sdt.ensure_ccc_mcp()
+        assert ok and "-ccc" in msg
+        assert "ccc" not in _read(isolated_mcp_file)["mcpServers"]
+
+    def test_managed_and_same_roles_as_graft(self) -> None:
+        assert "ccc" in MANAGED_MCP_NAMES
+        for role, mcps in _ROLE_MCP_POLICY.items():
+            assert ("ccc" in mcps) == ("graft" in mcps), role
+
+    def test_dropped_until_project_indexed_then_pinned(
+        self, isolated_mcp_file, tmp_path, monkeypatch
+    ) -> None:
+        from agent_takkub import ccc_store
+
+        monkeypatch.setattr(sdt, "ccc_cli_path", lambda: r"C:\fake\ccc.exe")
+        monkeypatch.setattr(sdt, "ccc_server_path", lambda: r"C:\fake\cocoindex-code.exe")
+        monkeypatch.setattr(ccc_store, "DATA_HOME", tmp_path / "home")
+        ok, _ = sdt.ensure_ccc_mcp()
+        assert ok
+        target = tmp_path / "proj-root"
+        target.mkdir()
+
+        path = sdt.browser_profile_mcp_config_path("backend", None, "proj", str(target))
+        assert "ccc" not in json.loads(pathlib.Path(path).read_text(encoding="utf-8"))["mcpServers"]
+
+        # `takkub ccc index` ran: settings in the project, DB under DATA_HOME.
+        ccc_store.project_settings_path(target).parent.mkdir(parents=True)
+        ccc_store.project_settings_path(target).write_text("x", encoding="utf-8")
+        db = ccc_store.db_dir(target)
+        db.mkdir(parents=True)
+        (db / ccc_store.INDEX_DB_FILE).write_bytes(b"")
+
+        path = sdt.browser_profile_mcp_config_path("backend", None, "proj", str(target))
+        cfg = json.loads(pathlib.Path(path).read_text(encoding="utf-8"))["mcpServers"]["ccc"]
+        assert cfg["command"] == r"C:\fake\cocoindex-code.exe"
+        assert cfg["args"] == ["serve"]
+        assert cfg["env"]["COCOINDEX_CODE_ROOT_PATH"] == str(target.resolve())
+        assert cfg["env"]["COCOINDEX_CODE_DB_PATH_MAPPING"].endswith(str(db))
+        assert cfg["env"]["COCOINDEX_DISABLE_USAGE_TRACKING"] == "1"
+
+    def test_worktree_pane_searches_main_checkout(self, tmp_path, monkeypatch) -> None:
+        from agent_takkub import ccc_store, worktree_manager
+
+        monkeypatch.setattr(worktree_manager, "DATA_HOME", tmp_path)
+        main = tmp_path / "main-checkout"
+        main.mkdir()
+        monkeypatch.setattr(ccc_store, "lead_cwd", lambda project=None: str(main), raising=False)
+        import agent_takkub.config as _config
+
+        monkeypatch.setattr(_config, "lead_cwd", lambda project=None: str(main))
+        wt = worktree_manager.worktree_root("proj") / "backend-1"
+        wt.mkdir(parents=True)
+        assert ccc_store.project_root_for_pane(wt, "proj") == main.resolve()
+        assert ccc_store.project_root_for_pane(main, "proj") == main.resolve()

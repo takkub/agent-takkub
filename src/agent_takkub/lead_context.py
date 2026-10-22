@@ -128,6 +128,15 @@ BIG_FILE_GUARD = """
 # conditional instead of unconditional. Wording is the condensed version
 # already proven in qa.md/critic.md (shorter than the original verbose copy
 # in the other 5 role files, same substantive content).
+CCC_TOOL_CAVEATS = """
+
+---
+
+## `ccc` (semantic code search) — ใช้คู่กับ graft ไม่ใช่แทนกัน
+- **หา "โค้ดที่ทำเรื่อง X" โดยไม่รู้ชื่อ symbol** → `ccc` tool `search` (ถามเป็นประโยค ภาษาคน เช่น "where is a pane judged to be stuck") ได้ chunk ระดับฟังก์ชันพร้อม path:line — ประหยัดกว่าอ่านทั้งไฟล์
+- **รู้ชื่อ symbol แล้ว อยากรู้ใครเรียก / โครงไฟล์** → `graft` (`callers`, `skeleton`) — `ccc` ไม่มี call-graph
+- ผลจาก `search` เป็น ranked guess ไม่ exhaustive และ index อาจเก่ากว่าไฟล์ที่เพิ่งแก้ — ใช้ `refresh_index: true` ครั้งเดียวต่อ task เมื่อสงสัย (incremental ~4 วิ) แล้ว grep/อ่านไฟล์จริงก่อนสรุป · ห้าม index โปรเจคอื่นเอง (`ccc init`/`ccc index` นอก `takkub ccc index`)"""
+
 GRAFT_TOOL_CAVEATS = """
 
 ---
