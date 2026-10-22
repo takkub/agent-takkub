@@ -34,7 +34,12 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 from .config import EVENTS_LOG
-from .maintenance import ROUTINE_EVENT_REASONS
+from .maintenance import (
+    PROCESS_PAUSE_MARKER_EVENT,
+    ROUTINE_EVENT_REASONS,
+    collect_event_stamps,
+    stall_is_process_pause,
+)
 
 # How far back each scan looks, and how often it runs. A 6h window is long
 # enough that a genuine defect clears the bar and short enough that yesterday's
@@ -119,6 +124,11 @@ class SignalRule:
     # #871: skip this rule when the named rule fired in the same scan — two
     # rules on one event must not file two issues about one problem.
     superseded_by: str | None = None
+    # #884-#887: for a `main_thread_stall` rule — skip records that describe a
+    # process-wide pause (machine saturated / asleep) rather than the Qt
+    # thread stuck on I/O; `maintenance.stall_is_process_pause` is the one
+    # verdict shared with `takkub ma`, so the two never disagree.
+    skip_process_pauses: bool = False
 
 
 # Each `min_count` is stated against what the reference box actually produced,
@@ -174,8 +184,10 @@ RULES: tuple[SignalRule, ...] = (
         title="UI ค้างยาวและบ่อยผิดปกติ",
         why=(
             "ก่อนแก้ #291 วัดได้ 1,448 ครั้ง/6 ชม. สูงสุด 21s — หลังแก้เหลือ 13 ครั้ง/ชม. "
-            "สูงสุด 3.3s เกณฑ์นี้จึงเงียบตอนปกติ และดังตอนที่ #291 กลับมา"
+            "สูงสุด 3.3s เกณฑ์นี้จึงเงียบตอนปกติ และดังตอนที่ #291 กลับมา · ไม่นับ whole_process "
+            "และ stall ที่ติดกับ sleep-gap marker (#884-#887: เครื่องอิ่มทั้งเครื่อง ไม่ใช่โค้ด)"
         ),
+        skip_process_pauses=True,
     ),
     SignalRule(
         key="main_thread_stall_long",
@@ -186,11 +198,11 @@ RULES: tuple[SignalRule, ...] = (
         title="UI ค้างนานเกิน 10 วิ",
         why=(
             "#871: 2.2.17 ค้าง 16.2 วิ แต่ไม่ถึงเกณฑ์จำนวน (≥40/6 ชม.) จึงเงียบ — ครั้งเดียวที่นานขนาดนี้ "
-            "ผู้ใช้เห็นแน่นอน · ไม่นับ whole_process (watchdog หยุดไปด้วย = เครื่อง sleep/OS throttle)"
+            "ผู้ใช้เห็นแน่นอน · ไม่นับ whole_process (watchdog หยุดไปด้วย = เครื่อง sleep/OS throttle) "
+            "และไม่นับ stall ที่ติดกับ sleep-gap marker ±120 s (#884-#887)"
         ),
-        ignore_field="whole_process",
-        ignore_values=frozenset({"True"}),
         superseded_by="main_thread_stall_severe",
+        skip_process_pauses=True,
     ),
     SignalRule(
         key="auto_migrate_rolled_back",
@@ -245,6 +257,12 @@ def scan_for_signals(
     samples: dict[str, list[str]] = {}
     # #427: last counted stamp per (rule, chain value) for chain collapsing.
     last_chain: dict[tuple[str, str], datetime] = {}
+    # #884-#887: sleep-gap markers, read once up front, only when a rule cares.
+    pause_marks: list[datetime] = (
+        collect_event_stamps(path, PROCESS_PAUSE_MARKER_EVENT, cutoff)
+        if any(r.skip_process_pauses for r in rules)
+        else []
+    )
     try:
         with path.open(encoding="utf-8", errors="replace") as fh:
             for line in fh:
@@ -267,6 +285,8 @@ def scan_for_signals(
                     if rule.ignore_field is not None and (
                         str(rec.get(rule.ignore_field) or "") in rule.ignore_values
                     ):
+                        continue
+                    if rule.skip_process_pauses and stall_is_process_pause(rec, stamp, pause_marks):
                         continue
                     if rule.field is not None:
                         try:

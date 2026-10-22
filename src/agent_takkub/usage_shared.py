@@ -26,6 +26,7 @@ import json
 import logging
 import os
 import sys
+import threading
 import time
 import uuid
 from collections.abc import Callable, Iterator
@@ -41,6 +42,11 @@ _LOCK_STALE_S = 10.0
 _LEASE_TTL_S = 45.0
 # One id per process so a lease is attributable to who took it.
 _PROC_ID = f"{os.getpid()}-{uuid.uuid4().hex[:8]}"
+# Writers inside ONE process queue here before touching the O_EXCL lock file,
+# so they never race each other into `_file_lock`'s 2 s best-effort fallback
+# (CI windows runner, 6 threads × 15 updates: 4 updates lost — PR #889). The
+# file lock stays the cross-process mutex.
+_PROC_LOCK = threading.Lock()
 
 
 # ── location ─────────────────────────────────────────────────────────────────
@@ -203,7 +209,7 @@ def update_record(
     """Locked read-modify-write; returns (record after, mutate's return).
     Atomic replace (never append — Windows concurrent-append lost writes)."""
     path = _record_path(provider, identity)
-    with _file_lock(path):
+    with _PROC_LOCK, _file_lock(path):
         rec = read_record(provider, identity)
         result = mutate(rec)
         body = {k: rec[k] for k in _blank()}

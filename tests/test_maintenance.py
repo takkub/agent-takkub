@@ -51,6 +51,51 @@ class TestScanEvents:
         assert check.data["severe"] == {"stuck_pane_recover": 1, "verify_failed": 1}
         assert check.data["warn"] == {"main_thread_stall": 1}
 
+    def test_stall_next_to_sleep_gap_marker_is_a_process_pause_not_ui_stall(
+        self, tmp_path: Path
+    ) -> None:
+        """#884-#887: a stall logged within ±120 s of
+        `watchdog_clock_sleep_gap_absorbed` is the tail of the same machine-
+        wide pause — reported on the 'ทั้ง process หยุด' line, never as 🟡 UI
+        ค้าง, never as the worst UI stall. A stall far from any marker still is."""
+        now = datetime(2026, 10, 16, 14, 40, 0)
+        log = _write_events(
+            tmp_path / "events.log",
+            [
+                {
+                    "ts": datetime(2026, 10, 16, 14, 37, 32).isoformat(),
+                    "event": "watchdog_clock_sleep_gap_absorbed",
+                    "gap_s": 80,
+                },
+                {
+                    "ts": datetime(2026, 10, 16, 14, 38, 3).isoformat(),
+                    "event": "main_thread_stall",
+                    "duration_ms": 25984,
+                    "watchdog_gap_ms": 18203,
+                    "stack": ["pathlib.py:stat:1013"],
+                },
+                {
+                    # Far from any marker, but the watchdog overslept 7.5 s.
+                    "ts": datetime(2026, 10, 16, 13, 10, 59).isoformat(),
+                    "event": "main_thread_stall",
+                    "duration_ms": 29890,
+                    "watchdog_gap_ms": 7484,
+                },
+                {
+                    "ts": datetime(2026, 10, 16, 14, 20, 0).isoformat(),
+                    "event": "main_thread_stall",
+                    "duration_ms": 2500,
+                    "watchdog_gap_ms": 40,
+                    "stack": ["agent_takkub/x.py:f:1"],
+                },
+            ],
+        )
+        check = maintenance.scan_events(log, since_hours=2, now=now)
+        assert check.data["warn"] == {"main_thread_stall": 1}
+        assert check.data["worst_stall_ms"] == 2500
+        assert check.data["process_paused"] == 2
+        assert any("ทั้ง process หยุด" in d and "×2" in d and "29.9s" in d for d in check.details)
+
     def test_routine_delivery_failure_is_not_severe(self, tmp_path: Path) -> None:
         """#870: a teammate's own `takkub done --fail` logs
         `task_delivery_failed reason=agent_reported_failed` — the task did

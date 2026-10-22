@@ -349,6 +349,13 @@ def _watchdog_should_exit(heartbeat_ts: float, now: float, timeout_s: float) -> 
 # #871: a stall is tagged `whole_process` when the watchdog's own oversleep
 # covers at least this share of it (see `_StallTracker.update`).
 _WHOLE_PROCESS_GAP_RATIO = 0.8
+# #884-#887: ...or when the watchdog overslept by this much in absolute terms.
+# Measured on prod 2026-10-14→18: 47 stalls ≥ 10 s carried watchdog gaps of
+# 3–23 s yet only 8 met the 0.8 ratio, so 39 were filed as "main thread stuck
+# on I/O" with stacks all over the place (stat, which, deepcopy, pyte…). A
+# watchdog thread that cannot run for seconds means the whole process was
+# starved (machine saturated by a browser e2e batch), whatever the ratio.
+_WHOLE_PROCESS_GAP_ABS_S = 2.0
 
 
 class _StallTracker:
@@ -401,7 +408,10 @@ class _StallTracker:
             }
             if self._max_gap > 0:
                 rec["watchdog_gap_ms"] = round(self._max_gap * 1000)
-                if self._max_gap >= _WHOLE_PROCESS_GAP_RATIO * self._peak:
+                if (
+                    self._max_gap >= _WHOLE_PROCESS_GAP_RATIO * self._peak
+                    or self._max_gap >= _WHOLE_PROCESS_GAP_ABS_S
+                ):
                     rec["whole_process"] = True
             self._max_gap = 0.0
             if self._stack:

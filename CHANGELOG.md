@@ -2,7 +2,12 @@
 
 All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses [SemVer](https://semver.org/).
 
-## [vNEXT]
+## [v2.2.23] - 2026-10-22
+
+### Fixed (แก้)
+
+- **auto-issue "UI ค้างนานเกิน 10 วิ" เปิดใบจาก process ที่ถูกเครื่องแช่ (#884 #885 #886 #887):** prod 14–18 ต.ค. มี stall ≥ 10 s 47 ครั้ง — 31 ครั้งอยู่ติดกับ `watchdog_clock_sleep_gap_absorbed` (orchestrator เห็นนาฬิกากระโดด 30–98 s) และ stack บน main thread กระจายไปทุกที่ (`pathlib.stat`, `shutil.which`, `deepcopy`, pyte …) = ทั้ง process ถูก starve ระหว่าง batch ที่มี Chrome e2e + 2–3 pane ไม่ใช่โค้ดเส้นใดติด I/O · แต่ `whole_process` ติดเฉพาะเมื่อ watchdog หลับ ≥ 80% ของ episode จึงมีแค่ 8/47 ที่ถูกจัดถูก · ตอนนี้ (1) watchdog หลับ ≥ 2 s = `whole_process` ไม่ว่าสัดส่วน (2) auto-issue ทั้ง 2 rule ของ stall และ `takkub ma` ใช้คำตัดสินเดียวกัน (`maintenance.stall_is_process_pause`: whole_process / gap ≥ 2 s ใน record เก่า / อยู่ภายใน ±120 s ของ sleep-gap marker) และ ma แยกบรรทัด "ทั้ง process หยุด (เครื่องอิ่ม/sleep/OS throttle — ไม่ใช่โค้ด cockpit)" ออกจาก 🟡 UI ค้าง ไม่นับซ้ำ
+- **`tests/test_usage_shared.py::test_concurrent_writers_lose_no_updates` flaky บน CI Windows (PR #889 แดง `assert 86 == 90`):** `_file_lock` รอได้ 2 s แล้วปล่อยให้เขียนแบบ best-effort — 6 thread ใน process เดียวแย่ง O_EXCL กันเองบน runner ที่ช้าจน update หาย · เพิ่ม `threading.Lock` ระดับ process หน้า file lock ใน `update_record` (file lock ยังเป็น mutex ข้าม process)
 
 ## [v2.2.22] - 2026-10-16
 

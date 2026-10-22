@@ -72,6 +72,44 @@ class TestThresholds:
         log = _log(tmp_path / "events.log", [rec])
         assert sig.scan_for_signals(log, now=now) == []
 
+    def test_stall_next_to_sleep_gap_marker_does_not_fire(self, tmp_path: Path) -> None:
+        """#884-#887: prod 2026-10-16 14:38:03 logged a 26 s stall (stack:
+        pathlib.stat) 31 s after the orchestrator absorbed an 80 s clock
+        jump — the machine was paused, not the Qt thread. Both stall rules
+        must skip it; the same stall without a marker nearby still fires."""
+        now = datetime(2026, 10, 16, 14, 40, 0)
+        stall = {
+            "ts": datetime(2026, 10, 16, 14, 38, 3).isoformat(),
+            "event": "main_thread_stall",
+            "duration_ms": 25984,
+            "watchdog_gap_ms": 18203,
+            "stack": ["pathlib.py:stat:1013"],
+        }
+        marker = {
+            "ts": datetime(2026, 10, 16, 14, 37, 32).isoformat(),
+            "event": "watchdog_clock_sleep_gap_absorbed",
+            "gap_s": 80,
+        }
+        log = _log(tmp_path / "events.log", [marker, stall])
+        assert sig.scan_for_signals(log, now=now) == []
+        severe_burst = [
+            stall | {"ts": (now - timedelta(seconds=90 - i)).isoformat()} for i in range(45)
+        ]
+        _log(log, [marker, *severe_burst])
+        assert sig.scan_for_signals(log, now=now) == []
+
+        # No marker nearby, but the watchdog itself overslept 18 s — a record
+        # written before app.py tagged such gaps `whole_process` (prod 10-16
+        # 13:10–13:33: ten stalls like this, gaps 2.6–23 s, zero markers).
+        _log(log, [stall])
+        assert sig.scan_for_signals(log, now=now) == []
+
+        # A genuine main-thread stall: watchdog on time, no marker → fires.
+        _log(log, [stall | {"watchdog_gap_ms": 32}])
+        assert [h.rule.key for h in sig.scan_for_signals(log, now=now)] == [
+            "main_thread_stall_long"
+        ]
+
     def test_repeated_watchdog_respawn_fires(self, tmp_path: Path) -> None:
         now = datetime(2026, 8, 18, 12, 0, 0)
         log = _log(

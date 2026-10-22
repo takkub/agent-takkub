@@ -122,6 +122,64 @@ def _idle_thread_entry(entry: str) -> bool:
 # just counting — below it, a stall is background noise on a busy box.
 _STALL_CALLOUT_MS = 2000
 
+# #884-#887: the orchestrator logs this when its own wall clock jumped by
+# WATCHDOG_SLEEP_GAP_THRESHOLD_S or more between two ticks — the whole process
+# (or the machine) was paused. A `main_thread_stall` that ends within this many
+# seconds of such a marker is the tail of that same pause, not the Qt thread
+# stuck on I/O: on prod 2026-10-16 the 35 stalls ≥ 10 s all sat next to
+# sleep-gap markers of 30–98 s while a browser e2e batch saturated the box.
+PROCESS_PAUSE_MARKER_EVENT = "watchdog_clock_sleep_gap_absorbed"
+PROCESS_PAUSE_MARKER_WINDOW_S = 120.0
+# Same bar as app._WHOLE_PROCESS_GAP_ABS_S (2.0 s), applied here to records
+# written before that rule existed: a watchdog that overslept this long did
+# not merely miss a busy main thread — nothing in the process was running.
+PROCESS_PAUSE_GAP_MS = 2000
+
+
+def stall_is_process_pause(rec: dict, ts: datetime, pause_marks: list[datetime]) -> bool:
+    """One verdict for `takkub ma` and the auto-issue scanner (#884-#887): a
+    `main_thread_stall` record describes a process-wide pause when the
+    watchdog said so (`whole_process`), when its own oversleep reached
+    `PROCESS_PAUSE_GAP_MS`, or when it ended within
+    `PROCESS_PAUSE_MARKER_WINDOW_S` of a sleep-gap marker."""
+    if rec.get("whole_process"):
+        return True
+    try:
+        gap_ms = float(rec.get("watchdog_gap_ms") or 0)
+    except (TypeError, ValueError):
+        gap_ms = 0.0
+    if gap_ms >= PROCESS_PAUSE_GAP_MS:
+        return True
+    return near_any(ts, pause_marks, PROCESS_PAUSE_MARKER_WINDOW_S)
+
+
+def collect_event_stamps(log_path: Path, event: str, cutoff: datetime) -> list[datetime]:
+    """Timestamps of every `event` record at/after `cutoff` (pure read; [] on
+    any I/O error so a caller never fails on a missing/unreadable log)."""
+    stamps: list[datetime] = []
+    try:
+        with log_path.open(encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                if event not in line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if str(rec.get("event") or "") != event:
+                    continue
+                ts = _parse_ts(rec.get("ts"))
+                if ts is not None and ts >= cutoff:
+                    stamps.append(ts)
+    except OSError:
+        return []
+    return stamps
+
+
+def near_any(stamp: datetime, stamps: list[datetime], window_s: float) -> bool:
+    """True when `stamp` lies within ±`window_s` of any entry in `stamps`."""
+    return any(abs((stamp - other).total_seconds()) <= window_s for other in stamps)
+
 
 @dataclass
 class Check:
@@ -402,6 +460,8 @@ def scan_events(log_path: Path, since_hours: float = 24.0, now: datetime | None 
     recover_reasons: Counter[str] = Counter()  # #422: `<event>:<reason>` buckets
     routine: Counter[str] = Counter()  # #870: `<event>:<reason>` not counted as 🔴/🟡
     whole_process_stalls: list[int] = []  # #871: duration_ms of process-wide pauses
+    # #884-#887: stalls next to a sleep-gap marker are the same pause.
+    pause_marks = collect_event_stamps(log_path, PROCESS_PAUSE_MARKER_EVENT, cutoff)
     total = 0
     try:
         with log_path.open(encoding="utf-8", errors="replace") as fh:
@@ -418,18 +478,24 @@ def scan_events(log_path: Path, since_hours: float = 24.0, now: datetime | None 
                     continue
                 total += 1
                 name = str(rec.get("event") or "")
+                # #871: the watchdog itself was paused too — the process as a
+                # whole stopped (sleep / OS throttling / native GIL hold), so
+                # no thread snapshot taken on wake names a culprit. #884-#887:
+                # same verdict for a stall that ends right next to a sleep-gap
+                # marker — the record predates the wider `whole_process` rule
+                # or the pause ran longer than the watchdog's absorb threshold.
+                process_paused = name == "main_thread_stall" and stall_is_process_pause(
+                    rec, ts, pause_marks
+                )
                 if is_routine_event(rec):
                     routine[f"{name}:{rec.get(ROUTINE_EVENT_REASONS[name][0])}"] += 1
                 elif name in _SEVERE_EVENTS:
                     severe[name] += 1
                     if name.endswith("_pane_recover"):
                         recover_reasons[str(rec.get("reason") or "unclassified")] += 1
-                elif name in _WARN_EVENTS:
+                elif name in _WARN_EVENTS and not process_paused:
                     warn[name] += 1
-                if name == "main_thread_stall" and rec.get("whole_process"):
-                    # #871: the watchdog itself was paused too — the process
-                    # as a whole stopped (sleep / OS throttling / native GIL
-                    # hold), so no thread snapshot taken on wake names a culprit.
+                if process_paused:
                     whole_process_stalls.append(int(rec.get("duration_ms") or 0))
                 elif name == "main_thread_stall":
                     ms = int(rec.get("duration_ms") or 0)
@@ -471,7 +537,7 @@ def scan_events(log_path: Path, since_hours: float = 24.0, now: datetime | None 
         )
     if whole_process_stalls:
         details.append(
-            f"ทั้ง process หยุด (sleep/OS throttle/native ถือ GIL — ไม่ใช่ main thread ติด I/O)"
+            f"ทั้ง process หยุด (เครื่องอิ่ม/sleep/OS throttle — ไม่ใช่โค้ด cockpit ติด I/O)"
             f" ×{len(whole_process_stalls)} นานสุด {max(whole_process_stalls) / 1000:.1f}s"
         )
     details += stall_callouts[-5:]
@@ -502,7 +568,12 @@ def scan_events(log_path: Path, since_hours: float = 24.0, now: datetime | None 
         status,
         summary,
         details,
-        {"severe": dict(severe), "warn": dict(warn), "worst_stall_ms": worst_stall},
+        {
+            "severe": dict(severe),
+            "warn": dict(warn),
+            "worst_stall_ms": worst_stall,
+            "process_paused": len(whole_process_stalls),
+        },
     )
 
 

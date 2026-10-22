@@ -711,6 +711,19 @@ class TestStallTracker:
         assert rec["whole_process"] is True
         assert rec["watchdog_gap_ms"] == 15800
 
+    def test_seconds_of_watchdog_oversleep_is_whole_process_regardless_of_ratio(self) -> None:
+        """#884-#887: prod 2026-10-16 — a 26 s stall whose watchdog gap was
+        18.2 s (0.7 of the peak, under the 0.8 ratio) was filed as "main
+        thread stuck in pathlib.stat". A watchdog thread that cannot run
+        for seconds means the whole process was starved, ratio or not."""
+        t = self._t()
+        t.update(25.984, False, loop_gap=18.203)
+        rec = t.update(0.0, False)
+        assert rec["whole_process"] is True
+        # Sub-second oversleep (normal scheduling jitter) still is not.
+        t.update(6.0, False, loop_gap=0.9)
+        assert "whole_process" not in t.update(0.0, False)
+
     def test_on_time_watchdog_is_a_main_thread_stall(self) -> None:
         t = self._t()
         t.update(6.0, False, loop_gap=0.01)
