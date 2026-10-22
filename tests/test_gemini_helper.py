@@ -394,12 +394,18 @@ class TestResolveAgyProjectId:
         assert gemini_helper.resolve_agy_project_id(str(repo)) == "p1"
         assert gemini_helper.resolve_agy_project_id(str(repo)) == "p1"
         assert reads == ["p1.json"]
-        # A rewritten file (new size) is parsed again.
+        # A rewritten file (new size) is parsed again. The cache key is
+        # (mtime_ns, size), so the rewrite MUST change the size: "p1" → "p2"
+        # kept it identical and the two writes can land in the same mtime
+        # tick on a fast CI disk (windows-latest, PR #891: got 'p1', wanted
+        # 'p2') — a flaky test, not a cache bug.
         (config_dir / "p1.json").write_text(
-            json.dumps({"id": "p2", "projectResources": {"resources": [{"folderUri": uri}]}}),
+            json.dumps(
+                {"id": "p2-rewritten", "projectResources": {"resources": [{"folderUri": uri}]}}
+            ),
             encoding="utf-8",
         )
-        assert gemini_helper.resolve_agy_project_id(str(repo)) == "p2"
+        assert gemini_helper.resolve_agy_project_id(str(repo)) == "p2-rewritten"
 
     def test_no_config_dir_returns_none(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
