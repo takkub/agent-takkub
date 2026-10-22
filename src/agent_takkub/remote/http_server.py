@@ -390,6 +390,9 @@ _ALLOWED_SSE_EVENTS = frozenset(
         # -> `LeadNotifier._on_report_shared` — a report to render as a
         # native attachment card in the PWA feed.
         "report",
+        # #895: cockpit-side notice about the Lead pane (e.g. a self-denying
+        # permission prompt) — rendered as a `sys` pill, not Lead's voice.
+        "notice",
     }
 )
 

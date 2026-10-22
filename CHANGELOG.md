@@ -2,6 +2,14 @@
 
 All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses [SemVer](https://semver.org/).
 
+## [v2.2.25] - 2026-10-22
+
+### Fixed (แก้)
+
+- **codex pane crash ตอนบูตเมื่อ role มี remote HTTP MCP (#897):** server แบบ `{"type":"http","url","headers"}` (เช่น figma) เคยถูกส่งเข้า codex เหลือแค่ `startup_timeout_sec` → codex 0.163 "invalid transport" exit 1 → respawn-capped · ตอนนี้แปลงเป็น `url` + `http_headers` (ยืนยันกับ binary จริงว่าเป็น `streamable_http`) ส่วน SSE/transport ที่ codex ไม่มีจะถูกข้ามพร้อม warning แทนการทำให้บูตล้ม
+- **Lead โดน cli_server ปฏิเสธทุกคำสั่งว่า "settings changed" ทั้งที่ `context status` ready (#890):** roster ใน revision ของ readiness มาจาก custom roles ที่ลงทะเบียนในหน่วยความจำ ซึ่งมีแค่ cockpit (boot hook) — CLI process ใหม่ไม่มี จึงได้ revision คนละค่าเสมอเมื่อเครื่องมี custom role · `team_preset._custom_role_names()` รวม registry บนดิสก์ด้วย ทั้งสอง process จึงเห็น roster เดียวกัน (ยืนยันกับ cockpit ที่รันอยู่โดยไม่ restart)
+- **permission prompt แบบ auto-deny บน Lead pane ไม่มีคำอธิบาย (#895):** #877 ข้าม Lead ไป · ตอนนี้ log `permission_prompt_auto_deny` และแจ้ง user ทาง status bar + Remote (SSE `notice` แสดงเป็น pill `sys`) ไม่ยัดเข้า inbox ของ Lead เอง · PWA cache v48
+
 ## [v2.2.24] - 2026-10-22
 
 ### Added (เพิ่ม)

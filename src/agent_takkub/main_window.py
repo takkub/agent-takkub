@@ -279,6 +279,9 @@ class MainWindow(
         self.orch.crossTabDone.connect(self._on_cross_tab_done)
         self.orch.leadNotified.connect(self._on_lead_notified)
         self.orch.leadUnavailable.connect(self._on_lead_unavailable)
+        self.orch.leadAutoDenyNotice.connect(
+            lambda _project, text: self._status.showMessage(text, 15_000)
+        )
         self.orch.sessionCapNotice.connect(self._on_session_cap_notice)
         self.orch.taskBudgetNotice.connect(self._on_task_budget_notice)
         self.orch.taskDisciplineConfirmation.connect(self._confirm_task_discipline)

@@ -102,6 +102,19 @@ def test_auto_enables_core_and_keeps_extra_positions_off():
     assert all(cfg["roles"][r] is False for r in team_preset.EXTRA_POSITION_ROLES)
 
 
+def test_890_disk_custom_roles_count_without_in_process_registration(tmp_path, monkeypatch):
+    """#890: only the cockpit registers custom roles in-process; a fresh CLI
+    must still resolve the same roster or the Lead readiness revision splits."""
+    from agent_takkub import custom_roles
+    from agent_takkub.roles import Role
+
+    monkeypatch.setattr(custom_roles, "path", lambda: tmp_path / "registry.json")
+    assert custom_roles.save_custom_roles(
+        {"data-eng": Role(name="data-eng", label="D", color="#123456", column=2, row=99)}
+    )
+    assert team_preset.current("proj")["roles"]["data-eng"] is False
+
+
 def test_set_current_rejects_unknown_preset():
     with pytest.raises(ValueError):
         team_preset.set_current("nope", "proj")

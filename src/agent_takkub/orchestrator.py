@@ -1628,6 +1628,9 @@ class Orchestrator(
     # panes-as-tabs layout shows only one pane at a time.
     leadNotified = pyqtSignal(str)  # project_ns
     leadUnavailable = pyqtSignal(str, str)  # project_ns, reason; UI-only immediate alert
+    # #895: UI/Remote-only — Lead's own screen shows a self-denying permission
+    # prompt the user might otherwise try to answer.
+    leadAutoDenyNotice = pyqtSignal(str, str)  # project_ns, text
     # #390: `takkub report publish --send` -> `push_report()` emits this so
     # `remote.notify.LeadNotifier` (the only thing holding a reference to the
     # SSE broadcaster) can push it to the connected mobile PWA as a native
@@ -16557,7 +16560,7 @@ class Orchestrator(
         waiting = picker_question_on_screen(getattr(pane, "session", None), provider)
         if ps is None and waiting:
             ps = self._ps(key)
-        if waiting and not ps.picker_wait_notice_active and role != LEAD.name:
+        if waiting and not ps.picker_wait_notice_active:
             from .provider_spec import auto_deny_prompt_on_screen
 
             auto_deny = auto_deny_prompt_on_screen(getattr(pane, "session", None))
@@ -16572,6 +16575,16 @@ class Orchestrator(
                     project=project,
                     line=auto_deny[:160],
                 )
+            if auto_deny and role == LEAD.name:
+                # #895: the Lead is the pane the user watches (often from the
+                # phone) — explain it to the user via status bar + Remote,
+                # never as a lead_notice into the Lead's own inbox.
+                self.leadAutoDenyNotice.emit(
+                    project,
+                    f"🛡 Lead ติด permission prompt ที่จะ auto-deny เอง — ไม่ต้องตอบ "
+                    f'("{auto_deny[:120]}") Lead จะเขียนคำสั่งใหม่เมื่อหมดเวลา',
+                )
+            elif auto_deny:
                 self._notify_lead(
                     project,
                     f"🛡 {role} ติด permission prompt ที่จะ auto-deny เอง — ไม่ต้องมีใครตอบ "
@@ -16581,7 +16594,7 @@ class Orchestrator(
                     note="permission-prompt-auto-deny",
                     kind="permission-prompt-auto-deny",
                 )
-            else:
+            elif role != LEAD.name:
                 self._notify_lead(
                     project,
                     f"⏳ {role} รอผู้ใช้ตอบคำถาม",

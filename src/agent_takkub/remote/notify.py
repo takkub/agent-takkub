@@ -2380,6 +2380,9 @@ class LeadNotifier(QObject):
         report_shared = getattr(orch, "reportShared", None)
         if report_shared is not None:
             report_shared.connect(self._on_report_shared)
+        auto_deny = getattr(orch, "leadAutoDenyNotice", None)
+        if auto_deny is not None:
+            auto_deny.connect(self._on_notice)
 
         # Start the poll timer only after every connect above succeeds — a
         # constructor that raises partway through (e.g. a future signal drift)
@@ -2815,6 +2818,10 @@ class LeadNotifier(QObject):
         wrapped as text."""
         self._broadcaster.push("report", payload, project_ns)
 
+    def _on_notice(self, project_ns: str, text: str) -> None:
+        """#895: cockpit notice about the Lead pane -> SSE `notice` (sys pill)."""
+        self._broadcaster.push("notice", text[:_MAX_EVENT_CHARS], project_ns)
+
     def stop(self) -> None:
         connections = [
             (self._orch.agentDone, self._on_done),
@@ -2823,6 +2830,9 @@ class LeadNotifier(QObject):
         report_shared = getattr(self._orch, "reportShared", None)
         if report_shared is not None:
             connections.append((report_shared, self._on_report_shared))
+        auto_deny = getattr(self._orch, "leadAutoDenyNotice", None)
+        if auto_deny is not None:
+            connections.append((auto_deny, self._on_notice))
         for signal, slot in connections:
             try:
                 signal.disconnect(slot)

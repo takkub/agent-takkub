@@ -2702,9 +2702,10 @@
         "agent_takkub.settings_management.repositories.roles",
         "agent_takkub.settings_management.services.cleanup",
         "agent_takkub.settings_management.services.validation",
-        "agent_takkub.settings_window"
+        "agent_takkub.settings_window",
+        "agent_takkub.team_preset"
       ],
-      "fan_in": 7,
+      "fan_in": 8,
       "fan_out": 6
     },
     {
@@ -5786,6 +5787,7 @@
       "imports": [
         "agent_takkub.config",
         "agent_takkub.core.routing",
+        "agent_takkub.custom_roles",
         "agent_takkub.pipeline_config",
         "agent_takkub.provider_config",
         "agent_takkub.role_models",
@@ -5814,7 +5816,7 @@
         "agent_takkub.user_actions"
       ],
       "fan_in": 18,
-      "fan_out": 8
+      "fan_out": 9
     },
     {
       "module": "agent_takkub.terminal_widget",

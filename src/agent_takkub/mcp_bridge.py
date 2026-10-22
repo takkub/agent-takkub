@@ -100,6 +100,19 @@ _log = logging.getLogger(__name__)
 # would just risk masking a genuinely hung tool call.
 _CODEX_SERVER_KEYS = ("command", "args", "env", "startup_timeout_sec", "tool_timeout_sec")
 
+# #897: remote servers in the shared config use Claude's `{"type": "http",
+# "url", "headers"}` shape. codex's streamable-HTTP equivalent is `url` +
+# `http_headers` (verified on codex-cli 0.163.0 via `mcp list --json`).
+# Emitting only the synthesized `startup_timeout_sec` for such a server left
+# codex with an entry that has neither `command` nor `url` → "invalid
+# transport" and exit 1 at boot, crash-looping the pane.
+_CODEX_HTTP_SERVER_KEYS = (
+    ("url", "url"),
+    ("headers", "http_headers"),
+    ("startup_timeout_sec", "startup_timeout_sec"),
+    ("tool_timeout_sec", "tool_timeout_sec"),
+)
+
 # Applied only when a cockpit-injected server config omits
 # `startup_timeout_sec` entirely (see `_CODEX_SERVER_KEYS` comment above).
 # 120s matches the value the #351 workaround verified against the real
@@ -584,9 +597,18 @@ def _codex_mcp_argv(
             continue
         if not isinstance(cfg, dict):
             continue
-        for key in _CODEX_SERVER_KEYS:
-            if key in cfg:
-                value = cfg[key]
+        if "command" in cfg:
+            pairs = [(k, k) for k in _CODEX_SERVER_KEYS]
+        elif cfg.get("type", "http") == "http" and "url" in cfg:
+            pairs = _CODEX_HTTP_SERVER_KEYS
+        else:
+            # SSE / unknown transport: codex has no equivalent, and a bare
+            # entry aborts the whole codex boot (#897) — leave it out.
+            _log.warning("mcp_bridge: skipping MCP %r for codex (unsupported transport)", name)
+            continue
+        for src_key, key in pairs:
+            if src_key in cfg:
+                value = cfg[src_key]
             elif key == "startup_timeout_sec":
                 value = _CODEX_DEFAULT_STARTUP_TIMEOUT_SEC
             else:

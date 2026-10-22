@@ -274,10 +274,16 @@ def _custom_role_names() -> frozenset[str]:
     not per-project (it reads one shared registry — see its own module),
     so this takes no `project` argument either — L4 cleanup, 2026-09-07
     review: the parameter used to be threaded through with nothing behind
-    it to scope."""
+    it to scope.
+
+    #890: the in-process registry is only populated by the cockpit's boot
+    hook, so a fresh CLI process resolved a different roster than the
+    cockpit for the same project — and the Lead readiness revision hashed
+    over it never matched. The on-disk registry is unioned in so both agree."""
+    from .custom_roles import load_custom_roles
     from .roles import custom_roles
 
-    return frozenset(r.name for r in custom_roles())
+    return frozenset(r.name for r in custom_roles()) | frozenset(load_custom_roles())
 
 
 def _position_roles(project: str | None) -> tuple[str, ...]:

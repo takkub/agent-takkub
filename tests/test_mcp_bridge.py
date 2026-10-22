@@ -181,6 +181,35 @@ class TestCodexMcpArgv:
         argv = mcp_bridge.mcp_argv_for_provider("codex", "codex", None, "proj")
         assert not any("tool_timeout_sec" in tok for tok in argv)
 
+    def test_897_http_server_maps_to_codex_url_and_sse_is_dropped(self, isolated_mcp_file):
+        """#897: a Claude-shape remote server used to reach codex as a bare
+        `startup_timeout_sec` entry → "invalid transport", codex exit 1."""
+        from agent_takkub import pane_tools_policy as ptp
+        from agent_takkub import shared_dev_tools as sdt
+
+        _write_master(
+            isolated_mcp_file,
+            {
+                "figma": {
+                    "type": "http",
+                    "url": "https://mcp.figma.com/mcp",
+                    "headers": {"X-B": "1"},
+                },
+                "old": {"type": "sse", "url": "https://x/sse"},
+            },
+        )
+        ptp.set_role_items("codex", "mcps", ["figma", "old"])
+        sdt.regen_role_variants()
+        argv = mcp_bridge.mcp_argv_for_provider("codex", "codex", None, "proj")
+        assert argv[4:] == [
+            "-c",
+            'mcp_servers.figma.url="https://mcp.figma.com/mcp"',
+            "-c",
+            'mcp_servers.figma.http_headers={X-B="1"}',
+            "-c",
+            "mcp_servers.figma.startup_timeout_sec=120",
+        ]
+
     def test_role_with_empty_policy_disables_all_codex_mcp_sources(self, isolated_mcp_file):
         from agent_takkub import pane_tools_policy as ptp
         from agent_takkub import shared_dev_tools as sdt

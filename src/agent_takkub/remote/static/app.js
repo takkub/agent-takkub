@@ -2302,6 +2302,9 @@
       setProjectWorking(project, false, null, true);
       appendProjectMessage(project, "done", parseSseData(evt.data, project), parseSseTs(evt.data));
     });
+    es.addEventListener("notice", function (evt) {
+      appendProjectMessage(project, "sys", parseSseData(evt.data, project), parseSseTs(evt.data));
+    });
     es.addEventListener("report", function (evt) {
       try {
         var payload = JSON.parse(evt.data);

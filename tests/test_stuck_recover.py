@@ -368,6 +368,30 @@ class TestCheckStuckPanes:
         assert "automatically deny this request in 1:49" in auto_deny[0]
         assert "takkub tail --role qa" in auto_deny[0]
 
+    def test_895_lead_auto_deny_prompt_goes_to_user_not_lead_inbox(self) -> None:
+        """#895: the Lead pane is the one the user watches from the phone, so
+        its auto-deny countdown is explained via the UI/Remote signal."""
+        from unittest.mock import MagicMock
+
+        fake = _FakeOrch()
+        fake.leadAutoDenyNotice = MagicMock()
+        pane = _FakePane(last_out=1.0)
+        pane.model.provider_name = "claude"
+        pane.session.display_lines.return_value = [
+            "Claude Code will automatically deny this request in 1:40",
+            "❯ 1. Yes",
+            "Esc to cancel",
+        ]
+        fake._panes_by_project["p"] = {"lead": pane}
+
+        assert fake._question_menu_waiting("lead", "p", pane) is True
+        fake._question_menu_waiting("lead", "p", pane)
+
+        assert fake.notify_calls == []
+        fake.leadAutoDenyNotice.emit.assert_called_once()
+        project, text = fake.leadAutoDenyNotice.emit.call_args.args
+        assert project == "p" and "automatically deny this request in 1:40" in text
+
     def test_stuck_recovery_restores_assign_provider_model_and_effort(self, monkeypatch) -> None:
         import agent_takkub.orchestrator as orchestrator_module
 
