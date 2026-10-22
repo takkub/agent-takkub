@@ -2,11 +2,11 @@
 
 Real clients for the optional design-tool integrations named in
 `core.capabilities.design_integrations.OPTIONAL_DESIGN_MCPS`: 21st.dev
-component reference, Figma, and Penpot. Storybook detection (real,
+component reference and Penpot (Figma was removed 2026-10-22 by user decision). Storybook detection (real,
 filesystem-only, always on when a project has it) is unaffected — see
 `design_integrations.detect_storybook`.
 
-All three are **default OFF** and go through the same two gates as every
+Both are **default OFF** and go through the same two gates as every
 other MCP grant in the cockpit — `pane_tools_policy` (Capability Hub Layer
 1) and a credential in `core.secrets.manager.SecretManager`. Nothing
 constructs a live client except `design_integrations.build_client`, which
@@ -16,7 +16,6 @@ re-checks both gates every call.
 
 ```bash
 # Lead only:
-takkub design integrations enable figma --role designer --token <figma-personal-access-token>
 takkub design integrations enable penpot --role designer --token <penpot-access-token> --base-url https://design.example.com
 takkub design integrations enable reference-21st --role designer --token <21st-api-key>
 ```
@@ -34,7 +33,7 @@ Credentials are stored via `SecretManager` under `SETTINGS_HOME/secrets/`
 
 ```bash
 takkub design integrations status                 # every integration, config-only (no network)
-takkub design integrations status figma --role designer   # + enabled/disabled for one role
+takkub design integrations status penpot --role designer  # + enabled/disabled for one role
 takkub design integrations doctor                  # same info, doctor-report formatted
 ```
 
@@ -44,7 +43,7 @@ role has the policy grant and whether a credential is stored.
 ## Disable
 
 ```bash
-takkub design integrations disable figma --role designer
+takkub design integrations disable penpot --role designer
 ```
 
 Removes the policy grant only; the stored credential (if any) is left in
@@ -52,9 +51,6 @@ place, same as `takkub mcp deny`.
 
 ## What each client actually does
 
-- **Figma** (`FigmaClient`) — real, stable REST API
-  (`https://api.figma.com`, `X-Figma-Token` header): file summary, local
-  variables, components. No gaps.
 - **Penpot** (`PenpotClient`) — self-hosted REST/RPC
   (`POST <base_url>/api/rpc/command/<name>`, `Authorization: Token
   <token>` header). `get_profile` (health check) follows Penpot's own

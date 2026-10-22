@@ -3375,7 +3375,7 @@ class LeadInboxMixin:
         # the real per-provider detail when it can.
         ceiling_sec = self._boot_stall_ceiling_sec(project, role_name)
         # #281: the pane is displaying exactly which MCP servers it is waiting
-        # on ("Starting MCP servers (0/3): codex_apps, context7, figma"). That
+        # on ("Starting MCP servers (0/3): codex_apps, context7, graft"). That
         # line is what makes a stuck boot actionable, and `codex mcp list` —
         # the diagnostic this notice used to imply — cannot see cockpit-
         # injected servers at all.

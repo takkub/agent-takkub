@@ -6,6 +6,8 @@ read-only for everyone. No real network call anywhere in this suite —
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from agent_takkub import cli, pane_tools_policy, shared_dev_tools
@@ -30,7 +32,7 @@ class TestStatusIsOpenToEveryone:
 
         assert code == 0
         out = capsys.readouterr().out
-        assert "figma" in out
+        assert "figma" not in out  # removed 2026-10-22
         assert "penpot" in out
         assert "reference-21st" in out
 
@@ -42,13 +44,13 @@ class TestStatusIsOpenToEveryone:
             pane_tools_policy, "effective_mcps", lambda role, default=None: frozenset()
         )
 
-        code = cli.main(["design", "integrations", "status", "figma"])
+        code = cli.main(["design", "integrations", "status", "penpot"])
 
         assert code == 0
         out = capsys.readouterr().out
         lines = [line for line in out.splitlines() if line.strip()]
         assert len(lines) == 1
-        assert lines[0].startswith("figma")
+        assert lines[0].startswith("penpot")
 
     def test_status_unknown_id_errors(self, monkeypatch: pytest.MonkeyPatch) -> None:
         _clear_role_env(monkeypatch)
@@ -62,10 +64,10 @@ class TestStatusIsOpenToEveryone:
     ) -> None:
         _clear_role_env(monkeypatch)
         monkeypatch.setattr(
-            pane_tools_policy, "effective_mcps", lambda role, default=None: frozenset({"figma"})
+            pane_tools_policy, "effective_mcps", lambda role, default=None: frozenset({"penpot"})
         )
 
-        code = cli.main(["design", "integrations", "status", "figma", "--role", "qa"])
+        code = cli.main(["design", "integrations", "status", "penpot", "--role", "qa"])
 
         assert code == 0
         out = capsys.readouterr().out
@@ -76,8 +78,8 @@ class TestEnableDisableAreLeadOnly:
     @pytest.mark.parametrize(
         "argv",
         [
-            ["design", "integrations", "enable", "figma", "--role", "qa"],
-            ["design", "integrations", "disable", "figma", "--role", "qa"],
+            ["design", "integrations", "enable", "penpot", "--role", "qa"],
+            ["design", "integrations", "disable", "penpot", "--role", "qa"],
         ],
     )
     def test_teammate_is_blocked(
@@ -108,10 +110,10 @@ class TestEnableDisableAreLeadOnly:
         )
         monkeypatch.setattr(shared_dev_tools, "regen_role_variants", lambda: 0)
 
-        code = cli.main(["design", "integrations", "enable", "figma", "--role", "qa"])
+        code = cli.main(["design", "integrations", "enable", "penpot", "--role", "qa"])
 
         assert code == 0
-        assert calls == [("qa", "mcps", "figma")]
+        assert calls == [("qa", "mcps", "penpot")]
 
     def test_enable_unknown_integration_id_errors(self, monkeypatch: pytest.MonkeyPatch) -> None:
         _clear_role_env(monkeypatch)
@@ -125,7 +127,7 @@ class TestEnableDisableAreLeadOnly:
         _clear_role_env(monkeypatch)
         monkeypatch.setenv("TAKKUB_ROLE", "lead")
 
-        code = cli.main(["design", "integrations", "enable", "figma", "--role", "nope"])
+        code = cli.main(["design", "integrations", "enable", "penpot", "--role", "nope"])
 
         assert code == 1
 
@@ -147,12 +149,26 @@ class TestEnableDisableAreLeadOnly:
         )
 
         code = cli.main(
-            ["design", "integrations", "enable", "figma", "--role", "qa", "--token", "sekret"]
+            [
+                "design",
+                "integrations",
+                "enable",
+                "penpot",
+                "--role",
+                "qa",
+                "--token",
+                "sekret",
+                "--base-url",
+                "https://d.example.test",
+            ]
         )
 
         assert code == 0
-        assert seen["ref"] == "secret://figma/default"
-        assert seen["value"] == "sekret"
+        assert seen["ref"] == "secret://penpot/default"
+        assert json.loads(seen["value"]) == {
+            "token": "sekret",
+            "base_url": "https://d.example.test",
+        }
 
     def test_enable_penpot_requires_base_url_with_token(
         self, monkeypatch: pytest.MonkeyPatch
@@ -199,10 +215,10 @@ class TestEnableDisableAreLeadOnly:
         )
         monkeypatch.setattr(shared_dev_tools, "regen_role_variants", lambda: 0)
 
-        code = cli.main(["design", "integrations", "disable", "figma", "--role", "qa"])
+        code = cli.main(["design", "integrations", "disable", "penpot", "--role", "qa"])
 
         assert code == 0
-        assert calls == [("qa", "mcps", "figma")]
+        assert calls == [("qa", "mcps", "penpot")]
 
 
 class TestDoctorSubcommand:

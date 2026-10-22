@@ -2,7 +2,7 @@
 `11_MASTER_PROMPT_FOR_LEAD.md`'s "Token policy") — classifies a task's size
 so `facade.build_context_for_assign` can scope which optional sources it
 calls and how much budget it spends, instead of unconditionally calling
-every optional reference source (Figma/21st/Graft once item D of the
+every optional reference source (21st/Graft once item D of the
 closeout pack wires them into Context Builder) for every assign regardless
 of how small the task is.
 
@@ -136,7 +136,7 @@ class SourcePolicy:
     # Gates any optional reference-source hook Context Builder wires in on
     # top of Brain/Conversation (none exist today — the OpenViking/
     # Resource pair this originally gated was removed along with
-    # OpenViking). Figma/21st/Graft aren't wired into context injection yet
+    # OpenViking). 21st/Graft aren't wired into context injection yet
     # (closeout item D); extend this dataclass with their own flag when
     # they land instead of overloading this one.
     allow_reference_sources: bool

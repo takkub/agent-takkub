@@ -2,6 +2,12 @@
 
 All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses [SemVer](https://semver.org/).
 
+## [v2.2.26] - 2026-10-22
+
+### Removed (ถอน)
+
+- **Figma integration ทั้งหมด (user ยกเลิก 2026-10-22):** ถอน `FigmaClient` + dataclass, รายการ `figma` ใน `OPTIONAL_DESIGN_MCPS`/`build_client`, secret backend `figma.json`, resilience policy `figma`, ตัวเลือก Figma ใน Settings → Design tools, branch ของ `takkub design integrations enable figma`, และคำแนะนำ Figma ใน role designer · design integration ที่เหลือ = 21st.dev + Penpot (+ Storybook detection) · ปิด #892 #893 #894 เป็น not planned · server HTTP MCP ทั่วไปบน codex (#897) ยังรองรับเหมือนเดิม
+
 ## [v2.2.25] - 2026-10-22
 
 ### Fixed (แก้)

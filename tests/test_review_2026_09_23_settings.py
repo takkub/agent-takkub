@@ -361,7 +361,6 @@ class TestKnowledgeDesignSecondClickSurvivesDeletedThread:
             lambda _project: {
                 "Storybook": (True, "ok"),
                 "21st.dev": (None, "-"),
-                "Figma": (None, "-"),
                 "Penpot": (None, "-"),
             },
         )

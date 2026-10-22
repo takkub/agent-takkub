@@ -83,14 +83,14 @@ class CapabilityRegistry:
         self, role: str, roots: list[Path]
     ) -> DesignIntegrationsSnapshot:
         """#365 phase 7 — Storybook detection (real) + the opt-in-only
-        21st.dev/Figma/Penpot registry entries, both scoped to `role`/`roots`
+        21st.dev/Penpot registry entries, both scoped to `role`/`roots`
         the same way `resolve_skills` is. Thin pass-through to
         `design_integrations.resolve_design_integrations`; see that
         module for why the optional MCPs stay stubs here."""
         return resolve_design_integrations(role, roots)
 
     def design_integration_client(self, role: str, integration_id: str) -> object:
-        """#373 — construct a live 21st.dev/Figma/Penpot client for `role`,
+        """#373 — construct a live 21st.dev/Penpot client for `role`,
         enforcing PermissionEngine + a stored credential (see
         `design_integrations.build_client`, the only place any of those
         classes is constructed). Raises the same errors that function

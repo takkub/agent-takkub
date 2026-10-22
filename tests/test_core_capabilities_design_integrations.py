@@ -1,5 +1,5 @@
 """core.capabilities.design_integrations — #365 phase 7: real Storybook
-detection; #373: real 21st.dev/Figma/Penpot clients, both gated through the
+detection; #373: real 21st.dev/Penpot clients, both gated through the
 SAME `pane_tools_policy` layer `PermissionEngine` reads (no separate opt-in
 flag, no bypass)."""
 
@@ -12,7 +12,6 @@ import pytest
 
 from agent_takkub import pane_tools_policy
 from agent_takkub.core.capabilities.design_clients import (
-    FigmaClient,
     PenpotClient,
     TwentyFirstClient,
 )
@@ -96,13 +95,12 @@ class TestOptionalDesignMcpStatus:
         monkeypatch.setattr(
             pane_tools_policy,
             "effective_mcps",
-            lambda role, default=None: frozenset({"figma"}),
+            lambda role, default=None: frozenset({"penpot"}),
         )
 
         status = {m.id: m for m in optional_design_mcp_status("designer")}
 
-        assert status["figma"].enabled_for_role is True
-        assert status["penpot"].enabled_for_role is False
+        assert status["penpot"].enabled_for_role is True
         assert status["reference-21st"].enabled_for_role is False
 
     def test_agrees_with_permission_engine_no_second_gate(
@@ -190,9 +188,9 @@ class _FakePermissionEngine:
 
 class TestIntegrationConfigStatus:
     def test_configured_when_secret_found(self) -> None:
-        manager = _FakeSecretManager({"secret://figma/default": "tok"})
+        manager = _FakeSecretManager({"secret://penpot/default": "tok"})
 
-        configured, detail = integration_config_status("figma", secret_manager=manager)
+        configured, detail = integration_config_status("penpot", secret_manager=manager)
 
         assert configured is True
         assert "configured" in detail
@@ -200,7 +198,7 @@ class TestIntegrationConfigStatus:
     def test_not_configured_when_secret_missing(self) -> None:
         manager = _FakeSecretManager({})
 
-        configured, detail = integration_config_status("figma", secret_manager=manager)
+        configured, detail = integration_config_status("penpot", secret_manager=manager)
 
         assert configured is False
         assert "no credential" in detail
@@ -214,10 +212,10 @@ class TestBuildClient:
     def test_denied_when_permission_engine_says_no(self) -> None:
         with pytest.raises(IntegrationDeniedError):
             build_client(
-                "figma",
+                "penpot",
                 "designer",
                 permission_engine=_FakePermissionEngine(frozenset()),
-                secret_manager=_FakeSecretManager({"secret://figma/default": "tok"}),
+                secret_manager=_FakeSecretManager({"secret://penpot/default": "tok"}),
             )
 
     def test_denied_when_no_policy_at_all_none_is_not_a_free_pass(self) -> None:
@@ -227,30 +225,20 @@ class TestBuildClient:
         treated as "everything allowed"."""
         with pytest.raises(IntegrationDeniedError):
             build_client(
-                "figma",
+                "penpot",
                 "designer",
                 permission_engine=_FakePermissionEngine(None),
-                secret_manager=_FakeSecretManager({"secret://figma/default": "tok"}),
+                secret_manager=_FakeSecretManager({"secret://penpot/default": "tok"}),
             )
 
     def test_not_configured_when_allowed_but_no_secret(self) -> None:
         with pytest.raises(IntegrationNotConfiguredError):
             build_client(
-                "figma",
+                "penpot",
                 "designer",
-                permission_engine=_FakePermissionEngine(frozenset({"figma"})),
+                permission_engine=_FakePermissionEngine(frozenset({"penpot"})),
                 secret_manager=_FakeSecretManager({}),
             )
-
-    def test_figma_client_built_from_bare_token(self) -> None:
-        client = build_client(
-            "figma",
-            "designer",
-            permission_engine=_FakePermissionEngine(frozenset({"figma"})),
-            secret_manager=_FakeSecretManager({"secret://figma/default": "  tok  "}),
-        )
-
-        assert isinstance(client, FigmaClient)
 
     def test_reference_21st_client_built_from_json_blob(self) -> None:
         secret = json.dumps({"api_key": "k", "base_url": "https://proxy.example.test"})
@@ -265,7 +253,7 @@ class TestBuildClient:
 
     def test_reference_21st_client_falls_back_to_bare_token(self) -> None:
         """A bare (non-JSON) stored value is still accepted as the API key
-        — matches figma's bare-token contract, just without a base_url."""
+        — a bare-token contract, just without a base_url."""
         client = build_client(
             "reference-21st",
             "designer",
@@ -309,10 +297,10 @@ class TestBuildClient:
 
         with pytest.raises(IntegrationDeniedError):
             build_client(
-                "figma",
+                "penpot",
                 "designer",
                 permission_engine=_FakePermissionEngine(frozenset()),
-                secret_manager=_WatchedSecretManager({"secret://figma/default": "tok"}),
+                secret_manager=_WatchedSecretManager({"secret://penpot/default": "tok"}),
             )
 
         assert calls == []

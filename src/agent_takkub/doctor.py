@@ -1846,7 +1846,7 @@ def check_capability_skill_store() -> list[Finding]:
 def check_design_integrations() -> list[Finding]:
     """[design-integrations] — Storybook detection (real, filesystem-only —
     no network call) per configured project, plus which of the opt-in-only
-    21st.dev/Figma/Penpot integrations (default OFF, `core.capabilities.
+    21st.dev/Penpot integrations (default OFF, `core.capabilities.
     design_integrations.OPTIONAL_DESIGN_MCPS`) any role has actually been
     granted via a `pane_tools_policy` override, and — #373 — whether each
     granted one actually has a stored credential yet

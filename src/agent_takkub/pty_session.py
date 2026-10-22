@@ -3017,7 +3017,7 @@ class PtySession(QObject):
 
     def boot_phase_detail(self) -> str:
         """The actual boot line on screen, e.g. ``Starting MCP servers (0/3):
-        codex_apps, context7, figma (12s • esc to interrupt)`` — or "" when the
+        codex_apps, context7, graft (12s • esc to interrupt)`` — or "" when the
         pane is not in a boot phase.
 
         #281: Lead used to be told only the word "booting" while the pane

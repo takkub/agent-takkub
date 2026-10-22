@@ -2114,9 +2114,7 @@ def cmd_design_integrations(args: argparse.Namespace) -> dict:
         if sub == "enable" and args.token:
             from .core.secrets.manager import SecretManager
 
-            if args.integration_id == "figma":
-                secret_value = args.token
-            elif args.integration_id == "penpot":
+            if args.integration_id == "penpot":
                 secret_value = json.dumps({"token": args.token, "base_url": args.base_url})
             else:  # reference-21st
                 secret_value = json.dumps({"api_key": args.token, "base_url": args.base_url})
@@ -6434,7 +6432,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     sdz_int = sdz_sub.add_parser(
         "integrations",
-        help="21st.dev/Figma/Penpot design-tool integrations — status/enable/disable/doctor (#373)",
+        help="21st.dev/Penpot design-tool integrations — status/enable/disable/doctor (#373)",
     )
     sdz_int_sub = sdz_int.add_subparsers(dest="integrations_action", required=True)
     sdz_int_status = sdz_int_sub.add_parser(
@@ -6445,7 +6443,7 @@ def build_parser() -> argparse.ArgumentParser:
         nargs="?",
         default=None,
         metavar="ID",
-        help="e.g. figma, penpot, reference-21st",
+        help="e.g. penpot, reference-21st",
     )
     sdz_int_status.add_argument(
         "--role", default=None, help="also show enabled/disabled for this role"

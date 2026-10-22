@@ -94,14 +94,14 @@ class TestDesignToolsView:
 
     def test_save_credential_writes_through_secret_manager_and_clears_field(self) -> None:
         dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_KNOWLEDGE)
-        idx = dlg._kd_design_target_combo.findData("figma")
+        idx = dlg._kd_design_target_combo.findData("reference-21st")
         dlg._kd_design_target_combo.setCurrentIndex(idx)
         dlg._kd_design_token_edit.setText("sekret-token-123")
         dlg._on_kd_design_save_credential_clicked()
 
         assert dlg._kd_design_token_edit.text() == ""  # never echoed back
-        assert SecretManager().get_secret("secret://figma/default") == "sekret-token-123"
-        assert "figma" in dlg._kd_design_cred_status.text()
+        assert SecretManager().get_secret("secret://reference-21st/default") == "sekret-token-123"
+        assert "reference-21st" in dlg._kd_design_cred_status.text()
         dlg.deleteLater()
 
     def test_save_credential_encodes_penpot_as_json_with_base_url(self) -> None:
@@ -138,7 +138,7 @@ class TestDesignToolsView:
         monkeypatch.setattr(
             design_integrations,
             "integration_config_status",
-            lambda mcp_id, secret_manager=None: (mcp_id == "figma", "fake status"),
+            lambda mcp_id, secret_manager=None: (mcp_id == "penpot", "fake status"),
         )
 
         dlg = settings_window.SettingsWindow(
@@ -148,7 +148,7 @@ class TestDesignToolsView:
         _wait(dlg._kd_design_thread)
 
         assert "6006" in dlg._kd_design_rows["Storybook"][1].text()
-        assert dlg._kd_design_rows["Figma"][1].text() == "fake status"
+        assert dlg._kd_design_rows["Penpot"][1].text() == "fake status"
         dlg.deleteLater()
 
     def test_test_button_reports_penpot_connectivity_via_fake_client(
@@ -180,7 +180,7 @@ class TestDesignToolsView:
 
         text = dlg._kd_design_result.toPlainText()
         assert "Test User" in text
-        assert "not configured" in text  # the other two integrations stay unconfigured
+        assert "not configured" in text  # reference-21st stays unconfigured
         dlg.deleteLater()
 
     def test_permissions_dialog_toggle_writes_role_policy(self) -> None:
@@ -188,15 +188,17 @@ class TestDesignToolsView:
 
         dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_KNOWLEDGE)
         perm = _RolePermissionsDialog(dlg, fonts=dlg._fonts)
-        assert ("frontend", "figma") in perm._checks
+        assert ("frontend", "penpot") in perm._checks
 
-        cb = perm._checks[("frontend", "figma")]
+        cb = perm._checks[("frontend", "penpot")]
         assert cb.isChecked() is False
         cb.setChecked(True)
-        assert "figma" in (pane_tools_policy.effective_mcps("frontend", frozenset()) or frozenset())
+        assert "penpot" in (
+            pane_tools_policy.effective_mcps("frontend", frozenset()) or frozenset()
+        )
 
         cb.setChecked(False)
-        assert "figma" not in (
+        assert "penpot" not in (
             pane_tools_policy.effective_mcps("frontend", frozenset()) or frozenset()
         )
         perm.deleteLater()

@@ -12,7 +12,6 @@ _VALID_LABELS = {Label.FATAL, Label.DEGRADED, Label.OPTIONAL, Label.RETRYABLE, L
 # Every dependency named in `10_FAIL_OPEN_MATRIX.md` (OpenViking excluded —
 # withdrawn from the product entirely, see the audit doc) must have an entry.
 _EXPECTED_SERVICES = {
-    "figma",
     "21st.dev",
     "penpot",
     "storybook",
@@ -44,7 +43,7 @@ class TestPolicyTable:
         assert policy_for("does-not-exist") is None
 
     def test_policy_for_known_service_matches_table(self) -> None:
-        assert policy_for("figma") is POLICY["figma"]
+        assert policy_for("penpot") is POLICY["penpot"]
 
     def test_no_service_is_labeled_fatal(self) -> None:
         # Every entry here is, by construction, an OPTIONAL dependency whose
@@ -55,7 +54,7 @@ class TestPolicyTable:
 
     def test_breaker_wired_services_match_design_clients_and_brain_read(self) -> None:
         wired = {name for name, spec in POLICY.items() if spec.breaker}
-        assert wired == {"figma", "21st.dev", "penpot", "brain_read"}
+        assert wired == {"21st.dev", "penpot", "brain_read"}
 
     def test_non_breaker_entries_document_a_reason(self) -> None:
         for spec in POLICY.values():

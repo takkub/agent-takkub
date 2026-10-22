@@ -61,7 +61,6 @@ class ServicePolicy:
 POLICY: dict[str, ServicePolicy] = {
     # design_clients.py — every call goes through `_safe_call`, which is now
     # the one choke point wired to `circuit_breaker.get_breaker(SOURCE)`.
-    "figma": ServicePolicy("figma", Label.OPTIONAL, "continue without reference", breaker=True),
     "21st.dev": ServicePolicy(
         "21st.dev", Label.OPTIONAL, "continue without reference", breaker=True
     ),

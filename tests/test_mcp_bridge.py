@@ -190,24 +190,24 @@ class TestCodexMcpArgv:
         _write_master(
             isolated_mcp_file,
             {
-                "figma": {
+                "remote": {
                     "type": "http",
-                    "url": "https://mcp.figma.com/mcp",
+                    "url": "https://mcp.example.test/mcp",
                     "headers": {"X-B": "1"},
                 },
                 "old": {"type": "sse", "url": "https://x/sse"},
             },
         )
-        ptp.set_role_items("codex", "mcps", ["figma", "old"])
+        ptp.set_role_items("codex", "mcps", ["remote", "old"])
         sdt.regen_role_variants()
         argv = mcp_bridge.mcp_argv_for_provider("codex", "codex", None, "proj")
         assert argv[4:] == [
             "-c",
-            'mcp_servers.figma.url="https://mcp.figma.com/mcp"',
+            'mcp_servers.remote.url="https://mcp.example.test/mcp"',
             "-c",
-            'mcp_servers.figma.http_headers={X-B="1"}',
+            'mcp_servers.remote.http_headers={X-B="1"}',
             "-c",
-            "mcp_servers.figma.startup_timeout_sec=120",
+            "mcp_servers.remote.startup_timeout_sec=120",
         ]
 
     def test_role_with_empty_policy_disables_all_codex_mcp_sources(self, isolated_mcp_file):

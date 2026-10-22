@@ -1,10 +1,10 @@
 """core.capabilities.design_clients — real HTTP clients for the optional
 design-tool integrations (#373, GAP-014/015/016): 21st.dev component
-reference search, Figma REST (variables/components/file summary), and
-Penpot's self-hosted REST/RPC API.
+reference search and Penpot's self-hosted REST/RPC API (Figma removed by
+user decision 2026-10-22).
 
 Every client here:
-  - is pure stdlib (`urllib`) — no new dependency for three optional,
+  - is pure stdlib (`urllib`) — no new dependency for two optional,
     default-OFF integrations (minimal-code: `requests`/`httpx` would be a
     real ongoing cost — a new pinned version, a new supply-chain surface —
     for what `urllib.request` already does).
@@ -14,7 +14,7 @@ Every client here:
     never be reached by accident with an unauthorized role attached (see
     `design_integrations.build_client`, the only constructor call site).
   - routes every real transport call through `core.resilience.circuit_
-    breaker` (v2-hardening D/F), keyed by `SOURCE` ("21st.dev"/"figma"/
+    breaker` (v2-hardening D/F), keyed by `SOURCE` ("21st.dev"/
     "penpot") — after `DEFAULT_FAILURE_THRESHOLD` consecutive failures the
     breaker opens and every further call on that source returns `None`
     immediately, without ever calling `transport`, until the cooldown
@@ -56,12 +56,6 @@ path for an operator-supplied `base_url` (e.g. a self-hosted proxy, or once
 reports "not configured" rather than guessing a URL, the same
 `NO_MODEL_DISCOVERY_GAPS` "document the gap instead of guessing" policy
 `provider_model_refresh.py` already uses for opencode/cursor.
-
-Figma's REST API (`https://api.figma.com`, `X-Figma-Token` header, `GET
-/v1/files/:key` + `/v1/files/:key/variables/local` + `/v1/files/:key/
-components`) is real, stable, and documented at
-developers.figma.com/docs/rest-api (verified 2026-08-24) — `FigmaClient`
-implements it directly, no gap.
 
 Penpot's self-hosted API is `POST <base_url>/api/rpc/command/<name>` with
 an `Authorization: Token <token>` header (help.penpot.app/technical-guide/
@@ -172,32 +166,6 @@ class ComponentReference:
     preview_url: str | None
     provenance: Provenance
     tags: tuple[str, ...] = ()
-
-
-@dataclass(frozen=True, slots=True)
-class FigmaFileSummary:
-    key: str
-    name: str
-    last_modified: str | None
-    version: str | None
-    provenance: Provenance
-
-
-@dataclass(frozen=True, slots=True)
-class FigmaVariable:
-    id: str
-    name: str
-    variable_type: str
-    collection_id: str | None
-    provenance: Provenance
-
-
-@dataclass(frozen=True, slots=True)
-class FigmaComponent:
-    key: str
-    name: str
-    description: str
-    provenance: Provenance
 
 
 @dataclass(frozen=True, slots=True)
@@ -325,138 +293,6 @@ class TwentyFirstClient:
         if raw is None:
             return None
         return _parse_21st_results(raw, self._base_url, self.SOURCE)
-
-
-class FigmaClient:
-    """Figma REST API (`https://api.figma.com`) — token-based, read-only:
-    file summary, local variables, components. Auth header per Figma's
-    documented convention: `X-Figma-Token: <personal access token>`
-    (developers.figma.com/docs/rest-api, verified 2026-08-24)."""
-
-    SOURCE = "figma"
-    BASE_URL = "https://api.figma.com/v1"
-
-    def __init__(
-        self,
-        *,
-        token: str,
-        transport: Transport = _default_transport,
-        timeout: float = DEFAULT_TIMEOUT,
-        breaker: CircuitBreaker | None = None,
-    ) -> None:
-        self._token = token
-        self._transport = transport
-        self._timeout = timeout
-        self._breaker = breaker if breaker is not None else get_breaker(self.SOURCE)
-
-    def _get(self, path: str) -> dict | None:
-        url = f"{self.BASE_URL}{path}"
-        headers = {"Accept": "application/json", "X-Figma-Token": self._token}
-        raw = _safe_call(
-            self._transport,
-            "GET",
-            url,
-            headers,
-            None,
-            self._timeout,
-            what=f"figma {path}",
-            breaker=self._breaker,
-        )
-        if raw is None:
-            return None
-        try:
-            payload = json.loads(raw)
-        except (json.JSONDecodeError, UnicodeDecodeError):
-            logger.warning("figma %s: non-JSON response", path)
-            return None
-        return payload if isinstance(payload, dict) else None
-
-    def get_file_summary(self, file_key: str) -> FigmaFileSummary | None:
-        payload = self._get(f"/files/{urllib.parse.quote(file_key)}")
-        if payload is None:
-            return None
-        try:
-            name = payload["name"]
-        except KeyError:
-            logger.warning("figma get_file_summary: unexpected shape")
-            return None
-        return FigmaFileSummary(
-            key=file_key,
-            name=str(name),
-            last_modified=payload.get("lastModified"),
-            version=payload.get("version"),
-            provenance=Provenance(
-                source=self.SOURCE,
-                url=f"https://www.figma.com/file/{file_key}",
-                license=None,
-                fetched_at=_utc_now_iso(),
-            ),
-        )
-
-    def list_local_variables(self, file_key: str) -> tuple[FigmaVariable, ...] | None:
-        payload = self._get(f"/files/{urllib.parse.quote(file_key)}/variables/local")
-        if payload is None:
-            return None
-        try:
-            variables = payload["meta"]["variables"]
-            if not isinstance(variables, dict):
-                raise TypeError
-        except (KeyError, TypeError):
-            logger.warning("figma list_local_variables: unexpected shape")
-            return None
-
-        fetched_at = _utc_now_iso()
-        out: list[FigmaVariable] = []
-        for var_id, var in variables.items():
-            if not isinstance(var, dict) or not var.get("name"):
-                continue
-            out.append(
-                FigmaVariable(
-                    id=str(var_id),
-                    name=str(var["name"]),
-                    variable_type=str(var.get("resolvedType") or "UNKNOWN"),
-                    collection_id=var.get("variableCollectionId"),
-                    provenance=Provenance(
-                        source=self.SOURCE,
-                        url=f"https://www.figma.com/file/{file_key}",
-                        license=None,
-                        fetched_at=fetched_at,
-                    ),
-                )
-            )
-        return tuple(out)
-
-    def list_components(self, file_key: str) -> tuple[FigmaComponent, ...] | None:
-        payload = self._get(f"/files/{urllib.parse.quote(file_key)}/components")
-        if payload is None:
-            return None
-        try:
-            components = payload["meta"]["components"]
-            if not isinstance(components, list):
-                raise TypeError
-        except (KeyError, TypeError):
-            logger.warning("figma list_components: unexpected shape")
-            return None
-
-        fetched_at = _utc_now_iso()
-        out: list[FigmaComponent] = []
-        for comp in components:
-            if not isinstance(comp, dict) or not comp.get("key") or not comp.get("name"):
-                continue
-            out.append(
-                FigmaComponent(
-                    key=str(comp["key"]),
-                    name=str(comp["name"]),
-                    description=str(comp.get("description") or ""),
-                    provenance=Provenance(
-                        source=self.SOURCE,
-                        url=f"https://www.figma.com/file/{file_key}",
-                        license=None,
-                        fetched_at=fetched_at,
-                    ),
-                )
-            )
-        return tuple(out)
 
 
 class PenpotClient:

@@ -1,5 +1,5 @@
 """Optional design tool integrations (#365 phase 7 real Storybook detection;
-#373 real 21st.dev/Figma/Penpot clients, GAP-014/015/016, epic #309
+#373 real 21st.dev/Penpot clients, GAP-014/015/016, epic #309
 Capability Hub) — `docs/plans/workspace-1.2.0-design/
 08_DESIGN_TOOL_INTEGRATIONS.md` and `docs/plans/workspace-master-upgrade-
 2026-08-24/09_DESIGN_TOOL_INTEGRATIONS.md`: "All optional through
@@ -12,7 +12,7 @@ reference (`07_DESIGN_DIRECTOR_WORKFLOW.md`'s anti-AI-cliché checklist: a
 design that copies a real, already-reviewed component beats one invented
 from a generic reference).
 
-21st.dev/Figma/Penpot are real clients as of #373 (`design_clients.py` +
+21st.dev/Penpot are real clients as of #373 (`design_clients.py` +
 `build_client` below) — `OPTIONAL_DESIGN_MCPS` still names what the cockpit
 KNOWS about (id/label/doc hint/secret ref hint), independent of whether a
 live client can be built for it right now. Enabling one for real still goes
@@ -35,7 +35,7 @@ bypassed here:
     string, not a resolved secret.
 
 #373 makes that last sentence literal: `build_client` below is the ONLY
-place a real `design_clients.TwentyFirstClient`/`FigmaClient`/`PenpotClient`
+place a real `design_clients.TwentyFirstClient`/`PenpotClient`
 gets constructed. It re-checks BOTH gates every call — `PermissionEngine.
 mcp_allowed` (default deny, per-role opt-in) and a stored
 `core.secrets.manager.SecretManager` credential — so a role that was never
@@ -56,7 +56,7 @@ from pathlib import Path
 from agent_takkub import pane_tools_policy
 
 from .audit import log_capability_event
-from .design_clients import FigmaClient, PenpotClient, TwentyFirstClient
+from .design_clients import PenpotClient, TwentyFirstClient
 from .permission_engine import PermissionEngine
 
 _log = logging.getLogger(__name__)
@@ -149,15 +149,9 @@ OPTIONAL_DESIGN_MCPS: tuple[OptionalDesignMcp, ...] = (
         secret_ref_hint="secret://reference-21st/<account-id>",
     ),
     OptionalDesignMcp(
-        id="figma",
-        label="Figma design/tokens/components",
-        doc_hint="approved design files only — pull tokens/components, not raw pixel copies",
-        secret_ref_hint="secret://figma/<account-id>",
-    ),
-    OptionalDesignMcp(
         id="penpot",
         label="Penpot (self-hosted, open) design source",
-        doc_hint="open/self-hosted alternative to Figma — same approved-source rule applies",
+        doc_hint="open/self-hosted design source — same approved-source rule applies",
         secret_ref_hint="secret://penpot/<account-id>",
     ),
 )
@@ -258,13 +252,13 @@ def build_client(
     *,
     secret_manager: object | None = None,
     permission_engine: PermissionEngine | None = None,
-) -> TwentyFirstClient | FigmaClient | PenpotClient:
+) -> TwentyFirstClient | PenpotClient:
     """Construct the real client for *integration_id*, enforcing BOTH gates
     every time — see module docstring. Raises `ValueError` (unknown id),
     `IntegrationDeniedError`, or `IntegrationNotConfiguredError`; never a
     raw network exception.
 
-    This is the only place any of `design_clients`' three classes gets
+    This is the only place any of `design_clients`' two classes gets
     constructed — callers that need a live client MUST come through here,
     never import `design_clients` and build one directly, or the
     permission/credential checks are skipped entirely."""
@@ -297,9 +291,6 @@ def build_client(
         cfg = _parse_json_secret(raw) or {}
         api_key = cfg.get("api_key") or raw.strip()
         return TwentyFirstClient(api_key=api_key, base_url=cfg.get("base_url"))
-
-    if integration_id == "figma":
-        return FigmaClient(token=raw.strip())
 
     # integration_id == "penpot" (the only remaining member of `ids`)
     cfg = _parse_json_secret(raw) or {}

@@ -1318,10 +1318,10 @@ class TestCheckDesignIntegrations:
         findings = check_design_integrations()
 
         by_name = {f.name: f for f in findings}
-        # the 3 known-optional MCPs are always reported (off by default);
+        # the 2 known-optional MCPs are always reported (off by default);
         # no project means no storybook: findings for it.
         assert not any(f.name.startswith("storybook:") for f in findings)
-        assert set(by_name) == {"reference-21st", "figma", "penpot"}
+        assert set(by_name) == {"reference-21st", "penpot"}
         assert all(f.status == Status.INFO for f in findings)
 
     def test_storybook_detected_reports_ok(
@@ -1362,14 +1362,14 @@ class TestCheckDesignIntegrations:
 
         seed_projects(tmp_path, {})
         monkeypatch.setattr(
-            _ptp, "load_policy", lambda: {"designer": {"mcps": ["figma"], "plugins": []}}
+            _ptp, "load_policy", lambda: {"designer": {"mcps": ["reference-21st"], "plugins": []}}
         )
 
         findings = check_design_integrations()
 
         by_name = {f.name: f for f in findings}
-        assert by_name["figma"].status == Status.OK
-        assert "designer" in by_name["figma"].detail
+        assert by_name["reference-21st"].status == Status.OK
+        assert "designer" in by_name["reference-21st"].detail
         assert by_name["penpot"].status == Status.INFO
 
 

@@ -44,23 +44,23 @@ class TestBuildFindings:
 
     def test_breaker_entry_with_no_recorded_calls_is_info(self, _isolated_data_home) -> None:
         rows = {r.name: r for r in build_findings()}
-        assert rows["figma"].status == "info"
-        assert "no calls recorded yet" in rows["figma"].detail
+        assert rows["penpot"].status == "info"
+        assert "no calls recorded yet" in rows["penpot"].detail
 
     def test_breaker_entry_closed_state_is_ok(self, _isolated_data_home) -> None:
         _write_state(
             _isolated_data_home,
-            {"figma": {"state": "closed", "failure_count": 0, "failure_threshold": 3}},
+            {"penpot": {"state": "closed", "failure_count": 0, "failure_threshold": 3}},
         )
         rows = {r.name: r for r in build_findings()}
-        assert rows["figma"].status == "ok"
-        assert "state=closed" in rows["figma"].detail
+        assert rows["penpot"].status == "ok"
+        assert "state=closed" in rows["penpot"].detail
 
     def test_breaker_entry_open_state_is_warn(self, _isolated_data_home) -> None:
         _write_state(
             _isolated_data_home,
             {
-                "figma": {
+                "penpot": {
                     "state": "open",
                     "failure_count": 3,
                     "failure_threshold": 3,
@@ -69,14 +69,14 @@ class TestBuildFindings:
             },
         )
         rows = {r.name: r for r in build_findings()}
-        assert rows["figma"].status == "warn"
-        assert "failures=3/3" in rows["figma"].detail
-        assert "open_until=" in rows["figma"].detail
+        assert rows["penpot"].status == "warn"
+        assert "failures=3/3" in rows["penpot"].detail
+        assert "open_until=" in rows["penpot"].detail
 
     def test_breaker_entry_half_open_state_is_info(self, _isolated_data_home) -> None:
         _write_state(
             _isolated_data_home,
-            {"figma": {"state": "half_open", "failure_count": 3, "failure_threshold": 3}},
+            {"penpot": {"state": "half_open", "failure_count": 3, "failure_threshold": 3}},
         )
         rows = {r.name: r for r in build_findings()}
-        assert rows["figma"].status == "info"
+        assert rows["penpot"].status == "info"

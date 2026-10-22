@@ -63,7 +63,6 @@ from . import pane_tools_policy as pt_policy
 
 _DESIGN_MCPS: tuple[tuple[str, str], ...] = (
     ("reference-21st", "21st.dev"),
-    ("figma", "Figma"),
     ("penpot", "Penpot"),
 )
 
@@ -353,7 +352,7 @@ class KnowledgeDesignSettingsMixin:
         p_lay.addLayout(header_row)
 
         self._kd_design_rows: dict[str, tuple[QWidget, QLabel]] = {}
-        for name in ("Storybook", "21st.dev", "Figma", "Penpot"):
+        for name in ("Storybook", "21st.dev", "Penpot"):
             row = QWidget(panel)
             row.setObjectName("providerRow")
             row_lay = QHBoxLayout(row)
@@ -381,7 +380,7 @@ class KnowledgeDesignSettingsMixin:
         cp_lay.addWidget(self._build_card_header("DESIGN", "Set credential", "", cred_panel))
         cred_note = QLabel(
             "ไม่แสดง credential ที่บันทึกไว้แล้ว — กรอกเพื่อบันทึกค่าใหม่ทับเท่านั้น "
-            "(Base URL ต้องกรอกสำหรับ Penpot, เว้นว่างได้สำหรับ 21st.dev/Figma)",
+            "(Base URL ต้องกรอกสำหรับ Penpot, เว้นว่างได้สำหรับ 21st.dev)",
             cred_panel,
         )
         cred_note.setObjectName("panelHint")
@@ -468,9 +467,7 @@ class KnowledgeDesignSettingsMixin:
             self._kd_design_cred_status.setText("Penpot ต้องกรอก Base URL ด้วย")
             return
 
-        if mcp_id == "figma":
-            value = token
-        elif mcp_id == "penpot":
+        if mcp_id == "penpot":
             value = json.dumps({"token": token, "base_url": base_url})
         else:  # reference-21st
             value = json.dumps({"api_key": token, "base_url": base_url}) if base_url else token
@@ -777,7 +774,7 @@ def _run_design_tools_test() -> list[str]:
 def _test_penpot() -> str:
     """Penpot is the one design integration with a documented, parameterless
     connectivity probe (`PenpotClient.get_profile`) — see `design_clients.
-    py`'s own docstring for why Figma/21st need a file/base_url this Settings
+    py`'s own docstring for why 21st needs a base_url this Settings
     view doesn't collect. Bypasses `design_integrations.build_client`'s
     per-role permission gate deliberately: a Settings-initiated credential
     test is an administrative action, not a pane acting as a role."""

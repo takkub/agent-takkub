@@ -1,5 +1,5 @@
 """core.capabilities.design_clients — #373: real HTTP clients for
-21st.dev/Figma/Penpot, exercised entirely via a fake `Transport` (no real
+21st.dev/Penpot, exercised entirely via a fake `Transport` (no real
 network call ever made in this suite). Covers the happy path, the
 fail-open contract (timeout/HTTP-error/shape-drift all degrade to `None`,
 never raise), and that every returned record carries `Provenance`."""
@@ -12,7 +12,6 @@ import urllib.error
 import pytest
 
 from agent_takkub.core.capabilities.design_clients import (
-    FigmaClient,
     PenpotClient,
     TwentyFirstClient,
 )
@@ -120,66 +119,6 @@ class TestTwentyFirstClient:
         client = TwentyFirstClient(api_key="k", base_url=None)
 
         assert client.get_inspiration("dashboard") is None
-
-
-class TestFigmaClient:
-    def test_get_file_summary_happy_path(self) -> None:
-        payload = {"name": "My File", "lastModified": "2026-08-24T00:00:00Z", "version": "42"}
-        client = FigmaClient(token="tok", transport=_json_transport(payload))
-
-        summary = client.get_file_summary("abc123")
-
-        assert summary is not None
-        assert summary.key == "abc123"
-        assert summary.name == "My File"
-        assert summary.provenance.source == "figma"
-
-    def test_get_file_summary_shape_drift_returns_none(self) -> None:
-        client = FigmaClient(token="tok", transport=_json_transport({"unexpected": True}))
-
-        assert client.get_file_summary("abc123") is None
-
-    def test_list_local_variables_happy_path(self) -> None:
-        payload = {
-            "meta": {
-                "variables": {
-                    "VariableID:1": {
-                        "name": "color/bg",
-                        "resolvedType": "COLOR",
-                        "variableCollectionId": "coll1",
-                    },
-                    "VariableID:2": {"name": ""},
-                }
-            }
-        }
-        client = FigmaClient(token="tok", transport=_json_transport(payload))
-
-        variables = client.list_local_variables("abc123")
-
-        assert variables is not None
-        assert len(variables) == 1
-        assert variables[0].name == "color/bg"
-        assert variables[0].variable_type == "COLOR"
-
-    def test_list_local_variables_shape_drift_returns_none(self) -> None:
-        client = FigmaClient(token="tok", transport=_json_transport({"meta": {}}))
-
-        assert client.list_local_variables("abc123") is None
-
-    def test_list_components_happy_path(self) -> None:
-        payload = {"meta": {"components": [{"key": "k1", "name": "Button", "description": "d"}]}}
-        client = FigmaClient(token="tok", transport=_json_transport(payload))
-
-        components = client.list_components("abc123")
-
-        assert components is not None
-        assert components[0].key == "k1"
-        assert components[0].name == "Button"
-
-    def test_transport_failure_never_raises(self) -> None:
-        client = FigmaClient(token="tok", transport=_raising_transport(TimeoutError()))
-
-        assert client.get_file_summary("abc123") is None
 
 
 class TestPenpotClient:
@@ -300,13 +239,18 @@ class TestCircuitBreakerWiring:
         assert transport.calls == 3
 
     def test_success_keeps_breaker_closed_across_many_calls(self) -> None:
-        breaker = CircuitBreaker("test-figma", failure_threshold=3, cooldown_s=60.0)
-        payload = json.dumps({"name": "f", "lastModified": None, "version": None}).encode("utf-8")
+        breaker = CircuitBreaker("test-penpot-ok", failure_threshold=3, cooldown_s=60.0)
+        payload = json.dumps({"id": "u1", "fullname": "x", "email": "x@x"}).encode("utf-8")
         transport = _CountingTransport(fail=False, payload=payload)
-        client = FigmaClient(token="tok", transport=transport, breaker=breaker)
+        client = PenpotClient(
+            base_url="https://design.example.test",
+            token="tok",
+            transport=transport,
+            breaker=breaker,
+        )
 
         for _ in range(10):
-            assert client.get_file_summary("abc") is not None
+            assert client.get_profile() is not None
         assert transport.calls == 10
         assert breaker.snapshot().state == CircuitState.CLOSED
 
@@ -337,5 +281,5 @@ class TestCircuitBreakerWiring:
         assert breaker.snapshot().state == CircuitState.CLOSED
 
     def test_default_breaker_is_shared_per_source_when_none_injected(self) -> None:
-        client = FigmaClient(token="tok")
-        assert client._breaker is get_breaker(FigmaClient.SOURCE)
+        client = PenpotClient(base_url="https://design.example.test", token="tok")
+        assert client._breaker is get_breaker(PenpotClient.SOURCE)
