@@ -253,6 +253,22 @@ class TestEffectiveProviderFor:
         monkeypatch.setattr(ch, "find_codex_executable", lambda: None)
         assert provider_config._provider_available("codex") is False
 
+    def test_898_unlaunchable_binary_makes_unavailable(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """#898: npm's opencode placeholder is on PATH but can never start —
+        it must not count as installed, so roles substitute instead."""
+        import agent_takkub._pty_backend as pb
+        import agent_takkub.opencode_helper as oh
+        import agent_takkub.provider_state as ps
+
+        stub = tmp_path / "opencode"
+        stub.write_text("echo postinstall not run >&2\nexit 1\n", encoding="utf-8")
+        monkeypatch.setattr(ps, "is_disabled", lambda prov: False)
+        monkeypatch.setattr(oh, "find_opencode_executable", lambda: str(stub))
+        monkeypatch.setattr(pb, "_looks_like_valid_executable", lambda p: p != str(stub))
+        assert provider_config._provider_available("opencode") is False
+
     def test_availability_is_cached_within_ttl(self, monkeypatch: pytest.MonkeyPatch) -> None:
         # Regression for the main_thread_stall root cause: the CLI-installed
         # probe (shutil.which via find_codex_executable) must not re-run on

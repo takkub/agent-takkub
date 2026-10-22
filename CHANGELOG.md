@@ -2,6 +2,12 @@
 
 All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses [SemVer](https://semver.org/).
 
+## [v2.2.27] - 2026-10-22
+
+### Fixed (แก้)
+
+- **provider ที่ติดตั้งไม่สมบูรณ์ทำให้ Lead/pane บูตไม่ขึ้นแบบเงียบ (#898):** `opencode-ai` จาก npm ที่ postinstall ไม่ได้รันทิ้ง placeholder script ไม่มี shebang ไว้บน PATH → discovery บอกว่า "ติดตั้งแล้ว" แต่ spawn ล้มด้วย `SpawnTargetCorrupt` วน retry 5 รอบ แล้ว Lead pane ว่างเปล่าไม่มีอะไรแจ้ง · ตอนนี้ (1) `_provider_available` ทุก provider ถือว่า binary ที่ไม่ผ่าน header check = ไม่ได้ติดตั้ง → role (รวม Lead) ถูกแทนด้วย provider ที่ใช้ได้อัตโนมัติ (2) script ไม่มี shebang = `SpawnTargetCorrupt.permanent` ไม่ retry และบอกให้ติดตั้ง CLI ใหม่ (3) Lead spawn ล้ม → status bar + tray + Remote notice (`leadUnavailable`)
+
 ## [v2.2.26] - 2026-10-22
 
 ### Removed (ถอน)

@@ -154,6 +154,22 @@ class TestClaudeBranchCorruptRetry:
         ]
         assert len(giveups) == 1
 
+    def test_898_permanent_corrupt_target_is_not_retried(self, qapp, monkeypatch, tmp_path):
+        """#898: an npm placeholder script never fixes itself — five retries
+        just delayed a silent failure."""
+        orch = _make_orchestrator(qapp, monkeypatch)
+        pane = _make_pane("backend")
+        orch._panes_by_project[TEST_PROJECT] = {"backend": pane}
+        permanent = SpawnTargetCorrupt("no shebang")
+        permanent.permanent = True
+
+        ok, _msg, mock_pty = _spawn_with_scripted_pty(
+            orch, "backend", monkeypatch, tmp_path, [permanent]
+        )
+
+        assert ok is False
+        assert mock_pty.spawn.call_count == 1
+
     def test_generic_failure_is_unaffected(self, qapp, monkeypatch, tmp_path):
         """A non-SpawnTargetCorrupt failure must still fail immediately, with
         no retry — the retry path is specific to this one exception type."""

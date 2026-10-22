@@ -154,7 +154,23 @@ class SpawnTargetCorrupt(OSError):
     """Raised when argv[0] resolves to a file whose header fails the
     pre-flight sanity check in :func:`_validate_spawn_target` — see that
     function's docstring for exactly what this does and doesn't catch.
+
+    ``permanent`` (#898): the target is a finished text file with no
+    shebang (e.g. npm's "postinstall was not run" placeholder), not a
+    binary mid-write — retrying cannot fix it.
     """
+
+    permanent: bool = False
+
+
+def _is_shebangless_script(path: str) -> bool:
+    """POSIX: an exec-bit text file with no `#!` — unlaunchable for good."""
+    try:
+        with open(path, "rb") as f:
+            head = f.read(64)
+    except OSError:
+        return False
+    return bool(head) and b"\x00" not in head and not head.startswith(_POSIX_MAGIC_PREFIXES)
 
 
 _POSIX_MAGIC_PREFIXES = (
@@ -227,6 +243,13 @@ def _validate_spawn_target(argv0: str, env: dict | None) -> None:
     """
     resolved = which(argv0, path=(env or os.environ).get("PATH"))
     if resolved is not None and not _looks_like_valid_executable(resolved):
+        if sys.platform != "win32" and _is_shebangless_script(resolved):
+            exc = SpawnTargetCorrupt(
+                f"spawn target is a script with no shebang — broken install? "
+                f"(e.g. npm postinstall not run; reinstall the CLI): {resolved!r}"
+            )
+            exc.permanent = True
+            raise exc
         raise SpawnTargetCorrupt(
             f"spawn target failed pre-flight header check, refusing the "
             f"native constructor call (#313): {resolved!r}"

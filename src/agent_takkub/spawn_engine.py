@@ -2337,7 +2337,10 @@ class SpawnEngineMixin:
                 pass
             _ps_corrupt = self._ps(_exit_key(project_ns, role_name))
             _ps_corrupt.corrupt_spawn_retries += 1
-            if _ps_corrupt.corrupt_spawn_retries <= _CORRUPT_SPAWN_MAX_RETRIES:
+            if (
+                not getattr(e, "permanent", False)
+                and _ps_corrupt.corrupt_spawn_retries <= _CORRUPT_SPAWN_MAX_RETRIES
+            ):
                 delay_ms = _CORRUPT_SPAWN_BACKOFF_MS * _ps_corrupt.corrupt_spawn_retries
                 _log_event(
                     "spawn_target_corrupt_retry",
@@ -2429,6 +2432,14 @@ class SpawnEngineMixin:
             _from_orch("_log_event")(
                 "lead_spawn_failed", project=self._resolve_project(project), msg=str(msg)[:300]
             )
+            # #898: a Lead that never boots left the pane blank with no
+            # dialog/banner (`_warn_lead_spawn_failed` skips Lead by design).
+            unavailable = getattr(self, "leadUnavailable", None)
+            if unavailable is not None:
+                unavailable.emit(
+                    self._resolve_project(project),
+                    f"Lead spawn failed: {str(msg)[:200]} — เปลี่ยน provider ของ Lead ใน Settings",
+                )
         return ok, msg
 
     def _spawn_once(
@@ -4541,7 +4552,10 @@ class SpawnEngineMixin:
                 pass
             _ps_corrupt = self._ps(_exit_key(project_ns, role_name))
             _ps_corrupt.corrupt_spawn_retries += 1
-            if _ps_corrupt.corrupt_spawn_retries <= _CORRUPT_SPAWN_MAX_RETRIES:
+            if (
+                not getattr(e, "permanent", False)
+                and _ps_corrupt.corrupt_spawn_retries <= _CORRUPT_SPAWN_MAX_RETRIES
+            ):
                 delay_ms = _CORRUPT_SPAWN_BACKOFF_MS * _ps_corrupt.corrupt_spawn_retries
                 _log_event(
                     "spawn_target_corrupt_retry",

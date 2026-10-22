@@ -447,7 +447,15 @@ def _provider_cli_installed_uncached(provider: str) -> bool:
     try:
         spec = PROVIDER_REGISTRY.get(provider)
         if spec is not None and spec.custom_discovery_fn is not None:
-            return spec.custom_discovery_fn() is not None
+            found = spec.custom_discovery_fn()
+            if found is None:
+                return False
+            # #898: an npm placeholder (`opencode-ai` before its postinstall
+            # ran) is on PATH but can never start — treat it as not installed
+            # so roles (Lead included) substitute instead of spawn-failing.
+            from ._pty_backend import _looks_like_valid_executable
+
+            return _looks_like_valid_executable(str(found))
     except Exception:
         return False
     return True

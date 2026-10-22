@@ -121,6 +121,19 @@ class TestLooksLikeValidExecutablePosix:
 
 
 class TestValidateSpawnTarget:
+    def test_898_shebangless_placeholder_is_permanent(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(backend.sys, "platform", "darwin")
+        target = tmp_path / "opencode"
+        target.write_bytes(
+            b'echo "Error: opencode-ai\'s postinstall script was not run." >&2\nexit 1\n'
+        )
+        monkeypatch.setattr(backend, "which", lambda *a, **kw: str(target))
+        monkeypatch.setattr(backend, "_looks_like_valid_executable", lambda p: False)
+
+        with pytest.raises(SpawnTargetCorrupt) as info:
+            _validate_spawn_target("opencode", None)
+        assert info.value.permanent is True
+
     def test_unresolvable_argv0_is_a_noop(self, monkeypatch, tmp_path):
         monkeypatch.setattr(backend, "which", lambda *a, **kw: None)
         _validate_spawn_target("does-not-exist-anywhere", None)  # must not raise

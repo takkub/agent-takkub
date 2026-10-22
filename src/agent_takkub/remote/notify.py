@@ -2383,6 +2383,10 @@ class LeadNotifier(QObject):
         auto_deny = getattr(orch, "leadAutoDenyNotice", None)
         if auto_deny is not None:
             auto_deny.connect(self._on_notice)
+        # #898: a dead/never-booted Lead must reach the phone too.
+        lead_unavailable = getattr(orch, "leadUnavailable", None)
+        if lead_unavailable is not None:
+            lead_unavailable.connect(self._on_notice)
 
         # Start the poll timer only after every connect above succeeds — a
         # constructor that raises partway through (e.g. a future signal drift)
@@ -2833,6 +2837,9 @@ class LeadNotifier(QObject):
         auto_deny = getattr(self._orch, "leadAutoDenyNotice", None)
         if auto_deny is not None:
             connections.append((auto_deny, self._on_notice))
+        lead_unavailable = getattr(self._orch, "leadUnavailable", None)
+        if lead_unavailable is not None:
+            connections.append((lead_unavailable, self._on_notice))
         for signal, slot in connections:
             try:
                 signal.disconnect(slot)
