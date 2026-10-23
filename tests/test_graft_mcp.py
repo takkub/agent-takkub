@@ -535,8 +535,12 @@ class TestCccMcp:
 
         path = sdt.browser_profile_mcp_config_path("backend", None, "proj", str(target))
         cfg = json.loads(pathlib.Path(path).read_text(encoding="utf-8"))["mcpServers"]["ccc"]
-        assert cfg["command"] == r"C:\fake\cocoindex-code.exe"
-        assert cfg["args"] == ["serve"]
+        # #904: every provider goes through the cockpit runner, which starts
+        # the launcher (and so the shared daemon) at below-normal priority.
+        runner = ccc_store.runner_mcp_config()
+        assert cfg["command"] == runner["command"]
+        assert cfg["args"] == [*ccc_store.CCC_RUNNER_ARGS, "--cwd", str(target.resolve())]
+        assert cfg["env"]["OMP_NUM_THREADS"] == ccc_store.EMBED_THREAD_CAP
         assert cfg["env"]["COCOINDEX_CODE_ROOT_PATH"] == str(target.resolve())
         assert cfg["env"]["COCOINDEX_CODE_DB_PATH_MAPPING"].endswith(str(db))
         assert cfg["env"]["COCOINDEX_DISABLE_USAGE_TRACKING"] == "1"

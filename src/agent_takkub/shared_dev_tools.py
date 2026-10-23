@@ -47,8 +47,8 @@ from datetime import datetime
 
 from ._win_console import SUBPROCESS_NO_WINDOW
 from .ccc_store import ccc_cli_path, ccc_server_path
-from .ccc_store import env_for_root as _ccc_env_for_root
 from .ccc_store import index_ready as _ccc_index_ready
+from .ccc_store import pane_mcp_config as _ccc_pane_mcp_config
 from .ccc_store import project_root_for_pane as _ccc_project_root
 from .config import RUNTIME_DIR
 from .graft_store import graft_cli_path, graph_store_dir, has_completed_build, staging_dir_for
@@ -612,9 +612,10 @@ def browser_profile_mcp_config_path(
         if ccc_root is None or launcher is None or not _ccc_index_ready(ccc_root):
             del servers["ccc"]
         else:
+            # Through the cockpit runner, not the launcher: only the runner
+            # can start the shared embedding daemon at low priority (#904).
             cfg = dict(servers["ccc"])
-            cfg["command"] = launcher
-            cfg["env"] = {**(cfg.get("env") or {}), **_ccc_env_for_root(ccc_root)}
+            cfg.update(_ccc_pane_mcp_config(ccc_root))
             servers["ccc"] = cfg
 
     # #281: applied again here, not only in the role-variant writer, so a

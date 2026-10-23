@@ -138,14 +138,34 @@ def db_dir(root: Path) -> Path:
     return _store_base() / CCC_DB_ROOT_NAME / f"{root.name}-{key}"
 
 
+# #901/#904: the daemon `cocoindex-code serve` spawns embeds on CPU through
+# torch/sentence-transformers, whose thread pools default to one thread per
+# core — measured 2026-10-23 at 7-10 cores for as long as a refresh ran, on a
+# machine the team was also building on. Two threads keep a warm refresh in
+# seconds (6 s for this repo) while leaving the machine to the panes. The
+# daemon inherits these from whichever `serve`/`index` starts it, so every
+# cockpit entry point must pass them. A value the user exported wins.
+EMBED_THREAD_CAP = "2"
+_THREAD_CAP_VARS = (
+    "OMP_NUM_THREADS",
+    "MKL_NUM_THREADS",
+    "OPENBLAS_NUM_THREADS",
+    "TORCH_NUM_THREADS",
+)
+
+
 def env_for_root(root: Path) -> dict[str, str]:
     """Environment that makes `ccc` (CLI or MCP) work on *root* without
     touching anything the cockpit does not own."""
-    return {
+    env = {
         "COCOINDEX_CODE_ROOT_PATH": str(root),
         "COCOINDEX_CODE_DB_PATH_MAPPING": f"{root}={db_dir(root)}",
         "COCOINDEX_DISABLE_USAGE_TRACKING": "1",
+        "TOKENIZERS_PARALLELISM": "false",
     }
+    for name in _THREAD_CAP_VARS:
+        env[name] = os.environ.get(name) or EMBED_THREAD_CAP
+    return env
 
 
 def project_settings_path(root: Path) -> Path:
@@ -186,7 +206,35 @@ def runner_mcp_config() -> dict[str, object]:
         # A source checkout is not guaranteed to have an editable install
         # (for example while uv cannot replace a live winpty executable).
         env["PYTHONPATH"] = str(REPO_ROOT / "src")
-    return {"command": sys.executable, "args": list(CCC_RUNNER_ARGS), "env": env}
+    return {"command": _console_python(), "args": list(CCC_RUNNER_ARGS), "env": env}
+
+
+def _console_python() -> str:
+    """The interpreter an MCP host can talk stdio to: the installed cockpit
+    runs under `pythonw.exe`, whose console-less launch is the wrong thing to
+    hand a provider as a stdio server; its `python.exe` sits next to it."""
+    exe = Path(sys.executable)
+    if exe.stem.lower() == "pythonw":
+        sibling = exe.with_name("python" + exe.suffix)
+        if sibling.is_file():
+            return str(sibling)
+    return sys.executable
+
+
+def pane_mcp_config(root: Path) -> dict[str, object]:
+    """The `ccc` MCP entry a pane of *root* gets, for every provider (#904).
+
+    Always the cockpit runner rather than the `cocoindex-code` launcher
+    itself: the runner starts the launcher at below-normal priority (and the
+    daemon it spawns inherits that on Windows and POSIX alike), which a
+    provider spawning the launcher directly cannot do.
+    """
+    runner = runner_mcp_config()
+    return {
+        **runner,
+        "args": [*runner["args"], "--cwd", str(root)],  # type: ignore[misc]
+        "env": {**runner["env"], **env_for_root(root)},  # type: ignore[dict-item]
+    }
 
 
 def ensure_cursor_mcp(path: Path | None = None) -> tuple[bool, str]:

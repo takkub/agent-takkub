@@ -3596,12 +3596,16 @@ def cmd_ccc(args: argparse.Namespace) -> dict:
     import subprocess
 
     from . import ccc_store
-    from ._win_console import SUBPROCESS_NO_WINDOW
+    from ._win_console import gate_popen_kwargs
     from .config import lead_cwd
 
     raw_root = args.cwd or lead_cwd(args.project or _from_project() or None) or os.getcwd()
     root = Path(raw_root).expanduser().resolve()
     env = {**os.environ, **ccc_store.env_for_root(root)}
+    # #904: below-normal priority (Windows) / nice 10 (POSIX) for every ccc
+    # child — `cocoindex-code serve`/`ccc` start the shared embedding daemon,
+    # and the daemon inherits the priority of whoever started it.
+    _low_prio = gate_popen_kwargs()
     if args.ccc_cmd == "serve":
         launcher = ccc_store.ccc_server_path()
         if launcher is None:
@@ -3613,10 +3617,7 @@ def cmd_ccc(args: argparse.Namespace) -> dict:
         if not ccc_store.index_ready(root):
             return {"ok": False, "msg": f"ccc index is not ready for {root}", "quiet": True}
         return {
-            "ok": subprocess.call(
-                [launcher, "serve"], cwd=str(root), env=env, creationflags=SUBPROCESS_NO_WINDOW
-            )
-            == 0,
+            "ok": subprocess.call([launcher, "serve"], cwd=str(root), env=env, **_low_prio) == 0,
             "msg": "",
             "quiet": True,
         }
@@ -3669,7 +3670,7 @@ def cmd_ccc(args: argparse.Namespace) -> dict:
                     text=True,
                     encoding="utf-8",
                     errors="replace",
-                    creationflags=SUBPROCESS_NO_WINDOW,
+                    **_low_prio,
                 )
             except OSError as exc:
                 results.append(f"{provider}: could not start ({exc})")
@@ -3705,7 +3706,7 @@ def cmd_ccc(args: argparse.Namespace) -> dict:
             text=True,
             encoding="utf-8",
             errors="replace",
-            creationflags=SUBPROCESS_NO_WINDOW,
+            **_low_prio,
         )
         _utf8_print((proc.stdout or proc.stderr).strip())
         return {"ok": True, "msg": "", "quiet": True}
@@ -3730,7 +3731,7 @@ def cmd_ccc(args: argparse.Namespace) -> dict:
             text=True,
             encoding="utf-8",
             errors="replace",
-            creationflags=SUBPROCESS_NO_WINDOW,
+            **_low_prio,
         )
         if proc.returncode != 0:
             return {"ok": False, "msg": f"`ccc {argv[1]}` exited {proc.returncode}"}
