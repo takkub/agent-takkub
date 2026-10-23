@@ -586,11 +586,18 @@ def _can_spawn_from_cfg(role: str, cfg: dict, project: str | None = None) -> tup
         allowed = bool(cfg["roles"].get(base, False))
     if allowed:
         return True, ""
-    return False, (
-        f"role {base} ไม่เปิดใน team preset '{label(cfg['preset'])}' ของโปรเจคนี้ — "
-        f"เปลี่ยน preset ที่ Settings หรือ `takkub assign --role lead --team full` "
-        "override เฉพาะงานนี้"
+    # #905: only point at `--team full` when that override would actually
+    # let this role through — never for a project already on `full`, and
+    # never for the extra positions every built-in preset leaves off.
+    full_allows = cfg["preset"] != "full" and bool(
+        BUILTIN_PRESETS["full"]["roles"].get(base) or BUILTIN_PRESETS["full"]["checker"] == base
     )
+    how = (
+        "เปลี่ยน preset ที่ Settings หรือ `takkub assign --role lead --team full` override เฉพาะงานนี้"
+        if full_allows
+        else f"เปิด {base} ที่ Settings → Roles & ตำแหน่ง ของโปรเจคนี้ แล้ว assign ใหม่"
+    )
+    return False, f"role {base} ไม่เปิดใน team preset '{label(cfg['preset'])}' ของโปรเจคนี้ — {how}"
 
 
 def can_spawn(role: str, project: str | None = None) -> tuple[bool, str]:

@@ -1035,16 +1035,40 @@ def _is_machine_busy_from_snapshot(
         )
 
     # Condition 2: RAM or CPU exceeds governor ceiling
-    if bool(data.get("overloaded")):
-        return True, "ระบบอยู่ในสถานะ overloaded"
     ram_pct = data.get("ram_percent")
-    if ram_pct is not None and ram_pct >= 85.0:
-        return True, f"RAM สูง ({ram_pct:.1f}%)"
     cpu_pct = data.get("cpu_percent")
-    if cpu_pct is not None and cpu_pct >= 90.0:
-        return True, f"CPU สูง ({cpu_pct:.1f}%)"
+    # #909: every deny names the live values and what lifts it — a pane that
+    # watched its own CPU monitor drop below 60% was still denied and could
+    # not tell why or for how long.
+    now_bit = (
+        f"ตอนนี้ RAM {ram_pct if ram_pct is not None else 0:.0f}% · "
+        f"CPU {cpu_pct if cpu_pct is not None else 0:.0f}%"
+    )
+    release = (
+        f"ปลดเมื่อ RAM < {_BUSY_RAM_PCT:.0f}% และ CPU < {_BUSY_CPU_PCT:.0f}% "
+        "(ค่าอัปเดตทุก ~15 วิ) — รอแล้วลองใหม่"
+    )
+    # #909: the governor's `overloaded` latch only releases on its stricter
+    # resume line (or a dead-band timeout), so it kept a single build
+    # (`check_working_panes=False`, the #846 own-verification class) denied
+    # long after the machine was fine. That class reads live values whenever
+    # the snapshot carries them, and falls back to the latch only when not.
+    has_live = ram_pct is not None or cpu_pct is not None
+    if bool(data.get("overloaded")) and (check_working_panes or not has_live):
+        return True, (
+            f"resource governor ยังอยู่ในสถานะ overloaded (ปลดเมื่อ CPU/RAM ลงถึงเกณฑ์ resume "
+            f"ของ governor) · {now_bit}"
+        )
+    if ram_pct is not None and ram_pct >= _BUSY_RAM_PCT:
+        return True, f"RAM สูง · {now_bit} · {release}"
+    if cpu_pct is not None and cpu_pct >= _BUSY_CPU_PCT:
+        return True, f"CPU สูง · {now_bit} · {release}"
 
     return False, ""
+
+
+_BUSY_RAM_PCT = 85.0
+_BUSY_CPU_PCT = 90.0
 
 
 def _is_note_exempt(file_path: str) -> bool:
@@ -3990,7 +4014,9 @@ _GIT_INVOCATION_RE = re.compile(
 )
 
 _GIT_SHARED_TREE_DENY_TEXT = (
-    "บน shared tree pane ใช้ได้เฉพาะคำสั่ง git อ่าน/เพิ่ม — ใช้ `--isolation worktree` หรือให้ Lead ทำ"
+    "บน shared tree pane ใช้ได้เฉพาะคำสั่ง git อ่าน/เพิ่ม — ใช้ `--isolation worktree` หรือให้ Lead ทำ. "
+    # #908: the deny drops the WHOLE Bash call, chained commands included.
+    "ทั้งคำสั่ง Bash นี้ไม่ได้รันเลย รวมคำสั่งอื่นที่ต่อด้วย `&&`/`;` — ส่งส่วนที่ไม่ใช่ git นี้ใหม่แยกต่างหาก"
 )
 
 # Subcommands already given their own carve-out-aware verdict earlier in
@@ -4034,6 +4060,15 @@ _GIT_SHARED_TREE_ALLOW_PLAIN = frozenset(
         "shortlog",
         "help",
         "version",
+        # #908: `git --version` / `--help` / `--exec-path` reach here as the
+        # "subcommand" (the invocation regex takes the first word after the
+        # global flags); all print and exit.
+        "--version",
+        "--help",
+        "--exec-path",
+        "--html-path",
+        "--man-path",
+        "--info-path",
         "add",
         "check-ignore",
         "count-objects",
@@ -4233,7 +4268,17 @@ def _reflog_tail_allowed(tail_tokens: list[str]) -> bool:
 
 # Subcommands allowed only when their tail matches a narrower safe shape —
 # checked with the invocation's already-split tail tokens.
+def _init_tail_allowed(tail_tokens: list[str]) -> bool:
+    """#908: `git init` creates a repo where there is none (scaffolding a new
+    project) and only re-stamps an existing one — it moves no ref and touches
+    no working-tree file. The two shapes that DO reach existing state are
+    denied: `--separate-git-dir` (moves the git dir) and `--template`
+    (copies hook scripts in)."""
+    return not any(t.startswith(("--separate-git-dir", "--template")) for t in tail_tokens)
+
+
 _GIT_SHARED_TREE_RESTRICTED_CHECKS: dict[str, Callable[[list[str]], bool]] = {
+    "init": _init_tail_allowed,
     "remote": _remote_tail_allowed,
     "worktree": _worktree_tail_allowed,
     "rm": _rm_tail_allowed,

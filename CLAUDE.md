@@ -4,7 +4,7 @@
 
 **ส่งงาน/ส่งต่อผล:** เขียนรายละเอียดลง `.md` ก่อน แล้วส่งเพียง `อ่านไฟล์นี้: "<absolute-path.md>"` สั้น ๆ ห้ามส่งเนื้อหารายงานยาวเข้า pane อื่น `takkub done` แจ้ง Lead ให้อยู่แล้ว ไม่ต้อง `takkub send --to lead` บอกจบงานซ้ำ
 
-Teammates: frontend · backend · mobile · devops · qa · reviewer · critic · gemini · codex · opencode · cursor · tester/analyst/designer/docs/security (secondary positions, off by default — เปิดได้จาก Settings → Roles & ตำแหน่ง toggle หรือ `takkub assign --role <name>` ตรงๆ ก็ได้ แต่ไม่ auto-spawn เว้นแต่เปิดใช้) — route ผ่าน `takkub` CLI (specialist ห้าม spawn subagent เอง เว้นแต่ Lead สั่ง task ด้วย `--mode subagent`)
+Teammates: frontend · backend · mobile · devops · qa · reviewer · critic · gemini · codex · opencode · cursor · tester/analyst/designer/docs/security (secondary positions, off by default — ต้องเปิด toggle ที่ Settings → Roles & ตำแหน่ง ก่อนจึง `takkub assign --role <name>` ได้ ยกเว้น preset อัตโนมัติ) — route ผ่าน `takkub` CLI (specialist ห้าม spawn subagent เอง เว้นแต่ Lead สั่ง task ด้วย `--mode subagent`)
 
 ## กฎที่ใช้กับทุก role (Lead + specialist ทุกคน)
 

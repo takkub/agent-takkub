@@ -3661,7 +3661,6 @@ def cmd_ccc(args: argparse.Namespace) -> dict:
     # #904: below-normal priority (Windows) / nice 10 (POSIX) for every ccc
     # child — `cocoindex-code serve`/`ccc` start the shared embedding daemon,
     # and the daemon inherits the priority of whoever started it.
-    _low_prio = gate_popen_kwargs()
     if args.ccc_cmd == "serve":
         launcher = ccc_store.ccc_server_path()
         if launcher is None:
@@ -3673,7 +3672,10 @@ def cmd_ccc(args: argparse.Namespace) -> dict:
         if not ccc_store.index_ready(root):
             return {"ok": False, "msg": f"ccc index is not ready for {root}", "quiet": True}
         return {
-            "ok": subprocess.call([launcher, "serve"], cwd=str(root), env=env, **_low_prio) == 0,
+            "ok": subprocess.call(
+                [launcher, "serve"], cwd=str(root), env=env, **gate_popen_kwargs()
+            )
+            == 0,
             "msg": "",
             "quiet": True,
         }
@@ -3726,7 +3728,7 @@ def cmd_ccc(args: argparse.Namespace) -> dict:
                     text=True,
                     encoding="utf-8",
                     errors="replace",
-                    **_low_prio,
+                    **gate_popen_kwargs(),
                 )
             except OSError as exc:
                 results.append(f"{provider}: could not start ({exc})")
@@ -3762,7 +3764,7 @@ def cmd_ccc(args: argparse.Namespace) -> dict:
             text=True,
             encoding="utf-8",
             errors="replace",
-            **_low_prio,
+            **gate_popen_kwargs(),
         )
         _utf8_print((proc.stdout or proc.stderr).strip())
         return {"ok": True, "msg": "", "quiet": True}
@@ -3787,7 +3789,7 @@ def cmd_ccc(args: argparse.Namespace) -> dict:
             text=True,
             encoding="utf-8",
             errors="replace",
-            **_low_prio,
+            **gate_popen_kwargs(),
         )
         if proc.returncode != 0:
             return {"ok": False, "msg": f"`ccc {argv[1]}` exited {proc.returncode}"}
