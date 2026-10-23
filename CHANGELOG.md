@@ -2,6 +2,18 @@
 
 All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses [SemVer](https://semver.org/).
 
+## [v2.2.28] - 2026-10-23
+
+### Fixed (แก้)
+
+- **ccc daemon กิน CPU 7–10 core + RAM 1.9 GB (#901 #904):** ทุก provider เรียก `ccc` MCP ผ่าน cockpit runner ที่ start `cocoindex-code serve` ด้วย priority ต่ำ (Windows BELOW_NORMAL / POSIX nice 10) — daemon ที่ถูกปลุกสืบทอด priority นี้ · จำกัด thread embedding (`OMP/MKL/OPENBLAS/TORCH_NUM_THREADS=2`, user ตั้งเองได้) · วัดจริง: re-embed จาก 7–10 core เหลือ 1.69 core · `takkub ccc index` รอบแรกหลังอัปจะล้าง index ค้างของไฟล์ที่ gitignore (เคยเจอ 4,937 ไฟล์ใต้ `providers/`)
+- **`takkub done` (#906 #907 #910 #911 #912 #913):** done ที่อ้าง task id เก่าตอบ error พร้อมบอก task id ที่ active แทน `ok:` (#910) · orchestrator timeout แล้วโน้ตไม่หาย บันทึกไว้ที่ `runtime/done-outbox/` พร้อมคำสั่งส่งซ้ำ `--note-file` · รับ `--screenshot PATH` ได้ (#911) · impact evidence บอก field ที่ขาดครบในรอบเดียวพร้อมค่าที่ถูก (#912) · project root ที่ไม่ใช่ git แต่มี repo ย่อย อ่าน git status จาก repo ที่ baseline มา ไม่ซ้อน "ตรวจไม่ได้" สองชั้น (#906) · รูป PNG ที่เกือบว่าง (<0.01 B/px) ติดป้าย `⚠mostly-blank` (#907 — ยังจับหน้า login ไม่ได้) · pane ใน worktree เห็น skill ของโปรเจกต์และ global (#913)
+- **guard (#905 #908 #909):** `git --version`/`git init` ผ่านบน shared tree (`init --template/--separate-git-dir` ยังบล็อก) และข้อความ deny บอกว่าคำสั่งที่ต่อกันไม่ได้รันด้วย (#908) · build/typecheck เดี่ยวดู CPU/RAM สดแทน latch overloaded ที่ค้าง และทุก busy deny บอกค่าปัจจุบัน + เงื่อนไขปลด (#909) · deny ของ preset แนะนำ `--team full` เฉพาะตอนที่ช่วยได้จริง ตำแหน่งเสริมชี้ไป Settings toggle และแก้ CLAUDE.md ให้ตรงพฤติกรรม (#905)
+- **auto-resume (#902):** pane ที่ park รอ quota กลับมาหลัง cockpit restart แม้ snapshot เก่ากว่า 1 ชม. (เคยหายพร้อมงานค้าง) · รอบ park/wake และการ give-up เริ่มนับใหม่เมื่อทำงานเกิน 2 ชม. หลังปลุก (Lead ไม่เคยได้ reset ตอน assign จึงหยุดตั้งแต่ limit แรกของวัน)
+- **ข้อความงานขาด (#914):** idle reminder รอบ escalate แนบ path ใบงานเต็ม
+- **UI ค้าง (#899):** probe usage meter ต่อ pane บน watchdog tick (stat + `Path.resolve` 0.8–1.7 วิต่อครั้ง ทุก 5 วิทุก pane) อ่านได้สูงสุดทุก 30 วิ
+- **context read (#903):** `takkub context read` พิมพ์ Effective session policy ก่อน (การลดขนาดย้ายไป backlog)
+
 ## [v2.2.27] - 2026-10-22
 
 ### Fixed (แก้)
