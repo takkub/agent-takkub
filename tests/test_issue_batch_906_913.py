@@ -164,3 +164,53 @@ def test_idle_reminder_names_task_sheet() -> None:
     text = idle_reminder_text("C:/x/runtime/tasks/p/2026-10-23/1-reviewer.md")
     assert text.startswith(IDLE_REMINDER_TEXT)
     assert '"C:/x/runtime/tasks/p/2026-10-23/1-reviewer.md"' in text
+
+
+# --- #903 -------------------------------------------------------------------
+
+
+def test_effective_policy_leads_the_context_read(monkeypatch) -> None:
+    from agent_takkub import lead_context, lead_readiness
+
+    monkeypatch.setattr(lead_context, "_build_lead_context_text", lambda *a, **k: "RENDERED")
+    facts = {"team": {"preset": "solo-lead", "lead_may_implement": True, "roles": {}}}
+    text = lead_readiness._context("p", ".", {"/x/role.md": "POLICY DOC"}, facts)
+    assert text.startswith("## Effective session policy")
+    assert text.index("RENDERED") < text.index("POLICY DOC")
+
+
+# --- #899 -------------------------------------------------------------------
+
+
+def test_meter_probe_is_throttled_per_pane(monkeypatch) -> None:
+    from agent_takkub import limit_autoresume
+    from agent_takkub import orchestrator as orch_mod
+
+    o = Orchestrator.__new__(Orchestrator)
+    o._pane_running_account = lambda project, role: None
+    calls: list[float] = []
+    monkeypatch.setattr(limit_autoresume, "pane_account_home", lambda *a: Path("."))
+
+    def fake_meter(provider, home, threshold, now):
+        calls.append(now)
+        return None
+
+    monkeypatch.setattr(limit_autoresume, "meter_reset_at", fake_meter)
+    t0 = 1_000_000.0
+    o._meter_limit_reset_at("p", "backend", "claude", t0)
+    o._meter_limit_reset_at("p", "backend", "claude", t0 + 5)
+    o._meter_limit_reset_at("p", "frontend", "claude", t0 + 5)
+    assert len(calls) == 2
+    o._meter_limit_reset_at("p", "backend", "claude", t0 + orch_mod._METER_PROBE_INTERVAL_S + 1)
+    assert len(calls) == 3
+
+
+def test_meter_probe_cached_reset_expires(monkeypatch) -> None:
+    from agent_takkub import limit_autoresume
+
+    o = Orchestrator.__new__(Orchestrator)
+    o._pane_running_account = lambda project, role: None
+    monkeypatch.setattr(limit_autoresume, "pane_account_home", lambda *a: Path("."))
+    monkeypatch.setattr(limit_autoresume, "meter_reset_at", lambda *a: 1_000_010.0)
+    assert o._meter_limit_reset_at("p", "r", "claude", 1_000_000.0) == 1_000_010.0
+    assert o._meter_limit_reset_at("p", "r", "claude", 1_000_011.0) is None

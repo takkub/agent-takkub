@@ -102,7 +102,17 @@ def _context(project: str, cwd: str, documents: dict, facts: dict) -> str:
         rule = "Lead may implement and self-verify. Honor the configured checker and disabled development positions."
     else:
         rule = "Delegate implementation/deployment to enabled positions through takkub assign --mode pane."
-    parts = [rendered]
+    # #903: the effective policy (~1 KB) goes FIRST — it is the part Lead acts
+    # on, and at the tail of a 60 KB read it sat behind a persisted-output cut.
+    parts = [
+        "## Effective session policy (authoritative over generic delegation defaults)\n"
+        + json.dumps(facts, ensure_ascii=False, indent=2)
+        + f"\n{rule}\nDo not change settings or invent a team override to bypass policy.\n"
+        "Native subagents require explicit permitted routing; they do not substitute for requested visible positions.\n"
+        "Before substantive work, run `takkub context read`. Repeat after resume, compaction, failover or policy changes.\n"
+        "Docker reports distinguish host checks, image build, container recreation and observed health.\n",
+        rendered,
+    ]
     # The rendered context already opens with the cockpit CLAUDE.md (#854):
     # it stays in the revision hash, but printing it twice only bloats the read.
     cockpit_md = str(ASSETS_ROOT / "CLAUDE.md")
@@ -110,14 +120,6 @@ def _context(project: str, cwd: str, documents: dict, facts: dict) -> str:
         f"\n## Required policy: {path}\n\n{text}"
         for path, text in documents.items()
         if path != cockpit_md
-    )
-    parts.append(
-        "\n## Effective session policy (authoritative over generic delegation defaults)\n"
-        + json.dumps(facts, ensure_ascii=False, indent=2)
-        + f"\n{rule}\nDo not change settings or invent a team override to bypass policy.\n"
-        "Native subagents require explicit permitted routing; they do not substitute for requested visible positions.\n"
-        "Before substantive work, run `takkub context read`. Repeat after resume, compaction, failover or policy changes.\n"
-        "Docker reports distinguish host checks, image build, container recreation and observed health.\n"
     )
     return "\n".join(parts)
 

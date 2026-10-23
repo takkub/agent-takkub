@@ -1157,6 +1157,9 @@ _STREAM_TOKENS_RE = re.compile(r"[↑↓]?\s*[\d.,]+\s*[km]?\s*tokens?\b", re.IG
 
 
 IDLE_WATCHDOG_INTERVAL_MS = 5_000
+# #899: min seconds between two usage-meter reads for the same pane on the
+# watchdog tick (see `_meter_limit_reset_at`).
+_METER_PROBE_INTERVAL_S = 30.0
 # #406: how long the cockpit-owned mb Chrome may sit with no browser pane
 # alive before `_release_native_chrome_if_idle` kills it (see
 # `_schedule_native_chrome_idle_release` for why not immediately).
@@ -17331,15 +17334,28 @@ class Orchestrator(
     ) -> float | None:
         """Reset epoch when the usage meter shows the account THIS pane runs
         on (its switched account, else the project's) spent in any window;
-        None otherwise. Cache read only — no network on the watchdog tick."""
+        None otherwise. Cache read only — no network on the watchdog tick.
+
+        #899: "cache read" still cost 0.8-1.7 s of main thread per call on
+        prod (`profile_for`'s stat + `get_account_usage`'s `Path.resolve`), and
+        this runs every 5 s tick for every live pane. The meter it reads only
+        changes on its own slow poll, and the on-screen banner covers the
+        gap, so each pane re-reads at most every `_METER_PROBE_INTERVAL_S`."""
+        cache = self.__dict__.setdefault("_meter_probe_cache", {})
+        cache_key = (project, role, provider)
+        hit = cache.get(cache_key)
+        if hit is not None and now - hit[0] < _METER_PROBE_INTERVAL_S:
+            return hit[1] if hit[1] is None or hit[1] > now else None
         try:
             from .limit_autoresume import METER_SPENT_PCT, meter_reset_at, pane_account_home
 
             account = self._pane_running_account(project, role)
             home = pane_account_home(project, provider, account)
-            return meter_reset_at(provider, home, METER_SPENT_PCT, now)
+            value = meter_reset_at(provider, home, METER_SPENT_PCT, now)
         except Exception:
-            return None
+            value = None
+        cache[cache_key] = (now, value)
+        return value
 
     def _rate_limit_suppressed(self, project: str, role: str, pane: AgentPane, now: float) -> bool:
         """Return True if `pane` is rate-limited and the watchdog should leave
