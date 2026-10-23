@@ -41,6 +41,12 @@ MAX_REROUTE_ROUNDS = len(PROVIDER_RING) - 1
 # stop retrying immediately instead of parking again.
 RELIMIT_GRACE_S = 10 * 60
 
+# #902: a pane that ran this long after its last wake before hitting a limit
+# again is in a NEW usage episode, not a park loop — its round count starts
+# over. Lead never gets the per-assign reset, so without this its count
+# carried across days and the first limit of a morning gave up at once.
+PARK_EPISODE_RESET_S = 2 * 60 * 60
+
 # Extra delay past the banner's advertised reset time before waking — usage
 # windows sometimes lag a few seconds/minutes past what the banner claims.
 WAKE_BUFFER_S = 3 * 60

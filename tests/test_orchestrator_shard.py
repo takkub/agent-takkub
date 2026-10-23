@@ -1021,6 +1021,39 @@ class TestSnapshotAndRestore:
         entries = snap["projects"].get(TEST_PROJECT, [])
         assert any(e.get("last_task", None) == "" for e in entries)
 
+    def test_stale_snapshot_still_restores_parked_pane(
+        self, orch: Orchestrator, tmp_path, monkeypatch
+    ) -> None:
+        """#902: a usage-limit park outlives the 1 h snapshot freshness cap
+        by design — that pane must come back; an unparked one must not."""
+        import json
+
+        from agent_takkub import limit_autoresume
+        from agent_takkub import orchestrator as orch_mod
+
+        snap = {
+            "saved_at": "2000-01-01T00:00:00",
+            "projects": {
+                TEST_PROJECT: [
+                    {"role": "backend", "cwd": "/api", "last_task": "W16 import"},
+                    {"role": "frontend", "cwd": "/web", "last_task": "old work"},
+                ]
+            },
+        }
+        fake_file = tmp_path / "last-session.json"
+        fake_file.write_text(json.dumps(snap), encoding="utf-8")
+        monkeypatch.setattr(orch_mod, "_LAST_SESSION_FILE", fake_file)
+        markers = {"backend": {"status": "parked", "task": "W16 import"}}
+        monkeypatch.setattr(limit_autoresume, "_read_progress_marker", lambda p, r: markers.get(r))
+        with (
+            patch.object(orch, "spawn", return_value=(True, "ok")) as spawn,
+            patch.object(orch, "_send_when_ready"),
+            patch.object(orch, "_restore_parked_pane", return_value=None),
+        ):
+            count = orch.restore_teammates()
+        assert count == 1
+        assert [c.args[0] for c in spawn.call_args_list] == ["backend"]
+
     def test_restore_teammates_queues_notice_with_task(
         self, orch: Orchestrator, tmp_path: pytest.TempPathFactory
     ) -> None:

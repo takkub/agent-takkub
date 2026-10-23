@@ -699,6 +699,23 @@ class AutoResumeMixin:
         is_lead = role == LEAD.name
         if not ps.last_assigned_task and not is_lead:
             return  # scope guard: never touch a pane with no pending task
+        if (
+            not ps.limit_parked
+            and (ps.limit_park_rounds or ps.limit_park_stopped)
+            and ps.limit_park_wake_ts
+            and (now - ps.limit_park_wake_ts) >= auto_resume.PARK_EPISODE_RESET_S
+        ):
+            # #902: a new usage episode, not a park loop — fresh budget.
+            _log_event(
+                "pane_limit_rounds_reset",
+                role=role,
+                project=project,
+                rounds=ps.limit_park_rounds,
+                since_wake_s=int(now - ps.limit_park_wake_ts),
+            )
+            ps.limit_park_rounds = 0
+            ps.limit_park_stopped = False
+            ps.limit_park_wake_ts = 0.0
         if ps.limit_park_stopped or ps.limit_parked or ps.limit_confirm_pending:
             return  # already parked, already confirming, or already gave up
         if ps.quota_reroute_pending:

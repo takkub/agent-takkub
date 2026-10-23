@@ -1171,6 +1171,17 @@ IDLE_REMINDER_TEXT = (
     'ยังทำงานต่ออยู่ → ignore ข้อความนี้ ถ้าติด blocker → `takkub send --to lead "..."`'
 )
 
+
+def idle_reminder_text(task_file: str | None) -> str:
+    """#914: the reminder names the active task sheet. A pane whose task
+    message arrived cut short (no path left in it) asked "which file?" in a
+    chat Lead never sees and idled; with the path here the next nudge is
+    enough to get the full brief."""
+    if not task_file:
+        return IDLE_REMINDER_TEXT
+    return f'{IDLE_REMINDER_TEXT} · ยังไม่เห็นใบงาน/ข้อความงานขาด → ใบงานเต็มอยู่ที่ "{task_file}"'
+
+
 # AUTO_RESPAWN_DELAY_MS, AUTO_RESPAWN_MAX, _PANE_COLS, _PANE_ROWS,
 # CODEX_EARLY_CRASH_WINDOW_SEC, _TOCTOU_RESAMPLE_N moved to spawn_engine.py; re-exported above
 
@@ -13492,8 +13503,23 @@ class Orchestrator(
             age = (datetime.now() - datetime.fromisoformat(saved_at)).total_seconds()
         except ValueError:
             return 0
-        if age > _LAST_SESSION_MAX_AGE_SEC:
-            return 0
+        # #902: a pane parked on a usage limit waits for HOURS by design, so
+        # the 1 h freshness cap used to drop it — backend parked at 07:28 for
+        # a 09:50 reset, cockpit back at 08:58 with a >1 h snapshot, and the
+        # pane with its unfinished task simply vanished. A stale snapshot
+        # still restores the entries whose park marker says they are waiting.
+        stale = age > _LAST_SESSION_MAX_AGE_SEC
+        if stale:
+            from .limit_autoresume import _read_progress_marker
+
+            def _parked_here(project: str, role: str, last_task: str) -> bool:
+                marker = _read_progress_marker(project, role) or {}
+                return (
+                    marker.get("status") == "parked"
+                    and bool(last_task)
+                    and marker.get("task") in (None, "", last_task)
+                )
+
         # #232: attribute WHY this boot is restoring teammates at all — a
         # bare "[cockpit restart]" notice didn't distinguish an auto-applied
         # npm update from a user hitting the restart button, so the reason
@@ -13508,6 +13534,8 @@ class Orchestrator(
                 cwd = (entry or {}).get("cwd") or None
                 last_task = (entry or {}).get("last_task") or ""
                 if not role:
+                    continue
+                if stale and not _parked_here(project, role, last_task):
                     continue
                 # Stamp recent-exit for crash-recovery bookkeeping.
                 # session_uuid has no value yet for these roles, so
@@ -17706,7 +17734,15 @@ class Orchestrator(
             )
             return
 
-        idle_sess.write(IDLE_REMINDER_TEXT)
+        idle_sess.write(
+            idle_reminder_text(
+                getattr(
+                    getattr(self, "_pane_state", {}).get(f"{project_name}::{role_name}"),
+                    "last_assigned_task_file",
+                    None,
+                )
+            )
+        )
         _delayed_enter(pane, idle_sess, 150)
         _log_event(
             "idle_reminder_escalation",

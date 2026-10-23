@@ -152,3 +152,15 @@ def test_worktree_pane_gets_skill_links(tmp_path, monkeypatch) -> None:
     linked.clear()
     spawn_engine._skill_roots_for_project("proj", str(main))
     assert linked == [main]
+
+
+# --- #914 -------------------------------------------------------------------
+
+
+def test_idle_reminder_names_task_sheet() -> None:
+    from agent_takkub.orchestrator import IDLE_REMINDER_TEXT, idle_reminder_text
+
+    assert idle_reminder_text(None) == IDLE_REMINDER_TEXT
+    text = idle_reminder_text("C:/x/runtime/tasks/p/2026-10-23/1-reviewer.md")
+    assert text.startswith(IDLE_REMINDER_TEXT)
+    assert '"C:/x/runtime/tasks/p/2026-10-23/1-reviewer.md"' in text

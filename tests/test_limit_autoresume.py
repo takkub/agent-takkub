@@ -422,6 +422,36 @@ class TestMaybeAutoResumePark:
             o._maybe_auto_resume_park("proj", "backend", _pane_alive(), time.time())
         confirm.assert_not_called()
 
+    def test_new_episode_resets_rounds_and_stop(self, monkeypatch) -> None:
+        """#902: Lead never gets an assign-time reset, so a round count from
+        an earlier day made the first limit of a morning give up at once."""
+        monkeypatch.setattr(auto_resume, "is_enabled", lambda: True)
+        o = _bare_orch()
+        ps = o._ps("proj::lead")
+        now = time.time()
+        ps.rate_limited_until = now + 3600
+        ps.limit_park_rounds = auto_resume.MAX_PARK_ROUNDS
+        ps.limit_park_stopped = True
+        ps.limit_park_wake_ts = now - auto_resume.PARK_EPISODE_RESET_S - 1
+        with patch.object(o, "_confirm_limit_via_usage_async") as confirm:
+            o._maybe_auto_resume_park("proj", "lead", _pane_alive(), now)
+        assert ps.limit_park_rounds == 0
+        assert ps.limit_park_stopped is False
+        confirm.assert_called_once()
+        o._notify_lead.assert_not_called()
+
+    def test_round_cap_within_episode_still_gives_up(self, monkeypatch) -> None:
+        monkeypatch.setattr(auto_resume, "is_enabled", lambda: True)
+        o = _bare_orch()
+        ps = o._ps("proj::backend")
+        now = time.time()
+        ps.last_assigned_task = "do the thing"
+        ps.rate_limited_until = now + 3600
+        ps.limit_park_rounds = auto_resume.MAX_PARK_ROUNDS
+        ps.limit_park_wake_ts = now - auto_resume.RELIMIT_GRACE_S - 60
+        o._maybe_auto_resume_park("proj", "backend", _pane_alive(), now)
+        assert ps.limit_park_stopped is True
+
     def test_round_cap_gives_up_without_confirming(self, monkeypatch) -> None:
         monkeypatch.setattr(auto_resume, "is_enabled", lambda: True)
         o = _bare_orch()
