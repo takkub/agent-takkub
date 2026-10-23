@@ -225,6 +225,10 @@ def _files_bit(facts: DigestFacts) -> str:
     if facts.non_git:
         return "ไฟล์ที่แตะ: n/a (non-git project)"
     if facts.files_touched is None:
+        # #906: a note that already says "ตรวจไม่ได้ (...)" is not wrapped in
+        # a second one.
+        if facts.files_note.startswith("ตรวจไม่ได้"):
+            return f"ไฟล์ที่แตะ:{facts.files_note}"
         suffix = f" ({facts.files_note})" if facts.files_note else ""
         return f"ไฟล์ที่แตะ:ตรวจไม่ได้{suffix}"
     note = f" · {facts.files_note}" if facts.files_note else ""

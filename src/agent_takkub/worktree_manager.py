@@ -457,6 +457,23 @@ def is_cockpit_worktree(branch: str | None, path: str | Path | None) -> bool:
     return p != root and root in p.parents
 
 
+def shared_status_cwd(pane_cwd: str, assign_git_root: str) -> str:
+    """Where a shared-tree pane's done-time git reads must run (#906).
+
+    The assign baseline of a pane whose cwd is a non-git project root holding
+    sub-repos (#800) was taken in one of those sub-repos; reading `git status`
+    at the pane's cwd then fails and the digest said "ตรวจไม่ได้". Read in the
+    repo the baseline came from whenever the cwd is not inside it.
+
+    Pure string work (no `resolve()` stat calls): `done()` runs this on the
+    Qt thread."""
+    cwd = os.path.normcase(os.path.abspath(pane_cwd))
+    root = os.path.normcase(os.path.abspath(assign_git_root))
+    if cwd == root or cwd.startswith(root.rstrip(os.sep) + os.sep):
+        return pane_cwd
+    return assign_git_root
+
+
 def _log_event(event: str, **details) -> None:
     """Proxy to orchestrator._log_event (lazy import to dodge a cycle — same
     pattern as lead_context._log_event). Best-effort; the real implementation
@@ -1693,10 +1710,13 @@ class WorktreeManager:
             "diffstat": "",
         }
         if pane_cwd and assign_base_sha and assign_git_root:
-            out["commits_ahead"] = self.commits_since(pane_cwd, assign_base_sha)
-            out["porcelain"] = self.shared_tree_status_porcelain(pane_cwd)
+            status_cwd = shared_status_cwd(pane_cwd, assign_git_root)
+            if status_cwd != pane_cwd:
+                out["branch"] = self.current_branch(status_cwd)
+            out["commits_ahead"] = self.commits_since(status_cwd, assign_base_sha)
+            out["porcelain"] = self.shared_tree_status_porcelain(status_cwd)
             if out["porcelain"] is not None:
-                out["diffstat"] = self.diffstat_since(pane_cwd, assign_base_sha)
+                out["diffstat"] = self.diffstat_since(status_cwd, assign_base_sha)
         return out
 
     def rediscover_worktree(self, pane_cwd: str) -> dict | None:

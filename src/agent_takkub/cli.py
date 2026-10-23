@@ -1716,11 +1716,50 @@ def cmd_restart(_: argparse.Namespace) -> dict:
     return _request(_with_project({"cmd": "restart", "from": _from_role()}))
 
 
+def _done_note_from_args(args: argparse.Namespace) -> tuple[str, str]:
+    """#911: `--note-file` (resend a saved note) and `--screenshot PATH`
+    (the flag agents keep reaching for) fold into the note text, so neither
+    shape makes argparse drop the whole report."""
+    note = args.note or ""
+    note_file = getattr(args, "note_file", None)
+    if note_file:
+        try:
+            note = Path(note_file).read_text(encoding="utf-8")
+        except OSError as exc:
+            return "", f"could not read --note-file: {exc}"
+    shots = [str(Path(p).expanduser().resolve()) for p in getattr(args, "screenshot", None) or []]
+    if shots:
+        note = "\n".join([note.rstrip(), *(f"screenshot: {p}" for p in shots)]).strip()
+    return note, ""
+
+
+def _save_done_outbox(note: str) -> Path | None:
+    """Keep a done note the orchestrator did not confirm, so a timeout never
+    loses the report (#911). One file per attempt; never overwritten."""
+    from datetime import datetime
+
+    from .config import RUNTIME_DIR
+
+    outbox = RUNTIME_DIR / "done-outbox"
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
+    path = outbox / f"{_from_role() or 'pane'}-{stamp}.md"
+    try:
+        outbox.mkdir(parents=True, exist_ok=True)
+        path.write_text(note, encoding="utf-8")
+    except OSError:
+        return None
+    return path
+
+
 def cmd_done(args: argparse.Namespace) -> dict:
+    base_note, error = _done_note_from_args(args)
+    if error:
+        return {"ok": False, "msg": error}
+    args.note = base_note
     note, error = _note_with_impact_evidence(args)
     if error:
         return {"ok": False, "msg": error}
-    return _request(
+    resp = _request(
         _with_project(
             {
                 "cmd": "done",
@@ -1736,6 +1775,23 @@ def cmd_done(args: argparse.Namespace) -> dict:
             }
         )
     )
+    if not resp.get("ok") and "timed out waiting for orchestrator response" in str(
+        resp.get("msg") or ""
+    ):
+        # Not retried here: a timed-out request may still be processed once
+        # the cockpit's main thread frees up, and a blind resend would report
+        # the same task twice.
+        saved = _save_done_outbox(note)
+        if saved is not None:
+            flags = " --fail" if getattr(args, "fail", False) else ""
+            flags += " --blocked" if getattr(args, "blocked", False) else ""
+            resp = {
+                **resp,
+                "msg": f"{resp.get('msg')} — the note is saved at {saved}. Check "
+                "`takkub list` in a minute (the report may still arrive); if your task "
+                f'is still working, resend: takkub done --note-file "{saved}"{flags}',
+            }
+    return resp
 
 
 def cmd_ma(args: argparse.Namespace) -> dict:
@@ -6268,6 +6324,18 @@ def build_parser() -> argparse.ArgumentParser:
     sd.add_argument("note", nargs="?", default="")
     sd.add_argument(
         "--impact-evidence-file", default=None, help="JSON results for the assigned impact checks"
+    )
+    sd.add_argument(
+        "--note-file",
+        default=None,
+        help="read the note from this file (e.g. the copy a timed-out done saved) — #911",
+    )
+    sd.add_argument(
+        "--screenshot",
+        action="append",
+        default=None,
+        metavar="PATH",
+        help="evidence image; appended to the note as its absolute path (repeatable)",
     )
     sd.add_argument(
         "--fail",

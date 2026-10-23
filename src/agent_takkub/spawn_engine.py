@@ -474,7 +474,7 @@ def _normalize_cwd_for_compare(cwd: str) -> str:
 _SAFE_SESSION_UUID_RE = re.compile(r"^[0-9A-Za-z_-]+$")
 
 
-def _skill_roots_for_project(project_ns: str) -> list[pathlib.Path]:
+def _skill_roots_for_project(project_ns: str, pane_cwd: str | None = None) -> list[pathlib.Path]:
     """Where to look for real `.claude/skills/` at spawn time — every
     configured path of `project_ns` first (project-specific skills win a
     name collision), plus the cockpit's own checkout as a fallback (same
@@ -509,10 +509,31 @@ def _skill_roots_for_project(project_ns: str) -> list[pathlib.Path]:
             # working in the project's second repo saw "Unknown skill".
             for root in roots:
                 ensure_project_skill_links(root, project_ns)
+            # #913: a `--isolation worktree` pane's cwd is a fresh checkout
+            # under the managed worktree root, where the gitignored
+            # `.claude/skills/` links do not exist — claude answered
+            # "Unknown skill" for a skill the task block named.
+            wt = _managed_worktree_cwd(project_ns, pane_cwd)
+            if wt is not None:
+                ensure_project_skill_links(wt, project_ns)
         except Exception:
             _log.exception("could not repair project skill links; spawning without them")
     roots.append(REPO_ROOT)
     return roots
+
+
+def _managed_worktree_cwd(project_ns: str, pane_cwd: str | None) -> pathlib.Path | None:
+    """*pane_cwd* when it is a checkout under the project's managed worktree
+    root (#913), else None. Path-string comparison only."""
+    if not pane_cwd:
+        return None
+    from .worktree_manager import worktree_root
+
+    cwd = os.path.normcase(os.path.abspath(pane_cwd))
+    root = os.path.normcase(os.path.abspath(worktree_root(project_ns)))
+    if cwd.startswith(root.rstrip(os.sep) + os.sep):
+        return pathlib.Path(pane_cwd)
+    return None
 
 
 def _learned_skill_index(project_ns: str, provider: str) -> str:
@@ -2970,7 +2991,9 @@ class SpawnEngineMixin:
                     from . import skill_policy
 
                     _skill_extra = skill_policy.render_skill_appendix(
-                        base_role, _skill_roots_for_project(project_ns), spec.context_strategy
+                        base_role,
+                        _skill_roots_for_project(project_ns, spawn_cwd),
+                        spec.context_strategy,
                     )
                     # Native SKILL.md discovery (codex $CODEX_HOME/skills):
                     # link the central store; on success the appendix is
@@ -3672,7 +3695,7 @@ class SpawnEngineMixin:
 
                     _appendix += skill_policy.render_skill_appendix(
                         base_role,
-                        _skill_roots_for_project(project_ns),
+                        _skill_roots_for_project(project_ns, spawn_cwd),
                         PROVIDER_REGISTRY["claude"].context_strategy,
                     )
                     _appendix += _learned_skill_index(project_ns, "claude")

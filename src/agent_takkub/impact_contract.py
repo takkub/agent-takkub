@@ -187,10 +187,24 @@ def validate_evidence(
     # #845: name both sides — a re-assign mid-task rotates the active task,
     # and "different task" alone cost the pane a round to work out which.
     refresh = "; run `takkub task impact` for the current ids and rewrite the evidence"
-    if evidence.get("task_id") != task_id:
+    if evidence.get("task_id") not in (None, "", task_id):
         return (
             f"impact evidence belongs to a different task "
             f"(evidence {str(evidence.get('task_id'))[:8]}, active {task_id[:8]}){refresh}"
+        )
+    # #912: an absent field is "missing", not "a different task/revision" —
+    # and every one is named at once, instead of one per rejected round.
+    missing = [
+        name
+        for name in ("task_id", "plan_digest", "revision", "checks")
+        if evidence.get(name) in (None, "")
+    ]
+    if missing:
+        return (
+            f"impact evidence is missing: {', '.join(missing)} "
+            f"(active task_id {task_id}, plan_digest {plan_digest(plan)}"
+            + (f", revision {revision}" if revision else "")
+            + "); see `takkub task impact` for the full schema"
         )
     if evidence.get("plan_digest") != plan_digest(plan):
         return (

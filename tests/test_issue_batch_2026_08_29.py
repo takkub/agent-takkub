@@ -953,17 +953,20 @@ class TestBoundTaskIdQueue795:
         orch._project_panes = lambda proj: {"qa": pane}
 
         # Call done with note citing older task cafe0001
-        ok, _msg = Orchestrator.done(
+        ok, msg = Orchestrator.done(
             orch,
             "qa",
             "PASS [task cafe0001] previous task completed",
             project="proj",
         )
-        assert ok is True
+        # #910: never `ok:` — the pane read that as success and went idle
+        # while the active task stayed open with no done for Lead.
+        assert ok is False
+        assert "feedbeef" in msg and "cafe0001" in msg
         # Check active feedbeef is still active and pane is NOT set to done
         assert ps.task_id == "feedbeef"
         assert pane.set_state.call_count == 0
-        assert any("cafe0001" in n for n in orch._notices)
+        assert orch._notices == []
 
     def test_queue_dispatch_during_post_done_respawn(self):
         from unittest.mock import MagicMock

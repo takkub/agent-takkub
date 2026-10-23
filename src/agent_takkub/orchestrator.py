@@ -19,6 +19,7 @@ import os
 import pathlib
 import re
 import secrets
+import struct
 import sys
 import threading
 import time
@@ -401,6 +402,10 @@ _EVIDENCE_EXCLUDED_DIR_NAMES = frozenset(
 # is rarely this small; below this, flag it as suspect rather than trust
 # existence alone as proof of a good capture.
 _EVIDENCE_SUSPECT_MIN_BYTES = 10 * 1024
+# #907: PNG bytes per pixel below which a capture is flagged ⚠mostly-blank.
+# Calibrated 2026-10-23 on 444 real evidence PNGs: blank PDF pages 0.005-0.008,
+# sparse-but-real pages from 0.017, normal UI screenshots ~0.1.
+_EVIDENCE_BLANK_MAX_BPP = 0.01
 # Cheap magic-byte sniff per extension — not a full decode (no image-lib
 # dependency), but enough to catch a 0-byte/truncated/HTML-error-page file
 # saved under an image extension.
@@ -7822,6 +7827,27 @@ class Orchestrator(
         return header.startswith(prefixes)
 
     @staticmethod
+    def _evidence_mostly_blank(path: pathlib.Path, size: int) -> bool:
+        """#907: a PNG that compresses to under `_EVIDENCE_BLANK_MAX_BPP`
+        bytes per pixel is almost one flat colour — an empty canvas / blank
+        PDF page passed off as proof (a real one: 12 KB for 1240x1755, 0.0057
+        B/px; UI screenshots on this machine sit around 0.1). Reads only the
+        IHDR, never decodes. Anything not a PNG, or unreadable → False."""
+        if path.suffix.lower() != ".png":
+            return False
+        try:
+            with open(path, "rb") as f:
+                header = f.read(24)
+        except OSError:
+            return False
+        if len(header) < 24 or header[12:16] != b"IHDR":
+            return False
+        width, height = struct.unpack(">II", header[16:24])
+        if width * height == 0:
+            return False
+        return size / (width * height) < _EVIDENCE_BLANK_MAX_BPP
+
+    @staticmethod
     def _evidence_content_hash(path: pathlib.Path, size: int, algo: str = "md5") -> str | None:
         """Hash of `path`'s bytes, for cross-file duplicate detection (issue
         #182). `None` on any read failure or when `size` exceeds
@@ -7859,6 +7885,8 @@ class Orchestrator(
             reasons.append("small")
         if not cls._evidence_looks_valid_image(path):
             reasons.append("bad-header")
+        elif cls._evidence_mostly_blank(path, size):
+            reasons.append("mostly-blank")
         if dup_of is not None:
             reasons.append(f"dup-of:{dup_of.name}")
         tag = f" ⚠{'+'.join(reasons)}" if reasons else ""
@@ -8633,12 +8661,15 @@ class Orchestrator(
         no_dirty_baseline = assign_dirty_snapshot is None
         # One porcelain read feeds BOTH the uncommitted count and the metadata
         # comparison; done() does not pay for two status subprocesses.
+        from .worktree_manager import shared_status_cwd
+
+        status_cwd = shared_status_cwd(pane_cwd, assign_git_root)
         if shared_gf is not None:
             commits_ahead = int(shared_gf.get("commits_ahead", 0))
             porcelain = shared_gf.get("porcelain")
         else:
-            commits_ahead = mgr.commits_since(pane_cwd, assign_base_sha)
-            porcelain = mgr.shared_tree_status_porcelain(pane_cwd)
+            commits_ahead = mgr.commits_since(status_cwd, assign_base_sha)
+            porcelain = mgr.shared_tree_status_porcelain(status_cwd)
         if porcelain is None:
             return (
                 DigestFacts(
@@ -8679,7 +8710,7 @@ class Orchestrator(
         diffstat = (
             str(shared_gf.get("diffstat", ""))
             if shared_gf is not None
-            else mgr.diffstat_since(pane_cwd, assign_base_sha)
+            else mgr.diffstat_since(status_cwd, assign_base_sha)
         )
         files_touched, dirs = union_files_touched(
             diffstat, changed_uncommitted, exclude=sibling_files
@@ -9164,21 +9195,21 @@ class Orchestrator(
                 ),
                 None,
             )
-            self._notify_lead(
-                project_ns,
-                (
+            # #910: the benign case (a continuation pane copied the previous
+            # note's tag) is answered to the pane itself as an error below, so
+            # it re-reports against the live task; Lead only hears about the
+            # #824 collision, which the pane cannot fix on its own.
+            if _owner_role:
+                self._notify_lead(
+                    project_ns,
                     f"🚨 [{from_role}] รายงาน done ของ task {older_id} ซึ่งเป็นงานของ "
                     f"{_owner_role} (ยังเปิดอยู่) — {from_role} อาจทำงานซ้อนกับ {_owner_role} "
                     f"บนไฟล์ชุดเดียวกัน (#824) · task {cur_tid} ของ {from_role} ยังไม่ปิด — "
-                    f"เช็ค `git diff` ก่อน แล้ว assign {from_role} ใหม่"
-                    if _owner_role
-                    else f"⚠️ [{from_role}] ได้รับรายงาน done สำหรับ task เก่า ({older_id}) "
-                    f"ขณะที่ task {cur_tid} กำลัง active อยู่ — รายงานนี้จะไม่ปิด task {cur_tid}"
-                ),
-                from_role=from_role,
-                note="done_older_task_ignored",
-                kind="done-older-task",
-            )
+                    f"เช็ค `git diff` ก่อน แล้ว assign {from_role} ใหม่",
+                    from_role=from_role,
+                    note="done_older_task_ignored",
+                    kind="done-older-task",
+                )
             note_project = _decision_note_project_label(
                 project_ns, getattr(pane, "_session_cwd", None), from_role
             )
@@ -9193,8 +9224,10 @@ class Orchestrator(
                 failed=failed,
             )
             return (
-                True,
-                f"{from_role} reported done for previous task {older_id}; active task {cur_tid} retained",
+                False,
+                f"this note cites task {older_id}, but {from_role}'s active task is "
+                f"{cur_tid} and it is still open — nothing was closed. Run `takkub done` "
+                f"again with [task {cur_tid}] (or no task tag) to report the active task",
             )
         # A successful report moves its card to review. FAILED/blocked reports
         # leave it active for the fix loop or an owner decision.
