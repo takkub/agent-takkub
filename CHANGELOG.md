@@ -2,6 +2,15 @@
 
 All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses [SemVer](https://semver.org/).
 
+## [v2.2.29] - 2026-10-23
+
+ออกรวมกับ 2.2.28 (2.2.28 ไม่ได้ publish แยก — ดูหัวข้อถัดไป)
+
+### Changed (เปลี่ยน)
+
+- **`takkub context read` จาก ~64 KB เหลือ ~1.8 KB ต่อครั้ง (#903, backlog a1ceeaae):** claude Lead ได้เอกสาร policy (`docs/lead/*`, project CLAUDE.md/AGENTS.md) ใน system prompt ตั้งแต่ spawn (คงอยู่หลัง compaction) — read ที่ revision เดียวกับตอน spawn พิมพ์แค่ Effective session policy + บรรทัดชี้ว่าเนื้อหาอยู่ใน system prompt · policy เปลี่ยน/provider ที่ไม่มี system prompt flag (codex/agy/opencode/cursor) → พิมพ์เต็มเหมือนเดิม · `takkub context read --full` บังคับพิมพ์เต็ม
+- **ไฟล์ system prompt ของ Lead แยกต่อโปรเจกต์ (`runtime/lead-context/<project>.md`):** ตอนบูต Lead หลายโปรเจกต์ spawn ห่างกันไม่ถึงวินาที ไฟล์เดียวที่ใช้ร่วมกันอาจถูกโปรเจกต์ถัดไปเขียนทับก่อน claude อ่าน
+
 ## [v2.2.28] - 2026-10-23
 
 ### Fixed (แก้)

@@ -177,3 +177,73 @@ def test_restricted_claude_lead_with_hooks_is_ready(
     state = lead_readiness.read_state(path)
     restricted = {"team": {"lead_may_implement": False}}
     assert lead_readiness.enforcement_status(state, restricted) == ("pretooluse_guard", "")
+
+
+def _solo(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "agent_takkub.team_preset.current",
+        lambda project=None: {"preset": "solo-lead", "roles": {}, "lead_may_implement": True},
+    )
+
+
+def test_read_is_compact_once_system_prompt_carries_policy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#903 / a1ceeaae: a claude Lead's system prompt (which survives
+    compaction) carries the policy docs, so a read at the same revision
+    prints only the effective policy + a pointer."""
+    monkeypatch.setattr("agent_takkub.config.RUNTIME_DIR", tmp_path / "runtime")
+    _solo(monkeypatch)
+    path = lead_readiness.prepare("default", "claude", str(tmp_path))
+
+    _state, full_text = lead_readiness.refresh(path)
+    assert "Mandatory Lead bootstrap" in full_text  # nothing embedded yet → full
+
+    _docs, revision = lead_readiness.docs_for_system_prompt(path)
+    lead_readiness.mark_embedded(path, revision)
+    state, text = lead_readiness.refresh(path)
+    assert text.startswith("## Effective session policy")
+    assert "Mandatory Lead bootstrap" not in text
+    assert "--full" in text
+    assert len(text) < len(full_text) // 4
+    lead_readiness.acknowledge(path, state)
+    assert lead_readiness.reason(path, project="default") == ""
+
+    _state, forced = lead_readiness.refresh(path, full=True)
+    assert forced == full_text
+
+
+def test_policy_change_after_embed_prints_full(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("agent_takkub.config.RUNTIME_DIR", tmp_path / "runtime")
+    _solo(monkeypatch)
+    path = lead_readiness.prepare("default", "claude", str(tmp_path))
+    _docs, revision = lead_readiness.docs_for_system_prompt(path)
+    lead_readiness.mark_embedded(path, revision)
+    (tmp_path / "CLAUDE.md").write_text("# project rule changed\n", encoding="utf-8")
+    _state, text = lead_readiness.refresh(path)
+    assert "Mandatory Lead bootstrap" in text
+
+
+def test_bootstrap_allows_full_read() -> None:
+    assert lead_readiness.bootstrap_allowed("Bash", {"command": "takkub context read --full"})
+    assert lead_readiness.bootstrap_allowed(
+        "PowerShell", {"command": "takkub context read --full 2>&1"}
+    )
+    assert not lead_readiness.bootstrap_allowed(
+        "Bash", {"command": "takkub context read --full | tail"}
+    )
+
+
+def test_lead_context_file_is_per_project(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from agent_takkub import lead_context
+
+    monkeypatch.setattr(lead_context, "RUNTIME_DIR", tmp_path / "runtime")
+    monkeypatch.setattr(lead_context, "ensure_runtime", lambda: None)
+    monkeypatch.setattr(lead_context, "_build_lead_context_text", lambda *a, **k: "BASE")
+    a = lead_context._render_lead_context("Proj A", extra_text="\nDOCS")
+    b = lead_context._render_lead_context("Proj B")
+    assert a != b
+    assert Path(a).read_text(encoding="utf-8") == "BASE\nDOCS"
+    assert Path(b).read_text(encoding="utf-8") == "BASE"

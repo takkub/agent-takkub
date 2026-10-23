@@ -135,7 +135,13 @@ def test_blank_png_is_flagged(tmp_path) -> None:
 
 
 def test_worktree_pane_gets_skill_links(tmp_path, monkeypatch) -> None:
-    from agent_takkub import skill_scan, spawn_engine, worktree_manager
+    import importlib
+
+    from agent_takkub import spawn_engine, worktree_manager
+
+    # The function-local `from .skill_scan import ...` resolves through
+    # sys.modules; another test may have reloaded the module.
+    skill_scan = importlib.import_module("agent_takkub.skill_scan")
 
     monkeypatch.setattr(worktree_manager, "DATA_HOME", tmp_path)
     wt = worktree_manager.worktree_root("proj") / "backend-1"

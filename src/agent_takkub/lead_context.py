@@ -848,10 +848,17 @@ def _render_lead_context(
     project: str | None = None,
     post_compact_brief: str | None = None,
     claude_cwd: str | None = None,
+    extra_text: str = "",
 ) -> str | None:
     """Render Lead's spawn-time system prompt to `runtime/lead-context.md`
     (the file claude reads via `--append-system-prompt-file`). See
     `_build_lead_context_text` for the content; this just writes it to disk.
+    *extra_text* (the Required policy docs, #903) is appended verbatim.
+
+    One file per project (`runtime/lead-context/<project>.md`): Leads of
+    several projects spawn within a second of each other at boot, and with
+    a single shared file a claude process could launch reading the file the
+    NEXT project's spawn had just overwritten.
 
     Returns the rendered file path (string), or None if there's no cockpit
     CLAUDE.md to render from.
@@ -862,8 +869,14 @@ def _render_lead_context(
     if text is None:
         return None
     ensure_runtime()
-    out = RUNTIME_DIR / "lead-context.md"
-    out.write_text(text, encoding="utf-8")
+    if project:
+        from .config import slugify_project_name
+
+        out = RUNTIME_DIR / "lead-context" / f"{slugify_project_name(project)}.md"
+        out.parent.mkdir(parents=True, exist_ok=True)
+    else:
+        out = RUNTIME_DIR / "lead-context.md"
+    out.write_text(text + extra_text, encoding="utf-8")
     return str(out)
 
 

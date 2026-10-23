@@ -3510,11 +3510,28 @@ class SpawnEngineMixin:
             if spawn_cwd != str(DATA_HOME):
                 try:
                     post_compact_brief = self._build_post_compact_brief(project_ns)
+                    # #903: the Required policy docs ride in the system prompt
+                    # too — it survives compaction, so `takkub context read`
+                    # at an unchanged revision no longer reprints ~60 KB.
+                    # Any failure here just leaves the read printing in full.
+                    from . import lead_readiness as _lr
+
+                    _policy_docs, _policy_rev = "", ""
+                    _readiness_path = getattr(_ps_initial, "lead_readiness_file", None)
+                    if _readiness_path:
+                        try:
+                            _policy_docs, _policy_rev = _lr.docs_for_system_prompt(_readiness_path)
+                        except Exception:
+                            _log.exception("could not embed Lead policy docs; read stays full")
+                            _policy_docs, _policy_rev = "", ""
                     role_md_file = _render_lead_context(
                         project_ns,
                         post_compact_brief=post_compact_brief,
                         claude_cwd=spawn_cwd,
+                        extra_text=_policy_docs,
                     )
+                    if role_md_file and _policy_docs and _readiness_path:
+                        _lr.mark_embedded(_readiness_path, _policy_rev)
                 except Exception:
                     _log.exception("could not render Claude Lead context; spawning without it")
                     role_md_file = None

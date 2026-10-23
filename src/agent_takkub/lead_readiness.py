@@ -89,12 +89,7 @@ def _sources(project: str, cwd: str) -> tuple[str, dict, dict]:
     return revision, documents, facts
 
 
-def _context(project: str, cwd: str, documents: dict, facts: dict) -> str:
-    from .lead_context import ASSETS_ROOT, _build_lead_context_text
-
-    rendered = _build_lead_context_text(project, claude_cwd=cwd)
-    if not rendered:
-        raise ValueError("active Lead context could not be rendered")
+def _policy_block(facts: dict) -> str:
     policy = facts["team"]
     if policy["preset"] == "auto":
         rule = "Run takkub team suggest for this task; explain and honor the routing/size decision."
@@ -102,26 +97,69 @@ def _context(project: str, cwd: str, documents: dict, facts: dict) -> str:
         rule = "Lead may implement and self-verify. Honor the configured checker and disabled development positions."
     else:
         rule = "Delegate implementation/deployment to enabled positions through takkub assign --mode pane."
-    # #903: the effective policy (~1 KB) goes FIRST — it is the part Lead acts
-    # on, and at the tail of a 60 KB read it sat behind a persisted-output cut.
-    parts = [
+    return (
         "## Effective session policy (authoritative over generic delegation defaults)\n"
         + json.dumps(facts, ensure_ascii=False, indent=2)
         + f"\n{rule}\nDo not change settings or invent a team override to bypass policy.\n"
         "Native subagents require explicit permitted routing; they do not substitute for requested visible positions.\n"
         "Before substantive work, run `takkub context read`. Repeat after resume, compaction, failover or policy changes.\n"
-        "Docker reports distinguish host checks, image build, container recreation and observed health.\n",
-        rendered,
-    ]
-    # The rendered context already opens with the cockpit CLAUDE.md (#854):
-    # it stays in the revision hash, but printing it twice only bloats the read.
+        "Docker reports distinguish host checks, image build, container recreation and observed health.\n"
+    )
+
+
+def policy_docs_text(documents: dict) -> str:
+    """The `## Required policy` sections. The rendered Lead context already
+    opens with the cockpit CLAUDE.md (#854): it stays in the revision hash,
+    but is not repeated here."""
+    from .lead_context import ASSETS_ROOT
+
     cockpit_md = str(ASSETS_ROOT / "CLAUDE.md")
-    parts.extend(
-        f"\n## Required policy: {path}\n\n{text}"
+    return "".join(
+        f"\n## Required policy: {path}\n\n{text}\n"
         for path, text in documents.items()
         if path != cockpit_md
     )
-    return "\n".join(parts)
+
+
+def _context(project: str, cwd: str, documents: dict, facts: dict) -> str:
+    from .lead_context import _build_lead_context_text
+
+    rendered = _build_lead_context_text(project, claude_cwd=cwd)
+    if not rendered:
+        raise ValueError("active Lead context could not be rendered")
+    # #903: the effective policy (~1 KB) goes FIRST — it is the part Lead acts
+    # on, and at the tail of a 60 KB read it sat behind a persisted-output cut.
+    return "\n".join([_policy_block(facts), rendered, policy_docs_text(documents)])
+
+
+def _compact_context(facts: dict, revision: str) -> str:
+    """#903 / backlog a1ceeaae: what a read prints when this session's system
+    prompt already carries the whole policy at the current revision."""
+    return (
+        _policy_block(facts) + "\n## Lead context + Required policy docs\n"
+        f"อยู่ใน system prompt ของ session นี้แล้วตั้งแต่ spawn (revision {revision[:12]}) "
+        "และยังไม่เปลี่ยน — คงอยู่หลัง compaction จึงไม่พิมพ์ซ้ำ. "
+        "ต้องการเนื้อหาเต็ม: `takkub context read --full`. "
+        "policy เปลี่ยนเมื่อไร read ครั้งถัดไปจะพิมพ์เต็มเอง.\n"
+    )
+
+
+def docs_for_system_prompt(path: str | Path) -> tuple[str, str]:
+    """``(policy_docs_text, revision)`` to append to a system prompt that
+    survives compaction (claude's `--append-system-prompt-file`). Call
+    `mark_embedded` with that revision only once the prompt file is
+    actually written (#903)."""
+    state = read_state(path)
+    revision, documents, _facts = _sources(state["project"], state["cwd"])
+    return policy_docs_text(documents), revision
+
+
+def mark_embedded(path: str | Path, revision: str) -> None:
+    """Record that this session's system prompt carries the whole policy at
+    *revision*; a read at that same revision prints `_compact_context`."""
+    state = read_state(path)
+    state["embedded_revision"] = revision
+    _write(Path(path), state)
 
 
 def prepare(project: str, provider: str, cwd: str) -> Path:
@@ -141,6 +179,7 @@ def prepare(project: str, provider: str, cwd: str) -> Path:
             "text": text,
             "epoch": 0,
             "read_epoch": None,
+            "embedded_revision": None,
         },
     )
     return path
@@ -205,7 +244,7 @@ def current_reason() -> str:
     return reason(path, project=os.environ.get("TAKKUB_PROJECT")) if path else ""
 
 
-def refresh(path: str | Path) -> tuple[dict, str]:
+def refresh(path: str | Path, *, full: bool = False) -> tuple[dict, str]:
     state = read_state(path)
     revision, documents, facts = _sources(state["project"], state["cwd"])
     if revision != state["revision"]:
@@ -216,6 +255,8 @@ def refresh(path: str | Path) -> tuple[dict, str]:
         state["epoch"] += 1
         state["read_epoch"] = None
         _write(Path(path), state)
+    if not full and state.get("embedded_revision") == revision:
+        return state, _compact_context(facts, revision)
     return state, state["text"]
 
 
@@ -249,7 +290,7 @@ def bootstrap_allowed(tool_name: str, tool_input: dict) -> bool:
         # would acknowledge a read the Lead never actually saw.
         return bool(
             re.fullmatch(
-                r"takkub (?:context (?:read|status)|team status|doctor(?: --[\w-]+)*)"
+                r"takkub (?:context (?:read(?: --full)?|status)|team status|doctor(?: --[\w-]+)*)"
                 r"(?: 2>&1)?",
                 command,
             )

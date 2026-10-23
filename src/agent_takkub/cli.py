@@ -5132,7 +5132,7 @@ def cmd_context(args: argparse.Namespace) -> dict:
             )
         )
         return {"ok": not error, "msg": "", "quiet": True}
-    state, text = lead_readiness.refresh(path)
+    state, text = lead_readiness.refresh(path, full=bool(getattr(args, "full", False)))
     if state["project"] != _from_project():
         return {"ok": False, "msg": "Lead context belongs to a different project"}
     _utf8_print(text)
@@ -6839,6 +6839,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     sctx = sub.add_parser("context", help="read or inspect the complete active Lead policy")
     sctx.add_argument("context_action", choices=("read", "status"))
+    sctx.add_argument(
+        "--full",
+        action="store_true",
+        help="print the whole policy even when this session's system prompt already carries it",
+    )
     sctx.set_defaults(func=cmd_context)
     scg = sub.add_parser("_context-guard", help=argparse.SUPPRESS)
     scg.set_defaults(func=cmd_context_guard)
