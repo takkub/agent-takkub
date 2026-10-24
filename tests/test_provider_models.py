@@ -94,9 +94,15 @@ class TestProviderModelConfig:
 
         provider_models.set_model("gemini", "gemini-3-pro")
 
-        assert replacements == [(isolated_models.with_suffix(".json.tmp"), isolated_models)]
+        # one replace, from a per-writer tmp sibling (`<name>.<pid>.<tid>.tmp`,
+        # core.storage.json_io — concurrent writers never share a tmp file)
+        assert len(replacements) == 1
+        src, dst = replacements[0]
+        assert dst == isolated_models
+        assert src.parent == isolated_models.parent
+        assert src.name.startswith(isolated_models.name + ".") and src.suffix == ".tmp"
         assert isolated_models.exists()
-        assert not isolated_models.with_suffix(".json.tmp").exists()
+        assert not list(isolated_models.parent.glob("*.tmp"))
 
 
 def _make_orchestrator(qapp, monkeypatch) -> Orchestrator:

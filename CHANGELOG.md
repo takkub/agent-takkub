@@ -23,6 +23,7 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 - **#926 guard ล็อก Lead ทั้งระบบเมื่อ import พัง:**
   - guard `lead_context` เคยปฏิเสธทุกเครื่องมือ รวมถึง `git checkout` ที่ต้องใช้ซ่อม ตอนนี้ถ้าตัว guard เองเช็คไม่ได้ จะปล่อยผ่านพร้อมเตือน
   - `pane_guard` ที่อ่านนโยบายทีมไม่ได้ จะบอกสาเหตุจริง (`policy_unreadable`) แทนข้อความ "deep category ต้อง delegate" ที่ทำไม่ได้บน solo-lead
+- **เทส agy scan cache ล้มเมื่อรันหลังไฟล์อื่น** (มีมาตั้งแต่ 2.2.31): poller ของ Remote mirror ที่ค้างจากเทสก่อนหน้าถือ lock ของการสแกนอยู่ ตอนนี้ fixture รอให้ lock ว่างก่อน
 
 ### Changed (refactor — พฤติกรรมเท่าเดิม)
 

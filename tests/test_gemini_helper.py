@@ -700,6 +700,12 @@ def _write_agy_db(root: Path, session_id: str, workspace: str, with_blob: bool =
 class TestAntigravityScanCache:
     @pytest.fixture(autouse=True)
     def _fresh_caches(self):
+        # A background scan left running by an earlier test file (Remote
+        # mirror poller) holds the single-flight lock, and a cold-store call
+        # then returns [] by design — wait it out so these tests are not
+        # order-dependent (they failed after ~130 other files, passed alone).
+        assert gemini_helper._agy_scan_lock.acquire(timeout=30)
+        gemini_helper._agy_scan_lock.release()
         gemini_helper._reset_antigravity_caches()
         yield
         gemini_helper._reset_antigravity_caches()
