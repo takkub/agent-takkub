@@ -1,6 +1,6 @@
 {
   "generated_by": "grimp 3.14",
-  "module_count": 362,
+  "module_count": 364,
   "modules": [
     {
       "module": "agent_takkub",
@@ -200,6 +200,7 @@
         "agent_takkub.orchestrator",
         "agent_takkub.orchestrator_text",
         "agent_takkub.provider_model_catalog",
+        "agent_takkub.removed_integrations",
         "agent_takkub.removed_providers",
         "agent_takkub.service_spawner",
         "agent_takkub.theme_settings",
@@ -210,7 +211,7 @@
         "agent_takkub.__main__"
       ],
       "fan_in": 1,
-      "fan_out": 18
+      "fan_out": 19
     },
     {
       "module": "agent_takkub.auto_issue_capture",
@@ -321,6 +322,19 @@
         "agent_takkub.main_window"
       ],
       "fan_in": 1,
+      "fan_out": 2
+    },
+    {
+      "module": "agent_takkub.backup_prune",
+      "imports": [
+        "agent_takkub.config",
+        "agent_takkub.core.storage.layout"
+      ],
+      "imported_by": [
+        "agent_takkub.cli",
+        "agent_takkub.doctor"
+      ],
+      "fan_in": 2,
       "fan_out": 2
     },
     {
@@ -528,6 +542,7 @@
         "agent_takkub._win_console",
         "agent_takkub.auto_migrate_boot",
         "agent_takkub.backlog",
+        "agent_takkub.backup_prune",
         "agent_takkub.bm25_search",
         "agent_takkub.boot_flow_terminal",
         "agent_takkub.ccc_store",
@@ -593,7 +608,7 @@
         "agent_takkub.__main__"
       ],
       "fan_in": 1,
-      "fan_out": 63
+      "fan_out": 64
     },
     {
       "module": "agent_takkub.cli_server",
@@ -748,6 +763,7 @@
         "agent_takkub.auto_migrate_boot",
         "agent_takkub.auto_resume",
         "agent_takkub.backlog",
+        "agent_takkub.backup_prune",
         "agent_takkub.boot_context",
         "agent_takkub.boot_flow",
         "agent_takkub.boot_flow_window",
@@ -831,6 +847,7 @@
         "agent_takkub.remote.notify",
         "agent_takkub.remote.reports",
         "agent_takkub.remote.tunnel",
+        "agent_takkub.removed_integrations",
         "agent_takkub.report_builder",
         "agent_takkub.response_language",
         "agent_takkub.role_memory",
@@ -867,7 +884,7 @@
         "agent_takkub.worktree_manager",
         "agent_takkub.worktree_reuse"
       ],
-      "fan_in": 125,
+      "fan_in": 127,
       "fan_out": 2
     },
     {
@@ -2349,6 +2366,7 @@
       "imported_by": [
         "agent_takkub.auto_issue_capture",
         "agent_takkub.auto_migrate_boot",
+        "agent_takkub.backup_prune",
         "agent_takkub.boot_flow",
         "agent_takkub.config",
         "agent_takkub.core.migration.pre_migrate_backup",
@@ -2365,10 +2383,11 @@
         "agent_takkub.provider_models",
         "agent_takkub.provider_state",
         "agent_takkub.remote.session_store",
+        "agent_takkub.removed_integrations",
         "agent_takkub.role_models",
         "agent_takkub.skill_policy"
       ],
-      "fan_in": 20,
+      "fan_in": 22,
       "fan_out": 1
     },
     {
@@ -2664,6 +2683,7 @@
       "imports": [
         "agent_takkub._win_console",
         "agent_takkub.auto_migrate_boot",
+        "agent_takkub.backup_prune",
         "agent_takkub.boot_context",
         "agent_takkub.cli_shim",
         "agent_takkub.codex_helper",
@@ -2714,7 +2734,7 @@
         "agent_takkub.user_actions"
       ],
       "fan_in": 3,
-      "fan_out": 45
+      "fan_out": 46
     },
     {
       "module": "agent_takkub.editor_service",
@@ -2861,11 +2881,12 @@
       "imports": [
         "agent_takkub.config",
         "agent_takkub.custom_roles",
-        "agent_takkub.headless_window"
+        "agent_takkub.headless_window",
+        "agent_takkub.removed_integrations"
       ],
       "imported_by": [],
       "fan_in": 0,
-      "fan_out": 3
+      "fan_out": 4
     },
     {
       "module": "agent_takkub.headless_pane",
@@ -4374,6 +4395,19 @@
       ],
       "fan_in": 2,
       "fan_out": 4
+    },
+    {
+      "module": "agent_takkub.removed_integrations",
+      "imports": [
+        "agent_takkub.config",
+        "agent_takkub.core.storage.layout"
+      ],
+      "imported_by": [
+        "agent_takkub.app",
+        "agent_takkub.headless"
+      ],
+      "fan_in": 2,
+      "fan_out": 2
     },
     {
       "module": "agent_takkub.removed_providers",

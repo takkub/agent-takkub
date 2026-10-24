@@ -3994,6 +3994,32 @@ def check_core_v2() -> list[Finding]:
     return findings
 
 
+def check_backups() -> list[Finding]:
+    """[storage/backups] — old migration/cleanup safety copies pile up in
+    DATA_HOME/backups (a V1 archive alone can be 10+ GB). Never deleted
+    automatically; WARN with the user-triggered `takkub backups prune`."""
+    from . import backup_prune, config
+
+    if config.DATA_HOME == config.REPO_ROOT:
+        return []
+    entries = backup_prune.list_backups()
+    total = sum(e.size for e in entries)
+    freeable = sum(e.size for e in entries if e.prunable)
+    gb = total / 1e9
+    if total >= backup_prune.WARN_BYTES and freeable:
+        return [
+            Finding(
+                "storage",
+                "backups",
+                Status.WARN,
+                f"{gb:.1f} GB in {backup_prune.backups_dir()} "
+                f"({freeable / 1e9:.1f} GB is old safety copies)",
+                fix_hint="takkub backups prune   (dry run; add --yes to delete)",
+            )
+        ]
+    return [Finding("storage", "backups", Status.OK, f"{gb:.2f} GB in backups")]
+
+
 def check_rtk_ripgrep() -> list[Finding]:
     """[rtk] — #402: rtk (the external `rg`-based grep/read proxy every
     pane's Bash PreToolUse hook routes commands through, see `rtk_helper`)
@@ -4090,6 +4116,7 @@ def run_all_checks() -> list[Finding]:
         ("check_core_v2", check_core_v2),
         ("check_resilience", check_resilience),
         ("check_rtk_ripgrep", check_rtk_ripgrep),
+        ("check_backups", check_backups),
         ("check_version", check_version),
     )
     for check_name, check in checks:

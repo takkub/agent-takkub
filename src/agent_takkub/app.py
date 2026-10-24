@@ -1103,6 +1103,16 @@ def _build_main_window():
             _boot_log(f"removed-provider settings rewritten: {changed}")
     except Exception as e:  # pragma: no cover - defensive, must never block boot
         _boot_log(f"removed-provider migration errored: {type(e).__name__}: {e}")
+    try:
+        # Leftovers of removed integrations (Figma) — once per install, with
+        # backup, so every machine gets the cleanup, not just one.
+        from .removed_integrations import run_boot_cleanups
+
+        cleaned = run_boot_cleanups()
+        if cleaned:
+            _boot_log(f"removed-integration cleanup: {cleaned}")
+    except Exception as e:  # pragma: no cover - defensive, must never block boot
+        _boot_log(f"removed-integration cleanup errored: {type(e).__name__}: {e}")
     return MainWindow()
 
 

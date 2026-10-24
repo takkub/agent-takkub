@@ -82,6 +82,13 @@ def main(argv: list[str] | None = None) -> int:
     app = QCoreApplication.instance() or QCoreApplication(argv or sys.argv)
     app.setApplicationName("agent-takkub-headless")
 
+    try:  # same once-per-install leftover cleanup the desktop boot runs
+        from .removed_integrations import run_boot_cleanups
+
+        run_boot_cleanups()
+    except Exception:
+        _log.exception("removed-integration cleanup failed (non-fatal)")
+
     window = HeadlessWindow()
 
     def _handle_signal(signum: int, _frame: object) -> None:

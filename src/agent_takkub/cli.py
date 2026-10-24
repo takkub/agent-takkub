@@ -3838,6 +3838,13 @@ def _skills_exclude_cmd(args: argparse.Namespace, project: str | None) -> dict:
     return {"ok": not errors, "project": project, "skills_exclude": current}
 
 
+def cmd_backups(args: argparse.Namespace) -> dict:
+    """`takkub backups list|prune [--yes]` — see `backup_prune`."""
+    from . import backup_prune
+
+    return backup_prune.run_cli(args.backups_cmd, yes=bool(getattr(args, "yes", False)))
+
+
 def cmd_skills(args: argparse.Namespace) -> dict:
     """`takkub skills list|effective` (#422 item 4) — what skills exist and
     which ones a role actually receives, from the CLI instead of Settings.
@@ -7168,6 +7175,16 @@ def build_parser() -> argparse.ArgumentParser:
 
     _add_learned_parser(ssk_sub)
     ssk.set_defaults(func=cmd_skills)
+
+    sbk = sub.add_parser(
+        "backups",
+        help="list / prune old safety copies in DATA_HOME/backups (migration + cleanups)",
+    )
+    sbk_sub = sbk.add_subparsers(dest="backups_cmd", required=True)
+    sbk_sub.add_parser("list", help="every backup entry with size, age and whether it can go")
+    sbkp = sbk_sub.add_parser("prune", help="delete old prunable entries (dry run without --yes)")
+    sbkp.add_argument("--yes", action="store_true", help="actually delete")
+    sbk.set_defaults(func=cmd_backups)
 
     sccc = sub.add_parser(
         "ccc",

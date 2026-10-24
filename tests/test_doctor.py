@@ -1568,6 +1568,7 @@ class TestRunAllChecks:
             "check_version",
             "check_editable_install",
             "check_rtk_ripgrep",
+            "check_backups",
         )
         for name in no_findings:
             monkeypatch.setattr(f"agent_takkub.doctor.{name}", lambda: [])
