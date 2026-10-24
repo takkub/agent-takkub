@@ -1126,16 +1126,14 @@ def test_core_internal_store_step_rollback_restores_prior_reapply_state(tmp_path
 
 
 def test_core_internal_store_step_parity_with_real_registries(tmp_path, monkeypatch):
-    """#360 parity requirement: real accounts/model_catalog registries must
+    """#360 parity requirement: the real accounts registry must
     read back identical data once core_home() flips from RUNTIME_DIR/core
     to v2/system/ — proves the existing legacy-fallback in
     core.storage.paths actually works end to end, not just that raw files
     land in the right place."""
     from agent_takkub.core.accounts.registry import AccountRegistry
     from agent_takkub.core.migration.steps_v1 import CoreInternalStoreStep
-    from agent_takkub.core.model_catalog.registry import ModelRegistry
     from agent_takkub.core.models.account import ProviderAccount
-    from agent_takkub.core.models.model import ModelDefinition
     from agent_takkub.core.storage.paths import core_home
 
     data_home = tmp_path / "data_home"
@@ -1147,7 +1145,6 @@ def test_core_internal_store_step_parity_with_real_registries(tmp_path, monkeypa
     assert core_home() == runtime_dir / "core"
 
     AccountRegistry().upsert(ProviderAccount(id="acct-1", provider_id="claude"))
-    ModelRegistry().upsert(ModelDefinition(id="model-1", provider_id="claude", name="Sonnet"))
 
     journal = MigrationJournal(JsonlStore(runtime_dir / "core" / "migration_journal.jsonl"))
     backups = BackupManager(runtime_dir / "core" / "migration_backups")
@@ -1161,8 +1158,6 @@ def test_core_internal_store_step_parity_with_real_registries(tmp_path, monkeypa
 
     accounts_after = AccountRegistry().all()
     assert [a.id for a in accounts_after] == ["acct-1"]
-    models_after = ModelRegistry().all()
-    assert [m.id for m in models_after] == ["model-1"]
 
 
 def test_core_internal_store_step_validate_and_rollback_survive_a_fresh_engine_after_apply(

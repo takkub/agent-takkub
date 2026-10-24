@@ -694,7 +694,6 @@ class LimitStore:
         429 (Retry-After escalated all the way to 3600s) and left the meter
         stuck on "—" forever. We also emit the last known data marked
         ``rate_limited`` so a stale value can show instead of blanking.
-        Mirrors the backoff logic in ``Poller._do_poll``.
 
         Both the backoff and the last good payload are ALSO persisted via the
         shared state file (see module comment above ``_state_path``) so
@@ -837,98 +836,3 @@ class LimitStore:
                     # Small stagger between fetches to avoid burst
                     self._wake.wait(timeout=self._stagger_s)
                     self._wake.clear()
-
-
-class Poller:
-    def __init__(
-        self,
-        interval_s: int,
-        on_update: Callable[[UsageData | None], None],
-        on_schedule: Callable[[float], None] | None = None,
-        config_dir: Path | None = None,
-    ) -> None:
-        self._interval_s = interval_s
-        self._on_update = on_update
-        self._on_schedule = on_schedule
-        self._config_dir = config_dir
-        self._timer: threading.Timer | None = None
-        self._lock = threading.Lock()
-        self._running = False
-        self._last_data: UsageData | None = None
-
-    def start(self) -> None:
-        self._running = True
-        threading.Thread(target=self._do_poll, daemon=True).start()
-
-    def stop(self) -> None:
-        self._running = False
-        with self._lock:
-            if self._timer is not None:
-                self._timer.cancel()
-                self._timer = None
-
-    def poll_now(self) -> None:
-        with self._lock:
-            if self._timer is not None:
-                self._timer.cancel()
-                self._timer = None
-        threading.Thread(target=self._do_poll, daemon=True).start()
-
-    def set_interval(self, seconds: int) -> None:
-        with self._lock:
-            self._interval_s = seconds
-            if self._timer is not None:
-                self._timer.cancel()
-                self._timer = None
-        threading.Thread(target=self._do_poll, daemon=True).start()
-
-    def _schedule_next(self, delay: float | None = None) -> None:
-        if not self._running:
-            return
-        with self._lock:
-            if not self._running:
-                return
-            actual_delay = (
-                self._interval_s + random.uniform(0, min(self._interval_s * 0.2, 10))
-                if delay is None
-                else delay
-            )
-            if self._on_schedule is not None:
-                self._on_schedule(actual_delay)
-            self._timer = threading.Timer(actual_delay, self._do_poll)
-            self._timer.daemon = True
-            self._timer.start()
-
-    def _emit(self, data: UsageData | None) -> None:
-        try:
-            self._on_update(data)
-        except Exception:
-            _log.exception("Error in usage poller callback")
-
-    def _do_poll(self) -> None:
-        try:
-            data = fetch_usage(self._config_dir)
-            if data is not None:
-                self._last_data = data
-                self._emit(data)
-            else:
-                self._emit(self._last_data)
-            self._schedule_next()
-        except RateLimited as exc:
-            backoff = max(exc.retry_after or 0.0, 300.0)
-            stale = (
-                dataclasses.replace(self._last_data, status="rate_limited")
-                if self._last_data is not None
-                else UsageData(
-                    plan="-",
-                    windows=[],
-                    extra_usage_enabled=False,
-                    status="rate_limited",
-                )
-            )
-            self._emit(stale)
-            self._schedule_next(delay=backoff)
-        except Exception:
-            _log.exception("Unhandled error polling Claude usage")
-            self._emit(self._last_data)
-            self._schedule_next()

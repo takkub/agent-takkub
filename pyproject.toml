@@ -211,7 +211,6 @@ forbidden_modules = [
     "agent_takkub.gemini_helper",
     "agent_takkub.codex_helper",
     "agent_takkub.pipeline_config",
-    "agent_takkub.lead_bash_audit",
     "agent_takkub.vault_graph",
     "agent_takkub.docs_verify",
     "agent_takkub.doctor",

@@ -2699,7 +2699,6 @@ class SettingsWindow(
         self._role_model_combos: dict[str, QComboBox] = {}
         self._role_effort_combos: dict[str, QComboBox] = {}
         self._role_provider_badges: dict[str, QLabel] = {}
-        self._role_defer_labels: dict[str, tuple[QLabel, str]] = {}
         self._lead_warning_lbl: QLabel | None = None
 
         # Bulk provider picker — stages the same provider change through each
@@ -3096,69 +3095,6 @@ class SettingsWindow(
             row_lay.addWidget(delete_btn)
 
         return row
-
-    def _build_deferred_role_row(
-        self,
-        role: str,
-        label: str,
-        color: str,
-        parent: QWidget,
-        *,
-        settings_role: str,
-        enabled: bool,
-    ) -> QWidget:
-        """A qa/critic roster row whose Settings row is actually
-        *settings_role*'s (`team_preset.settings_role_for`, #590) — round-2
-        #592 item 1. No independent provider/model/effort controls: editing
-        them here used to silently do nothing, since spawn always reads
-        *settings_role*'s row. Just the resolved text (`_refresh_deferred_
-        role_labels` keeps it live-bound to that row's combos) plus the
-        enable switch this mode's own toggle still governs (whether this
-        review MODE runs at all is independent of whose provider row backs
-        it)."""
-        row = QWidget(parent)
-        row.setObjectName("roleRow")
-        row_lay = QHBoxLayout(row)
-        row_lay.setContentsMargins(10, 8, 10, 8)
-        row_lay.setSpacing(10)
-        row_lay.addWidget(cockpit_theme.role_chip(label, color, row))
-
-        resolved_lbl = QLabel(row)
-        resolved_lbl.setObjectName("panelHint")
-        resolved_lbl.setWordWrap(True)
-        row_lay.addWidget(resolved_lbl, 1)
-        self._role_defer_labels[role] = (resolved_lbl, settings_role)
-
-        toggle = cockpit_theme.ToggleSwitch(row, checked=enabled)
-        toggle.setAccessibleName(f"{label} role — {'enabled' if enabled else 'disabled'}")
-        toggle.setToolTip(f"เปิด/ปิด role {label} ในทีม — ปิดแล้ว assign จะถูกปฏิเสธ")
-        toggle.toggled.connect(self._mark_dirty)
-        row_lay.addWidget(toggle)
-        self._role_toggles[role] = toggle
-        self._role_toggle_baseline[role] = enabled
-        return row
-
-    def _refresh_deferred_role_labels(self, *_args: object) -> None:
-        """Recompute every qa/critic deferred row's resolved text (#592
-        round-2 item 1) from its `settings_role`'s CURRENT combo selections
-        — called once after the roster builds, and again live on every
-        change to that row's provider/model/effort combos. `*_args` absorbs
-        whatever a connected Qt signal passes (index, text, …)."""
-        from . import team_preset as _team_preset
-
-        for _role, (lbl, settings_role) in self._role_defer_labels.items():
-            provider_combo = self._role_provider_combos.get(settings_role)
-            model_combo = self._role_model_combos.get(settings_role)
-            effort_combo = self._role_effort_combos.get(settings_role)
-            if provider_combo is None or model_combo is None or effort_combo is None:
-                continue
-            settings_label = _team_preset.REVIEWER_MODE_LABELS.get(
-                settings_role, settings_role.capitalize()
-            )
-            lbl.setText(
-                f"ใช้ค่าแถว {settings_label} → {provider_combo.currentText()} · "
-                f"{model_combo.currentText().strip()} · {effort_combo.currentText().strip()}"
-            )
 
     def _apply_provider_to_all_roles(self) -> None:
         """Stage the selected provider and model for every rendered role.

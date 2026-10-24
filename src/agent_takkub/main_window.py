@@ -166,7 +166,7 @@ class MainWindow(
     StatusHeaderMixin,
     QMainWindow,
 ):
-    # Thread-safe signal: background limit_status.Poller emits UsageData|None
+    # Thread-safe signal: background limit_status.LimitStore emits UsageData|None
     # from a daemon thread → Qt queues the call so _on_usage_updated runs on the GUI thread.
     _usageUpdated: pyqtSignal = pyqtSignal(object)
 

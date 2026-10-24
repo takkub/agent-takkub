@@ -348,7 +348,6 @@ _RUNTIME_DIR_MODULES = (
     "agent_takkub.orchestrator",
     "agent_takkub.orchestrator_text",  # pure-helper leaf, copies RUNTIME_DIR at import time
     "agent_takkub.agent_pane",
-    "agent_takkub.lead_bash_audit",
     "agent_takkub.shared_dev_tools",
     "agent_takkub.limit_autoresume",  # #158 progress-marker dump, copies RUNTIME_DIR at import time
     "agent_takkub.lead_context",
@@ -556,10 +555,6 @@ def _isolate_runtime(monkeypatch: pytest.MonkeyPatch, tmp_path):
             monkeypatch.setattr(
                 orch_mod, "_MACHINE_STATE_FILE", runtime / "machine-state.json", raising=False
             )
-
-    lba_mod = _maybe_module("agent_takkub.lead_bash_audit", force=False)
-    if lba_mod is not None and hasattr(lba_mod, "_DEFAULT_LOG"):
-        monkeypatch.setattr(lba_mod, "_DEFAULT_LOG", runtime / "lead_bash_audit.log", raising=False)
 
     sdt_mod = _maybe_module("agent_takkub.shared_dev_tools", force=False)
     if sdt_mod is not None and hasattr(sdt_mod, "SHARED_MCP_FILE"):

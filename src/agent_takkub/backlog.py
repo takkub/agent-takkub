@@ -678,14 +678,6 @@ def import_markdown(project: str, text: str, *, source: str = "") -> list[dict]:
     return created
 
 
-def list_projects_with_backlog() -> list[str]:
-    root = RUNTIME_DIR / "backlog"
-    try:
-        return sorted(p.name for p in root.iterdir() if (p / "backlog.json").is_file())
-    except OSError:
-        return []
-
-
 def render_line(item: dict, *, now: float | None = None) -> str:
     """One-line CLI rendering for `takkub backlog list`."""
     age = age_days(item, now=now)

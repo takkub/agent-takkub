@@ -280,27 +280,6 @@ def cockpit_repo_slug() -> str:
     )
 
 
-def _warn_cockpit_repo_unresolved(op: str, reason: str) -> None:
-    """Loud stderr warning when a **cockpit-bug** op (``cockpit_bug=True``)
-    can't resolve a real agent-takkub GitHub repo at all.
-
-    The cockpit always has a real GitHub remote somewhere, so this case is
-    never the legitimate "bare no-remote project" quiet fallback that
-    ``cockpit_bug=False`` (project-scoped) ops use — it means path
-    resolution itself is broken (issue #237). Silence here is exactly what
-    let 100% of cockpit-bug issues pile up in the local store unnoticed.
-    """
-    print(
-        f"⚠ takkub issue: {op} — could not resolve the agent-takkub GitHub repo "
-        f"({reason}). Cockpit-bug issues always have a real GitHub remote; landing "
-        "here means path resolution is broken, not a legit local-only mode. Set "
-        "AGENT_TAKKUB_COCKPIT_REPO to your agent-takkub checkout path, or open it "
-        "as a cockpit project named 'agent-takkub', to route this to GitHub. Using "
-        "the LOCAL issue store instead — NOT visible on GitHub until fixed.",
-        file=sys.stderr,
-    )
-
-
 def _resolve_repo_for_op(
     cwd: str | Path | None, cockpit_bug: bool, op: str
 ) -> tuple[str | Path | None, str | None, bool]:

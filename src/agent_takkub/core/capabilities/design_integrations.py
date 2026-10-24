@@ -175,9 +175,8 @@ class DesignIntegrationsSnapshot:
 
 
 def resolve_design_integrations(role: str, roots: list[Path]) -> DesignIntegrationsSnapshot:
-    """Everything `role` gets for #365 phase 7, in one call — mirrors
-    `CapabilityRegistry.snapshot`'s "one call instead of N policy imports"
-    shape for this one slice."""
+    """Everything `role` gets for #365 phase 7, in one call — one call instead
+    of N policy imports for this one slice."""
     return DesignIntegrationsSnapshot(
         storybook=detect_storybook(roots),
         optional_mcps=optional_design_mcp_status(role),

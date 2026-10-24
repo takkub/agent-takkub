@@ -1542,17 +1542,6 @@ def _shared_fetch(
     return data
 
 
-def _usage_fingerprint(usage: ProviderUsage) -> tuple:
-    return (
-        usage.provider,
-        usage.status,
-        usage.plan,
-        usage.utilization,
-        json.dumps(usage.windows, sort_keys=True, default=str),
-        usage.error,
-    )
-
-
 # #709: how far two "identical" accounts' window reset times may drift.
 # Codex answers `resets_at = now + window` for a window that has not started
 # (0 % used), so four back-to-back probes of the SAME account came back one

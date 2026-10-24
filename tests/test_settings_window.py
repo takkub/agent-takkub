@@ -99,7 +99,6 @@ class TestSettingsWindowStructure:
             assert role in dlg._role_provider_combos
             assert role in dlg._role_model_combos
             assert role in dlg._role_effort_combos
-            assert role not in dlg._role_defer_labels
         for role, model in (("reviewer", "sonnet"), ("qa", "haiku"), ("critic", "opus")):
             dlg._role_model_combos[role].setCurrentText(model)
         dlg._on_save_apply_clicked()

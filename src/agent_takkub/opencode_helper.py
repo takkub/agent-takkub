@@ -18,12 +18,9 @@ import json
 import os
 import shutil
 import sqlite3
-import subprocess
 import sys
 import time
 from pathlib import Path
-
-from ._win_console import SUBPROCESS_NO_WINDOW
 
 _MAX_EVENT_CHARS = 16000
 _SESSION_PREVIEW_CHARS = 140
@@ -683,43 +680,3 @@ def poll_opencode_delta(
         return since_time_ms, []
     finally:
         conn.close()
-
-
-def opencode_exec(
-    prompt: str,
-    *,
-    cwd: str | None = None,
-    timeout: float = 120.0,
-    model: str | None = None,
-) -> tuple[bool, str]:
-    """Run `opencode run "<prompt>"` non-interactively and return `(ok, output)`."""
-    binary = find_opencode_executable()
-    if binary is None:
-        return False, _INSTALL_HINT
-    if not (prompt or "").strip():
-        return False, "empty prompt"
-    argv: list[str] = [binary, "run", prompt]
-    if model:
-        argv = [binary, "-m", model, "run", prompt]
-    try:
-        proc = subprocess.run(
-            argv,
-            cwd=cwd,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            check=False,
-            encoding="utf-8",
-            errors="replace",
-            creationflags=SUBPROCESS_NO_WINDOW,
-        )
-    except subprocess.TimeoutExpired:
-        return False, "opencode exec timed out"
-    except FileNotFoundError:
-        return False, "opencode binary disappeared from PATH"
-    except Exception as e:
-        return False, f"opencode exec failed: {e}"
-    if proc.returncode != 0:
-        tail = (proc.stderr or proc.stdout or "opencode exec failed").strip()
-        return False, tail
-    return True, (proc.stdout or "").strip()

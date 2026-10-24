@@ -191,9 +191,6 @@ import agent_takkub.core.brain.adapter
 import agent_takkub.core.brain.facade
 import agent_takkub.core.brain.context_builder
 import agent_takkub.core.brain.sources
-import agent_takkub.core.brain.sources.role_memory_source
-import agent_takkub.core.brain.sources.knowledge_source
-import agent_takkub.core.brain.sources.decision_note_source
 import agent_takkub.core.brain.sources.digest_facts_source
 import agent_takkub.core.brain.sources.reflection_source
 

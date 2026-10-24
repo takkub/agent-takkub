@@ -6,7 +6,6 @@ Covers:
 - Reading history messages with role and remote prefix parsing
 - Listing recent sessions with teammate task filtering
 - Incremental delta polling (lead, user, working, blocked_on_picker)
-- One-shot execution (opencode_exec)
 - LeadNotifier integration with OpenCode SQLite transcripts
 """
 

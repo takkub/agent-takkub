@@ -27,7 +27,6 @@ from agent_takkub.core.capabilities.design_integrations import (
     resolve_design_integrations,
 )
 from agent_takkub.core.capabilities.permission_engine import PermissionEngine
-from agent_takkub.core.capabilities.registry import CapabilityRegistry
 from agent_takkub.core.secrets.backends import BackendStatus, SecretUnavailableError
 
 
@@ -133,15 +132,6 @@ class TestResolveDesignIntegrations:
 
         assert snapshot.storybook.detected is True
         assert len(snapshot.optional_mcps) == len(OPTIONAL_DESIGN_MCPS)
-
-    def test_capability_registry_delegates(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        monkeypatch.setattr(pane_tools_policy, "effective_mcps", lambda role, default=None: None)
-
-        snapshot = CapabilityRegistry().resolve_design_integrations("designer", [tmp_path])
-
-        assert snapshot.storybook.detected is False
 
     def test_provider_off_designer_workflow_still_resolves(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

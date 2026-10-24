@@ -1,13 +1,12 @@
 """Core V2 Scheduler/Resource/Runtime (docs/v2/07_SCHEDULER_RESOURCE_RUNTIME.md,
 epic #309 Phase 8a): pure `SlotPolicy` admission, the backpressure ladder,
-priority ordering, `ProcessRegistry` crash recovery, `AgentRuntimeControl`,
+priority ordering,
 and the fail-open `.facade` `resource_governor.py` calls into.
 """
 
 from __future__ import annotations
 
 import dataclasses
-import time
 from types import SimpleNamespace
 
 import pytest
@@ -24,8 +23,6 @@ from agent_takkub.core.scheduling.models import (
     SlotRequest,
 )
 from agent_takkub.core.scheduling.priority_queue import order_by_priority
-from agent_takkub.core.scheduling.process_registry import ProcessRegistry, ProcessStatus
-from agent_takkub.core.scheduling.runtime_control import AgentRuntimeControl, RunState
 
 
 @pytest.fixture(autouse=True)
@@ -189,171 +186,6 @@ def test_order_by_priority_moves_higher_tiers_earlier_and_keeps_ties_stable():
     priorities = {"a": Priority.LOW, "b": Priority.CRITICAL, "c": Priority.LOW, "d": Priority.HIGH}
     ordered = order_by_priority(["a", "b", "c", "d"], lambda pid: priorities[pid])
     assert ordered == ["b", "d", "a", "c"]  # a before c preserved (stable sort)
-
-
-# ── ProcessRegistry ──────────────────────────────────────────────────────
-
-
-def _register(registry: ProcessRegistry, pid: int) -> None:
-    registry.register(
-        pid=pid,
-        agent_id="agent-1",
-        project_id="proj",
-        task_id="task-1",
-        pane_id="pane-1",
-        provider_id="claude",
-        account_id="acct-1",
-    )
-
-
-def test_process_registry_register_and_snapshot():
-    registry = ProcessRegistry(clock=lambda: 100.0)
-    _register(registry, 111)
-    record = registry.get(111)
-    assert record is not None
-    assert record.status == ProcessStatus.RUNNING
-    assert record.started_at == 100.0
-    assert registry.for_project("proj") == [record]
-    assert registry.snapshot() == [record]
-
-
-def test_process_registry_mark_and_unregister():
-    registry = ProcessRegistry()
-    _register(registry, 222)
-    updated = registry.mark(222, ProcessStatus.DONE)
-    assert updated is not None and updated.status == ProcessStatus.DONE
-    assert registry.mark(999, ProcessStatus.DONE) is None
-    removed = registry.unregister(222)
-    assert removed is not None and removed.pid == 222
-    assert registry.get(222) is None
-
-
-def test_process_registry_detect_stale_marks_interrupted_not_dropped():
-    registry = ProcessRegistry()
-    _register(registry, 1)
-    _register(registry, 2)
-    registry.mark(2, ProcessStatus.DONE)  # not RUNNING -> never inspected
-
-    interrupted = registry.detect_stale(is_alive=lambda pid: pid != 1)
-
-    assert [r.pid for r in interrupted] == [1]
-    assert registry.get(1).status == ProcessStatus.INTERRUPTED
-    assert registry.get(2).status == ProcessStatus.DONE  # untouched
-
-
-def test_process_registry_detect_stale_is_alive_exception_marks_interrupted():
-    registry = ProcessRegistry()
-    _register(registry, 3)
-
-    def boom(pid: int) -> bool:
-        raise RuntimeError("no such process")
-
-    interrupted = registry.detect_stale(is_alive=boom)
-    assert [r.pid for r in interrupted] == [3]
-
-
-# ── AgentRuntimeControl ──────────────────────────────────────────────────
-
-
-def test_runtime_control_pause_resume_cancel():
-    control = AgentRuntimeControl()
-    assert control.state == RunState.RUNNING
-    assert control.may_dispatch_new() is True
-
-    control.pause()
-    assert control.state == RunState.PAUSED
-    assert control.may_dispatch_new() is False
-
-    control.resume()
-    assert control.state == RunState.RUNNING
-
-    control.cancel()
-    assert control.state == RunState.CANCELLED
-    control.resume()  # cancel is terminal
-    assert control.state == RunState.CANCELLED
-
-
-def test_runtime_control_limit_wait_park_and_resume():
-    # #322: usage-limit wait modeled as a first-class RunState, distinct
-    # from an operator pause() — resume() must never clear it, and
-    # resume_from_limit() must never clear a plain operator pause().
-    control = AgentRuntimeControl()
-    reset_at = time.time() + 3600
-
-    control.park_for_limit(reset_at)
-    assert control.state == RunState.LIMIT_WAIT
-    assert control.limit_reset_at == reset_at
-    assert control.may_dispatch_new() is False
-
-    control.resume()  # plain resume must not touch LIMIT_WAIT
-    assert control.state == RunState.LIMIT_WAIT
-
-    control.resume_from_limit()
-    assert control.state == RunState.RUNNING
-    assert control.limit_reset_at is None
-    assert control.may_dispatch_new() is True
-
-
-def test_runtime_control_limit_wait_from_paused():
-    control = AgentRuntimeControl()
-    control.pause()
-    control.park_for_limit(time.time() + 60)
-    assert control.state == RunState.LIMIT_WAIT
-
-    control.resume_from_limit()
-    assert control.state == RunState.RUNNING  # not back to PAUSED — reset wins
-
-
-def test_runtime_control_resume_from_limit_is_noop_on_plain_pause():
-    control = AgentRuntimeControl()
-    control.pause()
-    control.resume_from_limit()  # never parked — must not clear the pause
-    assert control.state == RunState.PAUSED
-
-
-def test_runtime_control_limit_wait_terminal_states_ignore_park():
-    control = AgentRuntimeControl()
-    control.cancel()
-    control.park_for_limit(time.time() + 60)
-    assert control.state == RunState.CANCELLED  # terminal — park is a no-op
-
-    control2 = AgentRuntimeControl()
-    control2.mark_done()
-    control2.park_for_limit(time.time() + 60)
-    assert control2.state == RunState.DONE
-
-
-def test_runtime_control_cancel_from_limit_wait():
-    control = AgentRuntimeControl()
-    control.park_for_limit(time.time() + 60)
-    control.cancel()
-    assert control.state == RunState.CANCELLED
-
-
-def test_runtime_control_checkpoint_is_noop_when_flag_off(monkeypatch):
-    monkeypatch.setenv("TAKKUB_V2_SCHEDULER", "0")
-    calls = []
-    control = AgentRuntimeControl(checkpoint_fn=lambda: calls.append(1))
-    assert control.checkpoint() is False
-    assert calls == []
-
-
-def test_runtime_control_checkpoint_calls_fn_when_flag_on(monkeypatch):
-    monkeypatch.setenv("TAKKUB_V2_SCHEDULER", "1")
-    calls = []
-    control = AgentRuntimeControl(checkpoint_fn=lambda: calls.append(1))
-    assert control.checkpoint() is True
-    assert calls == [1]
-
-
-def test_runtime_control_checkpoint_fail_open(monkeypatch):
-    monkeypatch.setenv("TAKKUB_V2_SCHEDULER", "1")
-
-    def boom():
-        raise RuntimeError("disk full")
-
-    control = AgentRuntimeControl(checkpoint_fn=boom)
-    assert control.checkpoint() is False  # never raises
 
 
 # ── facade: flag-off no-op, flag-on delegates, fail-open ────────────────
