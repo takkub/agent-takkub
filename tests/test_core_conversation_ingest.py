@@ -85,6 +85,37 @@ def test_claude_read_new_is_idempotent_via_cursor(tmp_path):
     assert [(m.role, m.text) for m in second.messages] == [(MessageRole.ASSISTANT, "hi")]
 
 
+def test_read_new_holds_a_half_written_record_until_its_newline(tmp_path):
+    """2026-10-24 review B4: the cursor used to jump past a record the
+    provider was still writing — that message was lost for good."""
+    path = tmp_path / "session.jsonl"
+    full = _claude_line("assistant", "late reply")
+    path.write_bytes((_claude_line("user", "hello") + "\n" + full[:10]).encode())
+    first = claude_adapter.read_new(str(path), None)
+    assert [m.text for m in first.messages] == ["hello"]
+
+    with open(path, "ab") as f:
+        f.write((full[10:] + "\n").encode())
+    second = claude_adapter.read_new(str(path), first.next_cursor)
+    assert [m.text for m in second.messages] == ["late reply"]
+
+
+def test_concurrent_set_cursor_keeps_every_key(tmp_path):
+    """Review B3: every role's done worker shares one cursor file."""
+    import threading
+
+    p = tmp_path / "cursors.json"
+    workers = [
+        threading.Thread(target=set_cursor, args=("codex", f"src-{i}", str(i)), kwargs={"path": p})
+        for i in range(16)
+    ]
+    for t in workers:
+        t.start()
+    for t in workers:
+        t.join()
+    assert all(get_cursor("codex", f"src-{i}", path=p) == str(i) for i in range(16))
+
+
 def test_claude_read_new_skips_non_conversation_records(tmp_path):
     path = tmp_path / "session.jsonl"
     path.write_text(

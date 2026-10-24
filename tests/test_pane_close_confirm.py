@@ -176,7 +176,7 @@ class TestOnPaneCloseClickedGate:
             patch.object(orch, "close") as mocked_close,
         ):
             orch._on_pane_close_clicked("frontend")
-        mocked_close.assert_called_once_with("frontend")
+        mocked_close.assert_called_once_with("frontend", project="testproj")
 
     def test_lead_click_replaces_only_lead(self, orch: Orchestrator) -> None:
         lead = _make_pane("working")

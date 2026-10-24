@@ -20,9 +20,26 @@ from __future__ import annotations
 
 import json
 import os
+import threading
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, NamedTuple
+
+# One lock per file: the rewrite mode is read-whole/replace, so two threads
+# (concurrent done workers feeding the Brain) appending to the same log
+# would otherwise each replace the other's record away.
+_PATH_LOCKS: dict[str, threading.Lock] = {}
+_PATH_LOCKS_GUARD = threading.Lock()
+
+
+def path_lock(path: Path) -> threading.Lock:
+    key = os.path.normcase(os.path.abspath(path))
+    with _PATH_LOCKS_GUARD:
+        return _PATH_LOCKS.setdefault(key, threading.Lock())
+
+
+def unique_tmp(path: Path) -> Path:
+    return path.with_name(f"{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
 
 
 class ReadResult(NamedTuple):
@@ -53,13 +70,14 @@ class JsonlStore:
                 f.write(line.encode("utf-8"))
                 f.write(b"\n")
             return
-        existing = self._path.read_bytes() if self._path.exists() else b""
-        tmp = self._path.with_name(self._path.name + ".tmp")
-        with open(tmp, "wb") as f:
-            f.write(existing)
-            f.write(line.encode("utf-8"))
-            f.write(b"\n")
-        os.replace(tmp, self._path)
+        with path_lock(self._path):
+            existing = self._path.read_bytes() if self._path.exists() else b""
+            tmp = unique_tmp(self._path)
+            with open(tmp, "wb") as f:
+                f.write(existing)
+                f.write(line.encode("utf-8"))
+                f.write(b"\n")
+            os.replace(tmp, self._path)
 
     def read_all(self) -> ReadResult:
         if not self._path.exists():

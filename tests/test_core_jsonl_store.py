@@ -47,8 +47,21 @@ def test_append_is_atomic_via_os_replace(tmp_path, monkeypatch):
     monkeypatch.setattr("agent_takkub.core.storage.jsonl_store.os.replace", spy_replace)
     store.append({"id": "b"})
     assert len(calls) == 1
-    tmp_leftover = path.with_name(path.name + ".tmp")
-    assert not tmp_leftover.exists()
+    assert not list(tmp_path.glob("*.tmp"))
+
+
+def test_concurrent_appends_never_lose_a_record(tmp_path):
+    """2026-10-24 review B2: concurrent done workers append to the same Brain
+    log; read-whole/replace without a lock dropped records."""
+    import threading
+
+    store = JsonlStore(tmp_path / "brain.jsonl")
+    workers = [threading.Thread(target=store.append, args=({"id": i},)) for i in range(32)]
+    for t in workers:
+        t.start()
+    for t in workers:
+        t.join()
+    assert sorted(r["id"] for r in store.read_all().records) == list(range(32))
 
 
 def test_read_all_skips_corrupt_lines_and_counts_them(tmp_path):

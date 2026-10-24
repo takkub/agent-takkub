@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from agent_takkub.core.storage.jsonl_store import path_lock
 from agent_takkub.core.storage.legacy_reader import read_json
 from agent_takkub.core.storage.paths import core_home
 
@@ -30,6 +31,9 @@ def get_cursor(provider_id: str, source_id: str, *, path: Path | None = None) ->
 
 def set_cursor(provider_id: str, source_id: str, cursor: str, *, path: Path | None = None) -> None:
     p = path or _cursor_path()
-    data = read_json(p)
-    data[_key(provider_id, source_id)] = cursor
-    write_json_atomic(p, data)
+    # Every role's done worker shares this one file — without the lock two
+    # concurrent read-modify-writes drop each other's key (re-ingest = dup history).
+    with path_lock(p):
+        data = dict(read_json(p))
+        data[_key(provider_id, source_id)] = cursor
+        write_json_atomic(p, data)

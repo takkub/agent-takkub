@@ -239,6 +239,7 @@ def test_task_budget_watchdog_interrupts_and_logs_once(monkeypatch, tmp_path):
     session = SimpleNamespace(is_alive=True, write=write)
     pane = SimpleNamespace(
         provider="codex",
+        model=SimpleNamespace(provider_name="codex"),
         session=session,
         current_usage=lambda: {"total": 1_000, "input": 900, "output": 100, "model": "test"},
     )

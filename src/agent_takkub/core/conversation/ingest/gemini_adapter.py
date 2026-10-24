@@ -22,6 +22,7 @@ from pathlib import Path
 from agent_takkub import gemini_helper
 from agent_takkub.core.models.conversation import MessageRole
 
+from ._jsonl_tail import read_complete_lines
 from .base import IngestBatch, IngestedMessage
 
 provider_id = "gemini"
@@ -79,23 +80,13 @@ def resolve_source(cwd: str, session_id: str | None) -> str | None:
 
 
 def read_new(source_id: str, cursor: str | None) -> IngestBatch:
-    path = Path(source_id)
-    offset = int(cursor) if cursor else 0
-    try:
-        size = path.stat().st_size
-    except OSError:
+    chunk = read_complete_lines(Path(source_id), cursor)
+    if chunk is None:
         return IngestBatch(source_id, [], cursor or "0")
-    if offset >= size:
-        return IngestBatch(source_id, [], str(size))
-    with open(path, "rb") as f:
-        f.seek(max(0, offset))
-        raw = f.read()
+    lines, next_cursor = chunk
     messages: list[IngestedMessage] = []
     seen_legacy_ids: set[str] = set()
-    for line in raw.decode("utf-8", errors="replace").splitlines():
-        line = line.strip()
-        if not line:
-            continue
+    for line in lines:
         try:
             rec = json.loads(line)
         except json.JSONDecodeError:
@@ -120,4 +111,4 @@ def read_new(source_id: str, cursor: str | None) -> IngestBatch:
                 messages.append(IngestedMessage(role=MessageRole.USER, text=text))
             elif mtype == "gemini":
                 messages.append(IngestedMessage(role=MessageRole.ASSISTANT, text=text))
-    return IngestBatch(source_id, messages, str(size))
+    return IngestBatch(source_id, messages, next_cursor)

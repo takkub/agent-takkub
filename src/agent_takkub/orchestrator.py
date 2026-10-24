@@ -1054,6 +1054,14 @@ def _count_active_teammates(panes_by_project: dict) -> int:
     return n
 
 
+def _pane_provider(pane) -> str | None:
+    """The provider this pane was spawned on (`pane.model.provider_name`).
+    Panes carry no `.provider` attribute — reading one silently gave None and
+    turned every provider-specific branch into the generic default."""
+    provider = getattr(getattr(pane, "model", None), "provider_name", None)
+    return provider.strip().lower() if isinstance(provider, str) and provider.strip() else None
+
+
 def _open_with_dialog_process_present() -> bool:
     """Best-effort corroboration for the #104 Windows Open-With dialog
     tripwire (issue #199): a transcript-text match alone false-positived
@@ -7918,17 +7926,26 @@ class Orchestrator(
         under a `node_modules`/`vendor` directory component (issue #500) —
         a pane that npm-installs a tool into the scratch dir leaves package
         icons/fixtures behind that are never real screenshots."""
+        # Prune excluded dirs DURING the walk: `rglob("*")` first listed every
+        # file under an npm-installed node_modules on the Qt thread inside
+        # done(), then threw them away.
+        candidates: list[pathlib.Path] = []
         try:
-            candidates = list(directory.rglob("*")) if directory.is_dir() else []
+            if directory.is_dir():
+                for root, dirs, files in os.walk(directory):
+                    dirs[:] = [d for d in dirs if d not in _EVIDENCE_EXCLUDED_DIR_NAMES]
+                    candidates.extend(
+                        pathlib.Path(root, name)
+                        for name in files
+                        if pathlib.Path(name).suffix.lower() in _EVIDENCE_EXTENSIONS
+                    )
         except OSError:
             candidates = []
 
         found: list[tuple[float, pathlib.Path, int]] = []
         for path in candidates:
-            if _EVIDENCE_EXCLUDED_DIR_NAMES.intersection(path.parent.parts):
-                continue
             try:
-                if not path.is_file() or path.suffix.lower() not in _EVIDENCE_EXTENSIONS:
+                if not path.is_file():
                     continue
             except OSError:
                 continue
@@ -14691,7 +14708,7 @@ class Orchestrator(
                     _is_fb = False
                     if callable(_at_fb_raw):
                         try:
-                            _res = _at_fb_raw(getattr(pane, "provider", None))
+                            _res = _at_fb_raw(_pane_provider(pane))
                             _is_fb = isinstance(_res, bool) and _res
                         except Exception:
                             _is_fb = False
@@ -15263,7 +15280,7 @@ class Orchestrator(
                     "task_work_budget_exceeded",
                     project=project_name,
                     role=role,
-                    provider=getattr(pane, "provider", None),
+                    provider=_pane_provider(pane),
                     reason=reason,
                     elapsed_seconds=round(max(0.0, now - started)),
                     tokens=ps.task_token_total,
@@ -15693,7 +15710,7 @@ class Orchestrator(
                     sess = pane.session
                     if sess is None or not sess.is_alive:
                         continue
-                    provider = getattr(pane, "provider", None) or getattr(pane, "_provider", None)
+                    provider = _pane_provider(pane)
                     key = f"{project_name}::{role}"
                     ps = self._ps(key)
                     _at_fb_raw = getattr(sess, "is_at_feedback_prompt", None)
@@ -16283,7 +16300,7 @@ class Orchestrator(
                     try:
                         _at_fb_fn = getattr(pane.session, "is_at_feedback_prompt", None)
                         if callable(_at_fb_fn):
-                            _at_fb_res = _at_fb_fn(getattr(pane, "provider", None))
+                            _at_fb_res = _at_fb_fn(_pane_provider(pane))
                             _at_feedback = isinstance(_at_fb_res, bool) and _at_fb_res
                         else:
                             _at_feedback = False
@@ -16296,7 +16313,7 @@ class Orchestrator(
                         ) >= 3.0 and _ps_fb.feedback_prompt_dismiss_attempts < 3:
                             from .provider_spec import feedback_prompt_skip_key_for
 
-                            _provider = getattr(pane, "provider", None)
+                            _provider = _pane_provider(pane)
                             skip_key = feedback_prompt_skip_key_for(_provider) or "0\r"
                             pane.session.write(skip_key)
                             _ps_fb.feedback_prompt_dismiss_ts = now
@@ -17951,7 +17968,7 @@ class Orchestrator(
                 project_ns, role_name, ps, candidate, provider, reset_at, manual=True
             )
             return
-        self.close(role_name)
+        self.close(role_name, project=project_ns)
 
     def confirm_manual_pane_close(
         self, pane: AgentPaneLike | None, role_name: str, project: str | None

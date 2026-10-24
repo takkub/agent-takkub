@@ -14,6 +14,7 @@ from agent_takkub import chatlog_scanner
 from agent_takkub.core.models.conversation import MessageRole
 from agent_takkub.token_meter import find_latest_session, find_session_by_uuid
 
+from ._jsonl_tail import read_complete_lines
 from .base import IngestBatch, IngestedMessage
 
 provider_id = "claude"
@@ -42,22 +43,12 @@ def resolve_source(
 
 
 def read_new(source_id: str, cursor: str | None) -> IngestBatch:
-    path = Path(source_id)
-    offset = int(cursor) if cursor else 0
-    try:
-        size = path.stat().st_size
-    except OSError:
+    chunk = read_complete_lines(Path(source_id), cursor)
+    if chunk is None:
         return IngestBatch(source_id, [], cursor or "0")
-    if offset >= size:
-        return IngestBatch(source_id, [], str(size))
-    with open(path, "rb") as f:
-        f.seek(max(0, offset))
-        raw = f.read()
+    lines, next_cursor = chunk
     messages: list[IngestedMessage] = []
-    for line in raw.decode("utf-8", errors="replace").splitlines():
-        line = line.strip()
-        if not line:
-            continue
+    for line in lines:
         try:
             rec = json.loads(line)
         except json.JSONDecodeError:
@@ -78,4 +69,4 @@ def read_new(source_id: str, cursor: str | None) -> IngestBatch:
                 created_at=dt.timestamp() if dt is not None else None,
             )
         )
-    return IngestBatch(source_id, messages, str(size))
+    return IngestBatch(source_id, messages, next_cursor)

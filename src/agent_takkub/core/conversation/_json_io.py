@@ -9,9 +9,11 @@ import os
 from pathlib import Path
 from typing import Any
 
+from agent_takkub.core.storage.jsonl_store import unique_tmp
+
 
 def write_json_atomic(path: Path, data: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(path.name + ".tmp")
+    tmp = unique_tmp(path)
     tmp.write_text(json.dumps(data, ensure_ascii=False, sort_keys=True, indent=2), encoding="utf-8")
     os.replace(tmp, path)
