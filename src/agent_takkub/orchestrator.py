@@ -15033,9 +15033,16 @@ class Orchestrator(
         provider = "unknown"
         model: str | None = None
         try:
-            from .provider_config import effective_provider_for
+            # #917: the provider the pane was actually spawned on (failover /
+            # `assign --provider`) — the configured routing can name codex
+            # while the screen being probed is agy.
+            live = getattr(getattr(pane, "model", None), "provider_name", None)
+            if isinstance(live, str) and live.strip():
+                provider = live.strip().lower()
+            else:
+                from .provider_config import effective_provider_for
 
-            provider = effective_provider_for(name, project=project_name)
+                provider = effective_provider_for(name, project=project_name)
             model = sess.current_model_label(provider)
         except Exception:
             pass

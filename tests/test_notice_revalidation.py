@@ -189,6 +189,22 @@ class TestSystemNoticeRevalidatedAtFlush:
         assert "คลี่คลายแล้ว" not in written
         assert "[backend FAILED] build broke" in written
 
+    def test_watchdog_notice_dropped_once_its_pane_closed(self, orch: Orchestrator) -> None:
+        """#917: a 09:33 "devops เงียบต่อเนื่อง" notice reached Lead at 11:14,
+        three seconds after devops was closed."""
+        body = "[watchdog] devops เงียบต่อเนื่อง 137s (ครั้งที่ 18 ...) — provider=agy"
+        orch._panes_by_project[PROJECT] = {"lead": _pane(session=_live_session())}
+        with patch("agent_takkub.lead_inbox._log_event"):
+            assert orch._revalidate_system_notice(PROJECT, body, queued_ts=1.0) == ""
+
+    def test_watchdog_notice_kept_while_pane_still_live(self, orch: Orchestrator) -> None:
+        body = "[watchdog] devops เงียบต่อเนื่อง 137s (ครั้งที่ 18 ...) — provider=agy"
+        orch._panes_by_project[PROJECT] = {
+            "lead": _pane(session=_live_session()),
+            "devops": _pane("working", session=_live_session()),
+        }
+        assert orch._revalidate_system_notice(PROJECT, body, queued_ts=1.0) == body
+
     def test_direct_revalidate_helper_unchanged_for_non_marker_body(
         self, orch: Orchestrator
     ) -> None:

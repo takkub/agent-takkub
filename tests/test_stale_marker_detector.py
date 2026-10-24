@@ -795,6 +795,35 @@ def test_liveness_alive_skips_notify_and_logs_quiet_but_alive(
     assert key not in orch._stale_marker_streak
 
 
+def test_escalation_names_the_provider_the_pane_runs_not_the_config(
+    orch: Orchestrator, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#917: routing said codex, the devops pane was actually agy (Gemini quota
+    error on screen) — the notice and the liveness probe must use agy."""
+    monkeypatch.setattr(
+        "agent_takkub.provider_config.effective_provider_for", lambda *a, **k: "codex"
+    )
+    _add_pane(orch, "projX", "devops", _sess(quiet=STALE_MARKER_QUIET_S + 10))
+    orch._panes_by_project["projX"]["devops"].model.provider_name = "agy"
+    events = _capture_events(monkeypatch)
+    notify_calls = _capture_notify(monkeypatch)
+    probed: list[str] = []
+    monkeypatch.setattr(
+        Orchestrator,
+        "_stale_marker_liveness",
+        lambda self, p, n, pane, sess, provider, now: (
+            probed.append(provider) or (False, "no_signal", None, [])
+        ),
+    )
+
+    _tick_n_cooldowns(orch, _STALE_MARKER_ESCALATE_EVERY + 1)
+
+    assert probed == ["agy"]
+    prolonged = [e for e in events if e[0] == "ready_marker_stale_prolonged"]
+    assert prolonged[0][1]["provider"] == "agy"
+    assert "provider=agy" in notify_calls[0][0][1]
+
+
 def test_liveness_dead_claude_pane_uses_definitive_wording(
     orch: Orchestrator, monkeypatch: pytest.MonkeyPatch
 ) -> None:

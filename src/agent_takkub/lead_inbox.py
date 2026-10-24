@@ -4741,6 +4741,27 @@ class LeadInboxMixin:
             ) in _DIGEST_TERMINAL_PANE_STATES | {None}:
                 _log_event("lead_notice_superseded", project=project_ns, body=body)
                 return ""
+        # #917: a watchdog "เงียบต่อเนื่อง" notice can wait behind a busy Lead
+        # for over an hour; once that pane closed or got a new task, the
+        # "it's quiet right now" claim no longer describes anything live.
+        watchdog = re.match(r"\[watchdog\]\s+(\S+)\s", body.strip())
+        if watchdog:
+            w_role = watchdog.group(1)
+            ps = getattr(self, "_pane_state", {}).get(f"{project_ns}::{w_role}")
+            reassigned = (
+                queued_ts is not None
+                and ps is not None
+                and (getattr(ps, "assign_ts", 0) or 0) > queued_ts
+            )
+            w_state = self.list_status(project=project_ns).get(w_role)
+            if (
+                reassigned
+                or w_state is None
+                or w_state in _DIGEST_TERMINAL_PANE_STATES
+                or str(w_state).startswith("closed")
+            ):
+                _log_event("lead_notice_superseded", project=project_ns, role=w_role, body=body)
+                return ""
         # #793: Revalidate backlog review items. If cards are already done, drop notice
         if "backlog" in body and (
             "รอยืนยัน" in body or "backlog-review" in body or "backlog_review" in body
