@@ -4341,125 +4341,25 @@ class Orchestrator(
         effective_provider = ps_assign.provider_override or effective_provider_for(
             settings_role_a, project=project_ns
         )
-        # #572: `effective_provider_for` above may have silently substituted
-        # away from base_role_a's configured provider because it's recorded
-        # quota-hit (provider_state, set by limit_autoresume's post-hit
-        # reroute #514) — this is the ONE place every spawn (normal + worktree,
-        # both route through `_assign_dispatch`) resolves that provider, so
-        # it's also the one place to log/notify once per assign instead of
-        # every one of `effective_provider_for`'s many per-assign call sites.
-        # Skipped when an explicit --provider (or a carried-over watchdog
-        # `provider_override`) already decided the provider above — that
-        # path is always honoured, never silently substituted (see
-        # `assign_provider_override_warning` for its own separate heads-up).
-        if not ps_assign.provider_override:
-            from .provider_config import provider_quota_skip_info
-
-            skip_info = provider_quota_skip_info(settings_role_a, project=project_ns)
-            if skip_info is not None:
-                skip_from, skip_to, skip_reset_at = skip_info
-                skip_human = (
-                    _human_duration(max(0, skip_reset_at - time.time()))
-                    if skip_reset_at
-                    else "ไม่ทราบ"
-                )
-                _log_event(
-                    "provider_quota_skip",
-                    role=role_name,
-                    project=project_ns,
-                    from_provider=skip_from,
-                    to_provider=skip_to,
-                    reset_at=skip_reset_at,
-                )
-                self._notify_lead(
-                    project_ns,
-                    f"⏭️ [{role_name}] {skip_from} ยังไม่ reset (กลับ {skip_human}) → ใช้ {skip_to}",
-                    from_role=role_name,
-                    note="provider_quota_skip",
-                    kind="quota-skip",
-                )
-            # #639: the availability substitution (provider switched off in
-            # Settings, or its CLI is not installed) used to happen silently —
-            # the pane just came up on another CLI. Same one-notice-per-assign
-            # shape as the quota skip above.
-            from .provider_config import provider_unavailable_substitution_info
-
-            sub_info = provider_unavailable_substitution_info(settings_role_a, project=project_ns)
-            if sub_info is not None:
-                sub_from, sub_to = sub_info
-                _log_event(
-                    "provider_unavailable_substitution",
-                    role=role_name,
-                    project=project_ns,
-                    from_provider=sub_from,
-                    to_provider=sub_to,
-                )
-                self._notify_lead(
-                    project_ns,
-                    f"⚠️ [{role_name}] {sub_from} ใช้ไม่ได้ (ปิดใน Settings หรือไม่ได้ติดตั้ง) "
-                    f"→ ใช้ {sub_to} แทน · ถ้าไม่ต้องการให้สลับ ให้ปิด {sub_to} ใน Settings "
-                    f"หรือแก้ provider ของ role นี้",
-                    from_role=role_name,
-                    note="provider_unavailable_substitution",
-                    kind="provider-substitution",
-                )
-        if effective_provider == CODEX:
-            task = _rewrite_task_for_codex(task)
-        task = _append_verify_fail_hint(task, base_role_a)
-        task = _append_report_rules_hint(task)  # #653
-        # v2-hardening C (Adaptive Escalation) — a NEW task dispatched to a
-        # role whose pane is still alive (pane_is_running, computed above)
-        # is being reassigned before its previous task ever closed out: the
-        # fix-loop/re-assign signal `03_ADAPTIVE_ESCALATION.md` describes.
-        # A fresh spawn resets the count to 0 (see `next_retry_count`).
-        if not hasattr(self, "_role_retry_counts"):
-            self._role_retry_counts: dict[str, int] = {}
-        from .core.brain.escalation import next_retry_count
-
-        retry_count = next_retry_count(
-            self._role_retry_counts.get(key, 0), pane_is_running=pane_is_running
-        )
-        self._role_retry_counts[key] = retry_count
-        task = _inject_v2_context(
-            task, project_ns, role_name, base_role_a, effective_provider, retry_count=retry_count
-        )
-
-        plan_file = None
-        delivery_task = task
-        if plan and shard_total > 0:
-            plan_file = self._qa_plan_file(project_ns, base_role_a)
-            delivery_task = self._wrap_planner_task(task, plan_file, shard_total)
-        elif shard_total > 0:
-            # Real shard pane (not the planner) — every shard in the group
-            # gets identical task text, so a fixed output path in it is a
-            # collision unless we force per-shard uniqueness (#160).
-            shard_idx = _split_shard(role_name)[1] or 0
-            delivery_task = self._wrap_shard_task(task, shard_idx, shard_total)
-
-        # #739/#740: the session this task lands in may still hold an earlier
-        # one — a live pane (paste), or a spawn that will `--resume` the role's
-        # last conversation (`_recent_exits` inside the window). Name the new
-        # task explicitly: in the preloaded block, the handoff file (kept equal
-        # to last_assigned_task for crash replay) and the paste/pointer.
-        # `_task_handoff_pointer` measures the body without it, so the header
-        # never flips a short task onto the pointer path.
-        _new_task_header = ""
-        _resume_candidate = bool(_recent_exit_a) and (
-            time.time() - float(_recent_exit_a.get("ts", 0) or 0) < RESUME_WINDOW_SEC
-        )
-        if pane_is_running or prev_task_id or _resume_candidate:
-            from .orchestrator_text import new_task_header
-
-            _new_task_header = new_task_header(ps_assign.task_id, prev_task_id)
-            delivery_task = _new_task_header + delivery_task
-            _log_event(
-                "assign_new_task_header",
-                role=role_name,
-                project=project_ns,
-                task_id=ps_assign.task_id[:8],
-                prev_task_id=(prev_task_id or "")[:8],
-                pane_running=pane_is_running,
+        _new_task_header, delivery_task, plan_file, task = (
+            Orchestrator._dispatch_resolve_provider_and_session(
+                self,
+                CODEX,
+                _recent_exit_a,
+                base_role_a,
+                effective_provider,
+                key,
+                pane_is_running,
+                plan,
+                prev_task_id,
+                project_ns,
+                ps_assign,
+                role_name,
+                settings_role_a,
+                shard_total,
+                task,
             )
+        )
 
         # Materialise the reliable file handoff before spawn. Claude can attach
         # the full task to its per-spawn system-prompt file; the pointer remains
@@ -4480,65 +4380,25 @@ class Orchestrator(
             message = "บันทึกไฟล์ .md สำหรับส่งงานไม่ได้ — ยังไม่ได้ส่งข้อความเข้า pane"
             self._warn_lead_spawn_failed(role_name, project, message)
             return False, message
-        if _new_task_header and task_file:
-            # The pointer replaced the text — the header still leads the paste.
-            paste_text = _new_task_header + paste_text
-        if model and pane_is_running and model != ps_assign.model_override:
-            # #587 C3: same "only actually-different requests" rule as the
-            # provider check above.
-            self._notify_lead(
-                project_ns,
-                f"⚠️ [{role_name}] --model {model!r} ไม่มีผล: pane เปิดอยู่แล้วและยังใช้ "
-                "model เดิม · close pane นี้ก่อนแล้ว assign ใหม่เพื่อใช้ override",
-                from_role=role_name,
-                note="",
-                kind="assign-override-ignored",
-            )
-            _log_event(
-                "assign_model_override_ignored",
-                role=role_name,
-                project=project_ns,
-                model=model,
-                reason="pane-already-running",
-            )
-        elif not pane_is_running:
-            # PaneState can outlive a crashed session. A new assign without
-            # --model must clear the prior one-shot choice; a new assign with
-            # --model survives spawn gate/FIFO retries and crash auto-respawn.
-            ps_assign.model_override = model
-        if effort and pane_is_running and effort != ps_assign.effort_override:
-            # #587 C3: same "only actually-different requests" rule as above.
-            self._notify_lead(
-                project_ns,
-                f"⚠️ [{role_name}] --effort {effort!r} ไม่มีผล: pane เปิดอยู่แล้วและยังใช้ "
-                "effort เดิม · close pane นี้ก่อนแล้ว assign ใหม่เพื่อใช้ override",
-                from_role=role_name,
-                note="",
-                kind="assign-override-ignored",
-            )
-            _log_event(
-                "assign_effort_override_ignored",
-                role=role_name,
-                project=project_ns,
-                effort=effort,
-                reason="pane-already-running",
-            )
-        elif not pane_is_running:
-            # Same one-shot-choice contract as model_override immediately
-            # above — narrowest override, cleared on every fresh assign that
-            # doesn't repeat it.
-            ps_assign.effort_override = effort
-        ps_assign.spawn_initial_task = None
-        ps_assign.spawn_initial_task_fallback = None
-        ps_assign.spawn_initial_prompt_file = None
-        ps_assign.spawn_initial_task_state = ""
-        if PROVIDER_REGISTRY[effective_provider].system_prompt_flag is not None:
-            ps_assign.spawn_initial_task = delivery_task
-            ps_assign.spawn_initial_task_fallback = paste_text
-            ps_assign.spawn_initial_task_state = "requested"
-
-        spawn_shard_total = 0 if plan else shard_total
-        ok, msg = self.spawn(role_name, cwd=cwd, project=project, _shard_total=spawn_shard_total)
+        msg, ok, paste_text = Orchestrator._dispatch_prepare_task_handoff(
+            self,
+            PROVIDER_REGISTRY,
+            _new_task_header,
+            cwd,
+            delivery_task,
+            effective_provider,
+            effort,
+            model,
+            pane_is_running,
+            paste_text,
+            plan,
+            project,
+            project_ns,
+            ps_assign,
+            role_name,
+            shard_total,
+            task_file,
+        )
         if not ok:
             ps_assign.spawn_initial_task = None
             ps_assign.spawn_initial_task_fallback = None
@@ -4661,6 +4521,352 @@ class Orchestrator(
             project_ns, role_name, ps_assign.task_id, dispatched_impact
         ):
             return False, "impact plan could not be saved to the task ledger; assignment stopped"
+        (
+            _WorktreeManagerSnap,
+            _apply_baseline,
+            _compute_baseline,
+            _snap_cwd,
+            initial_delivery,
+            initial_delivery_reason,
+            provider_source,
+            resolution_line,
+        ) = Orchestrator._dispatch_reset_task_state(
+            self,
+            PROVIDER_REGISTRY,
+            _team_preset_a,
+            auto_chain,
+            base_role_a,
+            cwd,
+            distinct_from,
+            effective_provider,
+            model,
+            paste_text,
+            project,
+            project_ns,
+            provider,
+            ps_assign,
+            requires_commit,
+            role_name,
+            settings_role_a,
+            worktree,
+        )
+        if plan and shard_total > 0:
+            # Planner wrapping happened before spawn so a fresh Claude pane can
+            # receive the complete planner task in its one-shot system prompt.
+            ps_assign.plan_fanout = {
+                "shards": shard_total,
+                "cwd": cwd,
+                "task": task,
+                "plan_file": str(plan_file),
+                "model": model,
+            }
+            _log_event(
+                "assign_plan",
+                role=role_name,
+                cwd=cwd,
+                shards=shard_total,
+                plan_file=str(plan_file),
+                task_file=task_file,
+                initial_delivery=initial_delivery,
+                initial_delivery_reason=initial_delivery_reason,
+                effective_provider=effective_provider,
+                provider_source=provider_source,
+            )
+            return (
+                True,
+                f"{resolution_line}planner queued for {role_name} (fan-out {shard_total} on done)",
+            )
+        if shard_total > 0:
+            ps_assign.shard_total = shard_total
+            # Create/update shard group for aggregate tracking.
+            group_key = f"{project_ns}::{base_role_a}"
+            if group_key not in self._shard_groups:
+                group = ShardGroup(base_role=base_role_a, total=shard_total)
+                self._shard_groups[group_key] = group
+                # #2: capture generation so stale timers from a previous
+                # fan-out with the same key don't close this new group.
+                gen_a = group.generation
+                QTimer.singleShot(
+                    _SHARD_GROUP_TIMEOUT_MS,
+                    lambda gk=group_key, pns=project_ns, g=gen_a: self._check_shard_group_timeout(
+                        pns, gk, g
+                    ),
+                )
+            else:
+                self._shard_groups[group_key].total = shard_total
+        _log_event(
+            "assign",
+            role=role_name,
+            cwd=cwd,
+            task_preview=task[:120],
+            requires_commit=requires_commit,
+            auto_chain=auto_chain,
+            shard_total=shard_total,
+            task_file=task_file,
+            initial_delivery=initial_delivery,
+            initial_delivery_reason=initial_delivery_reason,
+            effective_provider=effective_provider,
+            model_override=model,
+            provider_override=provider,
+            effort_override=effort,
+            provider_source=provider_source,
+        )
+        return True, f"{resolution_line}task queued for {role_name} (sending when ready)"
+
+    def _dispatch_resolve_provider_and_session(
+        self,
+        CODEX,
+        _recent_exit_a,
+        base_role_a,
+        effective_provider,
+        key,
+        pane_is_running,
+        plan,
+        prev_task_id,
+        project_ns,
+        ps_assign,
+        role_name,
+        settings_role_a,
+        shard_total,
+        task,
+    ):
+        """Provider-substitution notice (#572), adaptive escalation, stale-session handling (#739/#740) (extracted from `_assign_dispatch`, 2026-10-24)."""
+        _new_task_header = None
+        delivery_task = None
+        plan_file = None
+        # #572: `effective_provider_for` above may have silently substituted
+        # away from base_role_a's configured provider because it's recorded
+        # quota-hit (provider_state, set by limit_autoresume's post-hit
+        # reroute #514) — this is the ONE place every spawn (normal + worktree,
+        # both route through `_assign_dispatch`) resolves that provider, so
+        # it's also the one place to log/notify once per assign instead of
+        # every one of `effective_provider_for`'s many per-assign call sites.
+        # Skipped when an explicit --provider (or a carried-over watchdog
+        # `provider_override`) already decided the provider above — that
+        # path is always honoured, never silently substituted (see
+        # `assign_provider_override_warning` for its own separate heads-up).
+        if not ps_assign.provider_override:
+            from .provider_config import provider_quota_skip_info
+
+            skip_info = provider_quota_skip_info(settings_role_a, project=project_ns)
+            if skip_info is not None:
+                skip_from, skip_to, skip_reset_at = skip_info
+                skip_human = (
+                    _human_duration(max(0, skip_reset_at - time.time()))
+                    if skip_reset_at
+                    else "ไม่ทราบ"
+                )
+                _log_event(
+                    "provider_quota_skip",
+                    role=role_name,
+                    project=project_ns,
+                    from_provider=skip_from,
+                    to_provider=skip_to,
+                    reset_at=skip_reset_at,
+                )
+                self._notify_lead(
+                    project_ns,
+                    f"⏭️ [{role_name}] {skip_from} ยังไม่ reset (กลับ {skip_human}) → ใช้ {skip_to}",
+                    from_role=role_name,
+                    note="provider_quota_skip",
+                    kind="quota-skip",
+                )
+            # #639: the availability substitution (provider switched off in
+            # Settings, or its CLI is not installed) used to happen silently —
+            # the pane just came up on another CLI. Same one-notice-per-assign
+            # shape as the quota skip above.
+            from .provider_config import provider_unavailable_substitution_info
+
+            sub_info = provider_unavailable_substitution_info(settings_role_a, project=project_ns)
+            if sub_info is not None:
+                sub_from, sub_to = sub_info
+                _log_event(
+                    "provider_unavailable_substitution",
+                    role=role_name,
+                    project=project_ns,
+                    from_provider=sub_from,
+                    to_provider=sub_to,
+                )
+                self._notify_lead(
+                    project_ns,
+                    f"⚠️ [{role_name}] {sub_from} ใช้ไม่ได้ (ปิดใน Settings หรือไม่ได้ติดตั้ง) "
+                    f"→ ใช้ {sub_to} แทน · ถ้าไม่ต้องการให้สลับ ให้ปิด {sub_to} ใน Settings "
+                    f"หรือแก้ provider ของ role นี้",
+                    from_role=role_name,
+                    note="provider_unavailable_substitution",
+                    kind="provider-substitution",
+                )
+        if effective_provider == CODEX:
+            task = _rewrite_task_for_codex(task)
+        task = _append_verify_fail_hint(task, base_role_a)
+        task = _append_report_rules_hint(task)  # #653
+        # v2-hardening C (Adaptive Escalation) — a NEW task dispatched to a
+        # role whose pane is still alive (pane_is_running, computed above)
+        # is being reassigned before its previous task ever closed out: the
+        # fix-loop/re-assign signal `03_ADAPTIVE_ESCALATION.md` describes.
+        # A fresh spawn resets the count to 0 (see `next_retry_count`).
+        if not hasattr(self, "_role_retry_counts"):
+            self._role_retry_counts: dict[str, int] = {}
+        from .core.brain.escalation import next_retry_count
+
+        retry_count = next_retry_count(
+            self._role_retry_counts.get(key, 0), pane_is_running=pane_is_running
+        )
+        self._role_retry_counts[key] = retry_count
+        task = _inject_v2_context(
+            task, project_ns, role_name, base_role_a, effective_provider, retry_count=retry_count
+        )
+
+        plan_file = None
+        delivery_task = task
+        if plan and shard_total > 0:
+            plan_file = self._qa_plan_file(project_ns, base_role_a)
+            delivery_task = self._wrap_planner_task(task, plan_file, shard_total)
+        elif shard_total > 0:
+            # Real shard pane (not the planner) — every shard in the group
+            # gets identical task text, so a fixed output path in it is a
+            # collision unless we force per-shard uniqueness (#160).
+            shard_idx = _split_shard(role_name)[1] or 0
+            delivery_task = self._wrap_shard_task(task, shard_idx, shard_total)
+
+        # #739/#740: the session this task lands in may still hold an earlier
+        # one — a live pane (paste), or a spawn that will `--resume` the role's
+        # last conversation (`_recent_exits` inside the window). Name the new
+        # task explicitly: in the preloaded block, the handoff file (kept equal
+        # to last_assigned_task for crash replay) and the paste/pointer.
+        # `_task_handoff_pointer` measures the body without it, so the header
+        # never flips a short task onto the pointer path.
+        _new_task_header = ""
+        _resume_candidate = bool(_recent_exit_a) and (
+            time.time() - float(_recent_exit_a.get("ts", 0) or 0) < RESUME_WINDOW_SEC
+        )
+        if pane_is_running or prev_task_id or _resume_candidate:
+            from .orchestrator_text import new_task_header
+
+            _new_task_header = new_task_header(ps_assign.task_id, prev_task_id)
+            delivery_task = _new_task_header + delivery_task
+            _log_event(
+                "assign_new_task_header",
+                role=role_name,
+                project=project_ns,
+                task_id=ps_assign.task_id[:8],
+                prev_task_id=(prev_task_id or "")[:8],
+                pane_running=pane_is_running,
+            )
+        return _new_task_header, delivery_task, plan_file, task
+
+    def _dispatch_prepare_task_handoff(
+        self,
+        PROVIDER_REGISTRY,
+        _new_task_header,
+        cwd,
+        delivery_task,
+        effective_provider,
+        effort,
+        model,
+        pane_is_running,
+        paste_text,
+        plan,
+        project,
+        project_ns,
+        ps_assign,
+        role_name,
+        shard_total,
+        task_file,
+    ):
+        """Prepare the file handoff, scope/plan/fan-out text and delivery fields (extracted from `_assign_dispatch`, 2026-10-24)."""
+        msg = None
+        ok = None
+        if _new_task_header and task_file:
+            # The pointer replaced the text — the header still leads the paste.
+            paste_text = _new_task_header + paste_text
+        if model and pane_is_running and model != ps_assign.model_override:
+            # #587 C3: same "only actually-different requests" rule as the
+            # provider check above.
+            self._notify_lead(
+                project_ns,
+                f"⚠️ [{role_name}] --model {model!r} ไม่มีผล: pane เปิดอยู่แล้วและยังใช้ "
+                "model เดิม · close pane นี้ก่อนแล้ว assign ใหม่เพื่อใช้ override",
+                from_role=role_name,
+                note="",
+                kind="assign-override-ignored",
+            )
+            _log_event(
+                "assign_model_override_ignored",
+                role=role_name,
+                project=project_ns,
+                model=model,
+                reason="pane-already-running",
+            )
+        elif not pane_is_running:
+            # PaneState can outlive a crashed session. A new assign without
+            # --model must clear the prior one-shot choice; a new assign with
+            # --model survives spawn gate/FIFO retries and crash auto-respawn.
+            ps_assign.model_override = model
+        if effort and pane_is_running and effort != ps_assign.effort_override:
+            # #587 C3: same "only actually-different requests" rule as above.
+            self._notify_lead(
+                project_ns,
+                f"⚠️ [{role_name}] --effort {effort!r} ไม่มีผล: pane เปิดอยู่แล้วและยังใช้ "
+                "effort เดิม · close pane นี้ก่อนแล้ว assign ใหม่เพื่อใช้ override",
+                from_role=role_name,
+                note="",
+                kind="assign-override-ignored",
+            )
+            _log_event(
+                "assign_effort_override_ignored",
+                role=role_name,
+                project=project_ns,
+                effort=effort,
+                reason="pane-already-running",
+            )
+        elif not pane_is_running:
+            # Same one-shot-choice contract as model_override immediately
+            # above — narrowest override, cleared on every fresh assign that
+            # doesn't repeat it.
+            ps_assign.effort_override = effort
+        ps_assign.spawn_initial_task = None
+        ps_assign.spawn_initial_task_fallback = None
+        ps_assign.spawn_initial_prompt_file = None
+        ps_assign.spawn_initial_task_state = ""
+        if PROVIDER_REGISTRY[effective_provider].system_prompt_flag is not None:
+            ps_assign.spawn_initial_task = delivery_task
+            ps_assign.spawn_initial_task_fallback = paste_text
+            ps_assign.spawn_initial_task_state = "requested"
+
+        spawn_shard_total = 0 if plan else shard_total
+        ok, msg = self.spawn(role_name, cwd=cwd, project=project, _shard_total=spawn_shard_total)
+        return msg, ok, paste_text
+
+    def _dispatch_reset_task_state(
+        self,
+        PROVIDER_REGISTRY,
+        _team_preset_a,
+        auto_chain,
+        base_role_a,
+        cwd,
+        distinct_from,
+        effective_provider,
+        model,
+        paste_text,
+        project,
+        project_ns,
+        provider,
+        ps_assign,
+        requires_commit,
+        role_name,
+        settings_role_a,
+        worktree,
+    ):
+        """Reset per-task budgets/reroute state, record routing provenance and the mode (extracted from `_assign_dispatch`, 2026-10-24)."""
+        _WorktreeManagerSnap = None
+        _apply_baseline = None
+        _compute_baseline = None
+        _snap_cwd = None
+        initial_delivery = None
+        initial_delivery_reason = None
+        provider_source = None
+        resolution_line = None
         # New task → fresh one-shot budget for the Stop-hook done-gate.
         ps_assign.stop_gate_notified = False
         # New task → fresh auto-resume park/wake budget (issue: limit-aware
@@ -4844,68 +5050,16 @@ class Orchestrator(
             provider_override=provider_override_a,
             model_override=model,
         )
-        if plan and shard_total > 0:
-            # Planner wrapping happened before spawn so a fresh Claude pane can
-            # receive the complete planner task in its one-shot system prompt.
-            ps_assign.plan_fanout = {
-                "shards": shard_total,
-                "cwd": cwd,
-                "task": task,
-                "plan_file": str(plan_file),
-                "model": model,
-            }
-            _log_event(
-                "assign_plan",
-                role=role_name,
-                cwd=cwd,
-                shards=shard_total,
-                plan_file=str(plan_file),
-                task_file=task_file,
-                initial_delivery=initial_delivery,
-                initial_delivery_reason=initial_delivery_reason,
-                effective_provider=effective_provider,
-                provider_source=provider_source,
-            )
-            return (
-                True,
-                f"{resolution_line}planner queued for {role_name} (fan-out {shard_total} on done)",
-            )
-        if shard_total > 0:
-            ps_assign.shard_total = shard_total
-            # Create/update shard group for aggregate tracking.
-            group_key = f"{project_ns}::{base_role_a}"
-            if group_key not in self._shard_groups:
-                group = ShardGroup(base_role=base_role_a, total=shard_total)
-                self._shard_groups[group_key] = group
-                # #2: capture generation so stale timers from a previous
-                # fan-out with the same key don't close this new group.
-                gen_a = group.generation
-                QTimer.singleShot(
-                    _SHARD_GROUP_TIMEOUT_MS,
-                    lambda gk=group_key, pns=project_ns, g=gen_a: self._check_shard_group_timeout(
-                        pns, gk, g
-                    ),
-                )
-            else:
-                self._shard_groups[group_key].total = shard_total
-        _log_event(
-            "assign",
-            role=role_name,
-            cwd=cwd,
-            task_preview=task[:120],
-            requires_commit=requires_commit,
-            auto_chain=auto_chain,
-            shard_total=shard_total,
-            task_file=task_file,
-            initial_delivery=initial_delivery,
-            initial_delivery_reason=initial_delivery_reason,
-            effective_provider=effective_provider,
-            model_override=model,
-            provider_override=provider,
-            effort_override=effort,
-            provider_source=provider_source,
+        return (
+            _WorktreeManagerSnap,
+            _apply_baseline,
+            _compute_baseline,
+            _snap_cwd,
+            initial_delivery,
+            initial_delivery_reason,
+            provider_source,
+            resolution_line,
         )
-        return True, f"{resolution_line}task queued for {role_name} (sending when ready)"
 
     def worktree_assign_inputs(
         self,
@@ -9280,34 +9434,9 @@ class Orchestrator(
                 f"{cur_tid} and it is still open — nothing was closed. Run `takkub done` "
                 f"again with [task {cur_tid}] (or no task tag) to report the active task",
             )
-        # A successful report moves its card to review. FAILED/blocked reports
-        # leave it active for the fix loop or an owner decision.
-        backlog_review_line = None
-        if not failed and not blocked:
-            try:
-                from . import backlog
-
-                review_card = backlog.on_ledger_done(
-                    project_ns,
-                    had_task_id,
-                    item_id=_ps_done.backlog_id or None,
-                    role=from_role,
-                )
-            except Exception:
-                import logging
-
-                logging.getLogger(__name__).exception(
-                    "backlog.on_ledger_done failed for %s", had_task_id
-                )
-            else:
-                if review_card and review_card.get("status") == "review":
-                    card_id = review_card["id"]
-                    # #861: folded into the done notice below rather than a
-                    # second Lead turn per done (19 such nags in one session).
-                    backlog_review_line = (
-                        f"📋 backlog [{card_id}] รอยืนยัน — "
-                        f"ตรวจแล้วปิดด้วย `takkub backlog done {card_id}`"
-                    )
+        backlog_review_line = Orchestrator._done_move_backlog_card(
+            self, _ps_done, blocked, failed, from_role, had_task_id, project_ns
+        )
         # #244: the issue/task ref shown to Lead must come from the ORIGINAL
         # assign spec Lead itself sent (last_assigned_task), never from the
         # agent's own done() note — an agent has mistyped the issue number
@@ -9332,689 +9461,105 @@ class Orchestrator(
         self._idle_state.pop(key, None)
         getattr(self, "_pane_state", {}).pop(key, None)
 
-        # Screenshot evidence auto-attach (issue #5): scan the pane's artifacts
-        # dir for images newer than its assign_ts and fold the result into
-        # `note` so every downstream consumer (the done/FAIL notice, the shard
-        # aggregate, the decision note) carries it — `done --fail` gets
-        # evidence exactly the same way a clean done does.
-        raw_note = note
-        evidence_line = self._scan_done_evidence(
-            project_ns, from_role, had_assign_ts, raw_note, failed=failed
-        )
-        if evidence_line:
-            note = f"{note}\n{evidence_line}" if note else evidence_line
-
-        # Symmetrize the return path with the file-based task handoff (#1):
-        # persist the session note to disk BEFORE the Lead-facing notice is
-        # built/sent, so a long note's notice can point at the file instead of
-        # carrying the full text inline. `now` is shared with the
-        # `_recent_done` stamp further below so the two never disagree.
-        now = datetime.now()
-        # Task Ledger (A7): flip the role's open row to ok/fail. Best-effort —
-        # never blocks the done() report itself.
-        try:
-            from .task_ledger import mark_done
-
-            ledger_warning = mark_done(project_ns, from_role, "fail" if failed else "ok", ts=now)
-            if ledger_warning:
-                self._notify_lead(
-                    project_ns, ledger_warning, from_role=from_role, note="", kind="ledger-warning"
-                )
-            self.ledgerChanged.emit(project_ns)
-        except Exception:
-            _log_event("ledger_hook_error", role=from_role, project=project_ns, stage="done")
-
-        # #585 metrics: task_wall_time and test_files_written (audit log only)
-        if had_assign_ts:
-            wall_time_s = max(0.0, time.time() - had_assign_ts)
-            _log_event(
-                "task_wall_time",
-                role=from_role,
-                project=project_ns,
-                scope=_assigned_scope or "normal",
-                duration_s=round(wall_time_s, 2),
-                task_id=had_task_id,
-                failed=failed,
-            )
-        try:
-            from .worktree_manager import count_test_files_in_diff
-
-            _diff_cwd = getattr(pane, "_session_cwd", None) or had_assign_git_root
-            _diff_base = had_assign_base_sha or (
-                had_worktree.get("base_sha") if had_worktree else None
-            )
-            _written_tests = count_test_files_in_diff(_diff_cwd, _diff_base)
-            _log_event(
-                "test_files_written",
-                role=from_role,
-                project=project_ns,
-                count=len(_written_tests),
-                files=_written_tests,
-                scope=_assigned_scope or "normal",
-                task_id=had_task_id,
-            )
-        except Exception:
-            pass
-        transcript_path = getattr(pane, "_transcript_path", None)
-        # #546: file the decision note under the cwd's own repo when this
-        # role was assigned a cross-repo --cwd outside project_ns's
-        # registered roots — pane registry / wait / digest keep using
-        # project_ns unchanged, only discoverability of the note itself.
-        note_project = _decision_note_project_label(
-            project_ns, getattr(pane, "_session_cwd", None), from_role
-        )
-        session_md_path = self._save_decision_note(
-            note_project, from_role, note, now=now, transcript_path=transcript_path, failed=failed
-        )
-        _note_path = session_md_path  # Item 2 (#635): store for deferred-close append
-
-        # Core V2 Conversation hook (#309 Phase 6) — flag OFF (default) short-
-        # circuits before any import, so done() stays byte-identical; flag ON
-        # runs in a background thread (I/O must never land on the Qt main
-        # thread) and is fail-open around both the flag check and the thread
-        # body itself (core.conversation.facade.on_pane_done already wraps
-        # its own body in try/except, this is belt-and-suspenders).
-        try:
-            from .core.conversation.flag import v2_conversation_enabled
-
-            if v2_conversation_enabled():
-                import threading
-
-                from .core.conversation.facade import on_pane_done as _cv_on_pane_done
-                from .provider_config import effective_provider_for as _cv_provider_for
-
-                _cv_session = getattr(pane, "session", None)
-                threading.Thread(
-                    target=_cv_on_pane_done,
-                    args=(project_ns, from_role),
-                    kwargs={
-                        "note": raw_note,
-                        "failed": failed,
-                        "task_id": had_task_id,
-                        # The pane's live provider, not the settings one: a
-                        # quota switch / per-assign --provider differs (#917).
-                        "provider_id": _pane_provider(pane)
-                        or _cv_provider_for(from_role, project_ns),
-                        "cwd": getattr(pane, "_session_cwd", None),
-                        "session_id": _ps_done.session_uuid,
-                        # 2026-10-24 review B5: claude panes write under their
-                        # own CLAUDE_CONFIG_DIR, not ~/.claude.
-                        "source_hints": {
-                            "config_dir": getattr(_cv_session, "_claude_config_dir", None),
-                            "project_dir_name": getattr(
-                                _cv_session, "_claude_project_dir_name", None
-                            ),
-                        },
-                    },
-                    daemon=True,
-                ).start()
-        except Exception:
-            _log_event(
-                "conversation_v2_hook_error", role=from_role, project=project_ns, stage="done"
-            )
-
-        # notify Lead in the same project (a teammate in project-a mustn't
-        # nudge the Lead in project-b by mistake). `done --fail` swaps the plain
-        # done notice for a fix-loop proposal prompt (feedback routing MVP) —
-        # Lead proposes the fix, never auto-fires, and ALWAYS keeps the full
-        # note (Lead's fix-loop propose + classify_failure both read it) — only
-        # the clean-done path gets the file-pointer condensation.
-        # #244: the ref badge is computed (from the assign spec, above) and
-        # prepended only to the Lead-facing `notice` text — never mixed into
-        # `notice_body`, which stays the raw/condensed note other consumers
-        # (shard aggregate, role_memory failure capture) read unmodified.
-        ref_tag = f"[ref {issue_ref}] " if issue_ref else ""
-        # #245: the digest bullet's fact table, computed once here (never
-        # per-tick — see _compute_digest_facts' own docstring for the
-        # #229/#244 boundary this respects). `_worktree_digest_precomputed`
-        # lets `_finalize_worktree` below reuse these SAME git reads instead
-        # of re-running them a few lines later. Both stay None for a FAILED
-        # report — FAILED notices bypass the digest queue entirely
-        # (`_is_blocking_lead_notice`), so no bullet is ever rendered from
-        # them; `_finalize_worktree` still runs for a failed worktree pane
-        # and simply computes its own facts fresh in that (rarer) case.
-        digest_facts = None
-        _worktree_digest_precomputed = None
-        _fl_hook = None
-        if failed:
-            # #762: shard failures of one fan-out are ONE attempt (token =
-            # group generation); otherwise one attempt per assignment.
-            _fl_group = getattr(self, "_shard_groups", {}).get(
-                f"{project_ns}::{_split_shard(from_role)[0]}"
-            )
-            _fl_token = (
-                f"shard-gen-{_fl_group.generation}"
-                if _fl_group is not None and _split_shard(from_role)[1] is not None
-                else str(had_task_id)
-            )
-            _fl_hook = self._fix_loop_hook(
-                project_ns,
+        evidence_line, note, now, raw_note, transcript_path = (
+            Orchestrator._done_record_evidence_and_ledger(
+                self,
+                _assigned_scope,
+                failed,
                 from_role,
-                task_text=_ps_done.last_assigned_task or "",
-                backlog_id=_ps_done.backlog_id,
-                scope=_assigned_scope,
-                token=_fl_token,
-            )
-        else:
-            self._fix_loop_close_on_verify(project_ns, from_role, _ps_done)
-        if failed:
-            notice_body = note
-            elapsed_since_assign = (time.time() - had_assign_ts) if had_assign_ts else float("inf")
-            if is_delivery_pointer_failure(note, had_task_file, elapsed_since_assign):
-                # #273: a pane that couldn't open the file-pointer handoff
-                # never started the assigned WORK at all — this is a
-                # delivery failure, not a task failure. Deliberately skip
-                # the fix-loop-propose wording (there is no root cause in
-                # the work to find yet) and the role_memory capture below
-                # (it would poison this role's future-spawn context with a
-                # failure that was never about anything it did).
-                notice = self._build_delivery_pointer_failure_notice(
-                    from_role, f"{ref_tag}{note}", had_task_file
-                )
-                _log_event(
-                    "delivery_pointer_failure",
-                    project=project_ns,
-                    role=from_role,
-                    note=(note or "")[:200],
-                    task_file=had_task_file,
-                )
-            elif blocked:
-                # Reported BLOCKED outright (#296) — no signature guessing
-                # needed for whether it's actionable-vs-blocked, the pane
-                # said so. But #495: still check for the narrower
-                # precondition-mismatch case (task spec pointed at the
-                # wrong tenant/env/target) before falling back to the
-                # generic "no role can fix this, wait for a human" wording —
-                # a mismatch IS fixable by the Lead, immediately.
-                from .routing_planner import (
-                    classify_blocked,
-                    classify_code_root_cause,
-                    classify_precondition_mismatch,
-                )
-
-                full_note = f"{ref_tag}{note}".strip()
-                is_mismatch, mismatch_what = classify_precondition_mismatch(note)
-                is_code_bug, _code_what = classify_code_root_cause(note)
-                if is_mismatch:
-                    notice = self._build_precondition_mismatch_handoff(
-                        from_role, full_note, mismatch_what
-                    )
-                    _log_event(
-                        "verify_precondition_mismatch",
-                        project=project_ns,
-                        role=from_role,
-                        note=(note or "")[:200],
-                    )
-                elif is_code_bug:
-                    # #538: the pane called `--blocked`, but the note names a
-                    # concrete file/function — treat it as a real fail so it
-                    # gets routed to a fixable role, not "wait for a human".
-                    notice = self._build_verify_fail_handoff(
-                        from_role, full_note, fix_loop_hook=_fl_hook
-                    )
-                    _log_event(
-                        "verify_code_root_cause_despite_blocked_flag",
-                        project=project_ns,
-                        role=from_role,
-                        note=(note or "")[:200],
-                    )
-                else:
-                    notice = self._build_blocked_handoff(
-                        from_role, full_note, classify_blocked(note)[1]
-                    )
-                    _log_event(
-                        "verify_blocked",
-                        project=project_ns,
-                        role=from_role,
-                        note=(note or "")[:200],
-                        declared=True,
-                    )
-            else:
-                notice = self._build_verify_fail_handoff(
-                    from_role, f"{ref_tag}{note}", fix_loop_hook=_fl_hook
-                )
-                _log_event(
-                    "verify_failed", project=project_ns, role=from_role, note=(note or "")[:200]
-                )
-                # ReflexionMemory-style auto-capture: a FAILED report used to go to
-                # Lead and nowhere else, so the same role could repeat the same
-                # failure cold next spawn. No agent decision required here.
-                try:
-                    from .role_memory import append_failure_entry
-
-                    fail_role, _ = _split_shard(from_role)
-                    fail_reason = raw_note.strip().splitlines()[0] if raw_note.strip() else ""
-                    append_failure_entry(project_ns, fail_role, fail_reason)
-                except Exception:
-                    pass
-        else:
-            notice_body = self._condense_done_note(raw_note, note, evidence_line, session_md_path)
-            notice = f"[{from_role} done] {ref_tag}{notice_body}".rstrip()
-            headline = _truncate_at_word_boundary(
-                raw_note.strip().splitlines()[0] if raw_note.strip() else "", 200
-            )
-            pane_cwd = getattr(pane, "_session_cwd", None)
-            from .digest_facts import detect_investigate_task, detect_ops_task
-
-            ops_task = detect_ops_task(from_role, raw_note)
-            # #672: declared intent from the ASSIGNMENT itself (falls back to
-            # the done note) — an investigate/read-only task's zero files
-            # touched is the correct outcome, not the #278 alarm. Read from
-            # `_ps_done` (the pre-pop snapshot above): the live PaneState was
-            # already retired for this assignment earlier in done().
-            _assigned_task_text = strip_new_task_header(
-                getattr(_ps_done, "last_assigned_task", None) or ""
-            )
-            investigate_task = detect_investigate_task(_assigned_task_text, raw_note)
-            try:
-                sibling_files = (
-                    frozenset()
-                    if had_worktree
-                    else self._sibling_shared_tree_touched_paths(
-                        project_ns, from_role, had_assign_git_root
-                    )
-                )
-            except Exception:  # digest cosmetics must never break done()
-                sibling_files = frozenset()
-            try:
-                digest_facts, _worktree_digest_precomputed = self._compute_digest_facts(
-                    from_role,
-                    issue_ref,
-                    headline,
-                    session_md_path,
-                    had_worktree,
-                    pane_cwd,
-                    had_assign_base_sha,
-                    had_assign_git_root,
-                    had_assign_dirty_snapshot,
-                    assign_non_git=had_assign_non_git,
-                    git_facts=git_facts,
-                    ops_task=ops_task,
-                    investigate_task=investigate_task,
-                    sibling_files=sibling_files,
-                )
-            except Exception as exc:  # digest cosmetics must never break done()
-                _log_event(
-                    "digest_facts_error", role=from_role, project=project_ns, error=str(exc)[:200]
-                )
-                from .digest_facts import DigestFacts
-
-                digest_facts = DigestFacts(
-                    role=from_role,
-                    ref=issue_ref,
-                    report_path=session_md_path,
-                    headline=headline,
-                    files_note="ตรวจไม่ได้ (เกิด error ระหว่างคำนวณ)",
-                    ops_task=ops_task,
-                    investigate_task=investigate_task,
-                )
-                _worktree_digest_precomputed = None
-            # #859: name the CLI that actually ran this pane (+ spawn model).
-            _pane_model = getattr(pane, "model", None)
-            _provider = getattr(_pane_model, "provider_name", None)
-            if digest_facts is not None and isinstance(_provider, str) and _provider:
-                _spawn_model = getattr(_pane_model, "spawn_model", None)
-                if isinstance(_spawn_model, str) and _spawn_model:
-                    _provider = f"{_provider}/{_spawn_model}"
-                from dataclasses import replace as _replace_facts
-
-                digest_facts = _replace_facts(digest_facts, provider=_provider)
-            # #739/#740: a done that belongs to the PREVIOUS task (quoting its
-            # id, reusing its report, or arriving seconds after an
-            # implementation assign with nothing changed) must not close this
-            # one silently — tell Lead the new task may never have run.
-            try:
-                from .digest_facts import detect_investigate_task as _detect_inv_only
-                from .orchestrator_text import stale_done_reasons
-
-                base_role_eval, _ = _split_shard(from_role)
-                is_eval_role = base_role_eval in ("qa", "reviewer", "critic", "designer")
-                _stale_reasons = stale_done_reasons(
-                    raw_note,
-                    task_id=had_task_id,
-                    files_touched=getattr(digest_facts, "files_touched", None),
-                    elapsed_s=(time.time() - had_assign_ts) if had_assign_ts else None,
-                    implementation=not (
-                        ops_task or is_eval_role or _detect_inv_only(_assigned_task_text)
-                    ),
-                )
-            except Exception:
-                _stale_reasons = []
-            if _stale_reasons:
-                _log_event(
-                    "done_suspect_stale",
-                    role=from_role,
-                    project=project_ns,
-                    task_id=str(had_task_id)[:8],
-                    reasons=_stale_reasons,
-                )
-                self._notify_lead(
-                    project_ns,
-                    f"🚩 [done-suspect] {from_role} รายงาน done ของ task {str(had_task_id)[:8]} "
-                    f"แต่น่าสงสัยว่าเป็นผลของใบเก่า ({'; '.join(_stale_reasons)}) — งานใบนี้อาจ"
-                    f"ยังไม่ถูกทำ · ตรวจงานจริงก่อนปิด ถ้ายังไม่ทำให้ takkub assign --role "
-                    f"{from_role} ใหม่",
-                    from_role=from_role,
-                    note="done_suspect_stale",
-                    kind="done-suspect",
-                )
-
-        # Core V2 Second Brain Reflection hook (#309 Phase 7c) — flag OFF
-        # (default, `TAKKUB_V2_BRAIN`) short-circuits before any import, so
-        # done() stays byte-identical; flag ON runs in a background thread
-        # (fail-open around both the flag check and the thread body itself —
-        # `core.brain.facade.on_pane_done` already wraps its own body in
-        # try/except, belt-and-suspenders). Placed after `digest_facts` is
-        # finalized (both the happy path and its except-fallback above) so
-        # the cockpit-measured facts are available to fold in alongside the
-        # agent's own note.
-        try:
-            from .core.brain.flag import v2_brain_enabled
-
-            if v2_brain_enabled():
-                import threading
-
-                from .core.brain.facade import on_pane_done as _brain_on_pane_done
-
-                threading.Thread(
-                    target=_brain_on_pane_done,
-                    args=(project_ns, from_role),
-                    kwargs={
-                        "note": raw_note,
-                        "digest_facts": digest_facts,
-                        "failed": failed,
-                        "task_id": had_task_id,
-                    },
-                    daemon=True,
-                ).start()
-        except Exception:
-            _log_event("brain_v2_hook_error", role=from_role, project=project_ns, stage="done")
-
-        # #280: fold everything the watchdogs observed about this pane into
-        # its own report instead of having interrupted Lead with each
-        # observation as it happened (slow boot, unconfirmed paste, degrade +
-        # respawn …). Drained unconditionally — even when the notice below is
-        # suppressed for a shard — so one pane lifecycle's health can never
-        # leak into the next pane that takes over this role slot.
-        health_line = self._drain_pane_health(project_ns, from_role)
-        if health_line:
-            notice = f"{notice}\n{health_line}"
-        # Report quality and delivery confirmation are separate from task
-        # success. Keep these warnings visible even in a condensed digest.
-        from .orchestrator_text import done_report_warnings
-
-        review_warnings = done_report_warnings(raw_note, report_path=session_md_path)
-        if had_assign_ts:
-            try:
-                from . import role_messages
-
-                followups = [
-                    rec
-                    for rec in role_messages.read(RUNTIME_DIR, project_ns, role=from_role)
-                    if rec.get("from") == "lead"
-                    and rec.get("state") in ("sent", "delivered")
-                    and rec.get("ts", 0) >= had_assign_ts
-                    and rec.get("kind", "instruction") != "info"
-                    and not _is_info_message(rec.get("body", ""))
-                ]
-                # #823: only follow-ups the pane may not have acted on — not
-                # every confirmed one on every done. Skip ids the note cites,
-                # ids already warned about, and ones confirmed delivered well
-                # before this report (the pane had the turn to process them).
-                # Unconfirmed ("sent") or last-minute ones still warn.
-                _warned_fu = self.__dict__.setdefault("_followup_warned_ids", set())
-                _now_fu = time.time()
-                followups = [
-                    rec
-                    for rec in followups
-                    if str(rec.get("id", "")) not in _warned_fu
-                    and not (rec.get("id") and str(rec.get("id")) in (raw_note or ""))
-                    and not (
-                        rec.get("state") == "delivered"
-                        and _now_fu - float(rec.get("delivered_ts") or rec.get("ts") or 0) >= 60.0
-                    )
-                ]
-                _warned_fu.update(str(rec.get("id", "")) for rec in followups)
-                if followups:
-                    ids = ", ".join(str(rec.get("id", "")) for rec in followups)
-                    review_warnings.append(
-                        f"Lead follow-ups require review ({ids}); delivery does not confirm processing. "
-                        f"Read takkub messages --role {from_role} before accepting this report."
-                    )
-            except Exception:
-                _log_event("done_followup_review_error", role=from_role, project=project_ns)
-        if review_warnings:
-            warning_text = "⚠️ " + " · ".join(review_warnings)
-            notice += "\n" + warning_text
-            if digest_facts is not None:
-                from dataclasses import replace
-
-                digest_facts = replace(
-                    digest_facts, headline=digest_facts.headline + " — " + warning_text
-                )
-
-        # Shard panes suppress clean per-shard notices in favour of the
-        # consolidated handoff. Failures still surface immediately so the
-        # fix-loop proposal cannot be delayed or lost.
-        # Planner panes: suppress too — the "[qa plan ready] fan-out …" message
-        # from _fire_qa_plan_fanout is the meaningful one Lead acts on.
-        # Non-shard, non-planner panes use the normal notice path.
-        will_send_notice = failed or (had_shard_total == 0 and not had_plan_fanout)
-        # #519: fold the merge-readiness bit straight into THIS notice
-        # instead of `_finalize_worktree` sending a second, separate
-        # `worktree-proposal` ping a few lines below that only repeats
-        # branch/commits/files the digest bullet above it already has.
-        # Only possible when this notice is actually about to be sent
-        # (never for a shard/planner pane whose clean report is suppressed
-        # here — those still get `_finalize_worktree`'s own notice, same as
-        # before) and the digest git-reads ran (never true for `failed`).
-        merge_folded_into_notice = False
-        if (
-            not failed
-            and will_send_notice
-            and had_worktree
-            and _worktree_digest_precomputed is not None
-            and _worktree_digest_precomputed.get("commits", 0) > 0
-        ):
-            from .worktree_manager import WorktreeInfo, build_merge_proposal_line
-
-            _wt_info = WorktreeInfo.from_dict(had_worktree)
-            merge_line = build_merge_proposal_line(
-                from_role,
-                _wt_info,
-                dirty=_worktree_digest_precomputed["dirty"],
-                uncommitted=_worktree_digest_precomputed["uncommitted"],
-                merge_conflicts=_worktree_digest_precomputed["merge_conflicts"],
-                conflict_files=_worktree_digest_precomputed.get("conflict_files"),
-                crlf_phantom=_worktree_digest_precomputed.get("crlf_phantom", False),
-            )
-            notice = f"{notice}\n{merge_line}"
-            merge_folded_into_notice = True
-
-        if backlog_review_line:
-            if will_send_notice:
-                notice = f"{notice}\n{backlog_review_line}"
-                if digest_facts is not None:
-                    from dataclasses import replace
-
-                    digest_facts = replace(
-                        digest_facts,
-                        headline=f"{digest_facts.headline} — {backlog_review_line}",
-                    )
-            else:
-                try:
-                    self._notify_lead(
-                        project_ns,
-                        f"{backlog_review_line} (หลัง {from_role} done)",
-                        from_role=from_role,
-                        note="backlog_review",
-                        kind="backlog-review",
-                    )
-                except Exception:
-                    _log_event("backlog_review_notice_error", role=from_role, project=project_ns)
-
-        if will_send_notice:
-            # Route through _notify_lead so concurrent done notices are serialised
-            # and never injected while Lead is mid-generation (the root cause of the
-            # "Lead goes silent after parallel dispatch" bug).
-            completion_generation = int(getattr(pane, "_session_generation", 0))
-            # #678: fingerprint the REPORT itself into the dedupe key. The
-            # decision-note filename is unique per done() write (timestamped
-            # to the second); a true replay of the same completion re-sends
-            # the same file and still dedupes, while a genuinely new report
-            # from the same (task_id, generation) — the follow-up-via-send
-            # case — gets its own id instead of being eaten.
-            _content_fp = ""
-            if session_md_path:
-                _content_fp = pathlib.Path(str(session_md_path)).name
-            elif raw_note:
-                _content_fp = hashlib.sha256(raw_note.encode("utf-8", "replace")).hexdigest()[:16]
-            notice_id = make_notice_id(
-                project_ns,
-                from_role,
+                had_assign_base_sha,
+                had_assign_git_root,
+                had_assign_ts,
                 had_task_id,
-                completion_generation,
-                _content_fp,
-            )
-            deduper = getattr(self, "_notice_deduper", None)
-            if deduper is None:
-                deduper = self._notice_deduper = NoticeDeduper(RUNTIME_DIR / "notice-dedupe.json")
-            if deduper.mark_once(notice_id):
-                # #680: this role now has a completion report Lead has not
-                # read yet — cleared by the notify pump the moment the notice
-                # text is actually written into Lead's pane
-                # (`_mark_done_notices_delivered`). `takkub status` renders
-                # it as "done (unread)".
-                if not hasattr(self, "_done_unread"):
-                    self._done_unread = {}
-                self._done_unread[(project_ns, from_role)] = time.time()
-                if not hasattr(self, "_done_unread_notice"):
-                    self._done_unread_notice = {}
-                self._done_unread_notice[(project_ns, from_role)] = (
-                    self._redact_forwarded_text(
-                        notice, project_ns, hop="done_recovery", from_role=from_role
-                    ),
-                    origin_pane_token,
-                )
-                self._notify_lead(
-                    project_ns,
-                    notice,
-                    from_role=from_role,
-                    note=note,
-                    pane_token=origin_pane_token,
-                    digest_facts=digest_facts,
-                    kind="failed" if failed else "done",
-                )
-            else:
-                _log_event(
-                    "done_notice_deduped",
-                    project=project_ns,
-                    role=from_role,
-                    notice_id=notice_id,
-                )
-
-        # Fix A: when this done event belongs to a background tab, emit a
-        # cross-tab signal so main_window can flash the status bar even if
-        # the user is currently looking at a different project's tab.
-        try:
-            active_ns, _ = active_project()
-        except Exception:
-            active_ns = None
-        if active_ns and project_ns != active_ns:
-            self.crossTabDone.emit(project_ns, from_role, note)
-
-        # Worktree isolation (issue #81): the pane ran in its own git worktree.
-        # If its branch has commits, send Lead a MERGE PROPOSAL (never auto);
-        # otherwise safe-remove the empty worktree.
-        if had_worktree:
-            self._finalize_worktree(
-                project_ns,
-                from_role,
                 had_worktree,
-                precomputed=_worktree_digest_precomputed,
-                skip_proposal_notice=merge_folded_into_notice,
-                note=note,
-                no_repo_change_expected=bool(
-                    not failed
-                    and digest_facts is not None
-                    and (digest_facts.ops_task or digest_facts.investigate_task)
-                ),
+                note,
+                pane,
+                project_ns,
             )
-        else:
-            # graft code-graph refresh (debounced): the pane wrote directly
-            # into the project's tracked cwd (not a worktree — those are a
-            # throwaway checkout under DATA_HOME/worktrees/ that this must
-            # never touch), so the graph there just went stale. Best-effort,
-            # never blocks the done() report.
-            try:
-                from .graft_autobuild import schedule_rebuild_after_done
+        )
+        _note_path, session_md_path = Orchestrator._done_save_note_and_conversation(
+            self,
+            _ps_done,
+            failed,
+            from_role,
+            had_task_id,
+            note,
+            now,
+            pane,
+            project_ns,
+            raw_note,
+            transcript_path,
+        )
 
-                schedule_rebuild_after_done(getattr(pane, "_session_cwd", None))
-            except Exception:
-                pass
+        _worktree_digest_precomputed, digest_facts, notice, notice_body = (
+            Orchestrator._done_build_lead_notice(
+                self,
+                _assigned_scope,
+                _ps_done,
+                blocked,
+                evidence_line,
+                failed,
+                from_role,
+                git_facts,
+                had_assign_base_sha,
+                had_assign_dirty_snapshot,
+                had_assign_git_root,
+                had_assign_non_git,
+                had_assign_ts,
+                had_task_file,
+                had_task_id,
+                had_worktree,
+                issue_ref,
+                note,
+                pane,
+                project_ns,
+                raw_note,
+                session_md_path,
+            )
+        )
 
-        # Auto-chain handoff: if this pane was tagged --auto-chain at
-        # assign time, and it was the LAST pending auto-chain pane in
-        # the project, inject a pre-authorisation prompt so Lead fires
-        # verify (qa+reviewer) without proposing/confirming.
-        self._maybe_fire_auto_chain_handoff(project_ns, had_auto_chain)
+        Orchestrator._done_brain_hook(
+            self, digest_facts, failed, from_role, had_task_id, project_ns, raw_note
+        )
 
-        # Plan-then-fan-out: this pane was a planner (--plan). Read the bucket
-        # plan it just wrote and spawn the QA shards (each with its bucket).
-        if had_plan_fanout and not failed:
-            base_role_p, _ = _split_shard(from_role)
-            self._fire_qa_plan_fanout(project_ns, base_role_p, had_plan_fanout, planner_note=note)
+        digest_facts, merge_folded_into_notice = Orchestrator._done_route_lead_notice(
+            self,
+            _worktree_digest_precomputed,
+            backlog_review_line,
+            digest_facts,
+            failed,
+            from_role,
+            had_assign_ts,
+            had_plan_fanout,
+            had_shard_total,
+            had_task_id,
+            had_worktree,
+            note,
+            notice,
+            origin_pane_token,
+            pane,
+            project_ns,
+            raw_note,
+            session_md_path,
+        )
 
-        # Shard aggregate: record this shard's (possibly condensed) note and
-        # check if all N done. Reusing `notice_body` here means the
-        # consolidated handoff (_inject_shard_fanout_handoff) gets the same
-        # threshold/pointer treatment as a non-shard done notice (#1
-        # symmetrization, item 4) instead of stitching N full notes together.
-        if had_shard_total > 0:
-            base_role_d, _ = _split_shard(from_role)
-            group_key = f"{project_ns}::{base_role_d}"
-            group = self._shard_groups.get(group_key)
-            if group and not group.closed:
-                if failed:
-                    group.failed.add(from_role)
-                    group.failed_notes[from_role] = notice_body
-                else:
-                    group.done[from_role] = notice_body
-                if len(group.done) + len(group.failed) >= group.total:
-                    group.closed = True
-                    self._inject_shard_fanout_handoff(project_ns, group)
-                    self._shard_groups.pop(group_key, None)
-            else:
-                # #3: group already closed (timeout) or popped — shard arrived
-                # late.  Send a notice so Lead knows instead of silently dropping.
-                late_msg = (
-                    f"⚠️ [shard late-complete] {from_role} reported done after its "
-                    f"shard group already closed (timeout or all-failed). "
-                    f"note: {note!r:.120}"
-                )
-                self._notify_lead(
-                    project_ns,
-                    late_msg,
-                    from_role=from_role,
-                    note="late-complete",
-                    kind="shard-late-complete",
-                )
-                _log_event(
-                    "shard_late_complete",
-                    project=project_ns,
-                    role=from_role,
-                    note=note[:200],
-                )
-
-        # Pipeline hop advance: if this pane was part of a pipeline run, remove
-        # it from the hop's pending set and fire the next hop when all done.
-        if had_pipeline_run_id:
-            pipeline_key = f"{project_ns}::{had_pipeline_run_id}"
-            pl_run = self._pipeline_runs.get(pipeline_key)
-            if pl_run and not pl_run.closed:
-                pl_run.hop_pending.discard(from_role)
-                if not pl_run.hop_pending:
-                    self._advance_pipeline(project_ns, pipeline_key, pl_run)
+        Orchestrator._done_handoffs(
+            self,
+            _worktree_digest_precomputed,
+            digest_facts,
+            failed,
+            from_role,
+            had_auto_chain,
+            had_pipeline_run_id,
+            had_plan_fanout,
+            had_shard_total,
+            had_worktree,
+            merge_folded_into_notice,
+            note,
+            notice_body,
+            pane,
+            project_ns,
+        )
 
         # mark pane done, auto-close after a delay so user can see it.
         # Capture current session so the delayed close is a no-op if the pane
@@ -10291,6 +9836,834 @@ class Orchestrator(
         _msg = f"{from_role} reported done"
         _msg += self._language_nudge_suffix(project_ns, from_role, note, _lang_task_id)
         return True, _msg
+
+    def _done_move_backlog_card(
+        self, _ps_done, blocked, failed, from_role, had_task_id, project_ns
+    ):
+        """Move the task's backlog card to review (ok) or keep it open (failed) (extracted from `done`, 2026-10-24)."""
+        backlog_review_line = None
+        # A successful report moves its card to review. FAILED/blocked reports
+        # leave it active for the fix loop or an owner decision.
+        backlog_review_line = None
+        if not failed and not blocked:
+            try:
+                from . import backlog
+
+                review_card = backlog.on_ledger_done(
+                    project_ns,
+                    had_task_id,
+                    item_id=_ps_done.backlog_id or None,
+                    role=from_role,
+                )
+            except Exception:
+                import logging
+
+                logging.getLogger(__name__).exception(
+                    "backlog.on_ledger_done failed for %s", had_task_id
+                )
+            else:
+                if review_card and review_card.get("status") == "review":
+                    card_id = review_card["id"]
+                    # #861: folded into the done notice below rather than a
+                    # second Lead turn per done (19 such nags in one session).
+                    backlog_review_line = (
+                        f"📋 backlog [{card_id}] รอยืนยัน — "
+                        f"ตรวจแล้วปิดด้วย `takkub backlog done {card_id}`"
+                    )
+        return backlog_review_line
+
+    def _done_record_evidence_and_ledger(
+        self,
+        _assigned_scope,
+        failed,
+        from_role,
+        had_assign_base_sha,
+        had_assign_git_root,
+        had_assign_ts,
+        had_task_id,
+        had_worktree,
+        note,
+        pane,
+        project_ns,
+    ):
+        """Attach screenshot evidence, flip the Task Ledger row, log #585 metrics (extracted from `done`, 2026-10-24)."""
+        evidence_line = None
+        raw_note = None
+        # Screenshot evidence auto-attach (issue #5): scan the pane's artifacts
+        # dir for images newer than its assign_ts and fold the result into
+        # `note` so every downstream consumer (the done/FAIL notice, the shard
+        # aggregate, the decision note) carries it — `done --fail` gets
+        # evidence exactly the same way a clean done does.
+        raw_note = note
+        evidence_line = self._scan_done_evidence(
+            project_ns, from_role, had_assign_ts, raw_note, failed=failed
+        )
+        if evidence_line:
+            note = f"{note}\n{evidence_line}" if note else evidence_line
+
+        # Symmetrize the return path with the file-based task handoff (#1):
+        # persist the session note to disk BEFORE the Lead-facing notice is
+        # built/sent, so a long note's notice can point at the file instead of
+        # carrying the full text inline. `now` is shared with the
+        # `_recent_done` stamp further below so the two never disagree.
+        now = datetime.now()
+        # Task Ledger (A7): flip the role's open row to ok/fail. Best-effort —
+        # never blocks the done() report itself.
+        try:
+            from .task_ledger import mark_done
+
+            ledger_warning = mark_done(project_ns, from_role, "fail" if failed else "ok", ts=now)
+            if ledger_warning:
+                self._notify_lead(
+                    project_ns, ledger_warning, from_role=from_role, note="", kind="ledger-warning"
+                )
+            self.ledgerChanged.emit(project_ns)
+        except Exception:
+            _log_event("ledger_hook_error", role=from_role, project=project_ns, stage="done")
+
+        # #585 metrics: task_wall_time and test_files_written (audit log only)
+        if had_assign_ts:
+            wall_time_s = max(0.0, time.time() - had_assign_ts)
+            _log_event(
+                "task_wall_time",
+                role=from_role,
+                project=project_ns,
+                scope=_assigned_scope or "normal",
+                duration_s=round(wall_time_s, 2),
+                task_id=had_task_id,
+                failed=failed,
+            )
+        try:
+            from .worktree_manager import count_test_files_in_diff
+
+            _diff_cwd = getattr(pane, "_session_cwd", None) or had_assign_git_root
+            _diff_base = had_assign_base_sha or (
+                had_worktree.get("base_sha") if had_worktree else None
+            )
+            _written_tests = count_test_files_in_diff(_diff_cwd, _diff_base)
+            _log_event(
+                "test_files_written",
+                role=from_role,
+                project=project_ns,
+                count=len(_written_tests),
+                files=_written_tests,
+                scope=_assigned_scope or "normal",
+                task_id=had_task_id,
+            )
+        except Exception:
+            pass
+        transcript_path = getattr(pane, "_transcript_path", None)
+        return evidence_line, note, now, raw_note, transcript_path
+
+    def _done_save_note_and_conversation(
+        self,
+        _ps_done,
+        failed,
+        from_role,
+        had_task_id,
+        note,
+        now,
+        pane,
+        project_ns,
+        raw_note,
+        transcript_path,
+    ):
+        """File the decision note and run the Core V2 Conversation hook (extracted from `done`, 2026-10-24)."""
+        _note_path = None
+        session_md_path = None
+        # #546: file the decision note under the cwd's own repo when this
+        # role was assigned a cross-repo --cwd outside project_ns's
+        # registered roots — pane registry / wait / digest keep using
+        # project_ns unchanged, only discoverability of the note itself.
+        note_project = _decision_note_project_label(
+            project_ns, getattr(pane, "_session_cwd", None), from_role
+        )
+        session_md_path = self._save_decision_note(
+            note_project, from_role, note, now=now, transcript_path=transcript_path, failed=failed
+        )
+        _note_path = session_md_path  # Item 2 (#635): store for deferred-close append
+
+        # Core V2 Conversation hook (#309 Phase 6) — flag OFF (default) short-
+        # circuits before any import, so done() stays byte-identical; flag ON
+        # runs in a background thread (I/O must never land on the Qt main
+        # thread) and is fail-open around both the flag check and the thread
+        # body itself (core.conversation.facade.on_pane_done already wraps
+        # its own body in try/except, this is belt-and-suspenders).
+        try:
+            from .core.conversation.flag import v2_conversation_enabled
+
+            if v2_conversation_enabled():
+                import threading
+
+                from .core.conversation.facade import on_pane_done as _cv_on_pane_done
+                from .provider_config import effective_provider_for as _cv_provider_for
+
+                _cv_session = getattr(pane, "session", None)
+                threading.Thread(
+                    target=_cv_on_pane_done,
+                    args=(project_ns, from_role),
+                    kwargs={
+                        "note": raw_note,
+                        "failed": failed,
+                        "task_id": had_task_id,
+                        # The pane's live provider, not the settings one: a
+                        # quota switch / per-assign --provider differs (#917).
+                        "provider_id": _pane_provider(pane)
+                        or _cv_provider_for(from_role, project_ns),
+                        "cwd": getattr(pane, "_session_cwd", None),
+                        "session_id": _ps_done.session_uuid,
+                        # 2026-10-24 review B5: claude panes write under their
+                        # own CLAUDE_CONFIG_DIR, not ~/.claude.
+                        "source_hints": {
+                            "config_dir": getattr(_cv_session, "_claude_config_dir", None),
+                            "project_dir_name": getattr(
+                                _cv_session, "_claude_project_dir_name", None
+                            ),
+                        },
+                    },
+                    daemon=True,
+                ).start()
+        except Exception:
+            _log_event(
+                "conversation_v2_hook_error", role=from_role, project=project_ns, stage="done"
+            )
+        return _note_path, session_md_path
+
+    def _done_build_lead_notice(
+        self,
+        _assigned_scope,
+        _ps_done,
+        blocked,
+        evidence_line,
+        failed,
+        from_role,
+        git_facts,
+        had_assign_base_sha,
+        had_assign_dirty_snapshot,
+        had_assign_git_root,
+        had_assign_non_git,
+        had_assign_ts,
+        had_task_file,
+        had_task_id,
+        had_worktree,
+        issue_ref,
+        note,
+        pane,
+        project_ns,
+        raw_note,
+        session_md_path,
+    ):
+        """Build the Lead-facing done notice (digest facts, ref badge, condensation) (extracted from `done`, 2026-10-24)."""
+        _worktree_digest_precomputed = None
+        digest_facts = None
+        notice = None
+        notice_body = None
+        # notify Lead in the same project (a teammate in project-a mustn't
+        # nudge the Lead in project-b by mistake). `done --fail` swaps the plain
+        # done notice for a fix-loop proposal prompt (feedback routing MVP) —
+        # Lead proposes the fix, never auto-fires, and ALWAYS keeps the full
+        # note (Lead's fix-loop propose + classify_failure both read it) — only
+        # the clean-done path gets the file-pointer condensation.
+        # #244: the ref badge is computed (from the assign spec, above) and
+        # prepended only to the Lead-facing `notice` text — never mixed into
+        # `notice_body`, which stays the raw/condensed note other consumers
+        # (shard aggregate, role_memory failure capture) read unmodified.
+        ref_tag = f"[ref {issue_ref}] " if issue_ref else ""
+        # #245: the digest bullet's fact table, computed once here (never
+        # per-tick — see _compute_digest_facts' own docstring for the
+        # #229/#244 boundary this respects). `_worktree_digest_precomputed`
+        # lets `_finalize_worktree` below reuse these SAME git reads instead
+        # of re-running them a few lines later. Both stay None for a FAILED
+        # report — FAILED notices bypass the digest queue entirely
+        # (`_is_blocking_lead_notice`), so no bullet is ever rendered from
+        # them; `_finalize_worktree` still runs for a failed worktree pane
+        # and simply computes its own facts fresh in that (rarer) case.
+        digest_facts = None
+        _worktree_digest_precomputed = None
+        _fl_hook = None
+        if failed:
+            # #762: shard failures of one fan-out are ONE attempt (token =
+            # group generation); otherwise one attempt per assignment.
+            _fl_group = getattr(self, "_shard_groups", {}).get(
+                f"{project_ns}::{_split_shard(from_role)[0]}"
+            )
+            _fl_token = (
+                f"shard-gen-{_fl_group.generation}"
+                if _fl_group is not None and _split_shard(from_role)[1] is not None
+                else str(had_task_id)
+            )
+            _fl_hook = self._fix_loop_hook(
+                project_ns,
+                from_role,
+                task_text=_ps_done.last_assigned_task or "",
+                backlog_id=_ps_done.backlog_id,
+                scope=_assigned_scope,
+                token=_fl_token,
+            )
+        else:
+            self._fix_loop_close_on_verify(project_ns, from_role, _ps_done)
+        if failed:
+            notice_body = note
+            elapsed_since_assign = (time.time() - had_assign_ts) if had_assign_ts else float("inf")
+            if is_delivery_pointer_failure(note, had_task_file, elapsed_since_assign):
+                # #273: a pane that couldn't open the file-pointer handoff
+                # never started the assigned WORK at all — this is a
+                # delivery failure, not a task failure. Deliberately skip
+                # the fix-loop-propose wording (there is no root cause in
+                # the work to find yet) and the role_memory capture below
+                # (it would poison this role's future-spawn context with a
+                # failure that was never about anything it did).
+                notice = self._build_delivery_pointer_failure_notice(
+                    from_role, f"{ref_tag}{note}", had_task_file
+                )
+                _log_event(
+                    "delivery_pointer_failure",
+                    project=project_ns,
+                    role=from_role,
+                    note=(note or "")[:200],
+                    task_file=had_task_file,
+                )
+            elif blocked:
+                # Reported BLOCKED outright (#296) — no signature guessing
+                # needed for whether it's actionable-vs-blocked, the pane
+                # said so. But #495: still check for the narrower
+                # precondition-mismatch case (task spec pointed at the
+                # wrong tenant/env/target) before falling back to the
+                # generic "no role can fix this, wait for a human" wording —
+                # a mismatch IS fixable by the Lead, immediately.
+                from .routing_planner import (
+                    classify_blocked,
+                    classify_code_root_cause,
+                    classify_precondition_mismatch,
+                )
+
+                full_note = f"{ref_tag}{note}".strip()
+                is_mismatch, mismatch_what = classify_precondition_mismatch(note)
+                is_code_bug, _code_what = classify_code_root_cause(note)
+                if is_mismatch:
+                    notice = self._build_precondition_mismatch_handoff(
+                        from_role, full_note, mismatch_what
+                    )
+                    _log_event(
+                        "verify_precondition_mismatch",
+                        project=project_ns,
+                        role=from_role,
+                        note=(note or "")[:200],
+                    )
+                elif is_code_bug:
+                    # #538: the pane called `--blocked`, but the note names a
+                    # concrete file/function — treat it as a real fail so it
+                    # gets routed to a fixable role, not "wait for a human".
+                    notice = self._build_verify_fail_handoff(
+                        from_role, full_note, fix_loop_hook=_fl_hook
+                    )
+                    _log_event(
+                        "verify_code_root_cause_despite_blocked_flag",
+                        project=project_ns,
+                        role=from_role,
+                        note=(note or "")[:200],
+                    )
+                else:
+                    notice = self._build_blocked_handoff(
+                        from_role, full_note, classify_blocked(note)[1]
+                    )
+                    _log_event(
+                        "verify_blocked",
+                        project=project_ns,
+                        role=from_role,
+                        note=(note or "")[:200],
+                        declared=True,
+                    )
+            else:
+                notice = self._build_verify_fail_handoff(
+                    from_role, f"{ref_tag}{note}", fix_loop_hook=_fl_hook
+                )
+                _log_event(
+                    "verify_failed", project=project_ns, role=from_role, note=(note or "")[:200]
+                )
+                # ReflexionMemory-style auto-capture: a FAILED report used to go to
+                # Lead and nowhere else, so the same role could repeat the same
+                # failure cold next spawn. No agent decision required here.
+                try:
+                    from .role_memory import append_failure_entry
+
+                    fail_role, _ = _split_shard(from_role)
+                    fail_reason = raw_note.strip().splitlines()[0] if raw_note.strip() else ""
+                    append_failure_entry(project_ns, fail_role, fail_reason)
+                except Exception:
+                    pass
+        else:
+            notice_body = self._condense_done_note(raw_note, note, evidence_line, session_md_path)
+            notice = f"[{from_role} done] {ref_tag}{notice_body}".rstrip()
+            headline = _truncate_at_word_boundary(
+                raw_note.strip().splitlines()[0] if raw_note.strip() else "", 200
+            )
+            pane_cwd = getattr(pane, "_session_cwd", None)
+            from .digest_facts import detect_investigate_task, detect_ops_task
+
+            ops_task = detect_ops_task(from_role, raw_note)
+            # #672: declared intent from the ASSIGNMENT itself (falls back to
+            # the done note) — an investigate/read-only task's zero files
+            # touched is the correct outcome, not the #278 alarm. Read from
+            # `_ps_done` (the pre-pop snapshot above): the live PaneState was
+            # already retired for this assignment earlier in done().
+            _assigned_task_text = strip_new_task_header(
+                getattr(_ps_done, "last_assigned_task", None) or ""
+            )
+            investigate_task = detect_investigate_task(_assigned_task_text, raw_note)
+            try:
+                sibling_files = (
+                    frozenset()
+                    if had_worktree
+                    else self._sibling_shared_tree_touched_paths(
+                        project_ns, from_role, had_assign_git_root
+                    )
+                )
+            except Exception:  # digest cosmetics must never break done()
+                sibling_files = frozenset()
+            try:
+                digest_facts, _worktree_digest_precomputed = self._compute_digest_facts(
+                    from_role,
+                    issue_ref,
+                    headline,
+                    session_md_path,
+                    had_worktree,
+                    pane_cwd,
+                    had_assign_base_sha,
+                    had_assign_git_root,
+                    had_assign_dirty_snapshot,
+                    assign_non_git=had_assign_non_git,
+                    git_facts=git_facts,
+                    ops_task=ops_task,
+                    investigate_task=investigate_task,
+                    sibling_files=sibling_files,
+                )
+            except Exception as exc:  # digest cosmetics must never break done()
+                _log_event(
+                    "digest_facts_error", role=from_role, project=project_ns, error=str(exc)[:200]
+                )
+                from .digest_facts import DigestFacts
+
+                digest_facts = DigestFacts(
+                    role=from_role,
+                    ref=issue_ref,
+                    report_path=session_md_path,
+                    headline=headline,
+                    files_note="ตรวจไม่ได้ (เกิด error ระหว่างคำนวณ)",
+                    ops_task=ops_task,
+                    investigate_task=investigate_task,
+                )
+                _worktree_digest_precomputed = None
+            # #859: name the CLI that actually ran this pane (+ spawn model).
+            _pane_model = getattr(pane, "model", None)
+            _provider = getattr(_pane_model, "provider_name", None)
+            if digest_facts is not None and isinstance(_provider, str) and _provider:
+                _spawn_model = getattr(_pane_model, "spawn_model", None)
+                if isinstance(_spawn_model, str) and _spawn_model:
+                    _provider = f"{_provider}/{_spawn_model}"
+                from dataclasses import replace as _replace_facts
+
+                digest_facts = _replace_facts(digest_facts, provider=_provider)
+            # #739/#740: a done that belongs to the PREVIOUS task (quoting its
+            # id, reusing its report, or arriving seconds after an
+            # implementation assign with nothing changed) must not close this
+            # one silently — tell Lead the new task may never have run.
+            try:
+                from .digest_facts import detect_investigate_task as _detect_inv_only
+                from .orchestrator_text import stale_done_reasons
+
+                base_role_eval, _ = _split_shard(from_role)
+                is_eval_role = base_role_eval in ("qa", "reviewer", "critic", "designer")
+                _stale_reasons = stale_done_reasons(
+                    raw_note,
+                    task_id=had_task_id,
+                    files_touched=getattr(digest_facts, "files_touched", None),
+                    elapsed_s=(time.time() - had_assign_ts) if had_assign_ts else None,
+                    implementation=not (
+                        ops_task or is_eval_role or _detect_inv_only(_assigned_task_text)
+                    ),
+                )
+            except Exception:
+                _stale_reasons = []
+            if _stale_reasons:
+                _log_event(
+                    "done_suspect_stale",
+                    role=from_role,
+                    project=project_ns,
+                    task_id=str(had_task_id)[:8],
+                    reasons=_stale_reasons,
+                )
+                self._notify_lead(
+                    project_ns,
+                    f"🚩 [done-suspect] {from_role} รายงาน done ของ task {str(had_task_id)[:8]} "
+                    f"แต่น่าสงสัยว่าเป็นผลของใบเก่า ({'; '.join(_stale_reasons)}) — งานใบนี้อาจ"
+                    f"ยังไม่ถูกทำ · ตรวจงานจริงก่อนปิด ถ้ายังไม่ทำให้ takkub assign --role "
+                    f"{from_role} ใหม่",
+                    from_role=from_role,
+                    note="done_suspect_stale",
+                    kind="done-suspect",
+                )
+        return _worktree_digest_precomputed, digest_facts, notice, notice_body
+
+    def _done_brain_hook(self, digest_facts, failed, from_role, had_task_id, project_ns, raw_note):
+        """Core V2 Second Brain Reflection hook (extracted from `done`, 2026-10-24)."""
+        # Core V2 Second Brain Reflection hook (#309 Phase 7c) — flag OFF
+        # (default, `TAKKUB_V2_BRAIN`) short-circuits before any import, so
+        # done() stays byte-identical; flag ON runs in a background thread
+        # (fail-open around both the flag check and the thread body itself —
+        # `core.brain.facade.on_pane_done` already wraps its own body in
+        # try/except, belt-and-suspenders). Placed after `digest_facts` is
+        # finalized (both the happy path and its except-fallback above) so
+        # the cockpit-measured facts are available to fold in alongside the
+        # agent's own note.
+        try:
+            from .core.brain.flag import v2_brain_enabled
+
+            if v2_brain_enabled():
+                import threading
+
+                from .core.brain.facade import on_pane_done as _brain_on_pane_done
+
+                threading.Thread(
+                    target=_brain_on_pane_done,
+                    args=(project_ns, from_role),
+                    kwargs={
+                        "note": raw_note,
+                        "digest_facts": digest_facts,
+                        "failed": failed,
+                        "task_id": had_task_id,
+                    },
+                    daemon=True,
+                ).start()
+        except Exception:
+            _log_event("brain_v2_hook_error", role=from_role, project=project_ns, stage="done")
+
+    def _done_route_lead_notice(
+        self,
+        _worktree_digest_precomputed,
+        backlog_review_line,
+        digest_facts,
+        failed,
+        from_role,
+        had_assign_ts,
+        had_plan_fanout,
+        had_shard_total,
+        had_task_id,
+        had_worktree,
+        note,
+        notice,
+        origin_pane_token,
+        pane,
+        project_ns,
+        raw_note,
+        session_md_path,
+    ):
+        """Fold watchdog observations, check report quality/delivery, route the notice to Lead (extracted from `done`, 2026-10-24)."""
+        merge_folded_into_notice = None
+        # #280: fold everything the watchdogs observed about this pane into
+        # its own report instead of having interrupted Lead with each
+        # observation as it happened (slow boot, unconfirmed paste, degrade +
+        # respawn …). Drained unconditionally — even when the notice below is
+        # suppressed for a shard — so one pane lifecycle's health can never
+        # leak into the next pane that takes over this role slot.
+        health_line = self._drain_pane_health(project_ns, from_role)
+        if health_line:
+            notice = f"{notice}\n{health_line}"
+        # Report quality and delivery confirmation are separate from task
+        # success. Keep these warnings visible even in a condensed digest.
+        from .orchestrator_text import done_report_warnings
+
+        review_warnings = done_report_warnings(raw_note, report_path=session_md_path)
+        if had_assign_ts:
+            try:
+                from . import role_messages
+
+                followups = [
+                    rec
+                    for rec in role_messages.read(RUNTIME_DIR, project_ns, role=from_role)
+                    if rec.get("from") == "lead"
+                    and rec.get("state") in ("sent", "delivered")
+                    and rec.get("ts", 0) >= had_assign_ts
+                    and rec.get("kind", "instruction") != "info"
+                    and not _is_info_message(rec.get("body", ""))
+                ]
+                # #823: only follow-ups the pane may not have acted on — not
+                # every confirmed one on every done. Skip ids the note cites,
+                # ids already warned about, and ones confirmed delivered well
+                # before this report (the pane had the turn to process them).
+                # Unconfirmed ("sent") or last-minute ones still warn.
+                _warned_fu = self.__dict__.setdefault("_followup_warned_ids", set())
+                _now_fu = time.time()
+                followups = [
+                    rec
+                    for rec in followups
+                    if str(rec.get("id", "")) not in _warned_fu
+                    and not (rec.get("id") and str(rec.get("id")) in (raw_note or ""))
+                    and not (
+                        rec.get("state") == "delivered"
+                        and _now_fu - float(rec.get("delivered_ts") or rec.get("ts") or 0) >= 60.0
+                    )
+                ]
+                _warned_fu.update(str(rec.get("id", "")) for rec in followups)
+                if followups:
+                    ids = ", ".join(str(rec.get("id", "")) for rec in followups)
+                    review_warnings.append(
+                        f"Lead follow-ups require review ({ids}); delivery does not confirm processing. "
+                        f"Read takkub messages --role {from_role} before accepting this report."
+                    )
+            except Exception:
+                _log_event("done_followup_review_error", role=from_role, project=project_ns)
+        if review_warnings:
+            warning_text = "⚠️ " + " · ".join(review_warnings)
+            notice += "\n" + warning_text
+            if digest_facts is not None:
+                from dataclasses import replace
+
+                digest_facts = replace(
+                    digest_facts, headline=digest_facts.headline + " — " + warning_text
+                )
+
+        # Shard panes suppress clean per-shard notices in favour of the
+        # consolidated handoff. Failures still surface immediately so the
+        # fix-loop proposal cannot be delayed or lost.
+        # Planner panes: suppress too — the "[qa plan ready] fan-out …" message
+        # from _fire_qa_plan_fanout is the meaningful one Lead acts on.
+        # Non-shard, non-planner panes use the normal notice path.
+        will_send_notice = failed or (had_shard_total == 0 and not had_plan_fanout)
+        # #519: fold the merge-readiness bit straight into THIS notice
+        # instead of `_finalize_worktree` sending a second, separate
+        # `worktree-proposal` ping a few lines below that only repeats
+        # branch/commits/files the digest bullet above it already has.
+        # Only possible when this notice is actually about to be sent
+        # (never for a shard/planner pane whose clean report is suppressed
+        # here — those still get `_finalize_worktree`'s own notice, same as
+        # before) and the digest git-reads ran (never true for `failed`).
+        merge_folded_into_notice = False
+        if (
+            not failed
+            and will_send_notice
+            and had_worktree
+            and _worktree_digest_precomputed is not None
+            and _worktree_digest_precomputed.get("commits", 0) > 0
+        ):
+            from .worktree_manager import WorktreeInfo, build_merge_proposal_line
+
+            _wt_info = WorktreeInfo.from_dict(had_worktree)
+            merge_line = build_merge_proposal_line(
+                from_role,
+                _wt_info,
+                dirty=_worktree_digest_precomputed["dirty"],
+                uncommitted=_worktree_digest_precomputed["uncommitted"],
+                merge_conflicts=_worktree_digest_precomputed["merge_conflicts"],
+                conflict_files=_worktree_digest_precomputed.get("conflict_files"),
+                crlf_phantom=_worktree_digest_precomputed.get("crlf_phantom", False),
+            )
+            notice = f"{notice}\n{merge_line}"
+            merge_folded_into_notice = True
+
+        if backlog_review_line:
+            if will_send_notice:
+                notice = f"{notice}\n{backlog_review_line}"
+                if digest_facts is not None:
+                    from dataclasses import replace
+
+                    digest_facts = replace(
+                        digest_facts,
+                        headline=f"{digest_facts.headline} — {backlog_review_line}",
+                    )
+            else:
+                try:
+                    self._notify_lead(
+                        project_ns,
+                        f"{backlog_review_line} (หลัง {from_role} done)",
+                        from_role=from_role,
+                        note="backlog_review",
+                        kind="backlog-review",
+                    )
+                except Exception:
+                    _log_event("backlog_review_notice_error", role=from_role, project=project_ns)
+
+        if will_send_notice:
+            # Route through _notify_lead so concurrent done notices are serialised
+            # and never injected while Lead is mid-generation (the root cause of the
+            # "Lead goes silent after parallel dispatch" bug).
+            completion_generation = int(getattr(pane, "_session_generation", 0))
+            # #678: fingerprint the REPORT itself into the dedupe key. The
+            # decision-note filename is unique per done() write (timestamped
+            # to the second); a true replay of the same completion re-sends
+            # the same file and still dedupes, while a genuinely new report
+            # from the same (task_id, generation) — the follow-up-via-send
+            # case — gets its own id instead of being eaten.
+            _content_fp = ""
+            if session_md_path:
+                _content_fp = pathlib.Path(str(session_md_path)).name
+            elif raw_note:
+                _content_fp = hashlib.sha256(raw_note.encode("utf-8", "replace")).hexdigest()[:16]
+            notice_id = make_notice_id(
+                project_ns,
+                from_role,
+                had_task_id,
+                completion_generation,
+                _content_fp,
+            )
+            deduper = getattr(self, "_notice_deduper", None)
+            if deduper is None:
+                deduper = self._notice_deduper = NoticeDeduper(RUNTIME_DIR / "notice-dedupe.json")
+            if deduper.mark_once(notice_id):
+                # #680: this role now has a completion report Lead has not
+                # read yet — cleared by the notify pump the moment the notice
+                # text is actually written into Lead's pane
+                # (`_mark_done_notices_delivered`). `takkub status` renders
+                # it as "done (unread)".
+                if not hasattr(self, "_done_unread"):
+                    self._done_unread = {}
+                self._done_unread[(project_ns, from_role)] = time.time()
+                if not hasattr(self, "_done_unread_notice"):
+                    self._done_unread_notice = {}
+                self._done_unread_notice[(project_ns, from_role)] = (
+                    self._redact_forwarded_text(
+                        notice, project_ns, hop="done_recovery", from_role=from_role
+                    ),
+                    origin_pane_token,
+                )
+                self._notify_lead(
+                    project_ns,
+                    notice,
+                    from_role=from_role,
+                    note=note,
+                    pane_token=origin_pane_token,
+                    digest_facts=digest_facts,
+                    kind="failed" if failed else "done",
+                )
+            else:
+                _log_event(
+                    "done_notice_deduped",
+                    project=project_ns,
+                    role=from_role,
+                    notice_id=notice_id,
+                )
+        return digest_facts, merge_folded_into_notice
+
+    def _done_handoffs(
+        self,
+        _worktree_digest_precomputed,
+        digest_facts,
+        failed,
+        from_role,
+        had_auto_chain,
+        had_pipeline_run_id,
+        had_plan_fanout,
+        had_shard_total,
+        had_worktree,
+        merge_folded_into_notice,
+        note,
+        notice_body,
+        pane,
+        project_ns,
+    ):
+        """Background-tab emit, worktree merge, auto-chain, plan fan-out, shard aggregate, pipeline hop (extracted from `done`, 2026-10-24)."""
+        # Fix A: when this done event belongs to a background tab, emit a
+        # cross-tab signal so main_window can flash the status bar even if
+        # the user is currently looking at a different project's tab.
+        try:
+            active_ns, _ = active_project()
+        except Exception:
+            active_ns = None
+        if active_ns and project_ns != active_ns:
+            self.crossTabDone.emit(project_ns, from_role, note)
+
+        # Worktree isolation (issue #81): the pane ran in its own git worktree.
+        # If its branch has commits, send Lead a MERGE PROPOSAL (never auto);
+        # otherwise safe-remove the empty worktree.
+        if had_worktree:
+            self._finalize_worktree(
+                project_ns,
+                from_role,
+                had_worktree,
+                precomputed=_worktree_digest_precomputed,
+                skip_proposal_notice=merge_folded_into_notice,
+                note=note,
+                no_repo_change_expected=bool(
+                    not failed
+                    and digest_facts is not None
+                    and (digest_facts.ops_task or digest_facts.investigate_task)
+                ),
+            )
+        else:
+            # graft code-graph refresh (debounced): the pane wrote directly
+            # into the project's tracked cwd (not a worktree — those are a
+            # throwaway checkout under DATA_HOME/worktrees/ that this must
+            # never touch), so the graph there just went stale. Best-effort,
+            # never blocks the done() report.
+            try:
+                from .graft_autobuild import schedule_rebuild_after_done
+
+                schedule_rebuild_after_done(getattr(pane, "_session_cwd", None))
+            except Exception:
+                pass
+
+        # Auto-chain handoff: if this pane was tagged --auto-chain at
+        # assign time, and it was the LAST pending auto-chain pane in
+        # the project, inject a pre-authorisation prompt so Lead fires
+        # verify (qa+reviewer) without proposing/confirming.
+        self._maybe_fire_auto_chain_handoff(project_ns, had_auto_chain)
+
+        # Plan-then-fan-out: this pane was a planner (--plan). Read the bucket
+        # plan it just wrote and spawn the QA shards (each with its bucket).
+        if had_plan_fanout and not failed:
+            base_role_p, _ = _split_shard(from_role)
+            self._fire_qa_plan_fanout(project_ns, base_role_p, had_plan_fanout, planner_note=note)
+
+        # Shard aggregate: record this shard's (possibly condensed) note and
+        # check if all N done. Reusing `notice_body` here means the
+        # consolidated handoff (_inject_shard_fanout_handoff) gets the same
+        # threshold/pointer treatment as a non-shard done notice (#1
+        # symmetrization, item 4) instead of stitching N full notes together.
+        if had_shard_total > 0:
+            base_role_d, _ = _split_shard(from_role)
+            group_key = f"{project_ns}::{base_role_d}"
+            group = self._shard_groups.get(group_key)
+            if group and not group.closed:
+                if failed:
+                    group.failed.add(from_role)
+                    group.failed_notes[from_role] = notice_body
+                else:
+                    group.done[from_role] = notice_body
+                if len(group.done) + len(group.failed) >= group.total:
+                    group.closed = True
+                    self._inject_shard_fanout_handoff(project_ns, group)
+                    self._shard_groups.pop(group_key, None)
+            else:
+                # #3: group already closed (timeout) or popped — shard arrived
+                # late.  Send a notice so Lead knows instead of silently dropping.
+                late_msg = (
+                    f"⚠️ [shard late-complete] {from_role} reported done after its "
+                    f"shard group already closed (timeout or all-failed). "
+                    f"note: {note!r:.120}"
+                )
+                self._notify_lead(
+                    project_ns,
+                    late_msg,
+                    from_role=from_role,
+                    note="late-complete",
+                    kind="shard-late-complete",
+                )
+                _log_event(
+                    "shard_late_complete",
+                    project=project_ns,
+                    role=from_role,
+                    note=note[:200],
+                )
+
+        # Pipeline hop advance: if this pane was part of a pipeline run, remove
+        # it from the hop's pending set and fire the next hop when all done.
+        if had_pipeline_run_id:
+            pipeline_key = f"{project_ns}::{had_pipeline_run_id}"
+            pl_run = self._pipeline_runs.get(pipeline_key)
+            if pl_run and not pl_run.closed:
+                pl_run.hop_pending.discard(from_role)
+                if not pl_run.hop_pending:
+                    self._advance_pipeline(project_ns, pipeline_key, pl_run)
 
     def progress(
         self, from_role: str, note: str = "", project: str | None = None

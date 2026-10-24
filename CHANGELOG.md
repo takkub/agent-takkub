@@ -2,6 +2,42 @@
 
 All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses [SemVer](https://semver.org/).
 
+## [v2.2.32] - 2026-10-24
+
+### Added (เพิ่ม)
+
+- **ล้างข้อมูล Figma ที่ค้างอยู่ให้อัตโนมัติตอนบูต (ทุกเครื่อง):** ทำครั้งเดียวต่อเครื่อง ทั้งแอปปกติและ Docker headless ไม่แตะ dev checkout
+  - ล้างเฉพาะในส่วน MCP/plugin (`mcpServers`, OAuth token, plugin ที่เปิดไว้, plugin cache, สิทธิ์ MCP ของ role, skill `figma*`, `secrets/figma.json`) ชื่อโปรเจกต์หรือ path ที่บังเอิญมีคำว่า figma ไม่ถูกแตะ
+  - backup ทุกไฟล์ไว้ที่ `backups/figma-removed-<วันที่>/` ก่อนแก้เสมอ
+  - ถ้าผู้ใช้เพิ่ม Figma MCP กลับมาเองภายหลัง ระบบจะไม่ลบซ้ำ
+  - เคยทำแค่บนเครื่อง maintainer ด้วยสคริปต์แยก
+- **`takkub backups list | prune [--yes]`:**
+  - ดูว่าใน `DATA_HOME/backups` มีอะไร ขนาดเท่าไร อายุกี่วัน
+  - ลบได้เฉพาะของที่อายุเกิน 14 วัน และ migrate เป็น V2 เสร็จแล้ว ถ้าไม่ใส่ `--yes` จะแค่บอกว่าจะลบอะไร (dry run)
+  - เตือนก่อนว่าถ้าลบ `v1-archive-*` จะย้อนไปเวอร์ชันเก่าไม่ได้
+  - `takkub doctor` ขึ้นเตือนเมื่อ backup เกิน 1 GB
+- **กฎกลาง (`docs/lead/anti-patterns.md`):** ทุกการแก้ต้องอยู่ในตัวโปรแกรม ห้ามแก้แค่เครื่องเดียวด้วย .bat/สคริปต์
+
+### Fixed (แก้)
+
+- **#926 guard ล็อก Lead ทั้งระบบเมื่อ import พัง:**
+  - guard `lead_context` เคยปฏิเสธทุกเครื่องมือ รวมถึง `git checkout` ที่ต้องใช้ซ่อม ตอนนี้ถ้าตัว guard เองเช็คไม่ได้ จะปล่อยผ่านพร้อมเตือน
+  - `pane_guard` ที่อ่านนโยบายทีมไม่ได้ จะบอกสาเหตุจริง (`policy_unreadable`) แทนข้อความ "deep category ต้อง delegate" ที่ทำไม่ได้บน solo-lead
+
+### Changed (refactor — พฤติกรรมเท่าเดิม)
+
+- **แตก god-functions:** method ที่แยกออกมาทุกตัวมี AST เหมือนโค้ดเดิม และ parser tree ของ CLI ตรงกันทุก action
+  - `cli.build_parser` จาก 1,916 บรรทัด เป็น 65 ฟังก์ชันใน `cli_parser.py`
+  - `Orchestrator.done` จาก 1,322 เหลือ 713
+  - `_assign_dispatch` จาก 962 เหลือ 668
+  - `_spawn_once` จาก 2,213 เหลือ 753
+  - ขั้นตอนหนึ่งของ `_send_when_ready` แยกออกมาเป็น method
+  - อัปเดต `docs/architecture/godfile-map.md`
+- **เลิกโค้ดซ้ำ:**
+  - writer JSON แบบ atomic ย้ายไป `core/storage/json_io.py` เลิก import ผิดชั้น (storage ไป import migration)
+  - codex/agy/cursor/opencode ใช้ตัวรัน CLI และตัวหา executable ร่วมกันใน `provider_cli_common.py`
+  - Remote mirror กับ V2 ingest ใช้ parser transcript ของ codex/agy ชุดเดียวกัน ตัวใน core เคยทำรูป `local_image` หาย ตอนนี้กลับมาแล้ว
+
 ## [v2.2.31] - 2026-10-24
 
 ผลจาก system review ทั้งระบบ 2026-10-24 (Codex × agy × Lead — `docs/reviews/2026-10-24-system-review.md`)

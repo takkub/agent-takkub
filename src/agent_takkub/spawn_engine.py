@@ -2875,612 +2875,993 @@ class SpawnEngineMixin:
                 )
 
         if effective_provider != CLAUDE:
-            # ── generic non-claude provider branch (#103 Phase 1) ──────
-            # One spec-driven path replaces the old hand-written GEMINI and
-            # CODEX branches (which had drifted into ~110 nearly identical
-            # lines each). Everything provider-specific now lives on the
-            # ProviderSpec: binary discovery, autonomy flags (platform-keyed
-            # — codex's Windows sandbox-helper escape hatch #5 vs the
-            # workspace-write + network_access loopback unblock #26 Mode B),
-            # PATH handling (gemini: agy's installer doesn't reliably
-            # register it on PATH → prepend_bin_dir_to_path), first-boot
-            # trust driving (auto_trust), and early-crash detection
-            # (early_exit_watch → _on_codex_exit wiring). Adding a NEW
-            # provider = a PROVIDER_REGISTRY entry + ready markers; this
-            # branch should not need to change.
-            #
-            # Providers with confirmed native AGENTS.md discovery share one
-            # cheatsheet file and manager marker, avoiding write races in a
-            # shared cwd. A provider whose discovery is still unconfirmed
-            # uses context_strategy="none"; context is skipped with a log line
-            # so the #103 gap stays visible instead of being guessed.
-            from .codex_agents_md import ensure_agents_md
+            return SpawnEngineMixin._spawn_generic_provider(
+                self,
+                PROVIDER_REGISTRY,
+                _build_lead_env,
+                _build_pane_env,
+                _from_auto_respawn,
+                _is_lead,
+                _log_event,
+                _ps_initial,
+                _shard_total,
+                base_role,
+                cwd,
+                effective_provider,
+                pane,
+                project,
+                project_ns,
+                resume_uuid,
+                role_name,
+                settings_role,
+                shard_idx,
+            )
 
-            spec = PROVIDER_REGISTRY[effective_provider]
-            provider_bin = spec.custom_discovery_fn() if spec.custom_discovery_fn else None
-            if provider_bin is None:
-                return False, spec.install_instructions
-            if _is_lead:
-                spawn_cwd = cwd or lead_cwd(project=project_ns) or str(DATA_HOME)
-            else:
-                spawn_cwd = (
-                    cwd or default_cwd_for_role(role_name, project=project_ns) or str(DATA_HOME)
+        _initial_task_preloaded, role_md_file, spawn_cwd = (
+            SpawnEngineMixin._spawn_claude_resolve_cwd(
+                self, PROVIDER_REGISTRY, _ps_initial, base_role, cwd, project_ns, role_name
+            )
+        )
+
+        # LOW (codex full-system review 2026-07-11): validate an explicit
+        # resume_uuid BEFORE minting the per-pane capability token below.
+        # spawn_cwd is settled for both the Lead and teammate branches above,
+        # so this can reject a mismatched uuid without ever registering a
+        # token that a later early-return would leave orphaned in
+        # self._pane_tokens (the token is never revoked because it was never
+        # minted in the first place).
+        if resume_uuid and not _resume_uuid_matches_cwd(
+            project_ns, resume_uuid, spawn_cwd, base_role
+        ):
+            return False, f"resume_uuid does not match cwd for {role_name}"
+
+        try:
+            claude = find_claude_executable()
+        except RuntimeError as e:
+            return False, str(e)
+
+        env, pane_tok = SpawnEngineMixin._spawn_claude_build_env(
+            self,
+            CLAUDE,
+            _build_lead_env,
+            _build_pane_env,
+            _ps_initial,
+            _shard_total,
+            base_role,
+            claude,
+            pane,
+            project_ns,
+            role_name,
+            shard_idx,
+        )
+
+        # H1: MCP timeout / non-interactive env / truecolor term are applied
+        # inside _build_pane_env()/_build_lead_env() itself now (pane_env.py)
+        # so every branch (shell/codex/gemini/claude) gets them, not just
+        # this claude path.
+        apply_claude_auth_overrides(env)
+
+        settings_argv, sources = SpawnEngineMixin._spawn_claude_settings_flags(
+            self, CLAUDE, _log_event, _ps_initial, project_ns, role_name
+        )
+
+        (
+            CLAUDE,
+            _claude_mcp_argv,
+            denied_tools_argv,
+            disallowed_tools_argv,
+            effort_argv,
+            fallback_argv,
+            model_argv,
+            plugin_dir_argv,
+            system_prompt_argv,
+        ) = SpawnEngineMixin._spawn_claude_model_and_tools(
+            self,
+            CLAUDE,
+            PROVIDER_REGISTRY,
+            _log_event,
+            _ps_initial,
+            base_role,
+            env,
+            pane,
+            project_ns,
+            role_md_file,
+            role_name,
+            settings_role,
+            shard_idx,
+            spawn_cwd,
+        )
+
+        CLAUDE, _ekey_spawn, _spawned_session_uuid, argv, resumed = (
+            SpawnEngineMixin._spawn_claude_resume_and_trust(
+                self,
+                CLAUDE,
+                _claude_mcp_argv,
+                _log_event,
+                _ps_initial,
+                base_role,
+                claude,
+                denied_tools_argv,
+                disallowed_tools_argv,
+                effective_provider,
+                effort_argv,
+                env,
+                fallback_argv,
+                model_argv,
+                plugin_dir_argv,
+                project_ns,
+                resume_uuid,
+                role_name,
+                settings_argv,
+                sources,
+                spawn_cwd,
+                system_prompt_argv,
+            )
+        )
+
+        session = PtySession(cols=_PANE_COLS, rows=_PANE_ROWS, parent=self)
+        self._bind_pane_token(pane_tok, session)
+        _t_path = _build_transcript_path(project_ns, role_name)
+        pane._transcript_path = _t_path
+        self._spawn_in_progress = True
+        try:
+            # Tier 2 final re-sample: check InSendMessageEx immediately
+            # before the native ConPTY call to narrow the TOCTOU window.
+            if not self._final_gate_clear():
+                session.setParent(None)
+                session.deleteLater()
+                self._toctou_redefer(
+                    role_name,
+                    cwd,
+                    project,
+                    project_ns,
+                    _from_auto_respawn,
+                    _shard_total,
+                    pane_tok=pane_tok,
+                    resume_uuid=resume_uuid,
                 )
-            if resume_uuid:
-                if not spec.supports_resume or not spec.session_resume_flag:
+                return True, f"{role_name} spawn deferred (final re-sample blocked)"
+            _t0 = time.time()
+            share_takkub_env_with_wsl(env)  # #716: codex→bash→WSL keeps pane identity
+            session.spawn(argv=argv, cwd=spawn_cwd, env=env, transcript_path=_t_path)
+            _log_spawn_native_ms(
+                _log_event,
+                role=role_name,
+                project=project_ns,
+                ms=int((time.time() - _t0) * 1000),
+            )
+            pane.attach_session(
+                session,
+                cwd=spawn_cwd,
+                provider_name="claude",
+                session_uuid=_spawned_session_uuid,
+            )
+            self._ps(_ekey_spawn).corrupt_spawn_retries = 0
+            self._ps(_ekey_spawn).session_provider = CLAUDE
+            self._finish_spawn_initial_task(
+                role_name,
+                project_ns,
+                preloaded=_initial_task_preloaded,
+                resumed=resumed,
+            )
+            # Record exits so the auto-respawn watcher knows which project
+            # namespace owned the pane that just died.  Capture the session so
+            # stale exit signals from an old session don't trigger respawn on a
+            # replacement that's already attached.
+            _sess_claude = session
+            # #540: generation-based staleness check — see the matching
+            # comment in _launch_session for why `pane.session is s` always
+            # reads as stale (AgentPane's own exit handler, connected inside
+            # attach_session just above, nulls pane.session on every exit,
+            # not only a replaced one).
+            _pane_gen_claude = pane._session_generation
+            session.processExited.connect(
+                lambda code, r=role_name, c=spawn_cwd, p=project_ns, s=_sess_claude, g=_pane_gen_claude: (
+                    self._on_session_exit(r, c, p, session=s, exit_code=code)
+                    if (pp := self._panes_by_project.get(p, {}).get(r)) is not None
+                    and getattr(pp, "_session_generation", None) == g
+                    else None
+                )
+            )
+            # forget the prior exit record now that we've spawned successfully
+            if _ekey_spawn in self._recent_exits:
+                del self._recent_exits[_ekey_spawn]
+
+            # The TAKKUB_PANE_TOKEN was already injected into env (above the
+            # session.spawn call) and registered in self._pane_tokens at that time.
+            # Nothing more to do here.
+
+            self._auto_trust(role_name, project=project_ns)
+            self.statusChanged.emit()
+            # (The /remote-control auto-bridge was removed 2026-07-10 — it kept
+            # racing claude's /resume picker. Type /remote-control by hand.)
+            # Flush any CC messages queued while Lead was offline.
+            # Give the session a few seconds to reach the ready prompt before
+            # trying to write; if Lead isn't ready yet, _flush_pending_lead_cc
+            # is a no-op and we rely on the next send() or a future spawn to retry.
+            if role_name == LEAD.name and self._pending_lead_cc.get(project_ns):
+                QTimer.singleShot(
+                    5_000,
+                    lambda p=project_ns: self._flush_pending_lead_cc(p),
+                )
+            if role_name == LEAD.name and self._pending_done_notices.get(project_ns):
+                QTimer.singleShot(
+                    5_000,
+                    lambda p=project_ns: self._flush_pending_done_notices(p),
+                )
+            # #303 item 3: deliver any `takkub send` aimed at this role while
+            # it had no pane open yet. Any role, not just Lead — unlike the
+            # two queues above this one isn't Lead-specific, since a teammate
+            # can `takkub send` a peer that hasn't spawned. Cheap to check
+            # unconditionally (a single small JSONL read); only schedules the
+            # flush timer when there's actually something queued.
+            try:
+                from . import role_messages
+
+                _runtime_dir = _from_orch("RUNTIME_DIR")
+                pending, _expired = role_messages.queued_no_pane_for_role(
+                    _runtime_dir, project_ns, role_name
+                )
+                if pending:
+                    QTimer.singleShot(
+                        5_000,
+                        lambda p=project_ns, r=role_name: self._flush_queued_no_pane_messages(p, r),
+                    )
+            except Exception:
+                pass
+            _log_event(
+                "spawn",
+                role=role_name,
+                cwd=spawn_cwd,
+                resumed=resumed,
+            )
+            # Record resume decision as a structured flag so _auto_respawn and
+            # _do_respawn can read it directly without parsing the message string.
+            # (Fix 1: eliminates the "(resumed)" in msg string-coupling fragility.)
+            self._ps(_ekey_spawn).last_spawn_resumed = resumed
+            self._fire_parked_respawn_replay(
+                project_ns, role_name, resumed=resumed, from_auto_respawn=_from_auto_respawn
+            )
+            suffix = " (resumed)" if resumed else ""
+            # If a forced non-claude role (codex/gemini/...) reached the claude
+            # spawn path, its provider was unavailable (toggled off or not
+            # installed) and claude is standing in. Surface that so the user
+            # isn't surprised the pane talks like Claude.
+            from .provider_config import FORCED_ROLES
+
+            if role_name in FORCED_ROLES:
+                suffix += " — claude substitute (provider unavailable)"
+            return True, f"{role_name} spawned in {spawn_cwd}{suffix}"
+        except SpawnTargetCorrupt as e:
+            # #313: the resolved spawn target failed its pre-flight header
+            # check — most commonly an npm self-update rewriting the binary
+            # mid-spawn. That write finishes in seconds, so retry with a
+            # short capped backoff through the existing deferred-spawn queue
+            # instead of failing the pane outright; only fall through to the
+            # normal failure path once retries are exhausted.
+            try:
+                session.setParent(None)
+                session.deleteLater()
+            except Exception:
+                pass
+            _ps_corrupt = self._ps(_exit_key(project_ns, role_name))
+            _ps_corrupt.corrupt_spawn_retries += 1
+            if (
+                not getattr(e, "permanent", False)
+                and _ps_corrupt.corrupt_spawn_retries <= _CORRUPT_SPAWN_MAX_RETRIES
+            ):
+                delay_ms = _CORRUPT_SPAWN_BACKOFF_MS * _ps_corrupt.corrupt_spawn_retries
+                _log_event(
+                    "spawn_target_corrupt_retry",
+                    role=role_name,
+                    project=project_ns,
+                    attempt=_ps_corrupt.corrupt_spawn_retries,
+                    delay_ms=delay_ms,
+                )
+                if role_name != LEAD.name:
+                    getattr(self, "_pane_tokens", {}).pop(pane_tok, None)
+                _deferred = getattr(self, "_spawn_deferred", None)
+                if _deferred is None:
+                    self._spawn_deferred = _deferred = set()
+                _deferred.add(f"{project_ns}::{role_name}")
+                QTimer.singleShot(
+                    delay_ms,
+                    lambda r=role_name, c=cwd, p=project, a=_from_auto_respawn, s=_shard_total, u=resume_uuid: (
+                        self._retry_deferred_spawn(r, c, p, a, s, u)
+                    ),
+                )
+                return (
+                    True,
+                    f"{role_name} spawn deferred (target failed pre-flight check, retrying)",
+                )
+            _log_event(
+                "spawn_native_failed",
+                role=role_name,
+                project=project_ns,
+                ms=int((time.time() - _t0) * 1000) if "_t0" in locals() else None,
+                err=f"{type(e).__name__}: {e}",
+            )
+            if role_name != LEAD.name:
+                getattr(self, "_pane_tokens", {}).pop(pane_tok, None)
+            _reason = _spawn_failure_reason(
+                e, role_name=role_name, project_ns=project_ns, session=None
+            )
+            return (
+                False,
+                f"{_reason} (gave up after {_CORRUPT_SPAWN_MAX_RETRIES} retries)",
+            )
+        except Exception as e:
+            # #139: make a native-spawn failure's actual elapsed time visible
+            # even though it never reached the success log line above — this
+            # is the one place a PtySpawnTimeout (or any other native-call
+            # failure) surfaces its duration.
+            _log_event(
+                "spawn_native_failed",
+                role=role_name,
+                project=project_ns,
+                ms=int((time.time() - _t0) * 1000) if "_t0" in locals() else None,
+                err=f"{type(e).__name__}: {e}",
+            )
+            # #492: capture the reason (incl. any PTY tail) BEFORE tearing
+            # the session down below — display_lines() needs it alive.
+            _reason = _spawn_failure_reason(
+                e, role_name=role_name, project_ns=project_ns, session=session
+            )
+            _ps_failed = self._ps(_exit_key(project_ns, role_name))
+            if _ps_failed.spawn_initial_task_state == "pending":
+                _ps_failed.spawn_initial_task = None
+                _ps_failed.spawn_initial_task_fallback = None
+                _ps_failed.spawn_initial_prompt_file = None
+                _ps_failed.spawn_initial_task_state = ""
+            try:
+                session.terminate(wait=False)
+            except Exception:
+                pass
+            try:
+                session.setParent(None)
+                session.deleteLater()
+            except Exception:
+                pass
+            # Revoke the token if spawn failed — it was registered before the
+            # try block so the pane never actually came up to use it.
+            if role_name != LEAD.name:
+                getattr(self, "_pane_tokens", {}).pop(pane_tok, None)
+            return False, _reason
+        finally:
+            self._spawn_in_progress = False
+            self._drain_spawn_queue()
+
+    def _spawn_generic_provider(
+        self,
+        PROVIDER_REGISTRY,
+        _build_lead_env,
+        _build_pane_env,
+        _from_auto_respawn,
+        _is_lead,
+        _log_event,
+        _ps_initial,
+        _shard_total,
+        base_role,
+        cwd,
+        effective_provider,
+        pane,
+        project,
+        project_ns,
+        resume_uuid,
+        role_name,
+        settings_role,
+        shard_idx,
+    ):
+        """Spawn a non-claude provider pane from its ProviderSpec (#103 Phase 1) (extracted from `_spawn_once`, 2026-10-24)."""
+        # ── generic non-claude provider branch (#103 Phase 1) ──────
+        # One spec-driven path replaces the old hand-written GEMINI and
+        # CODEX branches (which had drifted into ~110 nearly identical
+        # lines each). Everything provider-specific now lives on the
+        # ProviderSpec: binary discovery, autonomy flags (platform-keyed
+        # — codex's Windows sandbox-helper escape hatch #5 vs the
+        # workspace-write + network_access loopback unblock #26 Mode B),
+        # PATH handling (gemini: agy's installer doesn't reliably
+        # register it on PATH → prepend_bin_dir_to_path), first-boot
+        # trust driving (auto_trust), and early-crash detection
+        # (early_exit_watch → _on_codex_exit wiring). Adding a NEW
+        # provider = a PROVIDER_REGISTRY entry + ready markers; this
+        # branch should not need to change.
+        #
+        # Providers with confirmed native AGENTS.md discovery share one
+        # cheatsheet file and manager marker, avoiding write races in a
+        # shared cwd. A provider whose discovery is still unconfirmed
+        # uses context_strategy="none"; context is skipped with a log line
+        # so the #103 gap stays visible instead of being guessed.
+        from .codex_agents_md import ensure_agents_md
+
+        spec = PROVIDER_REGISTRY[effective_provider]
+        provider_bin = spec.custom_discovery_fn() if spec.custom_discovery_fn else None
+        if provider_bin is None:
+            return False, spec.install_instructions
+        if _is_lead:
+            spawn_cwd = cwd or lead_cwd(project=project_ns) or str(DATA_HOME)
+        else:
+            spawn_cwd = cwd or default_cwd_for_role(role_name, project=project_ns) or str(DATA_HOME)
+        if resume_uuid:
+            if not spec.supports_resume or not spec.session_resume_flag:
+                _log_event(
+                    "provider_capability_fallback",
+                    role=role_name,
+                    project=project_ns,
+                    provider=spec.name,
+                    capability="resume",
+                    state="unsupported",
+                    fallback="refused",
+                )
+                return False, f"resume unavailable for provider {spec.name}"
+            if not _resume_uuid_matches_provider_cwd(
+                project_ns, spec.name, resume_uuid, spawn_cwd, base_role
+            ):
+                return False, f"resume_uuid does not match cwd for {role_name}"
+        if _is_lead:
+            # Lead-specific AGENTS.md content (cockpit CLAUDE.md +
+            # BLOCKED_DIRS + session brief) — NOT the teammate cheatsheet
+            # ensure_agents_md() plants for every other role (#101).
+            if spawn_cwd != str(DATA_HOME):
+                try:
+                    post_compact_brief = self._build_post_compact_brief(project_ns)
+                    _lead_md_path, _lead_md_reason, _lead_md_text = (
+                        render_lead_agents_md_with_reason(
+                            project_ns, spawn_cwd, post_compact_brief=post_compact_brief
+                        )
+                    )
+                    _ps_lead = self._ps(_exit_key(project_ns, role_name))
+                    if _lead_md_path:
+                        _log_event(
+                            "lead_policy_delivered",
+                            role=role_name,
+                            project=project_ns,
+                            provider=spec.name,
+                            delivery="agents_md",
+                            path=_lead_md_path,
+                            is_resume=bool(resume_uuid),
+                        )
+                    else:
+                        if _lead_md_text:
+                            _ps_lead.pending_lead_context = _lead_md_text
+                        _log_event(
+                            "provider_capability_fallback",
+                            role=role_name,
+                            project=project_ns,
+                            provider=spec.name,
+                            capability="lead_policy",
+                            state="partial" if _lead_md_text else "unsupported",
+                            fallback="pending_lead_context" if _lead_md_text else "none",
+                            reason=_lead_md_reason,
+                            is_resume=bool(resume_uuid),
+                        )
+                        _log_event(
+                            "lead_policy_degraded",
+                            role=role_name,
+                            project=project_ns,
+                            provider=spec.name,
+                            reason=_lead_md_reason,
+                            fallback="pending_lead_context" if _lead_md_text else "none",
+                            is_resume=bool(resume_uuid),
+                        )
+                except Exception:
+                    _log.exception(
+                        "could not render %s Lead context; spawning without it",
+                        spec.name,
+                    )
+        elif spec.context_strategy == "agents_md_file":
+            # Plant the takkub cheatsheet so the provider auto-discovers
+            # it on boot and knows how to call `takkub send/done`. Safe:
+            # only writes when the file is absent or already
+            # takkub-managed (marker check inside the helper). `extra`
+            # bridges this role's Skill Matrix assignment (#103 phase 4)
+            # as an instruction-style block (non-claude CLIs have no
+            # Skill tool).
+            try:
+                from . import skill_policy
+
+                _skill_extra = skill_policy.render_skill_appendix(
+                    base_role,
+                    _skill_roots_for_project(project_ns, spawn_cwd),
+                    spec.context_strategy,
+                )
+                # Native SKILL.md discovery (codex $CODEX_HOME/skills):
+                # link the central store; on success the appendix is
+                # redundant. Any failure keeps the appendix + warns.
+                from .native_skills import link_native_skills, project_has_skills
+
+                _nat, _nat_err = link_native_skills(spec, project_ns)
+                # Only global skills are linked (shared home); project
+                # skills still need the per-project appendix.
+                if _nat == "linked" and not project_has_skills(project_ns):
+                    _skill_extra = ""
+                elif _nat != "not_native":
                     _log_event(
                         "provider_capability_fallback",
                         role=role_name,
                         project=project_ns,
                         provider=spec.name,
-                        capability="resume",
-                        state="unsupported",
-                        fallback="refused",
+                        capability="skills",
+                        state="partial",
+                        fallback="native_link_" + _nat,
+                        errors=_nat_err[:3],
                     )
-                    return False, f"resume unavailable for provider {spec.name}"
-                if not _resume_uuid_matches_provider_cwd(
-                    project_ns, spec.name, resume_uuid, spawn_cwd, base_role
-                ):
-                    return False, f"resume_uuid does not match cwd for {role_name}"
-            if _is_lead:
-                # Lead-specific AGENTS.md content (cockpit CLAUDE.md +
-                # BLOCKED_DIRS + session brief) — NOT the teammate cheatsheet
-                # ensure_agents_md() plants for every other role (#101).
-                if spawn_cwd != str(DATA_HOME):
-                    try:
-                        post_compact_brief = self._build_post_compact_brief(project_ns)
-                        _lead_md_path, _lead_md_reason, _lead_md_text = (
-                            render_lead_agents_md_with_reason(
-                                project_ns, spawn_cwd, post_compact_brief=post_compact_brief
-                            )
-                        )
-                        _ps_lead = self._ps(_exit_key(project_ns, role_name))
-                        if _lead_md_path:
-                            _log_event(
-                                "lead_policy_delivered",
-                                role=role_name,
-                                project=project_ns,
-                                provider=spec.name,
-                                delivery="agents_md",
-                                path=_lead_md_path,
-                                is_resume=bool(resume_uuid),
-                            )
-                        else:
-                            if _lead_md_text:
-                                _ps_lead.pending_lead_context = _lead_md_text
-                            _log_event(
-                                "provider_capability_fallback",
-                                role=role_name,
-                                project=project_ns,
-                                provider=spec.name,
-                                capability="lead_policy",
-                                state="partial" if _lead_md_text else "unsupported",
-                                fallback="pending_lead_context" if _lead_md_text else "none",
-                                reason=_lead_md_reason,
-                                is_resume=bool(resume_uuid),
-                            )
-                            _log_event(
-                                "lead_policy_degraded",
-                                role=role_name,
-                                project=project_ns,
-                                provider=spec.name,
-                                reason=_lead_md_reason,
-                                fallback="pending_lead_context" if _lead_md_text else "none",
-                                is_resume=bool(resume_uuid),
-                            )
-                    except Exception:
-                        _log.exception(
-                            "could not render %s Lead context; spawning without it",
-                            spec.name,
-                        )
-            elif spec.context_strategy == "agents_md_file":
-                # Plant the takkub cheatsheet so the provider auto-discovers
-                # it on boot and knows how to call `takkub send/done`. Safe:
-                # only writes when the file is absent or already
-                # takkub-managed (marker check inside the helper). `extra`
-                # bridges this role's Skill Matrix assignment (#103 phase 4)
-                # as an instruction-style block (non-claude CLIs have no
-                # Skill tool).
-                try:
-                    from . import skill_policy
-
-                    _skill_extra = skill_policy.render_skill_appendix(
-                        base_role,
-                        _skill_roots_for_project(project_ns, spawn_cwd),
-                        spec.context_strategy,
+                # Keep the shared task contract even when native global
+                # skills made their appendix redundant.
+                _skill_extra = _TASK_EXECUTION_CONTEXT + _skill_extra
+                _skill_extra += _learned_skill_index(project_ns, spec.name)
+                if _skill_extra:
+                    # #422 item 2: this role HAS Skill Matrix skills and
+                    # this provider only gets them as instruction text
+                    # (no Skill tool) — say so in events.log instead of
+                    # silently doing less than a claude pane would.
+                    _log_event(
+                        "provider_capability_fallback",
+                        role=role_name,
+                        project=project_ns,
+                        provider=spec.name,
+                        capability="skills",
+                        state="partial",
+                        fallback="instruction_bridge",
                     )
-                    # Native SKILL.md discovery (codex $CODEX_HOME/skills):
-                    # link the central store; on success the appendix is
-                    # redundant. Any failure keeps the appendix + warns.
-                    from .native_skills import link_native_skills, project_has_skills
+                # Permission-gate awareness (#243): this provider has no
+                # persistent, bypass-proof "ask" mechanism the cockpit
+                # can enumerate yet (see permission_gates.py module
+                # docstring) — state that gap explicitly instead of
+                # silently only covering claude, and still tell the pane
+                # to report FAILED rather than stall on an unanswered
+                # prompt.
+                from .permission_gates import render_generic_gate_note
 
-                    _nat, _nat_err = link_native_skills(spec, project_ns)
-                    # Only global skills are linked (shared home); project
-                    # skills still need the per-project appendix.
-                    if _nat == "linked" and not project_has_skills(project_ns):
-                        _skill_extra = ""
-                    elif _nat != "not_native":
-                        _log_event(
-                            "provider_capability_fallback",
-                            role=role_name,
-                            project=project_ns,
-                            provider=spec.name,
-                            capability="skills",
-                            state="partial",
-                            fallback="native_link_" + _nat,
-                            errors=_nat_err[:3],
+                _skill_extra += render_generic_gate_note(
+                    spec.display_name or spec.name.capitalize(),
+                    list(
+                        spec.autonomy_flags.get(
+                            sys.platform, spec.autonomy_flags.get("default", [])
                         )
-                    # Keep the shared task contract even when native global
-                    # skills made their appendix redundant.
-                    _skill_extra = _TASK_EXECUTION_CONTEXT + _skill_extra
-                    _skill_extra += _learned_skill_index(project_ns, spec.name)
-                    if _skill_extra:
-                        # #422 item 2: this role HAS Skill Matrix skills and
-                        # this provider only gets them as instruction text
-                        # (no Skill tool) — say so in events.log instead of
-                        # silently doing less than a claude pane would.
-                        _log_event(
-                            "provider_capability_fallback",
-                            role=role_name,
-                            project=project_ns,
-                            provider=spec.name,
-                            capability="skills",
-                            state="partial",
-                            fallback="instruction_bridge",
-                        )
-                    # Permission-gate awareness (#243): this provider has no
-                    # persistent, bypass-proof "ask" mechanism the cockpit
-                    # can enumerate yet (see permission_gates.py module
-                    # docstring) — state that gap explicitly instead of
-                    # silently only covering claude, and still tell the pane
-                    # to report FAILED rather than stall on an unanswered
-                    # prompt.
-                    from .permission_gates import render_generic_gate_note
+                    ),
+                )
+                # #621: same team response-language directive claude
+                # specialists and Lead get — `None` under "as-typed" omits it.
+                from .response_language import prompt_directive as _lang_directive
 
-                    _skill_extra += render_generic_gate_note(
-                        spec.display_name or spec.name.capitalize(),
-                        list(
-                            spec.autonomy_flags.get(
-                                sys.platform, spec.autonomy_flags.get("default", [])
-                            )
-                        ),
-                    )
-                    # #621: same team response-language directive claude
-                    # specialists and Lead get — `None` under "as-typed" omits it.
-                    from .response_language import prompt_directive as _lang_directive
-
-                    _lang_line = _lang_directive()
-                    if _lang_line:
-                        _skill_extra += f"""
+                _lang_line = _lang_directive()
+                if _lang_line:
+                    _skill_extra += f"""
 
 ---
 
 ## ภาษาที่ตอบ (#621)
 
 {_lang_line}"""
-                    # #690: project memory (#33/#687) + role learned notes used
-                    # to reach claude teammates only. AGENTS.md is one file per
-                    # cwd, so the role part is a directory + naming rule keyed
-                    # on TAKKUB_BASE_ROLE (see memory_prompt's docstring) —
-                    # never one role's concrete file.
-                    _mem_path, _role_mem = self._resolve_teammate_memory(
-                        project_ns, base_role, spawn_cwd, role_name, spec.name
+                # #690: project memory (#33/#687) + role learned notes used
+                # to reach claude teammates only. AGENTS.md is one file per
+                # cwd, so the role part is a directory + naming rule keyed
+                # on TAKKUB_BASE_ROLE (see memory_prompt's docstring) —
+                # never one role's concrete file.
+                _mem_path, _role_mem = self._resolve_teammate_memory(
+                    project_ns, base_role, spawn_cwd, role_name, spec.name
+                )
+                if _mem_path is not None:
+                    _skill_extra += memory_prompt.project_memory_block(_mem_path)
+                if _role_mem is not None:
+                    _skill_extra += memory_prompt.shared_role_memory_block(_role_mem.parent)
+                _planted, _agents_md_reason = ensure_agents_md(spawn_cwd, extra=_skill_extra)
+                if not _planted:
+                    _ps_fallback = self._ps(_exit_key(project_ns, role_name))
+                    _ps_fallback.pending_task_execution_context = _TASK_EXECUTION_CONTEXT
+                    _log_event(
+                        "provider_capability_fallback",
+                        role=role_name,
+                        project=project_ns,
+                        provider=spec.name,
+                        capability="task_execution_context",
+                        state="partial",
+                        fallback="initial_task_paste",
+                        reason=_agents_md_reason,
                     )
-                    if _mem_path is not None:
-                        _skill_extra += memory_prompt.project_memory_block(_mem_path)
-                    if _role_mem is not None:
-                        _skill_extra += memory_prompt.shared_role_memory_block(_role_mem.parent)
-                    _planted, _agents_md_reason = ensure_agents_md(spawn_cwd, extra=_skill_extra)
-                    if not _planted:
-                        _ps_fallback = self._ps(_exit_key(project_ns, role_name))
-                        _ps_fallback.pending_task_execution_context = _TASK_EXECUTION_CONTEXT
+                    if _agents_md_reason == "user-owned" and _lang_line:
+                        # #621 M3: user-owned AGENTS.md means _skill_extra
+                        # (directive included) never gets written — carry
+                        # the directive through the initial-task paste
+                        # fallback instead (read + cleared by
+                        # orchestrator.assign() right after spawn()).
+                        _ps_fallback.pending_lang_directive = _lang_line
+                    # #690: same fallback for memory. The paste is
+                    # per-pane, so naming this role's concrete file is
+                    # safe here (unlike the shared AGENTS.md).
+                    _mem_note = (
+                        memory_prompt.paste_memory_note(_mem_path, _role_mem)
+                        if _agents_md_reason == "user-owned"
+                        else ""
+                    )
+                    if _mem_note:
+                        _ps_fallback.pending_memory_note = _mem_note
                         _log_event(
                             "provider_capability_fallback",
                             role=role_name,
                             project=project_ns,
                             provider=spec.name,
-                            capability="task_execution_context",
+                            capability="memory",
                             state="partial",
                             fallback="initial_task_paste",
-                            reason=_agents_md_reason,
                         )
-                        if _agents_md_reason == "user-owned" and _lang_line:
-                            # #621 M3: user-owned AGENTS.md means _skill_extra
-                            # (directive included) never gets written — carry
-                            # the directive through the initial-task paste
-                            # fallback instead (read + cleared by
-                            # orchestrator.assign() right after spawn()).
-                            _ps_fallback.pending_lang_directive = _lang_line
-                        # #690: same fallback for memory. The paste is
-                        # per-pane, so naming this role's concrete file is
-                        # safe here (unlike the shared AGENTS.md).
-                        _mem_note = (
-                            memory_prompt.paste_memory_note(_mem_path, _role_mem)
-                            if _agents_md_reason == "user-owned"
-                            else ""
-                        )
-                        if _mem_note:
-                            _ps_fallback.pending_memory_note = _mem_note
-                            _log_event(
-                                "provider_capability_fallback",
-                                role=role_name,
-                                project=project_ns,
-                                provider=spec.name,
-                                capability="memory",
-                                state="partial",
-                                fallback="initial_task_paste",
-                            )
-                except Exception:
-                    _log.exception(
-                        "could not render %s role context for %s; spawning without it",
-                        spec.name,
-                        base_role,
-                    )
-            else:
-                _log.warning(
-                    "provider %s has context_strategy=%r — teammate cheatsheet skipped (#103)",
-                    spec.name,
-                    spec.context_strategy,
-                )
-            env = _build_lead_env(project_ns) if _is_lead else _build_pane_env(project_ns)
-            env["TAKKUB_ROLE"] = role_name
-            env["TAKKUB_PROJECT"] = project_ns
-            if _is_lead:
-                env["TAKKUB_LEAD_READINESS_FILE"] = _ps_initial.lead_readiness_file
-            # #690: claude panes already get this (see the claude env block);
-            # non-claude teammates need it to find THEIR role-memory file from
-            # the per-cwd AGENTS.md rule (memory_prompt.shared_role_memory_block)
-            # — TAKKUB_ROLE alone would be "qa#1" for a shard, not the file name.
-            env["TAKKUB_BASE_ROLE"] = base_role
-            _stamp_subagent_fanout_env(env, int(_ps_initial.subagent_fanout or 0))
-            apply_chrome_bin(env, base_role)
-            _account = _ps_initial.account_override or _account_for_spawn(project_ns, spec.name)
-            _ps_initial.account_override = _account
-            inject_user_profile_env(env, project_ns)
-            # Prod isolation for this provider's own state (sessions/auth/
-            # config) — the non-claude counterpart of CLAUDE_CONFIG_DIR above.
-            # Must run for every non-claude spawn, including a Lead pane.
-            # Seed first: the pane must find its credentials and recent Lead
-            # sessions already in place, or isolation reads as data loss.
-            # One-time and bounded (see provider_bootstrap); a no-op on every
-            # later spawn, so this stays off the hot path.
-            try:
-                from .provider_bootstrap import ensure_provider_home
-
-                if ensure_provider_home(spec.name):
-                    _log_event("provider_home_seeded", provider=spec.name)
             except Exception:
-                _log.exception("provider home seeding failed for %s", spec.name)
-            inject_provider_home_env(env, spec.name, project_ns, account=_account)
-            inject_provider_no_autoupdate_env(env, spec.name)
-            from .core.routing.flag import v2_router_enabled
-
-            # A limit-driven account switch wins over the V2 router's pick:
-            # the router resolves the PROJECT's account and used to write its
-            # CODEX_HOME straight back over the switched one, so the pane
-            # respawned on the spent account in a loop (prod 2026-10-08).
-            if v2_router_enabled() and not _account:
-                _apply_v2_account_env_override(env, spec.name, project_ns, role_name)
-            # The account this pane really runs on — what the meter watchdog
-            # and the limit confirm check, even after PaneState is rebuilt.
-            pane._spawn_account = _account
-            bin_dir = _pane_cli_bin_dir()
-            if spec.prepend_bin_dir_to_path:
-                provider_dir = os.path.dirname(provider_bin)
-                env["PATH"] = bin_dir + os.pathsep + provider_dir + os.pathsep + env.get("PATH", "")
-            else:
-                env["PATH"] = bin_dir + os.pathsep + env.get("PATH", "")
-            env["TAKKUB_CLI_BIN_DIR"] = bin_dir  # #642
-            # Lead gets the Lead capability token (authorises Lead-only
-            # takkub CLI commands) instead of a per-pane teammate token —
-            # mirrors the claude branch below (#101).
-            if _is_lead:
-                env["TAKKUB_LEAD_TOKEN"] = self._lead_token
-                _prov_tok = None
-            else:
-                _prov_tok = self._mint_pane_token(env, project_ns, role_name)
-            autonomy_argv = list(
-                spec.autonomy_flags.get(sys.platform, spec.autonomy_flags.get("default", []))
-            )
-            if _is_lead:
-                # A Codex Lead runs with the same autonomy flags as every
-                # Codex pane. The #842 OS sandbox for a restricted Lead was
-                # removed (2026-10-14): its Windows admin setup popped a UAC
-                # prompt on every new machine and a Mac Lead never opened.
-                # A restricted policy now reaches it through the Lead policy
-                # text only — recorded truthfully as `codex_prompt`. Gemini/agy,
-                # OpenCode and Cursor Leads are held the same way (`policy_prompt`).
-                from . import lead_enforcement
-
-                _mode = (
-                    (
-                        lead_enforcement.MODE_CODEX_PROMPT
-                        if spec.name == "codex"
-                        else lead_enforcement.MODE_POLICY_PROMPT
-                    )
-                    if lead_enforcement.lead_is_restricted(project_ns)
-                    else lead_enforcement.MODE_NONE
-                )
-                _ps_lead = self._pane_state.get(_exit_key(project_ns, role_name))
-                _readiness_file = getattr(_ps_lead, "lead_readiness_file", None)
-                if _readiness_file:
-                    from . import lead_readiness
-
-                    lead_readiness.record_enforcement(_readiness_file, _mode)
-                if _ps_lead is not None:
-                    _ps_lead.lead_enforcement_mode = _mode
-                _log_event("lead_enforcement", project=project_ns, provider=spec.name, mode=_mode)
-            if spec.name == "codex":
-                # #784: central evidence/docs live outside the workspace.
-                # Grant only this project's two directories, including resume.
-                for env_key in ("TAKKUB_ARTIFACTS_DIR", "TAKKUB_DOCS_DIR"):
-                    writable_dir = env.get(env_key)
-                    if writable_dir:
-                        autonomy_argv.extend(["--add-dir", writable_dir])
-            if spec.trust_argv is not None and spawn_cwd:
-                # #730: Pass trusted folder config via session-scoped argv override (-c).
-                # Codex 0.157.1 prompts "Trust this folder?" on untrusted directories,
-                # which causes non-interactive panes to exit code 0 or stall.
-                try:
-                    _cwd_resolved = pathlib.Path(spawn_cwd).resolve()
-                    _pretrust_root = _resolve_pane_pretrust_root(spawn_cwd, project_ns)
-                    if _pretrust_root is not None:
-                        _root_resolved = pathlib.Path(_pretrust_root).resolve()
-                        # Always trust the actual session cwd. Lead commonly
-                        # launches at the registered root itself, where the
-                        # old ancestor-only branch omitted trust_argv entirely.
-                        if _root_resolved != _cwd_resolved:
-                            autonomy_argv.extend(spec.trust_argv(str(_root_resolved)))
-                        autonomy_argv.extend(spec.trust_argv(str(_cwd_resolved)))
-                except Exception:
-                    pass
-            # Default for providers with no model_flag (none currently in the
-            # registry, but ProviderSpec allows it) — _resolve_teammate_effort
-            # below still needs a value to check against
-            # provider_spec._MODELS_WITHOUT_EFFORT.
-            provider_model = ""
-            model_argv: list[str] = []
-            if spec.model_flag:
-                from .core.routing import effective_model_for_v2
-
-                # A per-role model wins over the provider-level default; empty
-                # falls through to the provider default, then the CLI's own.
-                # The role model is resolved against the provider ACTUALLY
-                # spawning (spec.name == effective_provider here), so a role
-                # re-pointed at another CLI — or substituted to claude because
-                # its own CLI is off/missing — never inherits a model id that
-                # belongs to a different CLI.
-                # Per-assign override is the narrowest choice and therefore
-                # wins over the role setting, provider setting, and CLI default.
-                # epic #309 Wave C: routed through core.routing's façade
-                # instead of calling role_models/provider_models directly —
-                # see core/routing/facade.py's effective_model_for_v2.
-                provider_model = _ps_initial.model_override or (
-                    effective_model_for_v2(settings_role, spec.name, project=project_ns) or ""
-                )
-                if provider_model:
-                    model_argv.extend([spec.model_flag, provider_model])
-            effort_argv: list[str] = []
-            provider_effort = ""
-            if not _is_lead:
-                # Role tiers are provider-neutral for effort: a pane mapped to
-                # agy or Codex should retain the role's low/medium/high setting
-                # just like a Claude-backed pane. _resolve_teammate_effort
-                # applies the full role-setting > env > tier precedence and
-                # gates the result against what this provider/model actually
-                # accepts — _append_provider_effort is then a no-op whenever
-                # that resolves to "".
-                provider_effort = _resolve_teammate_effort(
-                    settings_role,
-                    spec,
-                    provider_model,
-                    override=_ps_initial.effort_override or "",
-                    project=project_ns,
-                )
-                _append_provider_effort(effort_argv, spec, provider_effort)
-            # #591: remember what this pane actually resolved to spawn with
-            # for the header/tab "provider · model" display — a live-reported
-            # model (when the CLI exposes one) takes precedence over this at
-            # render time, see pane_provider_label.py.
-            pane.model.spawn_model = provider_model
-            pane.model.spawn_effort = provider_effort
-            pane.model.spawn_model_explicit = bool(_ps_initial.model_override)
-            # MCP injection (#100): dispatched per spec.mcp_adapter_variant —
-            # codex gets native `-c mcp_servers.<name>.<key>=…` session
-            # overrides; agy's "plugin_import" resolves to a documented no-op
-            # (see mcp_bridge.py). Called for every provider so each branch
-            # goes through the same adapter dispatch.
-            #
-            # codex's "session_override" variant is deny-by-default via an
-            # unconditional `-c mcp_servers={}` prefix, verified sufficient
-            # on its own against real codex-cli binaries 0.144.1/0.145.0/
-            # 0.146.0 (mcp_bridge.py docstring). Only for an older/unparseable
-            # codex build does it also need to resolve codex's own inherited
-            # MCP set to disable each by name; if THAT resolution fails,
-            # silently continuing would spawn the pane with whatever MCPs are
-            # already sitting in ~/.codex/config.toml unfiltered — the exact
-            # leak #100/#121 closed. Fail closed instead: refuse the spawn
-            # with a message the Lead can see (mirrors the binary-discovery
-            # failure return a few lines above), same as any other
-            # pre-launch spawn abort. A recent, detected codex-cli never
-            # reaches this failure mode at all — see McpResolutionError.
-            from .mcp_bridge import McpResolutionError, mcp_argv_for_provider
-
-            try:
-                mcp_argv = mcp_argv_for_provider(
+                _log.exception(
+                    "could not render %s role context for %s; spawning without it",
                     spec.name,
                     base_role,
-                    shard_idx,
-                    project_ns,
-                    provider_bin=provider_bin,
-                    cwd=spawn_cwd,
-                    env=env,
                 )
-            except McpResolutionError as exc:
-                return False, (
-                    f"could not verify {spec.name}'s inherited MCP servers, so "
-                    f"{role_name} was not spawned (refusing to guess a deny-list): {exc}"
-                )
-            # #304 point 2: log what actually made it into this pane's argv —
-            # separate from whether the provider binary goes on to connect it
-            # (unobservable from here, see mcp_bridge.describe_mcp_handshake's
-            # docstring) — so a shard whose spawn never got a browser MCP at
-            # all is distinguishable from one that did but still failed to
-            # connect at runtime.
-            from .mcp_bridge import describe_mcp_handshake
-
-            _handshake = describe_mcp_handshake(spec.name, mcp_argv)
-            _log_event(
-                "mcp_handshake_argv",
-                role=role_name,
-                base_role=base_role,
-                shard=shard_idx,
-                provider=spec.name,
-                project=project_ns,
-                **_handshake,
+        else:
+            _log.warning(
+                "provider %s has context_strategy=%r — teammate cheatsheet skipped (#103)",
+                spec.name,
+                spec.context_strategy,
             )
-            # #407: remember how many MCP servers this boot has to bring up so
-            # the delivery boot-stall ceiling can scale with it.
-            try:
-                self._ps(f"{project_ns}::{role_name}").mcp_server_count = len(
-                    _handshake.get("server_names") or []
+        env = _build_lead_env(project_ns) if _is_lead else _build_pane_env(project_ns)
+        env["TAKKUB_ROLE"] = role_name
+        env["TAKKUB_PROJECT"] = project_ns
+        if _is_lead:
+            env["TAKKUB_LEAD_READINESS_FILE"] = _ps_initial.lead_readiness_file
+        # #690: claude panes already get this (see the claude env block);
+        # non-claude teammates need it to find THEIR role-memory file from
+        # the per-cwd AGENTS.md rule (memory_prompt.shared_role_memory_block)
+        # — TAKKUB_ROLE alone would be "qa#1" for a shard, not the file name.
+        env["TAKKUB_BASE_ROLE"] = base_role
+        _stamp_subagent_fanout_env(env, int(_ps_initial.subagent_fanout or 0))
+        apply_chrome_bin(env, base_role)
+        _account = _ps_initial.account_override or _account_for_spawn(project_ns, spec.name)
+        _ps_initial.account_override = _account
+        inject_user_profile_env(env, project_ns)
+        # Prod isolation for this provider's own state (sessions/auth/
+        # config) — the non-claude counterpart of CLAUDE_CONFIG_DIR above.
+        # Must run for every non-claude spawn, including a Lead pane.
+        # Seed first: the pane must find its credentials and recent Lead
+        # sessions already in place, or isolation reads as data loss.
+        # One-time and bounded (see provider_bootstrap); a no-op on every
+        # later spawn, so this stays off the hot path.
+        try:
+            from .provider_bootstrap import ensure_provider_home
+
+            if ensure_provider_home(spec.name):
+                _log_event("provider_home_seeded", provider=spec.name)
+        except Exception:
+            _log.exception("provider home seeding failed for %s", spec.name)
+        inject_provider_home_env(env, spec.name, project_ns, account=_account)
+        inject_provider_no_autoupdate_env(env, spec.name)
+        from .core.routing.flag import v2_router_enabled
+
+        # A limit-driven account switch wins over the V2 router's pick:
+        # the router resolves the PROJECT's account and used to write its
+        # CODEX_HOME straight back over the switched one, so the pane
+        # respawned on the spent account in a loop (prod 2026-10-08).
+        if v2_router_enabled() and not _account:
+            _apply_v2_account_env_override(env, spec.name, project_ns, role_name)
+        # The account this pane really runs on — what the meter watchdog
+        # and the limit confirm check, even after PaneState is rebuilt.
+        pane._spawn_account = _account
+        bin_dir = _pane_cli_bin_dir()
+        if spec.prepend_bin_dir_to_path:
+            provider_dir = os.path.dirname(provider_bin)
+            env["PATH"] = bin_dir + os.pathsep + provider_dir + os.pathsep + env.get("PATH", "")
+        else:
+            env["PATH"] = bin_dir + os.pathsep + env.get("PATH", "")
+        env["TAKKUB_CLI_BIN_DIR"] = bin_dir  # #642
+        # Lead gets the Lead capability token (authorises Lead-only
+        # takkub CLI commands) instead of a per-pane teammate token —
+        # mirrors the claude branch below (#101).
+        if _is_lead:
+            env["TAKKUB_LEAD_TOKEN"] = self._lead_token
+            _prov_tok = None
+        else:
+            _prov_tok = self._mint_pane_token(env, project_ns, role_name)
+        autonomy_argv = list(
+            spec.autonomy_flags.get(sys.platform, spec.autonomy_flags.get("default", []))
+        )
+        if _is_lead:
+            # A Codex Lead runs with the same autonomy flags as every
+            # Codex pane. The #842 OS sandbox for a restricted Lead was
+            # removed (2026-10-14): its Windows admin setup popped a UAC
+            # prompt on every new machine and a Mac Lead never opened.
+            # A restricted policy now reaches it through the Lead policy
+            # text only — recorded truthfully as `codex_prompt`. Gemini/agy,
+            # OpenCode and Cursor Leads are held the same way (`policy_prompt`).
+            from . import lead_enforcement
+
+            _mode = (
+                (
+                    lead_enforcement.MODE_CODEX_PROMPT
+                    if spec.name == "codex"
+                    else lead_enforcement.MODE_POLICY_PROMPT
                 )
+                if lead_enforcement.lead_is_restricted(project_ns)
+                else lead_enforcement.MODE_NONE
+            )
+            _ps_lead = self._pane_state.get(_exit_key(project_ns, role_name))
+            _readiness_file = getattr(_ps_lead, "lead_readiness_file", None)
+            if _readiness_file:
+                from . import lead_readiness
+
+                lead_readiness.record_enforcement(_readiness_file, _mode)
+            if _ps_lead is not None:
+                _ps_lead.lead_enforcement_mode = _mode
+            _log_event("lead_enforcement", project=project_ns, provider=spec.name, mode=_mode)
+        if spec.name == "codex":
+            # #784: central evidence/docs live outside the workspace.
+            # Grant only this project's two directories, including resume.
+            for env_key in ("TAKKUB_ARTIFACTS_DIR", "TAKKUB_DOCS_DIR"):
+                writable_dir = env.get(env_key)
+                if writable_dir:
+                    autonomy_argv.extend(["--add-dir", writable_dir])
+        if spec.trust_argv is not None and spawn_cwd:
+            # #730: Pass trusted folder config via session-scoped argv override (-c).
+            # Codex 0.157.1 prompts "Trust this folder?" on untrusted directories,
+            # which causes non-interactive panes to exit code 0 or stall.
+            try:
+                _cwd_resolved = pathlib.Path(spawn_cwd).resolve()
+                _pretrust_root = _resolve_pane_pretrust_root(spawn_cwd, project_ns)
+                if _pretrust_root is not None:
+                    _root_resolved = pathlib.Path(_pretrust_root).resolve()
+                    # Always trust the actual session cwd. Lead commonly
+                    # launches at the registered root itself, where the
+                    # old ancestor-only branch omitted trust_argv entirely.
+                    if _root_resolved != _cwd_resolved:
+                        autonomy_argv.extend(spec.trust_argv(str(_root_resolved)))
+                    autonomy_argv.extend(spec.trust_argv(str(_cwd_resolved)))
             except Exception:
                 pass
-            # Project/session scoping (#132): opt-in per provider via
-            # ProviderSpec.project_scope_flag — currently only gemini/agy,
-            # whose own conversation history isn't keyed by cwd otherwise.
-            # Never hardcode a provider name here; a future provider plugs
-            # in by setting the three project_scope_* fields on its own spec.
-            project_scope_argv: list[str] = []
-            if spec.project_scope_flag and spec.project_scope_resolver:
-                try:
-                    _scope_id = spec.project_scope_resolver(spawn_cwd)
-                except Exception:
-                    _log.exception("project scope resolver failed for %s", spec.name)
-                    _scope_id = None
-                if _scope_id:
-                    project_scope_argv.extend([spec.project_scope_flag, _scope_id])
-                    _log_event(
-                        "provider_project_scope",
-                        provider=spec.name,
-                        resolved=_scope_id,
-                    )
-                elif spec.project_scope_new_flag:
-                    project_scope_argv.append(spec.project_scope_new_flag)
-                    _log_event(
-                        "provider_project_scope",
-                        provider=spec.name,
-                        resolved=None,
-                        fallback=spec.project_scope_new_flag,
-                    )
+        # Default for providers with no model_flag (none currently in the
+        # registry, but ProviderSpec allows it) — _resolve_teammate_effort
+        # below still needs a value to check against
+        # provider_spec._MODELS_WITHOUT_EFFORT.
+        provider_model = ""
+        model_argv: list[str] = []
+        if spec.model_flag:
+            from .core.routing import effective_model_for_v2
 
-            resume_argv: list[str] = []
-            _ekey_spawn = _exit_key(project_ns, role_name)
-            if not resume_uuid and spec.supports_resume and spec.session_resume_flag:
-                _ps_pre = self._pane_state.get(_ekey_spawn)
-                _prior_uuid = _ps_pre.session_uuid if _ps_pre is not None else None
-                _prior_cwd = _ps_pre.session_uuid_cwd if _ps_pre is not None else ""
-                _prior_exit = self._recent_exits.get(_ekey_spawn)
-                _prior_provider = (_prior_exit.get("provider") if _prior_exit else None) or (
-                    getattr(_ps_pre, "session_provider", None) if _ps_pre is not None else None
-                )
-                if (
-                    _prior_uuid
-                    and _prior_cwd
-                    and _normalize_cwd_for_compare(_prior_cwd)
-                    == _normalize_cwd_for_compare(spawn_cwd)
-                    and _prior_exit is not None
-                    and (time.time() - _prior_exit.get("ts", 0)) < RESUME_WINDOW_SEC
-                    and _prior_provider == spec.name
-                ):
-                    # #817: the remembered uuid can belong to ANOTHER provider
-                    # (a role that ran claude, then codex: done() paired the
-                    # stale claude uuid with provider=codex) or to a session
-                    # the CLI no longer has. `codex resume <missing>` exits 1
-                    # before the task lands → respawn crash-loop. Resume only
-                    # what this provider's own store can actually open.
-                    if _resume_uuid_matches_provider_cwd(
-                        project_ns, spec.name, _prior_uuid, spawn_cwd, base_role
-                    ):
-                        resume_uuid = _prior_uuid
-                    else:
-                        _log_event(
-                            "auto_resume_session_missing",
-                            role=role_name,
-                            project=project_ns,
-                            provider=spec.name,
-                            session_uuid=str(_prior_uuid)[:12],
-                        )
-                        _ps_pre.session_uuid = None
-                        self._recent_exits.pop(_ekey_spawn, None)
-                        getattr(self, "_last_session_uuid", {}).pop(_ekey_spawn, None)
+            # A per-role model wins over the provider-level default; empty
+            # falls through to the provider default, then the CLI's own.
+            # The role model is resolved against the provider ACTUALLY
+            # spawning (spec.name == effective_provider here), so a role
+            # re-pointed at another CLI — or substituted to claude because
+            # its own CLI is off/missing — never inherits a model id that
+            # belongs to a different CLI.
+            # Per-assign override is the narrowest choice and therefore
+            # wins over the role setting, provider setting, and CLI default.
+            # epic #309 Wave C: routed through core.routing's façade
+            # instead of calling role_models/provider_models directly —
+            # see core/routing/facade.py's effective_model_for_v2.
+            provider_model = _ps_initial.model_override or (
+                effective_model_for_v2(settings_role, spec.name, project=project_ns) or ""
+            )
+            if provider_model:
+                model_argv.extend([spec.model_flag, provider_model])
+        effort_argv: list[str] = []
+        provider_effort = ""
+        if not _is_lead:
+            # Role tiers are provider-neutral for effort: a pane mapped to
+            # agy or Codex should retain the role's low/medium/high setting
+            # just like a Claude-backed pane. _resolve_teammate_effort
+            # applies the full role-setting > env > tier precedence and
+            # gates the result against what this provider/model actually
+            # accepts — _append_provider_effort is then a no-op whenever
+            # that resolves to "".
+            provider_effort = _resolve_teammate_effort(
+                settings_role,
+                spec,
+                provider_model,
+                override=_ps_initial.effort_override or "",
+                project=project_ns,
+            )
+            _append_provider_effort(effort_argv, spec, provider_effort)
+        # #591: remember what this pane actually resolved to spawn with
+        # for the header/tab "provider · model" display — a live-reported
+        # model (when the CLI exposes one) takes precedence over this at
+        # render time, see pane_provider_label.py.
+        pane.model.spawn_model = provider_model
+        pane.model.spawn_effort = provider_effort
+        pane.model.spawn_model_explicit = bool(_ps_initial.model_override)
+        # MCP injection (#100): dispatched per spec.mcp_adapter_variant —
+        # codex gets native `-c mcp_servers.<name>.<key>=…` session
+        # overrides; agy's "plugin_import" resolves to a documented no-op
+        # (see mcp_bridge.py). Called for every provider so each branch
+        # goes through the same adapter dispatch.
+        #
+        # codex's "session_override" variant is deny-by-default via an
+        # unconditional `-c mcp_servers={}` prefix, verified sufficient
+        # on its own against real codex-cli binaries 0.144.1/0.145.0/
+        # 0.146.0 (mcp_bridge.py docstring). Only for an older/unparseable
+        # codex build does it also need to resolve codex's own inherited
+        # MCP set to disable each by name; if THAT resolution fails,
+        # silently continuing would spawn the pane with whatever MCPs are
+        # already sitting in ~/.codex/config.toml unfiltered — the exact
+        # leak #100/#121 closed. Fail closed instead: refuse the spawn
+        # with a message the Lead can see (mirrors the binary-discovery
+        # failure return a few lines above), same as any other
+        # pre-launch spawn abort. A recent, detected codex-cli never
+        # reaches this failure mode at all — see McpResolutionError.
+        from .mcp_bridge import McpResolutionError, mcp_argv_for_provider
 
-            if resume_uuid:
-                resume_argv.extend([spec.session_resume_flag, resume_uuid])
-                _ps_new = self._ps(_ekey_spawn)
-                _ps_new.session_uuid = resume_uuid
-                _ps_new.session_uuid_cwd = spawn_cwd
-                _ps_new.session_provider = spec.name
-            else:
-                # #817: a fresh conversation supersedes whatever this slot
-                # last reported. Providers without a SessionStart report
-                # (codex) would otherwise inherit the previous provider's
-                # uuid via `_session_uuid_for` and done() would re-seed it.
-                getattr(self, "_last_session_uuid", {}).pop(_ekey_spawn, None)
-
-            tools_argv: list[str] = []
-            if role_name != LEAD.name and spec.tools_flag:
-                _tools = _teammate_builtin_tools()
-                if _tools:
-                    tools_argv.extend([spec.tools_flag, ",".join(_tools)])
-
-            autocompact_argv: list[str] = []
-            if spec.autocompact_flag:
-                _window = _teammate_autocompact()
-                if _window:
-                    autocompact_argv.extend([spec.autocompact_flag, str(_window)])
-
-            from .core.providers.plan import assemble_generic_argv
-
-            provider_argv = assemble_generic_argv(
-                provider_bin,
-                provider_id=spec.name,
+        try:
+            mcp_argv = mcp_argv_for_provider(
+                spec.name,
+                base_role,
+                shard_idx,
+                project_ns,
+                provider_bin=provider_bin,
                 cwd=spawn_cwd,
-                autonomy_argv=autonomy_argv,
-                model_argv=model_argv,
-                effort_argv=effort_argv,
-                mcp_argv=mcp_argv,
-                project_scope_argv=project_scope_argv,
-                resume_argv=resume_argv,
-                autocompact_argv=autocompact_argv,
-                tools_argv=tools_argv,
-            )
-
-            return self._launch_session(
-                pane=pane,
-                role_name=role_name,
-                project_ns=project_ns,
-                spawn_cwd=spawn_cwd,
-                argv=provider_argv,
                 env=env,
-                pane_tok=_prov_tok,
-                label=spec.name,
-                cwd=cwd,
-                project=project,
-                _from_auto_respawn=_from_auto_respawn,
-                _shard_total=_shard_total,
-                codex_exit=spec.early_exit_watch,
-                paste_chunking=(spec.paste_chunk_chars, spec.paste_chunk_delay_ms),
-                auto_trust=spec.auto_trust,
-                # #186: watch at least as long as this provider's own
-                # cold-boot ready allowance, so a trust modal rendered late
-                # in a slow boot (multi-role fan-out contention) still gets
-                # auto-answered instead of outliving the watcher.
-                auto_trust_wait_ms=max(30_000, spec.ready_wait_ms),
-                resume_uuid=resume_uuid,
             )
+        except McpResolutionError as exc:
+            return False, (
+                f"could not verify {spec.name}'s inherited MCP servers, so "
+                f"{role_name} was not spawned (refusing to guess a deny-list): {exc}"
+            )
+        # #304 point 2: log what actually made it into this pane's argv —
+        # separate from whether the provider binary goes on to connect it
+        # (unobservable from here, see mcp_bridge.describe_mcp_handshake's
+        # docstring) — so a shard whose spawn never got a browser MCP at
+        # all is distinguishable from one that did but still failed to
+        # connect at runtime.
+        from .mcp_bridge import describe_mcp_handshake
 
+        _handshake = describe_mcp_handshake(spec.name, mcp_argv)
+        _log_event(
+            "mcp_handshake_argv",
+            role=role_name,
+            base_role=base_role,
+            shard=shard_idx,
+            provider=spec.name,
+            project=project_ns,
+            **_handshake,
+        )
+        # #407: remember how many MCP servers this boot has to bring up so
+        # the delivery boot-stall ceiling can scale with it.
+        try:
+            self._ps(f"{project_ns}::{role_name}").mcp_server_count = len(
+                _handshake.get("server_names") or []
+            )
+        except Exception:
+            pass
+        # Project/session scoping (#132): opt-in per provider via
+        # ProviderSpec.project_scope_flag — currently only gemini/agy,
+        # whose own conversation history isn't keyed by cwd otherwise.
+        # Never hardcode a provider name here; a future provider plugs
+        # in by setting the three project_scope_* fields on its own spec.
+        project_scope_argv: list[str] = []
+        if spec.project_scope_flag and spec.project_scope_resolver:
+            try:
+                _scope_id = spec.project_scope_resolver(spawn_cwd)
+            except Exception:
+                _log.exception("project scope resolver failed for %s", spec.name)
+                _scope_id = None
+            if _scope_id:
+                project_scope_argv.extend([spec.project_scope_flag, _scope_id])
+                _log_event(
+                    "provider_project_scope",
+                    provider=spec.name,
+                    resolved=_scope_id,
+                )
+            elif spec.project_scope_new_flag:
+                project_scope_argv.append(spec.project_scope_new_flag)
+                _log_event(
+                    "provider_project_scope",
+                    provider=spec.name,
+                    resolved=None,
+                    fallback=spec.project_scope_new_flag,
+                )
+
+        resume_argv: list[str] = []
+        _ekey_spawn = _exit_key(project_ns, role_name)
+        if not resume_uuid and spec.supports_resume and spec.session_resume_flag:
+            _ps_pre = self._pane_state.get(_ekey_spawn)
+            _prior_uuid = _ps_pre.session_uuid if _ps_pre is not None else None
+            _prior_cwd = _ps_pre.session_uuid_cwd if _ps_pre is not None else ""
+            _prior_exit = self._recent_exits.get(_ekey_spawn)
+            _prior_provider = (_prior_exit.get("provider") if _prior_exit else None) or (
+                getattr(_ps_pre, "session_provider", None) if _ps_pre is not None else None
+            )
+            if (
+                _prior_uuid
+                and _prior_cwd
+                and _normalize_cwd_for_compare(_prior_cwd) == _normalize_cwd_for_compare(spawn_cwd)
+                and _prior_exit is not None
+                and (time.time() - _prior_exit.get("ts", 0)) < RESUME_WINDOW_SEC
+                and _prior_provider == spec.name
+            ):
+                # #817: the remembered uuid can belong to ANOTHER provider
+                # (a role that ran claude, then codex: done() paired the
+                # stale claude uuid with provider=codex) or to a session
+                # the CLI no longer has. `codex resume <missing>` exits 1
+                # before the task lands → respawn crash-loop. Resume only
+                # what this provider's own store can actually open.
+                if _resume_uuid_matches_provider_cwd(
+                    project_ns, spec.name, _prior_uuid, spawn_cwd, base_role
+                ):
+                    resume_uuid = _prior_uuid
+                else:
+                    _log_event(
+                        "auto_resume_session_missing",
+                        role=role_name,
+                        project=project_ns,
+                        provider=spec.name,
+                        session_uuid=str(_prior_uuid)[:12],
+                    )
+                    _ps_pre.session_uuid = None
+                    self._recent_exits.pop(_ekey_spawn, None)
+                    getattr(self, "_last_session_uuid", {}).pop(_ekey_spawn, None)
+
+        if resume_uuid:
+            resume_argv.extend([spec.session_resume_flag, resume_uuid])
+            _ps_new = self._ps(_ekey_spawn)
+            _ps_new.session_uuid = resume_uuid
+            _ps_new.session_uuid_cwd = spawn_cwd
+            _ps_new.session_provider = spec.name
+        else:
+            # #817: a fresh conversation supersedes whatever this slot
+            # last reported. Providers without a SessionStart report
+            # (codex) would otherwise inherit the previous provider's
+            # uuid via `_session_uuid_for` and done() would re-seed it.
+            getattr(self, "_last_session_uuid", {}).pop(_ekey_spawn, None)
+
+        tools_argv: list[str] = []
+        if role_name != LEAD.name and spec.tools_flag:
+            _tools = _teammate_builtin_tools()
+            if _tools:
+                tools_argv.extend([spec.tools_flag, ",".join(_tools)])
+
+        autocompact_argv: list[str] = []
+        if spec.autocompact_flag:
+            _window = _teammate_autocompact()
+            if _window:
+                autocompact_argv.extend([spec.autocompact_flag, str(_window)])
+
+        from .core.providers.plan import assemble_generic_argv
+
+        provider_argv = assemble_generic_argv(
+            provider_bin,
+            provider_id=spec.name,
+            cwd=spawn_cwd,
+            autonomy_argv=autonomy_argv,
+            model_argv=model_argv,
+            effort_argv=effort_argv,
+            mcp_argv=mcp_argv,
+            project_scope_argv=project_scope_argv,
+            resume_argv=resume_argv,
+            autocompact_argv=autocompact_argv,
+            tools_argv=tools_argv,
+        )
+
+        return self._launch_session(
+            pane=pane,
+            role_name=role_name,
+            project_ns=project_ns,
+            spawn_cwd=spawn_cwd,
+            argv=provider_argv,
+            env=env,
+            pane_tok=_prov_tok,
+            label=spec.name,
+            cwd=cwd,
+            project=project,
+            _from_auto_respawn=_from_auto_respawn,
+            _shard_total=_shard_total,
+            codex_exit=spec.early_exit_watch,
+            paste_chunking=(spec.paste_chunk_chars, spec.paste_chunk_delay_ms),
+            auto_trust=spec.auto_trust,
+            # #186: watch at least as long as this provider's own
+            # cold-boot ready allowance, so a trust modal rendered late
+            # in a slow boot (multi-role fan-out contention) still gets
+            # auto-answered instead of outliving the watcher.
+            auto_trust_wait_ms=max(30_000, spec.ready_wait_ms),
+            resume_uuid=resume_uuid,
+        )
+
+    def _spawn_claude_resolve_cwd(
+        self, PROVIDER_REGISTRY, _ps_initial, base_role, cwd, project_ns, role_name
+    ):
+        """Claude branch: resolve cwd/role file and regenerate the role context (extracted from `_spawn_once`, 2026-10-24)."""
+        _initial_task_preloaded = None
+        role_md_file = None
         # Resolve cwd:
         #   Lead          → repo root (so CLAUDE.md auto-discovery picks up the
         #                   Lead instructions at agent-takkub/CLAUDE.md)
@@ -3838,24 +4219,24 @@ class SpawnEngineMixin:
         )
         if _prepared_prompt_file is not None:
             role_md_file = _prepared_prompt_file
+        return _initial_task_preloaded, role_md_file, spawn_cwd
 
-        # LOW (codex full-system review 2026-07-11): validate an explicit
-        # resume_uuid BEFORE minting the per-pane capability token below.
-        # spawn_cwd is settled for both the Lead and teammate branches above,
-        # so this can reject a mismatched uuid without ever registering a
-        # token that a later early-return would leave orphaned in
-        # self._pane_tokens (the token is never revoked because it was never
-        # minted in the first place).
-        if resume_uuid and not _resume_uuid_matches_cwd(
-            project_ns, resume_uuid, spawn_cwd, base_role
-        ):
-            return False, f"resume_uuid does not match cwd for {role_name}"
-
-        try:
-            claude = find_claude_executable()
-        except RuntimeError as e:
-            return False, str(e)
-
+    def _spawn_claude_build_env(
+        self,
+        CLAUDE,
+        _build_lead_env,
+        _build_pane_env,
+        _ps_initial,
+        _shard_total,
+        base_role,
+        claude,
+        pane,
+        project_ns,
+        role_name,
+        shard_idx,
+    ):
+        """Claude branch: account/shard/project/capability env for the pane (extracted from `_spawn_once`, 2026-10-24)."""
+        pane_tok = None
         env = _build_lead_env(project_ns) if role_name == LEAD.name else _build_pane_env(project_ns)
         env["TAKKUB_ROLE"] = role_name
         if role_name == LEAD.name:
@@ -3934,13 +4315,12 @@ class SpawnEngineMixin:
             rtk_dir = str(pathlib.Path(rtk_path).resolve().parent)
             if rtk_dir not in env["PATH"].split(os.pathsep):
                 env["PATH"] = rtk_dir + os.pathsep + env["PATH"]
+        return env, pane_tok
 
-        # H1: MCP timeout / non-interactive env / truecolor term are applied
-        # inside _build_pane_env()/_build_lead_env() itself now (pane_env.py)
-        # so every branch (shell/codex/gemini/claude) gets them, not just
-        # this claude path.
-        apply_claude_auth_overrides(env)
-
+    def _spawn_claude_settings_flags(self, CLAUDE, _log_event, _ps_initial, project_ns, role_name):
+        """Claude branch: --setting-sources and permission-mode flags (extracted from `_spawn_once`, 2026-10-24)."""
+        settings_argv = None
+        sources = None
         # --setting-sources controls which settings.json layers claude loads.
         # We default to `project,local` (skip ~/.claude/settings.json) because
         # the claude-obsidian plugin currently ships a SessionStart hook that
@@ -4000,7 +4380,31 @@ class SpawnEngineMixin:
                 lead_readiness.record_enforcement(_ps_initial.lead_readiness_file, _claude_mode)
             _ps_initial.lead_enforcement_mode = _claude_mode
             _log_event("lead_enforcement", project=project_ns, provider=CLAUDE, mode=_claude_mode)
+        return settings_argv, sources
 
+    def _spawn_claude_model_and_tools(
+        self,
+        CLAUDE,
+        PROVIDER_REGISTRY,
+        _log_event,
+        _ps_initial,
+        base_role,
+        env,
+        pane,
+        project_ns,
+        role_md_file,
+        role_name,
+        settings_role,
+        shard_idx,
+        spawn_cwd,
+    ):
+        """Claude branch: model tier, plugin allowlist, MCP config, tool deny-list (extracted from `_spawn_once`, 2026-10-24)."""
+        _claude_mcp_argv = None
+        denied_tools_argv = None
+        disallowed_tools_argv = None
+        fallback_argv = None
+        plugin_dir_argv = None
+        system_prompt_argv = None
         # Teammate model tier — picked PER ROLE (see _ROLE_MODEL_TIERS above),
         # not one flat tier for everyone. Lead does orchestration and stays on
         # the user's default model + effort. Teammates default to Sonnet 4.6
@@ -4274,7 +4678,46 @@ class SpawnEngineMixin:
             # the leaked quotes break the match. Comma needs no quoting and
             # --disallowed-tools accepts comma- or space-separated lists.
             denied_tools_argv.extend(["--disallowed-tools", ",".join(denied)])
+        return (
+            CLAUDE,
+            _claude_mcp_argv,
+            denied_tools_argv,
+            disallowed_tools_argv,
+            effort_argv,
+            fallback_argv,
+            model_argv,
+            plugin_dir_argv,
+            system_prompt_argv,
+        )
 
+    def _spawn_claude_resume_and_trust(
+        self,
+        CLAUDE,
+        _claude_mcp_argv,
+        _log_event,
+        _ps_initial,
+        base_role,
+        claude,
+        denied_tools_argv,
+        disallowed_tools_argv,
+        effective_provider,
+        effort_argv,
+        env,
+        fallback_argv,
+        model_argv,
+        plugin_dir_argv,
+        project_ns,
+        resume_uuid,
+        role_name,
+        settings_argv,
+        sources,
+        spawn_cwd,
+        system_prompt_argv,
+    ):
+        """Claude branch: session resume/continue, context flags, workspace pre-trust (extracted from `_spawn_once`, 2026-10-24)."""
+        _spawned_session_uuid = None
+        argv = None
+        resumed = None
         # Session resume: if this same role exited recently from the same
         # cwd and we have its session UUID, use --resume <uuid> so claude
         # rejoins the exact conversation without CWD-based disambiguation.
@@ -4438,238 +4881,7 @@ class SpawnEngineMixin:
                 pass
             else:
                 pre_trust_pane_cwd(project_ns, _exact_pretrust_cwd, role_name)
-
-        session = PtySession(cols=_PANE_COLS, rows=_PANE_ROWS, parent=self)
-        self._bind_pane_token(pane_tok, session)
-        _t_path = _build_transcript_path(project_ns, role_name)
-        pane._transcript_path = _t_path
-        self._spawn_in_progress = True
-        try:
-            # Tier 2 final re-sample: check InSendMessageEx immediately
-            # before the native ConPTY call to narrow the TOCTOU window.
-            if not self._final_gate_clear():
-                session.setParent(None)
-                session.deleteLater()
-                self._toctou_redefer(
-                    role_name,
-                    cwd,
-                    project,
-                    project_ns,
-                    _from_auto_respawn,
-                    _shard_total,
-                    pane_tok=pane_tok,
-                    resume_uuid=resume_uuid,
-                )
-                return True, f"{role_name} spawn deferred (final re-sample blocked)"
-            _t0 = time.time()
-            share_takkub_env_with_wsl(env)  # #716: codex→bash→WSL keeps pane identity
-            session.spawn(argv=argv, cwd=spawn_cwd, env=env, transcript_path=_t_path)
-            _log_spawn_native_ms(
-                _log_event,
-                role=role_name,
-                project=project_ns,
-                ms=int((time.time() - _t0) * 1000),
-            )
-            pane.attach_session(
-                session,
-                cwd=spawn_cwd,
-                provider_name="claude",
-                session_uuid=_spawned_session_uuid,
-            )
-            self._ps(_ekey_spawn).corrupt_spawn_retries = 0
-            self._ps(_ekey_spawn).session_provider = CLAUDE
-            self._finish_spawn_initial_task(
-                role_name,
-                project_ns,
-                preloaded=_initial_task_preloaded,
-                resumed=resumed,
-            )
-            # Record exits so the auto-respawn watcher knows which project
-            # namespace owned the pane that just died.  Capture the session so
-            # stale exit signals from an old session don't trigger respawn on a
-            # replacement that's already attached.
-            _sess_claude = session
-            # #540: generation-based staleness check — see the matching
-            # comment in _launch_session for why `pane.session is s` always
-            # reads as stale (AgentPane's own exit handler, connected inside
-            # attach_session just above, nulls pane.session on every exit,
-            # not only a replaced one).
-            _pane_gen_claude = pane._session_generation
-            session.processExited.connect(
-                lambda code, r=role_name, c=spawn_cwd, p=project_ns, s=_sess_claude, g=_pane_gen_claude: (
-                    self._on_session_exit(r, c, p, session=s, exit_code=code)
-                    if (pp := self._panes_by_project.get(p, {}).get(r)) is not None
-                    and getattr(pp, "_session_generation", None) == g
-                    else None
-                )
-            )
-            # forget the prior exit record now that we've spawned successfully
-            if _ekey_spawn in self._recent_exits:
-                del self._recent_exits[_ekey_spawn]
-
-            # The TAKKUB_PANE_TOKEN was already injected into env (above the
-            # session.spawn call) and registered in self._pane_tokens at that time.
-            # Nothing more to do here.
-
-            self._auto_trust(role_name, project=project_ns)
-            self.statusChanged.emit()
-            # (The /remote-control auto-bridge was removed 2026-07-10 — it kept
-            # racing claude's /resume picker. Type /remote-control by hand.)
-            # Flush any CC messages queued while Lead was offline.
-            # Give the session a few seconds to reach the ready prompt before
-            # trying to write; if Lead isn't ready yet, _flush_pending_lead_cc
-            # is a no-op and we rely on the next send() or a future spawn to retry.
-            if role_name == LEAD.name and self._pending_lead_cc.get(project_ns):
-                QTimer.singleShot(
-                    5_000,
-                    lambda p=project_ns: self._flush_pending_lead_cc(p),
-                )
-            if role_name == LEAD.name and self._pending_done_notices.get(project_ns):
-                QTimer.singleShot(
-                    5_000,
-                    lambda p=project_ns: self._flush_pending_done_notices(p),
-                )
-            # #303 item 3: deliver any `takkub send` aimed at this role while
-            # it had no pane open yet. Any role, not just Lead — unlike the
-            # two queues above this one isn't Lead-specific, since a teammate
-            # can `takkub send` a peer that hasn't spawned. Cheap to check
-            # unconditionally (a single small JSONL read); only schedules the
-            # flush timer when there's actually something queued.
-            try:
-                from . import role_messages
-
-                _runtime_dir = _from_orch("RUNTIME_DIR")
-                pending, _expired = role_messages.queued_no_pane_for_role(
-                    _runtime_dir, project_ns, role_name
-                )
-                if pending:
-                    QTimer.singleShot(
-                        5_000,
-                        lambda p=project_ns, r=role_name: self._flush_queued_no_pane_messages(p, r),
-                    )
-            except Exception:
-                pass
-            _log_event(
-                "spawn",
-                role=role_name,
-                cwd=spawn_cwd,
-                resumed=resumed,
-            )
-            # Record resume decision as a structured flag so _auto_respawn and
-            # _do_respawn can read it directly without parsing the message string.
-            # (Fix 1: eliminates the "(resumed)" in msg string-coupling fragility.)
-            self._ps(_ekey_spawn).last_spawn_resumed = resumed
-            self._fire_parked_respawn_replay(
-                project_ns, role_name, resumed=resumed, from_auto_respawn=_from_auto_respawn
-            )
-            suffix = " (resumed)" if resumed else ""
-            # If a forced non-claude role (codex/gemini/...) reached the claude
-            # spawn path, its provider was unavailable (toggled off or not
-            # installed) and claude is standing in. Surface that so the user
-            # isn't surprised the pane talks like Claude.
-            from .provider_config import FORCED_ROLES
-
-            if role_name in FORCED_ROLES:
-                suffix += " — claude substitute (provider unavailable)"
-            return True, f"{role_name} spawned in {spawn_cwd}{suffix}"
-        except SpawnTargetCorrupt as e:
-            # #313: the resolved spawn target failed its pre-flight header
-            # check — most commonly an npm self-update rewriting the binary
-            # mid-spawn. That write finishes in seconds, so retry with a
-            # short capped backoff through the existing deferred-spawn queue
-            # instead of failing the pane outright; only fall through to the
-            # normal failure path once retries are exhausted.
-            try:
-                session.setParent(None)
-                session.deleteLater()
-            except Exception:
-                pass
-            _ps_corrupt = self._ps(_exit_key(project_ns, role_name))
-            _ps_corrupt.corrupt_spawn_retries += 1
-            if (
-                not getattr(e, "permanent", False)
-                and _ps_corrupt.corrupt_spawn_retries <= _CORRUPT_SPAWN_MAX_RETRIES
-            ):
-                delay_ms = _CORRUPT_SPAWN_BACKOFF_MS * _ps_corrupt.corrupt_spawn_retries
-                _log_event(
-                    "spawn_target_corrupt_retry",
-                    role=role_name,
-                    project=project_ns,
-                    attempt=_ps_corrupt.corrupt_spawn_retries,
-                    delay_ms=delay_ms,
-                )
-                if role_name != LEAD.name:
-                    getattr(self, "_pane_tokens", {}).pop(pane_tok, None)
-                _deferred = getattr(self, "_spawn_deferred", None)
-                if _deferred is None:
-                    self._spawn_deferred = _deferred = set()
-                _deferred.add(f"{project_ns}::{role_name}")
-                QTimer.singleShot(
-                    delay_ms,
-                    lambda r=role_name, c=cwd, p=project, a=_from_auto_respawn, s=_shard_total, u=resume_uuid: (
-                        self._retry_deferred_spawn(r, c, p, a, s, u)
-                    ),
-                )
-                return (
-                    True,
-                    f"{role_name} spawn deferred (target failed pre-flight check, retrying)",
-                )
-            _log_event(
-                "spawn_native_failed",
-                role=role_name,
-                project=project_ns,
-                ms=int((time.time() - _t0) * 1000) if "_t0" in locals() else None,
-                err=f"{type(e).__name__}: {e}",
-            )
-            if role_name != LEAD.name:
-                getattr(self, "_pane_tokens", {}).pop(pane_tok, None)
-            _reason = _spawn_failure_reason(
-                e, role_name=role_name, project_ns=project_ns, session=None
-            )
-            return (
-                False,
-                f"{_reason} (gave up after {_CORRUPT_SPAWN_MAX_RETRIES} retries)",
-            )
-        except Exception as e:
-            # #139: make a native-spawn failure's actual elapsed time visible
-            # even though it never reached the success log line above — this
-            # is the one place a PtySpawnTimeout (or any other native-call
-            # failure) surfaces its duration.
-            _log_event(
-                "spawn_native_failed",
-                role=role_name,
-                project=project_ns,
-                ms=int((time.time() - _t0) * 1000) if "_t0" in locals() else None,
-                err=f"{type(e).__name__}: {e}",
-            )
-            # #492: capture the reason (incl. any PTY tail) BEFORE tearing
-            # the session down below — display_lines() needs it alive.
-            _reason = _spawn_failure_reason(
-                e, role_name=role_name, project_ns=project_ns, session=session
-            )
-            _ps_failed = self._ps(_exit_key(project_ns, role_name))
-            if _ps_failed.spawn_initial_task_state == "pending":
-                _ps_failed.spawn_initial_task = None
-                _ps_failed.spawn_initial_task_fallback = None
-                _ps_failed.spawn_initial_prompt_file = None
-                _ps_failed.spawn_initial_task_state = ""
-            try:
-                session.terminate(wait=False)
-            except Exception:
-                pass
-            try:
-                session.setParent(None)
-                session.deleteLater()
-            except Exception:
-                pass
-            # Revoke the token if spawn failed — it was registered before the
-            # try block so the pane never actually came up to use it.
-            if role_name != LEAD.name:
-                getattr(self, "_pane_tokens", {}).pop(pane_tok, None)
-            return False, _reason
-        finally:
-            self._spawn_in_progress = False
-            self._drain_spawn_queue()
+        return CLAUDE, _ekey_spawn, _spawned_session_uuid, argv, resumed
 
     def _on_codex_exit(
         self,

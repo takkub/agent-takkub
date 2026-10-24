@@ -2143,116 +2143,19 @@ class LeadInboxMixin:
                 return
             if elapsed_at_session_alive[0] is None:
                 elapsed_at_session_alive[0] = elapsed[0]
-            # #186: recognise "blocked on a prompt that needs a keypress" as
-            # its own state, checked on every poll independent of
-            # elapsed/max_wait_ms — NOT folded into the busy/stall split
-            # below, which only runs once the hard timeout has already fired
-            # and can't tell a periodically-redrawing modal apart from
-            # genuine work output. Computed every poll (not just once) so
-            # the ready-streak gate further down can reuse the live read —
-            # see its (#376 round 2) comment for why: a modal can sit
-            # directly over a footer that still reads idle, so a stale
-            # "already warned" flag must not let the streak keep advancing.
-            _reason = _prompt_block_reason(pane.session)
-            if _reason == "feedback":
-                try:
-                    from .provider_spec import feedback_prompt_skip_key_for
-
-                    _ps_fb = self._ps(f"{project_ns}::{role_name}")
-                    _now_fb = time.time()
-                    if (
-                        _now_fb - _ps_fb.feedback_prompt_dismiss_ts
-                    ) >= _FEEDBACK_SKIP_COOLDOWN_S and (
-                        _ps_fb.feedback_prompt_dismiss_attempts < _FEEDBACK_SKIP_MAX_ATTEMPTS
-                    ):
-                        _prov = (
-                            getattr(getattr(pane, "model", None), "provider_name", None)
-                            or getattr(pane, "provider", None)
-                            or "gemini"
-                        )
-                        _skip_key = feedback_prompt_skip_key_for(_prov) or "0\r"
-                        pane.session.write(_skip_key)
-                        _ps_fb.feedback_prompt_dismiss_ts = _now_fb
-                        _ps_fb.feedback_prompt_dismiss_attempts += 1
-                        _log_event(
-                            "feedback_prompt_auto_skipped",
-                            project=project_ns,
-                            role=role_name,
-                            provider=_prov,
-                            at="delivery",
-                            attempts=_ps_fb.feedback_prompt_dismiss_attempts,
-                        )
-                except Exception:
-                    pass
-            if _reason:
-                prompt_blocked_elapsed[0] += _READY_POLL_INTERVAL_MS
-                if (
-                    not prompt_blocked_warned[0]
-                    and prompt_blocked_elapsed[0] >= _PROMPT_BLOCK_WARNING_GRACE_MS
-                ):
-                    prompt_blocked_warned[0] = True
-                    _log_event(
-                        "task_deliver_blocked_on_prompt",
-                        project=self._resolve_project(project),
-                        role=role_name,
-                        reason=_reason,
-                    )
-                    self._warn_lead_delivery_blocked_prompt(role_name, project, _reason)
-            else:
-                prompt_blocked_elapsed[0] = 0
-            # #271: computed once per poll (not just while the #254 warning
-            # below is still armed) so the elapsed>=max_wait_ms blind-paste
-            # guard further down can reuse the SAME read instead of calling
-            # shows_startup_marker() a second time — a live session would
-            # answer identically either way, but a second call also desyncs
-            # any test double driven by a finite side_effect sequence.
-            try:
-                # #281: boot-phase ONLY. `shows_startup_marker()` also covers
-                # "mid-turn with a queued message", which codex displays the
-                # whole time it is working — reading that as "stuck at boot"
-                # is what warned about (and, under #276's ceiling, would have
-                # killed) panes that were working perfectly well.
-                # #284: widened window — see `shows_boot_phase_marker`'s
-                # docstring for why delivery specifically cannot use the tight
-                # one.
-                from .pty_session import _BOOT_MARKER_TAIL_ROWS
-
-                _still_booting = pane.session.shows_boot_phase_marker(rows=_BOOT_MARKER_TAIL_ROWS)
-                if not isinstance(_still_booting, bool):
-                    # Defensive: a real PtySession always returns bool, but a
-                    # test double / unconfigured mock session returns a
-                    # truthy Mock object by default — never treat that as a
-                    # genuine boot-phase marker hit (same guard as the
-                    # auth-failure check below).
-                    _still_booting = False
-            except Exception:
-                _still_booting = False
-            if not boot_stall_warned[0]:
-                # #254: same "checked every poll, own escalation" shape as
-                # the prompt-block check above, for the same reason —
-                # a continuously-redrawing boot spinner (codex/agy loading a
-                # configured MCP server) keeps seconds_since_output() low
-                # forever, so the busy/stall split further below (which only
-                # engages once the ordinary delivery timeout has already
-                # fired) would silently extend #144's busy-wait for up to
-                # BUSY_WAIT_CEILING_SEC with no further signal. Escalating
-                # far earlier, on a short CONTINUOUS streak, gives Lead
-                # something concrete to act on well before that.
-                if _still_booting:
-                    boot_stall_elapsed[0] += _READY_POLL_INTERVAL_MS
-                    if boot_stall_elapsed[0] >= _orch_attr("BOOT_STALL_GRACE_SEC", 110) * 1000:
-                        boot_stall_warned[0] = True
-                        _log_event(
-                            "task_deliver_boot_stall",
-                            project=self._resolve_project(project),
-                            role=role_name,
-                            elapsed_sec=round(boot_stall_elapsed[0] / 1000, 1),
-                        )
-                        self._warn_lead_delivery_boot_stall(
-                            role_name, project, boot_stall_elapsed[0] / 1000
-                        )
-                else:
-                    boot_stall_elapsed[0] = 0
+            _BOOT_MARKER_TAIL_ROWS, _reason, _still_booting = (
+                LeadInboxMixin._swr_poll_prompt_block_and_stall_warnings(
+                    self,
+                    boot_stall_elapsed,
+                    boot_stall_warned,
+                    pane,
+                    project,
+                    project_ns,
+                    prompt_blocked_elapsed,
+                    prompt_blocked_warned,
+                    role_name,
+                )
+            )
             if _still_booting and _splash_paste_after_ms > 0:
                 # (2026-08-27) Paste onto the MCP boot splash once the
                 # provider's settle window has passed — measured from the
@@ -2748,6 +2651,131 @@ class LeadInboxMixin:
         # just wait out the gate anyway.
         gate_deferred = getattr(pane, "deferred_spawn", False)
         QTimer.singleShot(0 if gate_deferred else _READY_POLL_FIRST_MS, _check)
+
+    def _swr_poll_prompt_block_and_stall_warnings(
+        self,
+        boot_stall_elapsed,
+        boot_stall_warned,
+        pane,
+        project,
+        project_ns,
+        prompt_blocked_elapsed,
+        prompt_blocked_warned,
+        role_name,
+    ):
+        """Per-poll prompt-block detection (#186) and busy/stall warnings (#254/#271) (extracted from `_check`, 2026-10-24)."""
+        _BOOT_MARKER_TAIL_ROWS = None
+        _reason = None
+        _still_booting = None
+        # #186: recognise "blocked on a prompt that needs a keypress" as
+        # its own state, checked on every poll independent of
+        # elapsed/max_wait_ms — NOT folded into the busy/stall split
+        # below, which only runs once the hard timeout has already fired
+        # and can't tell a periodically-redrawing modal apart from
+        # genuine work output. Computed every poll (not just once) so
+        # the ready-streak gate further down can reuse the live read —
+        # see its (#376 round 2) comment for why: a modal can sit
+        # directly over a footer that still reads idle, so a stale
+        # "already warned" flag must not let the streak keep advancing.
+        _reason = _prompt_block_reason(pane.session)
+        if _reason == "feedback":
+            try:
+                from .provider_spec import feedback_prompt_skip_key_for
+
+                _ps_fb = self._ps(f"{project_ns}::{role_name}")
+                _now_fb = time.time()
+                if (_now_fb - _ps_fb.feedback_prompt_dismiss_ts) >= _FEEDBACK_SKIP_COOLDOWN_S and (
+                    _ps_fb.feedback_prompt_dismiss_attempts < _FEEDBACK_SKIP_MAX_ATTEMPTS
+                ):
+                    _prov = (
+                        getattr(getattr(pane, "model", None), "provider_name", None)
+                        or getattr(pane, "provider", None)
+                        or "gemini"
+                    )
+                    _skip_key = feedback_prompt_skip_key_for(_prov) or "0\r"
+                    pane.session.write(_skip_key)
+                    _ps_fb.feedback_prompt_dismiss_ts = _now_fb
+                    _ps_fb.feedback_prompt_dismiss_attempts += 1
+                    _log_event(
+                        "feedback_prompt_auto_skipped",
+                        project=project_ns,
+                        role=role_name,
+                        provider=_prov,
+                        at="delivery",
+                        attempts=_ps_fb.feedback_prompt_dismiss_attempts,
+                    )
+            except Exception:
+                pass
+        if _reason:
+            prompt_blocked_elapsed[0] += _READY_POLL_INTERVAL_MS
+            if (
+                not prompt_blocked_warned[0]
+                and prompt_blocked_elapsed[0] >= _PROMPT_BLOCK_WARNING_GRACE_MS
+            ):
+                prompt_blocked_warned[0] = True
+                _log_event(
+                    "task_deliver_blocked_on_prompt",
+                    project=self._resolve_project(project),
+                    role=role_name,
+                    reason=_reason,
+                )
+                self._warn_lead_delivery_blocked_prompt(role_name, project, _reason)
+        else:
+            prompt_blocked_elapsed[0] = 0
+        # #271: computed once per poll (not just while the #254 warning
+        # below is still armed) so the elapsed>=max_wait_ms blind-paste
+        # guard further down can reuse the SAME read instead of calling
+        # shows_startup_marker() a second time — a live session would
+        # answer identically either way, but a second call also desyncs
+        # any test double driven by a finite side_effect sequence.
+        try:
+            # #281: boot-phase ONLY. `shows_startup_marker()` also covers
+            # "mid-turn with a queued message", which codex displays the
+            # whole time it is working — reading that as "stuck at boot"
+            # is what warned about (and, under #276's ceiling, would have
+            # killed) panes that were working perfectly well.
+            # #284: widened window — see `shows_boot_phase_marker`'s
+            # docstring for why delivery specifically cannot use the tight
+            # one.
+            from .pty_session import _BOOT_MARKER_TAIL_ROWS
+
+            _still_booting = pane.session.shows_boot_phase_marker(rows=_BOOT_MARKER_TAIL_ROWS)
+            if not isinstance(_still_booting, bool):
+                # Defensive: a real PtySession always returns bool, but a
+                # test double / unconfigured mock session returns a
+                # truthy Mock object by default — never treat that as a
+                # genuine boot-phase marker hit (same guard as the
+                # auth-failure check below).
+                _still_booting = False
+        except Exception:
+            _still_booting = False
+        if not boot_stall_warned[0]:
+            # #254: same "checked every poll, own escalation" shape as
+            # the prompt-block check above, for the same reason —
+            # a continuously-redrawing boot spinner (codex/agy loading a
+            # configured MCP server) keeps seconds_since_output() low
+            # forever, so the busy/stall split further below (which only
+            # engages once the ordinary delivery timeout has already
+            # fired) would silently extend #144's busy-wait for up to
+            # BUSY_WAIT_CEILING_SEC with no further signal. Escalating
+            # far earlier, on a short CONTINUOUS streak, gives Lead
+            # something concrete to act on well before that.
+            if _still_booting:
+                boot_stall_elapsed[0] += _READY_POLL_INTERVAL_MS
+                if boot_stall_elapsed[0] >= _orch_attr("BOOT_STALL_GRACE_SEC", 110) * 1000:
+                    boot_stall_warned[0] = True
+                    _log_event(
+                        "task_deliver_boot_stall",
+                        project=self._resolve_project(project),
+                        role=role_name,
+                        elapsed_sec=round(boot_stall_elapsed[0] / 1000, 1),
+                    )
+                    self._warn_lead_delivery_boot_stall(
+                        role_name, project, boot_stall_elapsed[0] / 1000
+                    )
+            else:
+                boot_stall_elapsed[0] = 0
+        return _BOOT_MARKER_TAIL_ROWS, _reason, _still_booting
 
     def _send_when_ready_no_repaste(
         self,

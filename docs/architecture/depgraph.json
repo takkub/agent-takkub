@@ -1,6 +1,6 @@
 {
   "generated_by": "grimp 3.14",
-  "module_count": 366,
+  "module_count": 367,
   "modules": [
     {
       "module": "agent_takkub",
@@ -545,6 +545,7 @@
         "agent_takkub.boot_flow_terminal",
         "agent_takkub.ccc_store",
         "agent_takkub.chatlog_scanner",
+        "agent_takkub.cli_parser",
         "agent_takkub.codex_agents_md",
         "agent_takkub.codex_helper",
         "agent_takkub.config",
@@ -563,7 +564,6 @@
         "agent_takkub.doctor",
         "agent_takkub.gemini_helper",
         "agent_takkub.impact_contract",
-        "agent_takkub.issues",
         "agent_takkub.lead_context",
         "agent_takkub.lead_readiness",
         "agent_takkub.limit_autoresume",
@@ -607,6 +607,18 @@
       ],
       "fan_in": 1,
       "fan_out": 64
+    },
+    {
+      "module": "agent_takkub.cli_parser",
+      "imports": [
+        "agent_takkub.issues",
+        "agent_takkub.skill_learning.cli_commands"
+      ],
+      "imported_by": [
+        "agent_takkub.cli"
+      ],
+      "fan_in": 1,
+      "fan_out": 2
     },
     {
       "module": "agent_takkub.cli_server",
@@ -2970,7 +2982,7 @@
       "imported_by": [
         "agent_takkub.auto_issue_capture",
         "agent_takkub.auto_issue_signals",
-        "agent_takkub.cli",
+        "agent_takkub.cli_parser",
         "agent_takkub.maintenance",
         "agent_takkub.update_worker"
       ],
@@ -5286,9 +5298,10 @@
         "agent_takkub.skill_learning.store"
       ],
       "imported_by": [
-        "agent_takkub.cli"
+        "agent_takkub.cli",
+        "agent_takkub.cli_parser"
       ],
-      "fan_in": 1,
+      "fan_in": 2,
       "fan_out": 6
     },
     {

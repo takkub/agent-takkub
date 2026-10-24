@@ -10,6 +10,30 @@
 > **Core V2** (`agent_takkub.core.*`, epic #309): ไม่ใช่ god-file, เป็น package ที่ **V1 runtime import ตรงอยู่แล้ว 26 module** (secrets/provider-config/brain facade ฯลฯ — ตรวจ 2026-08-31 test-diet audit; ที่ยังไม่สลับคือ `TAKKUB_V2_AUTHORITY` dual-write flag ใน core/storage/v2_authority.py เท่านั้น #362) —
 > ดู `docs/v2/` (`V2_IMPLEMENTATION_PLAN.md` §1 module tree + §3 Phase 1) ไม่ใช่แผนที่นี้.
 
+## สถานะปัจจุบัน (2026-10-24 — นับจาก source จริง; ส่วน 2026-07-11 ด้านล่างเป็นประวัติ ตัวเลขเก่าแล้ว)
+
+| ไฟล์ | LOC | ฟังก์ชันใหญ่สุด (บรรทัด) |
+|---|---|---|
+| `orchestrator.py` | 18,687 | `assign` 759 · `done` 713 · `_assign_dispatch` 668 · `_check_idle_teammates` 524 |
+| `lead_inbox.py` | 5,732 | `_send_when_ready` 1,186 (closure `_check` 567, `_delayed_enter_verified` 466) |
+| `spawn_engine.py` | 5,411 | `_spawn_once` 753 · `_spawn_generic_provider` 607 · `_spawn_claude_resolve_cwd` 364 |
+| `cli.py` | 6,080 | `cmd_assign` 492 |
+| `cli_parser.py` (ใหม่) | 2,190 | `_add_assign` 229 — argparse tree ทั้งหมด, หนึ่ง `_add_<command>` ต่อคำสั่ง |
+| `main_window.py` | 2,057 | `__init__` 304 |
+
+**แตกแล้ว 2026-10-24 (review D, พฤติกรรมเท่าเดิม):** `build_parser` 1,916 → 65 ฟังก์ชันใน `cli_parser.py`
+(parser tree เทียบ dump ก่อน/หลังตรงกันทุก action) · `done` 1,322 → 713 (`_done_move_backlog_card`,
+`_done_record_evidence_and_ledger`, `_done_save_note_and_conversation`, `_done_build_lead_notice`,
+`_done_brain_hook`, `_done_route_lead_notice`, `_done_handoffs`) · `_spawn_once` 2,213 → 753
+(`_spawn_generic_provider` + `_spawn_claude_{resolve_cwd,build_env,settings_flags,model_and_tools,resume_and_trust}`) ·
+`_assign_dispatch` 962 → 668 (`_dispatch_resolve_provider_and_session`, `_dispatch_prepare_task_handoff`, `_dispatch_reset_task_state`) · `_send_when_ready._check` → `_swr_poll_prompt_block_and_stall_warnings`. ทุก method ที่แยกออกมามี body
+AST ตรงกับโค้ดเดิม และถูกเรียกแบบ `Class._x(self, …)` เพื่อให้ test double (`Orchestrator.done(fake)`) ยังใช้ได้.
+
+**ยังไม่แยกเป็นไฟล์ (ตั้งใจ):** method ของ `Orchestrator` อยู่ใน `orchestrator.py` ต่อ เพราะเทสจำนวนมาก
+patch global ของ module (`orch_mod._log_event`, `orch_mod.EVENTS_LOG` …) — ย้าย method ไป module อื่นจะทำให้
+patch เหล่านั้นไม่มีผลแบบเงียบๆ. `_send_when_ready` เป็น poll state machine ที่ทุกขั้น early-return
+แยกต่อต้องเปลี่ยนโครงสร้าง return ก่อน ไม่ใช่ย้ายโค้ด.
+
 ## สถานะ (refreshed 2026-07-11 — verified against source, not the old 2026-06-21 claim)
 
 `orchestrator.py` **4,045 LOC** · `main_window.py` **1,270 LOC** (68 / ~35 top-level methods
