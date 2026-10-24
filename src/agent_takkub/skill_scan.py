@@ -452,7 +452,10 @@ def migrate_legacy_project_skills(
     except ValueError:
         return []
 
-    tracked = _git_tracked_skill_names(project_root)
+    # Lazy: this runs on the Qt thread at every tab open, and the steady state
+    # (every skill already a link) needs no git at all (2026-10-24 review C3).
+    _unset = object()
+    tracked: object = _unset
     records: list[SkillMigration] = []
     for child in sorted(skills_dir.iterdir()):
         name = child.name
@@ -461,6 +464,8 @@ def migrate_legacy_project_skills(
             continue
         if not child.is_dir():
             continue  # flat `<name>.md` legacy layout — leave as-is
+        if tracked is _unset:
+            tracked = _git_tracked_skill_names(project_root)
         if tracked is None:
             records.append(
                 SkillMigration(

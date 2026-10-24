@@ -1125,6 +1125,26 @@ def test_core_internal_store_step_rollback_restores_prior_reapply_state(tmp_path
     assert "acct-2" not in (target / "accounts.jsonl").read_text(encoding="utf-8")
 
 
+def test_core_internal_store_step_reapply_keeps_newer_live_target_data(tmp_path):
+    """2026-10-24 review B1: post-flip writers append into `target`; a re-run
+    must not recopy the frozen `source` over it, and validate must not call
+    the (legitimately different) live file a mismatch."""
+    import os
+
+    step, data_home, source = _core_internal_step_fixture(tmp_path)
+    target = data_home / "system"
+    assert step.apply().ok
+
+    live = target / "accounts.jsonl"
+    live.write_text(live.read_text(encoding="utf-8") + '{"id": "live"}\n', encoding="utf-8")
+    src_mtime = (source / "accounts.jsonl").stat().st_mtime
+    os.utime(live, (src_mtime + 10, src_mtime + 10))
+
+    assert step.validate().ok
+    assert step.apply().ok
+    assert '"live"' in live.read_text(encoding="utf-8")
+
+
 def test_core_internal_store_step_parity_with_real_registries(tmp_path, monkeypatch):
     """#360 parity requirement: the real accounts registry must
     read back identical data once core_home() flips from RUNTIME_DIR/core

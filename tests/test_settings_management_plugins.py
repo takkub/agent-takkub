@@ -1,7 +1,7 @@
 """Characterization + CRUD tests for settings_management's Plugins slice.
 
 Never shells out to the real ``claude`` CLI — ``plugin_installer``'s
-``list_installed``/``list_marketplaces``/``install_by_id``/``uninstall_plugin``
+``list_installed``/``install_by_id``/``uninstall_plugin``
 are monkeypatched to an in-memory fake registry, mirroring how
 ``test_settings_management_mcps.py`` redirects the JSON stores.
 """
@@ -110,7 +110,6 @@ def redirect_stores(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     )
     monkeypatch.setattr(config, "default_claude_config_dir", lambda: cfg_dir)
     monkeypatch.setattr(plugin_installer, "list_installed", fake.list_installed)
-    monkeypatch.setattr(plugin_installer, "list_marketplaces", fake.list_marketplaces)
     monkeypatch.setattr(plugin_installer, "install_by_id", fake.install_by_id)
     monkeypatch.setattr(plugin_installer, "uninstall_plugin", fake.uninstall_plugin)
     yield fake

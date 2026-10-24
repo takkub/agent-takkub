@@ -10,7 +10,6 @@ from agent_takkub.work_discipline import (
     confirmation_digest,
     needs_spec_confirmation,
     task_limits,
-    task_turn_tokens,
 )
 
 
@@ -85,51 +84,20 @@ def test_confirmation_digest_binds_exact_task_text():
 def test_default_limits_apply_and_settings_can_override(tmp_path):
     assert task_limits("normal", tmp_path).minutes == DEFAULT_LIMITS["normal"]["minutes"]
     (tmp_path / "work-discipline.json").write_text(
-        json.dumps({"limits": {"normal": {"minutes": 7, "tokens": 12_000}}}),
+        json.dumps({"limits": {"normal": {"minutes": 7}}}),
         encoding="utf-8",
     )
     assert task_limits("normal", tmp_path).minutes == 7
-    assert task_limits("normal", tmp_path).tokens == 12_000
 
 
 def test_limits_validate_values_and_detect_first_crossing():
-    assert cap_reason(elapsed_s=60, minutes=2, context_tokens=20, token_cap=10) == "tokens"
-    assert cap_reason(elapsed_s=120, minutes=2, context_tokens=0, token_cap=10) == "time"
-    assert cap_reason(elapsed_s=30, minutes=2, context_tokens=0, token_cap=10) is None
+    assert cap_reason(elapsed_s=120, minutes=2) == "time"
+    assert cap_reason(elapsed_s=30, minutes=2) is None
 
 
-def test_default_token_limits_leave_room_for_normal_work_and_catch_extreme_usage():
-    assert DEFAULT_LIMITS["normal"]["tokens"] >= 500_000
-    assert DEFAULT_LIMITS["deep"]["tokens"] < 77_500_000
-    assert (
-        cap_reason(
-            elapsed_s=1,
-            minutes=120,
-            context_tokens=77_500_000,
-            token_cap=DEFAULT_LIMITS["deep"]["tokens"],
-        )
-        == "tokens"
-    )
-
-
-def test_task_turn_tokens_excludes_replayed_cache_and_handles_provider_shapes():
-    assert (
-        task_turn_tokens("codex", {"input": 60_000, "cache_read": 59_000, "output": 100}) == 1_100
-    )
-    assert (
-        task_turn_tokens(
-            "claude", {"input": 800, "cache_creation": 200, "cache_read": 59_000, "output": 100}
-        )
-        == 1_100
-    )
-    assert (
-        task_turn_tokens(
-            "opencode", {"input": 800, "cache_creation": 200, "cache_read": 59_000, "output": 100}
-        )
-        == 1_100
-    )
-    assert task_turn_tokens("gemini", {"input": 900, "output": 100}) is None
-    assert task_turn_tokens("kimi", {"input": 900, "output": 100}) is None
+def test_no_per_task_token_cap():
+    """User 2026-10-24: tasks are never stopped for token usage."""
+    assert all(set(row) == {"minutes"} for row in DEFAULT_LIMITS.values())
 
 
 def test_provider_discipline_gaps_are_visible_in_capability_matrix():
@@ -137,7 +105,7 @@ def test_provider_discipline_gaps_are_visible_in_capability_matrix():
 
     assert capability_matrix(PROVIDER_REGISTRY["codex"])["lead_context_recovery"] == "supported"
     assert capability_matrix(PROVIDER_REGISTRY["gemini"])["lead_context_recovery"] == "unsupported"
-    assert capability_matrix(PROVIDER_REGISTRY["cursor"])["task_token_budget"] == "unsupported"
+    assert "task_token_budget" not in capability_matrix(PROVIDER_REGISTRY["cursor"])
 
 
 def test_assign_does_not_treat_digest_flag_as_user_confirmation(monkeypatch):
@@ -241,15 +209,12 @@ def test_task_budget_watchdog_interrupts_and_logs_once(monkeypatch, tmp_path):
         provider="codex",
         model=SimpleNamespace(provider_name="codex"),
         session=session,
-        current_usage=lambda: {"total": 1_000, "input": 900, "output": 100, "model": "test"},
     )
     state = SimpleNamespace(
         last_assigned_task="ongoing",
         task_budget_halted=False,
         assign_ts=100.0,
         last_assigned_scope="tiny",
-        task_token_total=0,
-        task_last_usage_marker=(999, 900, 100, "test", "older-turn"),
         last_turn_end_ts=99,
     )
     notices = []
@@ -264,76 +229,27 @@ def test_task_budget_watchdog_interrupts_and_logs_once(monkeypatch, tmp_path):
     monkeypatch.setattr(config, "SETTINGS_HOME", tmp_path)
     monkeypatch.setattr(orch_mod, "EVENTS_LOG", tmp_path / "events.log")
     (tmp_path / "work-discipline.json").write_text(
-        json.dumps({"limits": {"tiny": {"minutes": 30, "tokens": 1_000}}}),
+        json.dumps({"limits": {"tiny": {"minutes": 1}}}),
         encoding="utf-8",
     )
     monkeypatch.setenv("TAKKUB_EVENTS_LOG_SYNC", "1")
     orch_mod.Orchestrator._check_task_work_limits(orch, now=101)
-    assert not state.task_budget_halted
-    orch_mod.Orchestrator._check_task_work_limits(orch, now=102)
-    orch_mod.Orchestrator._check_task_work_limits(orch, now=103)
+    assert writes == []  # under the time cap: untouched
+    orch_mod.Orchestrator._check_task_work_limits(orch, now=161)
+    assert not state.task_budget_halted  # first write failed
+    orch_mod.Orchestrator._check_task_work_limits(orch, now=162)
+    orch_mod.Orchestrator._check_task_work_limits(orch, now=163)
     rows = [
         json.loads(line)
         for line in (tmp_path / "events.log").read_text(encoding="utf-8").splitlines()
     ]
     assert rows[0]["event"] == "task_work_budget_exceeded"
     assert rows[0]["provider"] == "codex"
-    assert rows[0]["reason"] == "tokens"
+    assert rows[0]["reason"] == "time"
     assert writes == ["\x03", "\x03"]
     assert state.task_budget_halted
     assert len(notices) == 1
     assert len(rows) == 1
-
-
-def test_task_budget_does_not_sum_repeated_context_snapshots(monkeypatch, tmp_path):
-    from agent_takkub import config
-    from agent_takkub import orchestrator as orch_mod
-
-    snapshot = {
-        "total": 60_000,
-        "input": 60_000,
-        "cache_read": 59_000,
-        "output": 100,
-        "model": "test",
-    }
-    pane = SimpleNamespace(provider="codex", session=None, current_usage=lambda: snapshot)
-    state = SimpleNamespace(
-        last_assigned_task="ongoing",
-        task_budget_halted=False,
-        assign_ts=100.0,
-        last_assigned_scope="tiny",
-        task_token_total=0,
-        # Baseline is the resumed session's latest usage at assignment.
-        task_last_usage_marker=(60_000, 60_000, 100, "test", "baseline"),
-        last_turn_end_ts=99,
-    )
-    orch = SimpleNamespace(
-        _panes_by_project={"proj": {"backend": pane}},
-        _ps=lambda _key: state,
-        _notify_lead=lambda *args, **kwargs: None,
-        taskBudgetNotice=SimpleNamespace(emit=lambda *args: None),
-    )
-    monkeypatch.setattr(config, "SETTINGS_HOME", tmp_path)
-    monkeypatch.setattr(orch_mod, "EVENTS_LOG", tmp_path / "events.log")
-    (tmp_path / "work-discipline.json").write_text(
-        json.dumps({"limits": {"tiny": {"minutes": 30, "tokens": 5_000}}}),
-        encoding="utf-8",
-    )
-
-    # A changed turn-end timestamp alone does not count this same snapshot.
-    snapshot["task_turn_id"] = "baseline"
-    state.last_turn_end_ts = 100
-    orch_mod.Orchestrator._check_task_work_limits(orch, now=101)
-    assert state.task_token_total == 0  # timestamp changes alone are not a new turn
-    # Four distinct turns keep the same 60k context snapshot. Only fresh input
-    # and output are counted; the 59k cached context is replayed, not new work.
-    for turn_end in range(100, 104):
-        snapshot["task_turn_id"] = f"turn-{turn_end}"
-        state.last_turn_end_ts = turn_end
-        orch_mod.Orchestrator._check_task_work_limits(orch, now=turn_end + 1)
-
-    assert state.task_token_total == 4_400
-    assert not state.task_budget_halted
 
 
 def test_budget_resume_uses_a_real_qt_signal_receiver():

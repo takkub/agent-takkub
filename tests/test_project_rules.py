@@ -10,10 +10,17 @@ import pytest
 
 from agent_takkub import config as config_mod
 from agent_takkub.project_rules import (
-    generate_project_rules,
+    collect_result,
+    generate_project_rules_proc,
     read_project_rules,
     write_project_rules,
 )
+
+
+def generate_project_rules(prompt: str, project_name: str) -> str:
+    """The blocking proc → result path the QThread caller runs."""
+    return collect_result(generate_project_rules_proc(prompt, project_name), project_name)
+
 
 # ─────────────────────────────────────────────────────────────────────
 # Fixtures

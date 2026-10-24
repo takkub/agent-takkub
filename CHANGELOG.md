@@ -2,6 +2,28 @@
 
 All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses [SemVer](https://semver.org/).
 
+## [v2.2.31] - 2026-10-24
+
+ผลจาก system review ทั้งระบบ 2026-10-24 (Codex × agy × Lead — `docs/reviews/2026-10-24-system-review.md`)
+
+### Removed (เอาออก)
+
+- **โค้ดขยะ ~3,200 บรรทัด:** โมดูลที่ไม่มีใครเรียก (`core/scheduling/{process_registry,runtime_control}`, `core/brain/sources/{decision_note,knowledge,role_memory}_source`, `core/context_sources/{brain,conversation,resource}_source`, `core/capabilities/{plugin_manager,registry}`, `core/model_catalog/`, `wincred_backend`, `lead_bash_audit`) และฟังก์ชันตาย (`limit_status.Poller`, `performance_settings.from_dict/validate/to_dict`, `pipeline_config.with_providers/provider_disabled_targets`, `generate_project_rules`, `lead_capability_gap`, `provider_models.all_models`, `eligible_providers`, `list_marketplaces` ฯลฯ)
+- **เพดาน token ต่องาน:** ถอดออกทั้งเส้น (ไม่เคยทำงานจริง — อ่าน `pane.provider` ที่ไม่มีอยู่) · user สั่งไม่จำกัด token · เพดานเวลาต่องานยังอยู่เหมือนเดิม
+
+### Fixed (แก้)
+
+- **#918 (ข้อมูลหาย):** migration re-apply ไม่ copy ไฟล์ V1 ที่ค้างไว้ทับข้อมูลสดใน `v2/system/` อีก (copy เฉพาะไฟล์ที่ใหม่กว่า) · Brain JSONL append มี lock + tmp ไม่ชนกัน · cursor ingest ไม่หายเมื่อหลาย role done พร้อมกัน · บรรทัด JSON ที่เขียนไม่จบรอรอบหน้าแทนข้ามทิ้ง
+- **#919:** ingest ตอน `done` หา transcript claude ใน `CLAUDE_CONFIG_DIR` ของ pane เอง และใช้ provider ที่ pane รันอยู่จริง
+- **#920:** codex สองบัญชีที่ quota เท่ากันไม่ถูกรวมเป็นการ์ดเดียว · การ์ด gemini ไม่ error ตอนไฟล์ cache ถูกแทนที่กลางทาง
+- **#921:** headless (`docker stop`) ปิด session แบบรอจบก่อน quit — ไม่เหลือ process กำพร้า · respawn ตอนสลับ provider/cwd ใช้ slot ของ ResourceGovernor เดิม · cache child-process ไม่โตไม่สิ้นสุด · assign ที่ถูกปฏิเสธไม่ทิ้ง PaneState ผี
+- **#922 (security):** ไฟล์ credential (codex `auth.json`, token 21st/penpot) เขียนเป็น 0600 ตั้งแต่สร้าง (เดิม 0644 บน macOS/Linux)
+- **#923:** ปุ่มปิด pane ปิดใน project ของ pane นั้น ไม่ใช่ project ที่ active · feedback-prompt auto-skip ใช้ provider จริงของ pane · language nudge ทำงานกับงานที่ไม่มี task id · ข้อยกเว้น screenshot "diff เล็ก" นับไฟล์ใหม่ที่ยังไม่ track ด้วย
+
+### Performance (UI ไม่ค้าง)
+
+- `done()` หาไฟล์ evidence ด้วย `os.walk` ตัด `node_modules`/`.git` ก่อนเดิน · `taskkill` ของ graft viewer มี timeout 5s · เปิดแท็บไม่เรียก `git ls-files` เมื่อ skill ทุกตัวเป็นลิงก์อยู่แล้ว · log panel ไม่ parse ทุกวินาทีตอนซ่อนอยู่
+
 ## [v2.2.30] - 2026-10-24
 
 ### Added (เพิ่ม)

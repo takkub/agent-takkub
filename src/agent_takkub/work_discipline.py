@@ -13,9 +13,9 @@ from dataclasses import dataclass
 from pathlib import Path
 
 DEFAULT_LIMITS = {
-    "tiny": {"minutes": 30, "tokens": 100_000},
-    "normal": {"minutes": 120, "tokens": 1_000_000},
-    "deep": {"minutes": 360, "tokens": 5_000_000},
+    "tiny": {"minutes": 30},
+    "normal": {"minutes": 120},
+    "deep": {"minutes": 360},
 }
 DEFAULT_LEAD_CACHED_INPUT_TOKENS = 100_000
 _BUSINESS_DOMAIN = re.compile(
@@ -50,31 +50,6 @@ _QUOTED_EXAMPLE = re.compile(
 @dataclass(frozen=True)
 class TaskLimits:
     minutes: int
-    tokens: int
-
-
-def task_turn_tokens(provider: str | None, usage: dict) -> int | None:
-    """Return countable tokens for one completed provider turn.
-
-    The usage badge's ``total`` is a latest-turn/context snapshot, so it must
-    never be accumulated as though it were a session counter. Count fresh
-    input, cache creation, and output for each turn; omit cache reads because
-    they replay prior context and otherwise dominate normal tasks. Codex's
-    ``input`` includes its cached input, unlike Claude/OpenCode, so subtract
-    ``cache_read`` for that provider. Gemini/Cursor and unknown providers have
-    no confirmed usage schema and receive the time ceiling only.
-    """
-    if provider not in {"claude", "codex", "opencode"}:
-        return None
-    try:
-        input_tokens = max(0, int(usage.get("input") or 0))
-        cache_creation = max(0, int(usage.get("cache_creation") or 0))
-        output = max(0, int(usage.get("output") or 0))
-        if provider == "codex":
-            input_tokens = max(0, input_tokens - int(usage.get("cache_read") or 0))
-        return input_tokens + cache_creation + output
-    except (TypeError, ValueError, OverflowError):
-        return None
 
 
 def needs_spec_confirmation(task: str) -> bool:
@@ -157,7 +132,6 @@ def task_limits(scope: str, settings_home: Path | None = None) -> TaskLimits:
     row = values.get(scope, values["normal"])
     return TaskLimits(
         minutes=_bounded_int(row.get("minutes"), DEFAULT_LIMITS[scope]["minutes"], 1, 1440),
-        tokens=_bounded_int(row.get("tokens"), DEFAULT_LIMITS[scope]["tokens"], 1_000, 10_000_000),
     )
 
 
@@ -182,12 +156,9 @@ def _bounded_int(value: object, default: int, minimum: int, maximum: int) -> int
     return min(maximum, max(minimum, parsed))
 
 
-def cap_reason(
-    *, elapsed_s: float, minutes: int, context_tokens: int | None, token_cap: int
-) -> str | None:
-    """Return the first hard limit crossed, if any."""
+def cap_reason(*, elapsed_s: float, minutes: int) -> str | None:
+    """Return the hard limit crossed, if any. Elapsed time is the only cap —
+    per-task token caps were removed (user 2026-10-24: no token limit)."""
     if elapsed_s >= minutes * 60:
         return "time"
-    if context_tokens is not None and context_tokens >= token_cap:
-        return "tokens"
     return None

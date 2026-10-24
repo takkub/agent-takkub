@@ -439,6 +439,14 @@ class TestCodexCardMergeTolerance:
         c = self._row("c", 32.0, "2026-09-22T16:39:13+00:00", "2026-09-28T03:47:03+00:00")
         assert len(pu._merge_identical_account_rows([a, c])) == 2
 
+    def test_two_known_accounts_with_equal_quota_stay_separate(self) -> None:
+        """2026-10-24 review B6: identity already deduped the homes, so two
+        `acct:` rows with identical numbers are two accounts, not one."""
+        a = self._row("a@x", 0.0, "2026-09-22T16:39:13+00:00", "2026-09-28T03:47:03+00:00")
+        b = self._row("b@x", 0.0, "2026-09-22T16:39:13+00:00", "2026-09-28T03:47:03+00:00")
+        assert len(pu._merge_identical_account_rows([a, b])) == 1  # unknown identity: guessed
+        assert len(pu._merge_identical_account_rows([a, b], ["acct:1", "acct:2"])) == 2
+
 
 # ── #710: cloudflared provisioning ──────────────────────────────────────────
 

@@ -55,6 +55,7 @@ def on_pane_done(
     cwd: str | None = None,
     session_id: str | None = None,
     store: ConversationStore | None = None,
+    source_hints: dict[str, str] | None = None,
 ) -> None:
     if not v2_conversation_enabled():
         return
@@ -69,6 +70,7 @@ def on_pane_done(
             cwd=cwd,
             session_id=session_id,
             store=store,
+            source_hints=source_hints,
         )
     except Exception:
         _log.exception(
@@ -90,6 +92,7 @@ def _on_pane_done_impl(
     cwd: str | None,
     session_id: str | None,
     store: ConversationStore | None,
+    source_hints: dict[str, str] | None = None,
 ) -> None:
     cs = store or ConversationStore()
     conversation_id = conversation_id_for(project_id, role)
@@ -97,7 +100,13 @@ def _on_pane_done_impl(
 
     if provider_id and cwd:
         ingest_provider_transcript(
-            provider_id, project_id, conversation_id, cwd=cwd, session_id=session_id, store=cs
+            provider_id,
+            project_id,
+            conversation_id,
+            cwd=cwd,
+            session_id=session_id,
+            store=cs,
+            source_hints=source_hints,
         )
 
     # session_id is None for a subagent (no pane/session of its own) — skip

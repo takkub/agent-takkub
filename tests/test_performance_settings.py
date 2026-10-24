@@ -1,9 +1,6 @@
 from __future__ import annotations
 
 import json
-from dataclasses import replace
-
-import pytest
 
 from agent_takkub import performance_settings
 
@@ -75,10 +72,13 @@ def test_legacy_full_shape_file_migrates_to_mode_only(tmp_path) -> None:
     }
 
 
-def test_hysteresis_and_per_project_invariants() -> None:
-    base = performance_settings.preset("balanced", logical_cpus=16, total_memory_gb=32)
-    with pytest.raises(ValueError, match="per-project"):
-        performance_settings.validate(replace(base, max_heavy_global=1, max_heavy_per_project=2))
+def test_every_preset_keeps_hysteresis_and_per_project_invariants() -> None:
+    for mode in performance_settings.MODES:
+        for cpus, ram in ((4, 8), (16, 32), (32, 128)):
+            s = performance_settings.preset(mode, logical_cpus=cpus, total_memory_gb=ram)
+            assert s.max_heavy_per_project <= s.max_heavy_global
+            assert s.cpu_resume_percent < s.cpu_pause_percent
+            assert s.min_available_ram_percent < s.resume_ram_percent
 
 
 def test_safe_and_maximum_bound_balanced() -> None:
@@ -87,29 +87,6 @@ def test_safe_and_maximum_bound_balanced() -> None:
     maximum = performance_settings.preset("maximum", logical_cpus=32, total_memory_gb=128)
     assert safe.max_heavy_global < balanced.max_heavy_global <= maximum.max_heavy_global
     assert safe.hidden_render_ms > balanced.hidden_render_ms > maximum.hidden_render_ms
-
-
-def test_from_dict_still_defaults_missing_overload_deadband_field() -> None:
-    """#305: `overload_deadband_timeout_s` was added after the schema
-    shipped. `from_dict` (still used to validate a fully-specified
-    `PerformanceSettings` payload, e.g. in tests) defaults it instead of
-    discarding the whole payload the way a genuinely-missing field would."""
-    desired = performance_settings.preset("maximum", logical_cpus=24, total_memory_gb=64)
-    payload = desired.to_dict()
-    del payload["overload_deadband_timeout_s"]
-
-    loaded = performance_settings.from_dict(payload)
-    assert loaded.mode == "maximum"
-    assert loaded.max_heavy_global == desired.max_heavy_global
-    assert loaded.overload_deadband_timeout_s == 120.0
-
-
-def test_overload_deadband_timeout_bounds_are_validated() -> None:
-    base = performance_settings.preset("balanced", logical_cpus=16, total_memory_gb=32)
-    with pytest.raises(ValueError, match="dead-band"):
-        performance_settings.validate(replace(base, overload_deadband_timeout_s=5.0))
-    with pytest.raises(ValueError, match="dead-band"):
-        performance_settings.validate(replace(base, overload_deadband_timeout_s=3_600.0))
 
 
 def test_package_install_limit_not_one_in_balanced_or_maximum() -> None:

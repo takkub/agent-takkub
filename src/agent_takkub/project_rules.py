@@ -5,8 +5,6 @@ Design:
   (e.g. a QThread) can kill it on cancel.  The companion collect_result()
   helper resolves the Popen into a markdown string or raises RuntimeError.
 
-  generate_project_rules() is a convenience wrapper (blocking, no cancel).
-
   read_project_rules() / write_project_rules() are thin wrappers around
   <project_root>/CLAUDE.md.  write_project_rules() writes atomically (temp
   file + replace) so a crash mid-write never leaves a partial file.
@@ -87,13 +85,6 @@ def collect_result(proc: subprocess.Popen, project_name: str) -> str:
             f"claude returned empty output generating project rules for '{project_name}'"
         )
     return content
-
-
-def generate_project_rules(prompt: str, project_name: str) -> str:
-    """Blocking convenience wrapper.  Prefer generate_project_rules_proc() when
-    you need cancel support (e.g. in a QThread)."""
-    proc = generate_project_rules_proc(prompt, project_name)
-    return collect_result(proc, project_name)
 
 
 def read_project_rules(project_root: Path) -> str | None:

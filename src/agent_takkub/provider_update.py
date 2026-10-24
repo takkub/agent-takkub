@@ -184,8 +184,7 @@ def eligibility_gap(name: str) -> UpdateOutcome | None:
     run this boot, else None when it IS eligible (installed and enabled).
 
     Free of subprocess/network cost either way — `_discover` is a PATH probe
-    only. Shared by `eligible_providers()` and the boot splash, which needs
-    the skip REASON (not installed vs. disabled) to label each row.
+    only. Used by the boot splash, which needs the skip REASON (not installed vs. disabled) to label each row.
     """
     from . import provider_state
     from .provider_spec import PROVIDER_REGISTRY
@@ -198,14 +197,6 @@ def eligibility_gap(name: str) -> UpdateOutcome | None:
     if _discover(spec) is None:
         return UpdateOutcome(name, STATUS_SKIPPED_NOT_INSTALLED, "not installed")
     return None
-
-
-def eligible_providers() -> list[str]:
-    """Provider names that are both installed and enabled — the only ones
-    boot-update ever probes or downloads for (user directive 2026-08-20)."""
-    from .provider_spec import PROVIDER_REGISTRY
-
-    return [name for name in PROVIDER_REGISTRY if eligibility_gap(name) is None]
 
 
 def _run(argv: list[str], timeout: float) -> subprocess.CompletedProcess[str]:
@@ -433,8 +424,8 @@ def _update_generic(name: str) -> UpdateOutcome:
 def update_provider(name: str) -> UpdateOutcome:
     """Run the update for *name* and return its terminal outcome.
 
-    Callers MUST have already filtered through `eligible_providers()` for
-    the disabled/not-installed skip to be free of subprocess cost — this
+    Callers should already have filtered through `eligibility_gap()` for the
+    disabled/not-installed skip to be free of subprocess cost — this
     function still defends both checks so it is safe to call directly (e.g.
     from a test or `takkub doctor`) without duplicating that filter.
     """

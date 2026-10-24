@@ -1672,7 +1672,7 @@ class Orchestrator(
     # Teammate crossings also emit this after their safe-idle advisory is queued.
     sessionCapNotice = pyqtSignal(str, str, int, int, bool)
     # project_ns, role, prompt, threshold, is_lead
-    taskBudgetNotice = pyqtSignal(str, str, str, int, int)
+    taskBudgetNotice = pyqtSignal(str, str, str, int)
     # project_ns, role, reason, elapsed_seconds, task_tokens
     # UI-only idle notice. The routine reminder uses this cockpit-side channel
     # for every provider (#103) instead of writing+Enter into a provider PTY.
@@ -3185,7 +3185,13 @@ class Orchestrator(
             )
         if subagent_fanout > 1 and plan:
             return False, "subagent fan-out (--shards N) ใช้กับ --plan ไม่ได้ — ใช้ --fanout pane"
-        _fo_ps = self._ps(_exit_key(role_check_project_ns, role_name))
+        # Peek, don't get-or-create: a later validation can still reject this
+        # assign, and a created PaneState would linger as a ghost (review B13).
+        _fo_key = _exit_key(role_check_project_ns, role_name)
+        try:
+            _fo_ps = self._pane_state.get(_fo_key)
+        except (AttributeError, RuntimeError):
+            _fo_ps = None
         _fo_pane = self._project_panes(role_check_project_ns).get(role_name)
         _fo_pane_alive = bool(
             _fo_pane is not None
@@ -3201,7 +3207,7 @@ class Orchestrator(
             task = wrap_subagent_fanout_task(task, subagent_fanout, _fo_provider, _fo_hint)
             if (
                 _fo_pane_alive
-                and int(_fo_ps.subagent_fanout or 0) <= 0
+                and int(getattr(_fo_ps, "subagent_fanout", 0) or 0) <= 0
                 and _fo_provider == "claude"
             ):
                 # A running claude pane was spawned WITHOUT the Agent tool
@@ -3224,7 +3230,7 @@ class Orchestrator(
                     shards=subagent_fanout,
                 )
             elif not _fo_pane_alive:
-                _fo_ps.subagent_fanout = subagent_fanout
+                self._ps(_fo_key).subagent_fanout = subagent_fanout
             _log_event(
                 "assign_subagent_fanout",
                 role=role_name,
@@ -3236,7 +3242,8 @@ class Orchestrator(
         elif not _fo_pane_alive:
             # One-shot contract: a fresh, fan-out-less assign clears the flag
             # so the next spawn is an ordinary (no-Agent) teammate pane.
-            _fo_ps.subagent_fanout = 0
+            if _fo_ps is not None:
+                _fo_ps.subagent_fanout = 0
 
         from . import decide, task_scope
 
@@ -3257,7 +3264,10 @@ class Orchestrator(
         from .work_discipline import confirmation_digest
 
         _discipline_task_text = task_scope.strip_budget(task)
-        _discipline_ps = self._ps(f"{role_check_project_ns}::{role_name}")
+        try:
+            _discipline_ps = self._pane_state.get(f"{role_check_project_ns}::{role_name}")
+        except (AttributeError, RuntimeError):
+            _discipline_ps = None
         if (
             getattr(_discipline_ps, "task_budget_halted", False)
             and getattr(_discipline_ps, "budget_task_text", "") == _discipline_task_text
@@ -3920,6 +3930,20 @@ class Orchestrator(
         else:
             self._dispatch_next_assignment(project, role)
 
+    def _close_keeping_resource_slot(self, role_name: str, project_ns: str, **close_kwargs) -> None:
+        """Close a pane that `_assign_dispatch` re-spawns itself a moment
+        later for the SAME admitted task (provider/cwd switch, post-done
+        respawn). close() releases the governor slot; the delayed re-dispatch
+        never asks for one, so the respawn ran outside ResourceGovernor
+        (2026-10-24 review B11). Hand the task's slot across the close."""
+        tokens = getattr(self, "_resource_tokens", None)
+        kept = tokens.pop((project_ns, role_name), None) if tokens is not None else None
+        try:
+            self.close(role_name, project=project_ns, **close_kwargs)
+        finally:
+            if kept is not None:
+                self._resource_tokens[(project_ns, role_name)] = kept
+
     def _assign_dispatch(
         self,
         role_name: str,
@@ -4072,9 +4096,10 @@ class Orchestrator(
                 "task": task,
                 "_queued_task_id": _queued_task_id,
             }
-            self.close(
+            Orchestrator._close_keeping_resource_slot(
+                self,
                 role_name,
-                project=project_ns,
+                project_ns,
                 suppress_pipeline=True,
                 suppress_auto_chain=True,
                 preserve_resume=True,
@@ -4272,9 +4297,10 @@ class Orchestrator(
                 note="",
                 kind="assign-provider-switch",
             )
-            self.close(
+            Orchestrator._close_keeping_resource_slot(
+                self,
                 role_name,
-                project=project_ns,
+                project_ns,
                 suppress_pipeline=True,
                 suppress_auto_chain=True,
                 keep_queue=True,
@@ -4601,20 +4627,7 @@ class Orchestrator(
         # picks up screenshots captured for THIS task, not a stale one left
         # over from a previous assignment to the same pane (issue #5).
         ps_assign.assign_ts = time.time()
-        ps_assign.task_token_total = 0
-        ps_assign.task_last_usage_marker = None
         ps_assign.task_budget_halted = False
-        _assigned_pane = self._project_panes(project).get(role_name)
-        _usage_fn = getattr(_assigned_pane, "current_usage", None)
-        _usage = _usage_fn() if callable(_usage_fn) else None
-        if isinstance(_usage, dict) and isinstance(_usage.get("total"), int):
-            ps_assign.task_last_usage_marker = (
-                _usage.get("total"),
-                _usage.get("input"),
-                _usage.get("output"),
-                _usage.get("model"),
-                _usage.get("task_turn_id"),
-            )
         # Task Ledger (A7): write-on-assign — every task, not just long ones,
         # so a role that never calls `takkub done` leaves a visible `[~]` row
         # behind. Degrades on failure (never blocks the assign itself).
@@ -6702,6 +6715,11 @@ class Orchestrator(
         hit = cache.get(pid)
         if hit is not None and not sync and time.monotonic() - hit[0] < self._CHILD_SCAN_TTL_S:
             return list(hit[1])
+        # Dead panes' pids would otherwise stay forever (and a reused pid
+        # could inherit them) — drop anything far past its TTL.
+        _cutoff = time.monotonic() - 20 * self._CHILD_SCAN_TTL_S
+        for _old in [k for k, v in cache.items() if v[0] < _cutoff and k != pid]:
+            cache.pop(_old, None)
         if sync or hit is None:
             procs = self._scan_child_procs(project_ns, role_name, pid)
             cache[pid] = (time.monotonic(), procs)
@@ -8937,7 +8955,9 @@ class Orchestrator(
                 seen = {}
                 self._lang_nudge_sent = seen
             key = (project_ns, from_role)
-            if seen.get(key) == task_id:
+            # `key in seen` first: a task without an id (None) must still get
+            # its one nudge — `seen.get(key) == None` was True on first use.
+            if key in seen and seen[key] == task_id:
                 return ""
             seen[key] = task_id
             return "\n\n" + response_language.LANGUAGE_NUDGE
@@ -9403,6 +9423,7 @@ class Orchestrator(
                 from .core.conversation.facade import on_pane_done as _cv_on_pane_done
                 from .provider_config import effective_provider_for as _cv_provider_for
 
+                _cv_session = getattr(pane, "session", None)
                 threading.Thread(
                     target=_cv_on_pane_done,
                     args=(project_ns, from_role),
@@ -9410,9 +9431,20 @@ class Orchestrator(
                         "note": raw_note,
                         "failed": failed,
                         "task_id": had_task_id,
-                        "provider_id": _cv_provider_for(from_role, project_ns),
+                        # The pane's live provider, not the settings one: a
+                        # quota switch / per-assign --provider differs (#917).
+                        "provider_id": _pane_provider(pane)
+                        or _cv_provider_for(from_role, project_ns),
                         "cwd": getattr(pane, "_session_cwd", None),
                         "session_id": _ps_done.session_uuid,
+                        # 2026-10-24 review B5: claude panes write under their
+                        # own CLAUDE_CONFIG_DIR, not ~/.claude.
+                        "source_hints": {
+                            "config_dir": getattr(_cv_session, "_claude_config_dir", None),
+                            "project_dir_name": getattr(
+                                _cv_session, "_claude_project_dir_name", None
+                            ),
+                        },
                     },
                     daemon=True,
                 ).start()
@@ -15224,8 +15256,8 @@ class Orchestrator(
         )
 
     def _check_task_work_limits(self, now: float) -> None:
-        """Stop assigned work at its configured elapsed/token budget (#655512b2)."""
-        from .work_discipline import cap_reason, task_limits, task_turn_tokens
+        """Stop assigned work at its configured elapsed-time budget (#655512b2)."""
+        from .work_discipline import cap_reason, task_limits
 
         for project_name, project_panes in list(self._panes_by_project.items()):
             for role, pane in list(project_panes.items()):
@@ -15238,32 +15270,9 @@ class Orchestrator(
                     continue
                 scope = getattr(ps, "last_assigned_scope", None) or "normal"
                 limits = task_limits(scope)
-                usage_fn = getattr(pane, "current_usage", None)
-                usage = usage_fn() if callable(usage_fn) else None
-                total = usage.get("total") if isinstance(usage, dict) else None
-                if isinstance(total, int) and total >= 0:
-                    marker = (
-                        total,
-                        usage.get("input"),
-                        usage.get("output"),
-                        usage.get("model"),
-                        usage.get("task_turn_id"),
-                    )
-                    if marker != ps.task_last_usage_marker:
-                        # current_usage() is a latest-turn/context snapshot for
-                        # every meter. The first sample after assignment may be
-                        # a resumed session's old turn, so establish a baseline
-                        # and only count subsequent completed turns.
-                        if ps.task_last_usage_marker is not None:
-                            turn_tokens = task_turn_tokens(getattr(pane, "provider", None), usage)
-                            if turn_tokens is not None:
-                                ps.task_token_total += turn_tokens
-                        ps.task_last_usage_marker = marker
                 reason = cap_reason(
                     elapsed_s=max(0.0, now - started),
                     minutes=limits.minutes,
-                    context_tokens=ps.task_token_total,
-                    token_cap=limits.tokens,
                 )
                 if reason is None:
                     continue
@@ -15283,13 +15292,11 @@ class Orchestrator(
                     provider=_pane_provider(pane),
                     reason=reason,
                     elapsed_seconds=round(max(0.0, now - started)),
-                    tokens=ps.task_token_total,
-                    token_cap=limits.tokens,
                     time_cap_minutes=limits.minutes,
                 )
                 notice = (
                     f"⏸️ [{role}] cockpit หยุด task อัตโนมัติ: เกินเพดาน {reason} "
-                    f"(เวลา {limits.minutes} นาที / tokens {limits.tokens:,}) · "
+                    f"(เวลา {limits.minutes} นาที) · "
                     "ตรวจผลที่ทำไปและให้ผู้ใช้อนุมัติ scope/เพดานใหม่ก่อน assign ต่อ"
                 )
                 self.taskBudgetNotice.emit(
@@ -15297,7 +15304,6 @@ class Orchestrator(
                     role,
                     reason,
                     round(max(0.0, now - started)),
-                    ps.task_token_total,
                 )
                 if role != LEAD.name:
                     self._notify_lead(

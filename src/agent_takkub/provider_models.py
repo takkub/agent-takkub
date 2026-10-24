@@ -94,8 +94,3 @@ def clear_model(provider: str) -> None:
     models = _load()
     models.pop(provider, None)
     _save(models)
-
-
-def all_models() -> dict[str, str]:
-    """Return all configured provider models as a fresh mapping."""
-    return _load()

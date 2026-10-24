@@ -64,19 +64,6 @@ class TestEligibilityGap:
         assert gap is not None
         assert gap.status == pu.STATUS_FAILED
 
-    def test_eligible_providers_filters_registry(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        import agent_takkub.provider_state as provider_state
-
-        monkeypatch.setattr(provider_state, "is_disabled", lambda name: name == "opencode")
-        monkeypatch.setattr(
-            pu, "_discover", lambda spec: None if spec.name == "cursor" else "/bin/x"
-        )
-        result = pu.eligible_providers()
-        assert "opencode" not in result
-        assert "cursor" not in result
-        assert "claude" in result
-        assert set(result) <= set(PROVIDER_REGISTRY)
-
 
 class TestGenericUpdateArgv:
     def test_npm_reused_verbatim(self) -> None:

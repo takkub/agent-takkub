@@ -1078,6 +1078,32 @@ class CoreInternalStoreStep:
             dest.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(src, dest)
 
+    @staticmethod
+    def _copy_newer(src: Path, dest: Path) -> None:
+        """Re-apply copy, per file: only when `dest` is missing or older than
+        `src`. Post-flip the V1 writers resolve into `target`, so a newer
+        `target` file is live data — the old blind overwrite with the frozen
+        `source` copy lost Brain memories/messages and undid account
+        tombstones (2026-10-24 review B1). copy2 keeps mtimes comparable."""
+
+        def one(s: Path, d: Path) -> None:
+            try:
+                if d.exists() and d.stat().st_mtime >= s.stat().st_mtime:
+                    return
+            except OSError:
+                # swallow-ok: unreadable mtime → never overwrite live data blind
+                return
+            d.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(s, d)
+
+        if src.is_dir():
+            for root, _dirs, files in os.walk(src):
+                rel = Path(root).relative_to(src)
+                for fname in files:
+                    one(Path(root) / fname, dest / rel / fname)
+        else:
+            one(src, dest)
+
     def inspect(self) -> StepReport:
         entries = self._present_entries()
         excluded = sorted(self._excluded_names())
@@ -1131,7 +1157,7 @@ class CoreInternalStoreStep:
                 for name in entries:
                     if name in self._REENTRY_EXCLUDED_NAMES:
                         continue
-                    self._copy_entry(source / name, target / name)
+                    self._copy_newer(source / name, target / name)
             else:
                 # First materialization: build the whole tree off to one
                 # side, then a single os.replace() makes it appear whole —
@@ -1180,7 +1206,15 @@ class CoreInternalStoreStep:
             if src.is_dir():
                 if not dest.is_dir():
                     mismatched.append(name)
-            elif not dest.is_file() or dest.read_bytes() != src.read_bytes():
+            elif not dest.is_file():
+                mismatched.append(name)
+            elif dest.stat().st_mtime > src.stat().st_mtime:
+                # B1: copy2 keeps the source mtime, so a NEWER target file was
+                # written live after the flip — `source` is frozen, the bytes
+                # legitimately differ. Calling that a mismatch re-ran apply()
+                # (which used to recopy the stale source over it).
+                continue
+            elif dest.read_bytes() != src.read_bytes():
                 mismatched.append(name)
         ok = not mismatched
         summary = (

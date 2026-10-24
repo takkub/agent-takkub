@@ -41,7 +41,6 @@ def redirect_stores(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     monkeypatch.setattr(config, "_SAFE_PLUGINS", ("claude-plugins-official",))
     entries = [dict(e) for e in _ENTRIES]
     monkeypatch.setattr(plugin_installer, "list_installed", lambda: [dict(e) for e in entries])
-    monkeypatch.setattr(plugin_installer, "list_marketplaces", lambda: [])
 
     def _install(plugin_id: str) -> tuple[bool, str]:
         entries.append({"id": plugin_id, "version": "0.1.0", "scope": "user", "enabled": True})

@@ -1059,7 +1059,6 @@ class AutoResumeMixin:
                 "backlog_id",
                 "assign_ts",
                 "budget_task_text",
-                "task_token_total",
                 "task_spec_confirmation_digest",
             )
         }

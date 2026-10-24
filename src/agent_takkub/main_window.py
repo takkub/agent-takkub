@@ -1204,13 +1204,13 @@ class MainWindow(
         self._status.showMessage(f"⚠ [{project_ns}] {body}", 15_000)
 
     def _on_task_budget_notice(
-        self, project_ns: str, role: str, reason: str, elapsed_s: int, tokens: int
+        self, project_ns: str, role: str, reason: str, elapsed_s: int
     ) -> None:
         """Tell the owner when the cockpit has stopped a task at its cap."""
         elapsed = f"{elapsed_s // 60}m"
         body = (
             f"[{project_ns}] หยุด task ของ {role} ถึงเพดาน {reason} "
-            f"(เวลา {elapsed}, {tokens:,} tokens) — ต้องตรวจและอนุมัติการทำต่อ"
+            f"(เวลา {elapsed}) — ต้องตรวจและอนุมัติการทำต่อ"
         )
         self._status.showMessage(f"⏸️ {body}", 30_000)
         if self._tray and QSystemTrayIcon.isSystemTrayAvailable():

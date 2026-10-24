@@ -35,9 +35,20 @@ class FileSecretBackend:
 
     def set(self, account_id: str, value: str) -> None:
         self._path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = self._path.with_name(self._path.name + ".tmp")
-        tmp.write_text(value, encoding="utf-8")
-        os.replace(tmp, self._path)
+        tmp = self._path.with_name(f"{self._path.name}.{os.getpid()}.tmp")
+        # Credentials: owner-only from creation (umask 022 made them 0644 on
+        # POSIX). On Windows the mode only toggles read-only; ACLs apply.
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                fh.write(value)
+            os.replace(tmp, self._path)
+        except BaseException:
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
+            raise
 
     def delete(self, account_id: str) -> None:
         try:

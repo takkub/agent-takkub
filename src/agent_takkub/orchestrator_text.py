@@ -408,9 +408,46 @@ def _get_git_diff_numstat(cwd: str | None) -> list[tuple[int, int, str]] | None:
                 added = int(parts[0]) if parts[0].isdigit() else 0
                 deleted = int(parts[1]) if parts[1].isdigit() else 0
                 lines.append((added, deleted, parts[2]))
-        return lines
+        untracked = _untracked_numstat(cwd)
+        if untracked is None:
+            return None
+        return lines + untracked
     except Exception:
         return None
+
+
+_UNTRACKED_READ_CAP = 1_000_000
+
+
+def _untracked_numstat(cwd: str) -> list[tuple[int, int, str]] | None:
+    """`git diff HEAD` never lists untracked files, so a brand-new file
+    counted as 0 lines and slipped through the tiny-diff exemption (2026-10-24
+    review B16). Report each one as all-added lines; None = could not tell."""
+    res = subprocess.run(
+        ["git", "ls-files", "--others", "--exclude-standard", "-z"],
+        cwd=cwd,
+        capture_output=True,
+        creationflags=SUBPROCESS_NO_WINDOW,
+        timeout=5,
+    )
+    if res.returncode != 0:
+        return None
+    rows: list[tuple[int, int, str]] = []
+    for raw in res.stdout.split(b"\0"):
+        if not raw:
+            continue
+        rel = raw.decode("utf-8", errors="replace")
+        try:
+            with open(os.path.join(cwd, rel), "rb") as fh:
+                data = fh.read(_UNTRACKED_READ_CAP + 1)
+        except OSError:
+            return None
+        if len(data) > _UNTRACKED_READ_CAP:
+            count = _UNTRACKED_READ_CAP  # far past any tiny threshold
+        else:
+            count = data.count(b"\n") + (1 if data and not data.endswith(b"\n") else 0)
+        rows.append((count, 0, rel))
+    return rows
 
 
 def is_tiny_style_or_text_diff(

@@ -11,7 +11,7 @@ import json
 
 import pytest
 
-from agent_takkub import pipeline_config, provider_state
+from agent_takkub import pipeline_config
 
 
 @pytest.fixture
@@ -319,56 +319,6 @@ def test_load_returns_fresh_objects(tmp_path_json):
     b = pipeline_config.load()
     a["templates"][0]["name"] = "mutated"
     assert b["templates"][0]["name"] == "Feature (UI+API)"
-
-
-# ── provider <-> page bridge helpers (pure, no Qt) ────────────────────
-
-_TOGGLABLE = ("codex", "gemini")
-
-
-def test_with_providers_all_enabled_when_none_disabled():
-    out = pipeline_config.with_providers({"x": 1}, disabled=set(), togglable=_TOGGLABLE)
-    assert out["providers"] == {"codex": True, "gemini": True}
-    assert out["x"] == 1  # original keys preserved
-
-
-def test_with_providers_inverts_disabled_to_off():
-    out = pipeline_config.with_providers({}, disabled={"codex"}, togglable=_TOGGLABLE)
-    assert out["providers"] == {"codex": False, "gemini": True}
-
-
-def test_with_providers_does_not_mutate_input():
-    payload = {"templates": []}
-    pipeline_config.with_providers(payload, disabled={"gemini"}, togglable=_TOGGLABLE)
-    assert "providers" not in payload
-
-
-def test_provider_disabled_targets_inverts_enabled_map():
-    payload = {"providers": {"codex": False, "gemini": True}}
-    assert pipeline_config.provider_disabled_targets(payload, _TOGGLABLE) == {
-        "codex": True,
-        "gemini": False,
-    }
-
-
-def test_provider_disabled_targets_only_present_providers():
-    payload = {"providers": {"codex": True}}
-    assert pipeline_config.provider_disabled_targets(payload, _TOGGLABLE) == {"codex": False}
-
-
-def test_provider_disabled_targets_missing_or_bad_providers_key():
-    assert pipeline_config.provider_disabled_targets({}, _TOGGLABLE) == {}
-    assert pipeline_config.provider_disabled_targets({"providers": "nope"}, _TOGGLABLE) == {}
-    assert pipeline_config.provider_disabled_targets("not a dict", _TOGGLABLE) == {}
-
-
-def test_provider_helpers_round_trip_through_real_togglable():
-    # with_providers (disabled→enabled map) then provider_disabled_targets
-    # (enabled map→disabled targets) recovers the original disabled membership.
-    disabled = {"codex"}
-    composed = pipeline_config.with_providers({}, disabled, provider_state.TOGGLABLE)
-    targets = pipeline_config.provider_disabled_targets(composed, provider_state.TOGGLABLE)
-    assert {p for p, d in targets.items() if d} == disabled
 
 
 # ── is_role_enabled / disabled_roles (#510) ─────────────────────────────

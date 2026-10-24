@@ -903,9 +903,7 @@ def lead_capability_gap_for_provider(provider: str) -> list[str]:
     Pure function of a provider name — no role/project lookup, no disk
     read — so callers can warn reactively on an unsaved selection (e.g. the
     Roles-page Access tab's provider combo while the user is still editing
-    a draft) without touching provider-overrides.json. `lead_capability_gap`
-    below is the disk-backed sibling that resolves the role's *current*
-    provider first, then delegates here.
+    a draft) without touching provider-overrides.json.
     """
     from .provider_spec import PROVIDER_REGISTRY
 
@@ -917,29 +915,12 @@ def lead_capability_gap_for_provider(provider: str) -> list[str]:
     return [label for flag, label in _LEAD_CAPABILITY_LABELS if not getattr(spec, flag, False)]
 
 
-def lead_capability_gap(project: str | None = None) -> tuple[str, list[str]] | None:
-    """Return `(provider, [missing feature labels])` when Lead is currently
-    backed by something other than claude, or `None` when it's claude (no
-    gap).
-
-    Used by the Settings UI (capability-warning badge on the Lead row) and
-    the remote API (mobile mirror/history/resume responses) to tell the
-    user WHY a claude-only feature is unavailable instead of silently doing
-    nothing — issue #101 requires visible degradation, never a silent break.
-    """
-    provider = effective_provider_for("lead", project)
-    if provider == CLAUDE:
-        return None
-    return provider, lead_capability_gap_for_provider(provider)
-
-
 def lead_missing_capability(flag: str, project: str | None = None) -> str | None:
     """Return the current Lead provider's name if it lacks `flag` (a
     `ProviderSpec.supports_*` attribute name), else `None` (claude, or a
     provider that actually has the flag).
 
-    Precise sibling to `lead_capability_gap` for call sites that only care
-    about ONE capability — e.g. `remote/api.py`'s `resume_lead` gates
+    For call sites that only care about ONE capability — e.g. `remote/api.py`'s `resume_lead` gates
     specifically on `"supports_resume"` rather than blocking on ANY gap
     (a future provider could have mirror but not resume, or vice versa).
     """

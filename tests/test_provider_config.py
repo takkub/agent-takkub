@@ -753,37 +753,6 @@ class TestPerProject:
         assert provider_config.provider_for("backend") == "claude"
 
 
-class TestLeadCapabilityGap:
-    """Issue #101: Lead degradation must be visible, never silent. This is
-    the function the Settings UI badge and the remote API responses consult
-    to tell the user which claude-only features are gone."""
-
-    def test_claude_lead_has_no_gap(self) -> None:
-        assert provider_config.lead_capability_gap() is None
-
-    def test_codex_lead_reports_provider_and_missing_features(
-        self, redirect_config_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        redirect_config_path.write_text('{"lead": "codex"}', encoding="utf-8")
-        monkeypatch.setattr(provider_config, "_provider_available", lambda p: True)
-        gap = provider_config.lead_capability_gap()
-        assert gap is not None
-        provider, missing = gap
-        assert provider == "codex"
-        assert missing  # codex_spec has every supports_* flag False
-        assert any("mirror" in m for m in missing)
-
-    def test_unavailable_codex_lead_degrades_to_claude_no_gap(
-        self, redirect_config_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        # Same substitution rule as any other role: an unusable codex Lead
-        # silently falls back to claude at spawn time, so there's no
-        # capability gap to report — the *effective* engine is claude.
-        redirect_config_path.write_text('{"lead": "codex"}', encoding="utf-8")
-        monkeypatch.setattr(provider_config, "_provider_available", lambda p: p == "claude")
-        assert provider_config.lead_capability_gap() is None
-
-
 class TestLeadCapabilityGapForProvider:
     """Pure sibling of lead_capability_gap — no disk/role lookup, so the
     Settings UI can warn on an unsaved combo selection (#101 critic R3

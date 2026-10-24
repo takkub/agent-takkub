@@ -62,6 +62,7 @@ def ingest_provider_transcript(
     session_id: str | None = None,
     store: ConversationStore | None = None,
     cursor_path: Path | None = None,
+    source_hints: dict[str, str] | None = None,
 ) -> IngestResult:
     """Read whatever's new in *provider_id*'s transcript for (cwd, session_id)
     and append it to the conversation. Idempotent — safe to call repeatedly
@@ -72,11 +73,18 @@ def ingest_provider_transcript(
     injection for test isolation, same pattern as
     `core.accounts.switch_log.log_switch(..., store=...)`; `None` uses the
     real default (`core.storage.paths.core_home()`).
+
+    `source_hints` are extra keyword arguments for the adapter's
+    `resolve_source` — claude's `config_dir`/`project_dir_name`: a cockpit
+    pane writes under its own CLAUDE_CONFIG_DIR, not `~/.claude` (2026-10-24
+    review B5). Empty values are dropped.
     """
     adapter = adapter_for(provider_id)
     if adapter is None:
         return IngestResult(0, None, skipped_no_source=True)
-    source_id = adapter.resolve_source(cwd, session_id)
+    # Only claude's resolver takes these; the others keep (cwd, session_id).
+    hints = {k: v for k, v in (source_hints or {}).items() if v} if provider_id == "claude" else {}
+    source_id = adapter.resolve_source(cwd, session_id, **hints)
     if source_id is None:
         return IngestResult(0, None, skipped_no_source=True)
     cs = store or ConversationStore()

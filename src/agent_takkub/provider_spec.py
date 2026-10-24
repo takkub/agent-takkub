@@ -1727,7 +1727,6 @@ CAPABILITY_NAMES: tuple[str, ...] = (
     "provider_isolation",  # provider home isolated under DATA_HOME
     "spec_confirmation",  # assign blocks numeric/business-rule work pending user confirmation
     "task_time_budget",  # hard elapsed-time task stop
-    "task_token_budget",  # hard task stop from provider token usage telemetry
     "quota_reroute",  # quota hit moves work to an available provider
     "lead_context_recovery",  # proactive context reduction for an idle Lead
     "native_tool_interception",  # capability to intercept native child tools/edits via hooks
@@ -1754,11 +1753,6 @@ def capability_matrix(spec: ProviderSpec) -> dict[str, str]:
     m["token_meter"] = "supported" if spec.supports_token_meter else "unsupported"
     m["spec_confirmation"] = "supported"
     m["task_time_budget"] = "supported"
-    # Gemini and Cursor do not currently provide task usage totals through
-    # token_meter; do not imply the token ceiling is enforced for them.
-    m["task_token_budget"] = (
-        "supported" if spec.name in {"claude", "codex", "opencode"} else "unsupported"
-    )
     m["quota_reroute"] = "supported"
     m["lead_context_recovery"] = {
         "claude": "partial",  # idle-age compact only, no cached-input threshold

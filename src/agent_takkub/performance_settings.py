@@ -23,7 +23,7 @@ written in its place.
 from __future__ import annotations
 
 import json
-from dataclasses import MISSING, asdict, dataclass
+from dataclasses import dataclass
 from pathlib import Path
 
 import psutil
@@ -60,9 +60,6 @@ class PerformanceSettings:
     # story as overload_deadband_timeout_s above — defaulted in from_dict
     # for settings files saved before this field existed.
     pane_discard_enabled: bool = True
-
-    def to_dict(self) -> dict:
-        return {"schema_version": SCHEMA_VERSION, **asdict(self)}
 
 
 def path() -> Path:
@@ -135,50 +132,6 @@ def preset(
         25,
         300,
     )
-
-
-def validate(settings: PerformanceSettings) -> PerformanceSettings:
-    if settings.mode not in MODES:
-        raise ValueError("mode must be safe, balanced, or maximum")
-    integer_limits = (
-        settings.max_heavy_global,
-        settings.max_heavy_per_project,
-        settings.max_browser_global,
-        settings.max_build_global,
-        settings.max_test_global,
-        settings.max_package_install_global,
-    )
-    if any(value < 1 or value > 64 for value in integer_limits):
-        raise ValueError("concurrency limits must be between 1 and 64")
-    if settings.max_heavy_per_project > settings.max_heavy_global:
-        raise ValueError("per-project heavy limit cannot exceed the global limit")
-    if not 1 <= settings.cpu_resume_percent < settings.cpu_pause_percent <= 100:
-        raise ValueError("CPU resume threshold must be lower than pause threshold")
-    if not 1 <= settings.min_available_ram_percent < settings.resume_ram_percent <= 100:
-        raise ValueError("RAM resume threshold must be higher than pause threshold")
-    if not 50 <= settings.hidden_render_ms <= 2_000:
-        raise ValueError("background render cadence must be between 50 and 2000 ms")
-    if not 10 <= settings.overload_deadband_timeout_s <= 1_800:
-        raise ValueError("overload dead-band timeout must be between 10 and 1800 seconds")
-    return settings
-
-
-def from_dict(payload: dict) -> PerformanceSettings:
-    values = {
-        name: payload[name] for name in PerformanceSettings.__dataclass_fields__ if name in payload
-    }
-    # Fields with a dataclass default (currently just overload_deadband_timeout_s,
-    # #305) may be absent from a settings file saved before that field existed —
-    # fall back to its default instead of discarding the whole persisted file.
-    missing = set(PerformanceSettings.__dataclass_fields__) - set(values)
-    missing = {
-        name
-        for name in missing
-        if PerformanceSettings.__dataclass_fields__[name].default is MISSING
-    }
-    if missing:
-        raise ValueError(f"missing performance settings: {', '.join(sorted(missing))}")
-    return validate(PerformanceSettings(**values))
 
 
 _DEFAULT_MODE = "balanced"

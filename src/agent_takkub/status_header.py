@@ -1536,14 +1536,20 @@ class StatusHeaderMixin:
             if sys.platform == "win32":
                 from ._win_console import SUBPROCESS_NO_WINDOW
 
-                subprocess.run(
-                    ["taskkill", "/T", "/F", "/PID", str(proc.pid)],
-                    stdin=subprocess.DEVNULL,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                    creationflags=SUBPROCESS_NO_WINDOW,
-                    check=False,
-                )
+                # Bounded: this runs on the Qt thread (viewer replace / app
+                # close) — a wedged taskkill must not freeze the UI (C2).
+                try:
+                    subprocess.run(
+                        ["taskkill", "/T", "/F", "/PID", str(proc.pid)],
+                        stdin=subprocess.DEVNULL,
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                        creationflags=SUBPROCESS_NO_WINDOW,
+                        check=False,
+                        timeout=5,
+                    )
+                except subprocess.TimeoutExpired:
+                    pass
             else:
                 import os
                 import signal

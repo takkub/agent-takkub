@@ -124,6 +124,18 @@ class HeadlessWindow(QObject):
                 self._remote.stop()
             except Exception:
                 pass
+        # wait=True first (mirrors MainWindow.closeEvent): the close path
+        # below tears sessions down on detached daemon threads, which
+        # app.quit() kills mid-tree-kill → orphaned children (review B7).
+        for _role, pane in list(self.orch.iter_all_panes()):
+            session = getattr(pane, "session", None)
+            if session is None:
+                continue
+            try:
+                pane.mark_expected_exit()
+                session.terminate(wait=True)
+            except Exception:
+                pass
         for project_name in list(self._tabs.keys()):
             self._close_project_tab(project_name, confirm=False)
         try:

@@ -116,6 +116,33 @@ def test_concurrent_set_cursor_keeps_every_key(tmp_path):
     assert all(get_cursor("codex", f"src-{i}", path=p) == str(i) for i in range(16))
 
 
+def test_claude_ingest_resolves_inside_the_panes_own_config_dir(tmp_path):
+    """Review B5: a cockpit claude pane writes under its CLAUDE_CONFIG_DIR +
+    CLAUDE_CODE_PROJECT_DIR_NAME, never ~/.claude/projects/<encoded cwd>."""
+    proj = tmp_path / "cfg" / "projects" / "takkub-project-demo"
+    proj.mkdir(parents=True)
+    (proj / "sid-1.jsonl").write_text(
+        json.dumps({"type": "user", "message": {"role": "user", "content": "hi"}}) + "\n",
+        encoding="utf-8",
+    )
+    store = ConversationStore(tmp_path / "conv")
+    res = ingest.ingest_provider_transcript(
+        "claude",
+        "demo",
+        "conv-1",
+        cwd=str(tmp_path / "repo"),
+        session_id="sid-1",
+        store=store,
+        cursor_path=tmp_path / "cursors.json",
+        source_hints={
+            "config_dir": str(tmp_path / "cfg"),
+            "project_dir_name": "takkub-project-demo",
+        },
+    )
+    assert res.source_id == str(proj / "sid-1.jsonl")
+    assert res.ingested == 1
+
+
 def test_claude_read_new_skips_non_conversation_records(tmp_path):
     path = tmp_path / "session.jsonl"
     path.write_text(

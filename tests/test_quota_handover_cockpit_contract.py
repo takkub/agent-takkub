@@ -94,7 +94,6 @@ def test_reroute_keeps_the_registered_task_contract(cockpit, monkeypatch, provid
     ps.backlog_id = "card-1"
     ps.assign_ts = 1234.0
     ps.budget_task_text = "Implement the pending fix"
-    ps.task_token_total = 4321
     ps.task_spec_confirmation_digest = "approved-spec"
     expected = {
         name: getattr(ps, name)
@@ -105,7 +104,6 @@ def test_reroute_keeps_the_registered_task_contract(cockpit, monkeypatch, provid
             "backlog_id",
             "assign_ts",
             "budget_task_text",
-            "task_token_total",
             "task_spec_confirmation_digest",
         )
     }

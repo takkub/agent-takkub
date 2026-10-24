@@ -1018,7 +1018,14 @@ def fetch_gemini_usage() -> ProviderUsage:
     if not candidates:
         return _unsupported("gemini", "no Antigravity quota cache file found (not logged in?)")
 
-    candidates.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+    def _mtime(p: Path) -> float:
+        # A cache file replaced between glob and stat must not fail the card.
+        try:
+            return p.stat().st_mtime
+        except OSError:
+            return -1.0
+
+    candidates.sort(key=_mtime, reverse=True)
 
     try:
         raw = json.loads(candidates[0].read_text(encoding="utf-8"))
@@ -1595,23 +1602,38 @@ def _same_account_usage(a: ProviderUsage, b: ProviderUsage) -> bool:
     return True
 
 
-def _merge_identical_account_rows(rows: list[ProviderUsage]) -> list[ProviderUsage]:
+def _merge_identical_account_rows(
+    rows: list[ProviderUsage], identities: list[str] | None = None
+) -> list[ProviderUsage]:
     """#700: two Codex homes logged into the SAME OpenAI account report the
     same quota window — one card labelled with both homes (``default +
     local (~/.codex)``) says everything two identical cards said, without
     the meter looking broken. Rows that differ in any quota-bearing field
     stay separate; non-codex rows pass through. #709: "same" tolerates the
-    per-probe drift in `resets_at` (see `_same_account_usage`)."""
+    per-probe drift in `resets_at` (see `_same_account_usage`).
+
+    *identities* (parallel to *rows*): a row whose account identity is known
+    (`acct:`) was already deduped per identity in `_codex_targets`, so equal
+    numbers there mean two DIFFERENT accounts (e.g. both fresh at 0%) — never
+    merge it (2026-10-24 review B6). Only unknown-identity rows are guessed."""
     merged: list[ProviderUsage] = []
-    for row in rows:
+    known: set[int] = set()
+    for pos, row in enumerate(rows):
         if row.provider != "codex" or not row.account:
+            merged.append(row)
+            continue
+        if identities is not None and identities[pos].startswith("acct:"):
+            known.add(len(merged))
             merged.append(row)
             continue
         idx = next(
             (
                 i
                 for i, prev in enumerate(merged)
-                if prev.provider == "codex" and prev.account and _same_account_usage(prev, row)
+                if i not in known
+                and prev.provider == "codex"
+                and prev.account
+                and _same_account_usage(prev, row)
             ),
             None,
         )
@@ -1786,24 +1808,28 @@ class ProviderUsageStore:
             account_cache = dict(self._account_cache)
 
         rows: list[ProviderUsage] = []
+        identities: list[str] = []
         for provider in PROVIDER_NAMES:
             if provider not in ("claude", "codex"):
                 usage = provider_cache.get(provider)
                 if usage is not None:
                     rows.append(usage)
+                    identities.append("")
                 continue
             targets = self._known_targets(provider)
             if not targets:  # not discovered yet / none: keep the provider-level row
                 usage = provider_cache.get(provider)
                 if usage is not None:
                     rows.append(usage)
+                    identities.append("")
                 continue
             for target in targets:
                 usage = account_cache.get(_account_key(provider, target))
                 if usage is None:
                     usage = ProviderUsage(provider=provider, status=STATUS_LOADING)
                 rows.append(dataclasses.replace(usage, account=target.account))
-        return _merge_identical_account_rows(rows)
+                identities.append(target.identity or "")
+        return _merge_identical_account_rows(rows, identities)
 
     def _discover_targets(self, provider: str) -> tuple[UsageAccountTarget, ...]:
         """Run account discovery (slow — background threads only) and keep

@@ -38,14 +38,14 @@ class TestProviderModelConfig:
         provider_models.set_model("opencode", "k2.5")
 
         assert provider_models.model_for("codex") == "gpt-6-codex"
-        assert provider_models.all_models() == {
+        assert provider_models._load() == {
             "codex": "gpt-6-codex",
             "opencode": "k2.5",
         }
 
         provider_models.clear_model("codex")
         assert provider_models.model_for("codex") is None
-        assert provider_models.all_models() == {"opencode": "k2.5"}
+        assert provider_models._load() == {"opencode": "k2.5"}
 
     def test_unknown_provider_is_rejected(self) -> None:
         with pytest.raises(ValueError, match="unknown provider"):
@@ -56,7 +56,7 @@ class TestProviderModelConfig:
         provider_models.set_model("cursor", "   ")
 
         assert provider_models.model_for("cursor") is None
-        assert provider_models.all_models() == {}
+        assert provider_models._load() == {}
 
     def test_load_drops_unknown_empty_and_non_string_entries(self, isolated_models) -> None:
         isolated_models.parent.mkdir(parents=True, exist_ok=True)
@@ -75,7 +75,7 @@ class TestProviderModelConfig:
             encoding="utf-8",
         )
 
-        assert provider_models.all_models() == {"opencode": "k2.5"}
+        assert provider_models._load() == {"opencode": "k2.5"}
 
     def test_write_uses_atomic_tmp_replace(self, isolated_models, monkeypatch) -> None:
         # write_data -> write_json_atomic (core.migration.registry_copy_step)

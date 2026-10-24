@@ -7,11 +7,7 @@ per-role enable/disable map and the active-template pointer.
 It deliberately does **not** own provider (codex/gemini) enable/disable — that
 lives in :mod:`provider_state` (``disabled-providers.json``) so the status-bar
 toggle and the 👥 Team chip's Pipeline Builder / Templates views (see
-:mod:`settings_window`) share one source of truth. ``with_providers`` /
-``provider_disabled_targets`` compose the two — used by the old standalone
-Pipeline-Settings dialog (:mod:`pipeline_dialog`, removed 2026-07-10); kept
-here (still covered by tests) as the documented seam for any future caller
-that needs the same provider on/off ↔ pipeline-payload composition.
+:mod:`settings_window`) share one source of truth.
 
 File shape (matches the settings page's JS ``STATE`` / ``TEMPLATES`` 1:1)::
 
@@ -36,7 +32,6 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import Iterable
 from pathlib import Path
 
 from .config import SETTINGS_HOME as _BASE_DIR
@@ -353,27 +348,3 @@ def save(payload: object, project: str | None = None) -> None:
 # provider_state stores ``true = disabled``. These two helpers translate at the
 # boundary so the dialog bridge stays a thin shell.
 # ─────────────────────────────────────────────────────────────────────
-
-
-def with_providers(payload: dict, disabled: Iterable[str], togglable: Iterable[str]) -> dict:
-    """Return ``payload`` plus a ``providers`` map for the page.
-
-    ``providers[name] = True`` means *enabled* (native CLI on) — i.e. the
-    provider is NOT in the ``disabled`` set.
-    """
-    disabled_set = set(disabled)
-    out = dict(payload)
-    out["providers"] = {name: name not in disabled_set for name in sorted(togglable)}
-    return out
-
-
-def provider_disabled_targets(payload: object, togglable: Iterable[str]) -> dict[str, bool]:
-    """Read a saved page payload → ``{provider: desired_disabled}`` (inverted).
-
-    Only includes togglable providers actually present in the payload's
-    ``providers`` map. ``desired_disabled = not enabled``.
-    """
-    providers = payload.get("providers") if isinstance(payload, dict) else None
-    if not isinstance(providers, dict):
-        return {}
-    return {name: not bool(providers[name]) for name in togglable if name in providers}

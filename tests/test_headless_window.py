@@ -145,6 +145,20 @@ class TestOpenCloseProjectTab:
         window._close_project_tab("other")
         assert config.active_project()[0] is None
 
+    def test_shutdown_terminates_sessions_inline_before_quit(
+        self, window: HeadlessWindow, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Review B7: the detached teardown thread dies with app.quit() —
+        shutdown must tear every session down inline (wait=True) first."""
+        monkeypatch.setattr(window.orch, "spawn", MagicMock(return_value=(True, "ok")))
+        window._open_project_tab("proj")
+        session = MagicMock()
+        window._tabs["proj"].lead_pane.session = session
+
+        window.shutdown()
+
+        session.terminate.assert_any_call(wait=True)
+
     def test_close_project_tab_unknown_project(self, window: HeadlessWindow) -> None:
         ok, msg = window._close_project_tab("never-opened")
         assert ok is False

@@ -59,15 +59,6 @@ def read_log_tail(path: Path, tail_bytes: int = _TAIL_BYTES) -> str:
     return raw.decode("utf-8", "replace")
 
 
-_EVENT_COLOR = {
-    "spawn": cockpit_theme.STATE_OK_BRIGHT,
-    "assign": cockpit_theme.STATE_WARN_BRIGHT,
-    "send": cockpit_theme.STATE_INFO_BRIGHT,
-    "done": cockpit_theme.CHIP_REMOTE_ON,
-    "close": cockpit_theme.STATE_EXITED,
-}
-
-
 class LogsPanel(QWidget):
     """A read-only viewport that tails an events.log file."""
 
@@ -148,10 +139,21 @@ class LogsPanel(QWidget):
 
         self._timer = QTimer(self)
         self._timer.setInterval(1_000)
-        self._timer.timeout.connect(self._poll)
+        self._timer.timeout.connect(self._poll_if_visible)
         self._timer.start()
 
         self._poll()  # initial fill
+
+    def _poll_if_visible(self) -> None:
+        # A hidden dock still ticked every second — stat + tail + JSON parse
+        # on the Qt thread for nobody (2026-10-24 review C4). showEvent below
+        # catches up the moment it is shown again.
+        if self.isVisible():
+            self._poll()
+
+    def showEvent(self, event) -> None:
+        super().showEvent(event)
+        self._poll()
 
     # ──────────────────────────────────────────────────────────────
     def _on_event_filter(self, value: str) -> None:

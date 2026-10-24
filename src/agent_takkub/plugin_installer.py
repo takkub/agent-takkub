@@ -303,22 +303,6 @@ def list_installed(timeout: float = 30.0) -> list[dict] | None:
     return data if isinstance(data, list) else None
 
 
-def list_marketplaces(timeout: float = 30.0) -> list[dict] | None:
-    """``claude plugin marketplace list --json`` — registered marketplaces
-    (``name``/``source``/``repo``/``installLocation``). ``None`` on failure."""
-    try:
-        proc = _claude("plugin", "marketplace", "list", "--json", timeout=timeout)
-    except Exception:  # pragma: no cover - binary missing/timeout
-        return None
-    if proc.returncode != 0:
-        return None
-    try:
-        data = json.loads(proc.stdout)
-    except ValueError:
-        return None
-    return data if isinstance(data, list) else None
-
-
 def install_by_id(plugin_id: str, *, timeout: float = 120.0) -> tuple[bool, str]:
     """Install ``<key>`` or ``<key>@<marketplace>`` — the generic counterpart
     to :func:`install_plugin` for plugins outside the curated ``RECOMMENDED``
