@@ -1352,16 +1352,37 @@ class AutoResumeMixin:
         from . import provider_config, provider_state
 
         provider_state.clear_quota_reset(provider)
-        how = (
-            " (probe จาก usage meter: มีบัญชีที่ยังว่าง)"
-            if reason == "reprobe" and provider in ACCOUNT_SWITCH_PROVIDERS
-            else " (probe ยืนยันว่าใช้ได้ก่อนเวลาที่ banner บอก)"
-            if reason == "reprobe"
-            else ""
-        )
-        msg = f"⏰ [auto-resume] {provider} quota reset แล้ว{how} — กลับมาใช้ปกติได้"
+        # #916: a reprobe clears the PROVIDER (some account is free), but a
+        # pane parked under the `park` policy does not switch accounts — it
+        # still sleeps until its own reset_at. "กลับมาใช้ปกติได้" was false
+        # for it; say what actually happens instead.
+        still_parked = self._panes_parked_on(project, provider) if reason == "reprobe" else []
+        if still_parked:
+            roles = ", ".join(r for r, _ in still_parked)
+            wake = max(t for _, t in still_parked)
+            wake_txt = time.strftime("%H:%M", time.localtime(wake)) if wake else "เวลา reset"
+            msg = (
+                f"ℹ️ [auto-resume] {provider} มีบัญชีที่ยังว่าง แต่ {roles} ยัง park ตามนโยบาย "
+                f"park (ไม่สลับบัญชี) — จะปลุกทำงานต่อเองตอน {wake_txt}"
+            )
+        else:
+            roles = ""
+            how = (
+                " (probe จาก usage meter: มีบัญชีที่ยังว่าง)"
+                if reason == "reprobe" and provider in ACCOUNT_SWITCH_PROVIDERS
+                else " (probe ยืนยันว่าใช้ได้ก่อนเวลาที่ banner บอก)"
+                if reason == "reprobe"
+                else ""
+            )
+            msg = f"⏰ [auto-resume] {provider} quota reset แล้ว{how} — กลับมาใช้ปกติได้"
         self._notify_lead(project, msg, note="quota_provider_reset", kind="quota-reset")
-        _log_event("provider_quota_reset", project=project, provider=provider, reason=reason)
+        _log_event(
+            "provider_quota_reset",
+            project=project,
+            provider=provider,
+            reason=reason,
+            still_parked=roles,
+        )
         recovery = self.__dict__.get("_lead_quota_recovery", {}).get(project)
         if recovery is None or recovery[0] != provider:
             return
@@ -1386,6 +1407,20 @@ class AutoResumeMixin:
             manual=True,
             restoring=True,
         )
+
+    def _panes_parked_on(self, project: str, provider: str) -> list[tuple[str, float]]:
+        """(role, reset_at) for live panes of *project* parked for a usage
+        limit while running on *provider* (#916)."""
+        out: list[tuple[str, float]] = []
+        for role, pane in list(self._project_panes(project).items()):
+            ps = self._pane_state.get(f"{project}::{role}")
+            if ps is None or not ps.limit_parked:
+                continue
+            live = getattr(getattr(pane, "model", None), "provider_name", None)
+            if live and live != provider:
+                continue
+            out.append((role, float(ps.rate_limited_until or 0.0)))
+        return out
 
     # ── #663: periodic re-probe of quota-stalled providers ─────────────
     def _maybe_reprobe_quota_stalls(self, now: float) -> None:

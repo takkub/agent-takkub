@@ -2,7 +2,7 @@
 outside `cockpit_theme.py` — every color must be a theme token so the
 light/dark variant switch reaches it. New hex literal? Add a token to
 `cockpit_theme.py` (BOTH `DARK_TOKENS`-backed constant and `LIGHT_TOKENS`
-entry) and import that instead — see `capabilities/skills/cockpit-ui-style/`.
+entry) and import that instead.
 
 Files with a documented reason to keep literals are allowlisted below with
 that reason spelled out; extending the allowlist requires the same.

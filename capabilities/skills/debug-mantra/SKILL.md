@@ -29,6 +29,8 @@ Build a runnable repro before anything else.
 
 Target: a fast (1–5 s), deterministic pass/fail signal. Pin time, seed the RNG, freeze network, isolate filesystem.
 
+Done when you can name **one command you already ran** that asserts the **user's exact symptom** (not "didn't crash" — a nearby failure is the wrong bug). Then minimise: cut inputs/steps one at a time, re-running after each cut.
+
 ## 2. Know the fail path
 
 Once reproducible, find *where* the code breaks and *what stops it from breaking*. The differential narrows the search. Try in this order — escalate only when the prior tactic fails.

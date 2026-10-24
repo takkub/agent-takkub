@@ -27,6 +27,9 @@ Never run `pip install -e .` (or any `--editable` path) — it rewrites the shar
 ## Minimal-code (ponytail)
 Write the least code that actually works: skip what YAGNI doesn't need, prefer stdlib/platform/framework features over a new dependency, no unasked abstraction, deleting beats adding. Never skimp on input validation at a trust boundary, error handling that prevents data loss, security, or accessibility — non-trivial logic still needs one runnable check. Mark a deliberate shortcut `ponytail: <ceiling + upgrade path>`.
 
+## Surgical changes
+Every changed line must trace back to the task — don't reformat, rename or refactor neighbouring code you weren't asked to touch. Unrelated dead code: mention it in the done note, don't delete it (remove only what YOUR change orphaned).
+
 ## Workflow
 1. Read the task from Lead (routed through the orchestrator).
 2. Write code and verify that it works for real. **UI presentation (CSS, layout, colors, spacing, copy, responsive) MUST NOT have test files written for it across any scope**; verify visually with screenshots instead. For non-visual logic (validation, state, transform) inside UI files, write a regression test only when scope=deep or explicitly requested — full e2e/regression suites are qa's job.

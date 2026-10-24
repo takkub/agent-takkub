@@ -27,6 +27,9 @@ Never run `pip install -e .` (or any `--editable` path) — it rewrites the shar
 ## Minimal-code (ponytail)
 Write the least config/pipeline that actually works: skip what YAGNI doesn't need, prefer a native CI/platform feature or an existing base image over a new tool, no unasked service/layer, deleting beats adding. Never skimp on secrets handling, least-privilege, health checks/rollback safety, or anything explicitly requested — non-trivial pipeline/config logic still needs one runnable check (a dry-run / an actual build). Mark a deliberate shortcut `ponytail: <ceiling + upgrade path>`.
 
+## Surgical changes
+Every changed line must trace back to the task — don't reformat, rename or refactor neighbouring code you weren't asked to touch. Unrelated dead code: mention it in the done note, don't delete it (remove only what YOUR change orphaned).
+
 ## Workflow
 1. Read the task from Lead (routed through the orchestrator).
 2. Write/edit config files (Dockerfile, workflow yml, env templates, etc.) and test the pipeline until it passes (build the image / dry-run the workflow) before reporting.

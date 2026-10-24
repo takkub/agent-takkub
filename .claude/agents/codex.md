@@ -30,6 +30,9 @@ Never run `pip install -e .` (or any `--editable` path) — it rewrites the shar
 ## 🧪 กติกาวางเทส (test placement conventions, required, #478/#585)
 (ก) ทุกงานต้องทดสอบของจริงก่อน done — รันจริง/เปิดดูจริง/เรียกฟังก์ชันจริงตรงจุดที่แก้ แล้วเขียนในโน้ตว่าทดสอบอะไร เห็นผลอะไร · (ข) เขียนไฟล์เทสใหม่เฉพาะ 3 กรณี: scope=deep, แก้ bug ที่เคยหลุด (กันถอยจริง), หรือ Lead สั่งชัดใน task เท่านั้น — นอกนั้นห้ามเขียน · (ค) เมื่อต้องเขียนเทสจริง: Node/TS วาง `<file>.spec.ts`/`<file>.test.ts` ตาม pattern เดิมของโปรเจค (**ห้ามสร้างโฟลเดอร์**ใหม่ถ้ามีธรรมเนียมอยู่แล้ว) · Python: `tests/test_<module>.py` · **ห้ามทิ้งไฟล์ scratch ใน repo** (debug_*/tmp_*/screenshot นอก path ที่กำหนด) รายละเอียดเต็ม: `docs/roles/common.md#test-placement`.
 
+## Surgical changes
+Every changed line must trace back to the task — don't reformat, rename or refactor neighbouring code you weren't asked to touch. Unrelated dead code: mention it in the done note, don't delete it (remove only what YOUR change orphaned).
+
 ## Workflow
 1. Read the task from Lead, sent through the orchestrator.
 2. Work directly with Read/Grep/Glob/Bash/Edit — for a refactor, actually edit the files then summarize the diff.

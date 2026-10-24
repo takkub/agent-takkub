@@ -847,6 +847,20 @@ def preset_roles_for_active() -> list[str]:
     return [str(x).strip().lower() for x in raw if str(x).strip()]
 
 
+def project_skill_excludes(project: str | None) -> frozenset[str]:
+    """Global skill names a project opted out of — its `skills_exclude`
+    field in projects.json. `skill_scan.ensure_project_skill_links` neither
+    links these into the project nor keeps an old link of ours, so every
+    provider reading the project's `.claude/skills/` (claude's Skill tool,
+    the AGENTS.md appendix for gemini/opencode/cursor) stops seeing them."""
+    if not project:
+        return frozenset()
+    raw = _project_dict(project).get("skills_exclude") or []
+    if not isinstance(raw, list):
+        return frozenset()
+    return frozenset(str(x).strip().lower() for x in raw if str(x).strip())
+
+
 def lead_cwd(project: str | None = None) -> str | None:
     """Where Lead should spawn.
 

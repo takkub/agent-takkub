@@ -1061,6 +1061,30 @@ class TestQuotaReprobe:
         o._notify_lead.assert_called_once()
         assert "probe" in o._notify_lead.call_args.args[1]
 
+    def test_clear_with_pane_still_parked_does_not_claim_back_to_normal(self, monkeypatch) -> None:
+        """#916: reprobe found a free account, but the `park` policy keeps the
+        Lead asleep until its own reset — the notice must say so."""
+        from agent_takkub import provider_state
+
+        now = time.time()
+        reset_at = now + 3600
+        state = {"claude": reset_at}
+        monkeypatch.setattr(provider_state, "load_quota_resets", lambda: dict(state))
+        monkeypatch.setattr(provider_state, "clear_quota_reset", lambda p: state.pop(p, None))
+        o = _bare_orch()
+        o._resolve_project = lambda p=None: "proj"
+        lead = _pane_alive()
+        lead.model.provider_name = "claude"
+        o._panes_by_project = {"proj": {"lead": lead}}
+        ps = o._ps("proj::lead")
+        ps.limit_parked = True
+        ps.rate_limited_until = reset_at
+        o._on_quota_reprobed("claude", reset_at, "clear", 0.0)
+        msg = o._notify_lead.call_args.args[1]
+        assert "กลับมาใช้ปกติได้" not in msg
+        assert "lead" in msg and "park" in msg
+        assert time.strftime("%H:%M", time.localtime(reset_at)) in msg
+
     def test_superseded_reset_is_ignored(self, monkeypatch) -> None:
         from agent_takkub import provider_state
 

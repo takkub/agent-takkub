@@ -3804,6 +3804,40 @@ def cmd_ccc(args: argparse.Namespace) -> dict:
     }
 
 
+def _skills_exclude_cmd(args: argparse.Namespace, project: str | None) -> dict:
+    """`takkub skills exclude|include NAME…` — edit the project's
+    `skills_exclude` list, then re-run the link repair so the change reaches
+    `.claude/skills/` (every provider's view) right away."""
+    from . import config, skill_scan
+    from .lead_context import _allowed_project_roots
+
+    if not project:
+        return {"ok": False, "error": "no project (pass --project)"}
+    data = config.load_projects()
+    proj = data.get("projects", {}).get(project)
+    if proj is None:
+        return {"ok": False, "error": f"unknown project: {project}"}
+    names = [n.strip().lower() for n in args.names if n.strip()]
+    current = [str(x).strip().lower() for x in proj.get("skills_exclude") or []]
+    if args.skills_cmd == "exclude":
+        current += [n for n in names if n not in current]
+    else:
+        current = [n for n in current if n not in names]
+    if current:
+        proj["skills_exclude"] = current
+    else:
+        proj.pop("skills_exclude", None)
+    if not config.save_projects_json(data):
+        return {"ok": False, "error": "could not save the project store"}
+    errors: list[str] = []
+    for root in _allowed_project_roots(project):
+        errors += skill_scan.ensure_project_skill_links(root, project)
+    print(f"  {project} skills_exclude = {current or '[]'}")
+    for e in errors:
+        print(f"  ⚠ {e}")
+    return {"ok": not errors, "project": project, "skills_exclude": current}
+
+
 def cmd_skills(args: argparse.Namespace) -> dict:
     """`takkub skills list|effective` (#422 item 4) — what skills exist and
     which ones a role actually receives, from the CLI instead of Settings.
@@ -3828,6 +3862,8 @@ def cmd_skills(args: argparse.Namespace) -> dict:
     from .lead_context import _allowed_project_roots
 
     project = args.project or config.active_project()[0]
+    if args.skills_cmd in ("exclude", "include"):
+        return _skills_exclude_cmd(args, project)
     roots = list(_allowed_project_roots(project)) if project else []
     roots.append(config.REPO_ROOT)
     global_dir = config.global_skills_dir()
@@ -7121,6 +7157,13 @@ def build_parser() -> argparse.ArgumentParser:
     sske.add_argument(
         "--provider", default=None, help="override provider (default: resolved for the role)"
     )
+    for _name, _help in (
+        ("exclude", "stop linking these global skills into the project (every provider)"),
+        ("include", "undo `exclude` — link these global skills into the project again"),
+    ):
+        _p = ssk_sub.add_parser(_name, help=_help)
+        _p.add_argument("names", nargs="+", help="skill name(s)")
+        _p.add_argument("--project", default=None, help="project name (default: active project)")
     from .skill_learning.cli_commands import add_parser as _add_learned_parser
 
     _add_learned_parser(ssk_sub)

@@ -80,6 +80,10 @@ def _record_path(provider: str, identity: str) -> Path:
 # ── identity ─────────────────────────────────────────────────────────────────
 
 
+_IDENTITY_TTL_S = 60.0
+_identity_cache: dict[str, tuple[str, float]] = {}
+
+
 def claude_identity(config_dir: Path | str | None) -> str:
     """Stable key for the Claude account behind *config_dir*.
 
@@ -87,7 +91,25 @@ def claude_identity(config_dir: Path | str | None) -> str:
     implicit ``~/.claude`` profile Claude Code may also keep it at
     ``~/.claude.json``); falls back to the resolved config-dir path so a
     logged-out / unreadable dir still gets a private, deterministic record.
+
+    #915: memoised for `_IDENTITY_TTL_S` — the idle watchdog asks on the Qt
+    main thread every tick, and each uncached call parsed a ~170 KB
+    ``.claude.json`` plus two ``resolve()`` calls; under disk pressure each of
+    those blocked the UI for seconds. An account switch uses a different
+    config dir (one per account), so only a re-login inside the same dir is
+    seen up to a minute late.
     """
+    key = str(config_dir)
+    hit = _identity_cache.get(key)
+    now = time.monotonic()
+    if hit is not None and now - hit[1] < _IDENTITY_TTL_S:
+        return hit[0]
+    ident = _claude_identity_uncached(config_dir)
+    _identity_cache[key] = (ident, now)
+    return ident
+
+
+def _claude_identity_uncached(config_dir: Path | str | None) -> str:
     cd = Path(config_dir) if config_dir is not None else Path.home() / ".claude"
     candidates = [cd / ".claude.json"]
     try:

@@ -84,8 +84,8 @@ def test_scan_skills_tolerates_malformed_yaml(tmp_path: Path) -> None:
 
 
 def test_scan_skills_finds_real_repo_skill() -> None:
-    """The task spec's concrete example — cockpit-ui-style must exist for
-    real under this checkout's .claude/skills/ and be discoverable.
+    """A shipped skill (debug-mantra) must exist for real under this
+    checkout's .claude/skills/ and be discoverable.
 
     Uses the real on-disk repo root directly, not `config.REPO_ROOT` — the
     global test-isolation fixture (tests/conftest.py's `_isolate_runtime`)
@@ -95,7 +95,7 @@ def test_scan_skills_finds_real_repo_skill() -> None:
     real_repo_root = Path(__file__).resolve().parents[1]
     result = scan_skills(real_repo_root)
     names = {s.name for s in result}
-    assert "cockpit-ui-style" in names
+    assert "debug-mantra" in names
 
 
 class TestValidateSkillName:
@@ -531,6 +531,50 @@ class TestGlobalSkills:
             assert ensure_project_skill_links(project, ns) == []
             assert (project / ".claude" / "skills" / "shared-skill" / "SKILL.md").is_file()
             assert [s.name for s in scan_skills(project)] == ["shared-skill"]
+
+    def test_skills_exclude_drops_global_skill_from_that_project_only(
+        self, tmp_path: Path, central_home: Path, global_home: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        (global_home / "company-flow").mkdir(parents=True)
+        (global_home / "company-flow" / "SKILL.md").write_text(
+            "---\nname: company-flow\ndescription: global\n---\nbody", encoding="utf-8"
+        )
+        monkeypatch.setattr(
+            config,
+            "project_skill_excludes",
+            lambda ns: frozenset({"company-flow"}) if ns == "proj_a" else frozenset(),
+        )
+        proj_a, proj_b = tmp_path / "proj_a", tmp_path / "proj_b"
+        for p in (proj_a, proj_b):
+            p.mkdir()
+        # proj_a had the link from before it opted out — it must go away.
+        (proj_a / ".claude" / "skills").mkdir(parents=True)
+        assert (
+            skill_scan._make_link(
+                global_home / "company-flow", proj_a / ".claude" / "skills" / "company-flow"
+            )
+            is None
+        )
+        assert ensure_project_skill_links(proj_a, "proj_a") == []
+        assert ensure_project_skill_links(proj_b, "proj_b") == []
+        assert scan_skills(proj_a) == []
+        assert [s.name for s in scan_skills(proj_b)] == ["company-flow"]
+        assert (global_home / "company-flow" / "SKILL.md").is_file()
+
+    def test_skills_exclude_never_removes_a_real_project_folder(
+        self, tmp_path: Path, central_home: Path, global_home: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        (global_home / "mine").mkdir(parents=True)
+        (global_home / "mine" / "SKILL.md").write_text(
+            "---\nname: mine\n---\nglobal", encoding="utf-8"
+        )
+        monkeypatch.setattr(config, "project_skill_excludes", lambda ns: frozenset({"mine"}))
+        project = tmp_path / "proj"
+        real = project / ".claude" / "skills" / "mine"
+        real.mkdir(parents=True)
+        (real / "SKILL.md").write_text("---\nname: mine\n---\nuser's own", encoding="utf-8")
+        assert ensure_project_skill_links(project, "proj") == []
+        assert "user's own" in (real / "SKILL.md").read_text(encoding="utf-8")
 
     def test_project_skill_wins_name_collision_with_global(
         self, tmp_path: Path, central_home: Path, global_home: Path

@@ -193,6 +193,23 @@ def _prune_dangling_store_links(project_root: Path) -> None:
                     continue
 
 
+def _unlink_excluded_skill(project_root: Path, store_dir: Path) -> None:
+    """Drop `<project_root>/.claude/skills/<name>` when it is OUR link to
+    *store_dir* (the project opted the skill out via `skills_exclude`). A real
+    folder or a link pointing anywhere else is the user's — left alone."""
+    from .native_skills import _is_link
+
+    dst = project_root / ".claude" / "skills" / store_dir.name
+    if not _is_link(dst):
+        return
+    try:
+        ours = os.path.realpath(str(dst)) == os.path.realpath(str(store_dir))
+    except OSError:
+        return
+    if ours:
+        _remove_link(dst)
+
+
 def ensure_project_skill_links(project_root: str | Path, project_ns: str) -> list[str]:
     """(Re)create the junction/symlink for every central skill of
     `project_ns` into `<project_root>/.claude/skills/`. Idempotent — safe to
@@ -225,9 +242,13 @@ def ensure_project_skill_links(project_root: str | Path, project_ns: str) -> lis
     # project's own so a same-named project skill (already present at the
     # link path by now) wins; `_link_skill_into_project` never clobbers.
     global_dir = config.global_skills_dir()
+    excluded = config.project_skill_excludes(project_ns)
     if global_dir.is_dir():
         for skill_dir in sorted(global_dir.iterdir()):
             if not skill_dir.is_dir() or not (skill_dir / "SKILL.md").is_file():
+                continue
+            if skill_dir.name.lower() in excluded:
+                _unlink_excluded_skill(project_root, skill_dir)
                 continue
             err = _link_skill_into_project(
                 project_root, project_ns, skill_dir.name, central=skill_dir

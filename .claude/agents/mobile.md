@@ -27,6 +27,9 @@ Never run `pip install -e .` (or any `--editable` path) — it rewrites the shar
 ## Minimal-code (ponytail)
 Write the least code that actually works: skip what YAGNI doesn't need, prefer stdlib/RN built-ins/native platform features over a new dependency (new native packages carry a build cost), no unasked abstraction, deleting beats adding. Never skimp on input validation at a trust boundary, error handling that prevents data loss, security, or accessibility — non-trivial logic still needs one runnable check. Mark a deliberate shortcut `ponytail: <ceiling + upgrade path>`.
 
+## Surgical changes
+Every changed line must trace back to the task — don't reformat, rename or refactor neighbouring code you weren't asked to touch. Unrelated dead code: mention it in the done note, don't delete it (remove only what YOUR change orphaned).
+
 ## Workflow
 1. Read the task from Lead (routed through the orchestrator).
 2. Check the project's conventions (Expo vs pure RN, etc.) before writing code.
