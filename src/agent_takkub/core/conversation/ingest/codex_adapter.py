@@ -1,14 +1,9 @@
 """Codex ingest adapter — WRAPS `codex_helper.py`'s session-root/cwd-match
-helpers (`codex_sessions_root`, `normalize_codex_cwd`, `read_codex_session_meta`,
-`resolve_codex_jsonl_for_cwd`); none of them are modified.
-
-`_parse_record` below is a DELIBERATE, DOCUMENTED duplicate of
-`remote/notify.py::_codex_record_message`'s two-schema parsing (codex 0.147
-replaced `event_msg.agent_message`/`.user_message` with
-`event_msg.item_completed` — the schema-drift lesson from #206/D3, see
-`docs/v2/CURRENT_ARCHITECTURE_AUDIT.md` §2.9). It cannot import
-`remote/notify.py` directly — that module pulls in `PyQt6.QtCore`, and
-`core.*` must stay importable standalone (`core-is-bottom-layer` contract).
+helpers (`codex_sessions_root`, `normalize_codex_cwd`, `read_codex_session_meta`)
+AND its record parser (`parse_codex_record_message`, both the <= 0.146 and the
+0.147 `item_completed` schema) — the same function the Remote mirror
+(`remote/notify.py`) uses. It used to be a documented duplicate here and the
+two drifted (this copy dropped `local_image` blocks); 2026-10-24 review D.
 Both schema branches are exercised by `tests/test_core_conversation_ingest.py`
 so a future schema flip fails a **core** test, not just the remote-mirror one.
 """
@@ -23,6 +18,7 @@ from agent_takkub.codex_helper import (
     codex_archived_sessions_root,
     codex_sessions_root,
     normalize_codex_cwd,
+    parse_codex_record_message,
     read_codex_session_meta,
 )
 from agent_takkub.core.models.conversation import MessageRole
@@ -32,23 +28,7 @@ from .base import IngestBatch, IngestedMessage
 
 provider_id = "codex"
 
-_ITEM_KINDS = {"AgentMessage": MessageRole.ASSISTANT, "UserMessage": MessageRole.USER}
-
-
-def _item_text(item: dict) -> str:
-    blocks = item.get("content")
-    if not isinstance(blocks, list):
-        return ""
-    parts: list[str] = []
-    for block in blocks:
-        if not isinstance(block, dict):
-            continue
-        if str(block.get("type") or "").strip().lower() != "text":
-            continue
-        text = block.get("text")
-        if isinstance(text, str) and text.strip():
-            parts.append(text.strip())
-    return "\n".join(parts)
+_KIND_ROLE = {"me": MessageRole.USER, "lead": MessageRole.ASSISTANT}
 
 
 def _record_epoch(rec: dict) -> float | None:
@@ -72,32 +52,12 @@ def _record_epoch(rec: dict) -> float | None:
 
 
 def _parse_record(rec: dict) -> IngestedMessage | None:
-    if rec.get("type") != "event_msg":
+    parsed = parse_codex_record_message(rec)
+    if parsed is None:
         return None
-    payload = rec.get("payload")
-    if not isinstance(payload, dict):
-        return None
-    created_at = _record_epoch(rec)
-    ptype = payload.get("type")
-    if ptype == "item_completed":  # codex >= 0.147 (TUI)
-        item = payload.get("item")
-        if not isinstance(item, dict):
-            return None
-        role = _ITEM_KINDS.get(str(item.get("type") or "").strip())
-        if role is None:
-            return None
-        text = _item_text(item)
-        return IngestedMessage(role=role, text=text, created_at=created_at) if text else None
-    if ptype == "agent_message":  # codex <= 0.146, and `codex exec` on 0.147
-        role = MessageRole.ASSISTANT
-    elif ptype == "user_message":
-        role = MessageRole.USER
-    else:
-        return None
-    text = payload.get("message")
-    if not isinstance(text, str) or not text.strip():
-        return None
-    return IngestedMessage(role=role, text=text.strip(), created_at=created_at)
+    return IngestedMessage(
+        role=_KIND_ROLE[parsed[0]], text=parsed[1], created_at=_record_epoch(rec)
+    )
 
 
 def _scan_root_for_cwd(root: Path, wanted_cwd: str, wanted_id: str) -> str | None:

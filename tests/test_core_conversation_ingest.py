@@ -116,6 +116,32 @@ def test_concurrent_set_cursor_keeps_every_key(tmp_path):
     assert all(get_cursor("codex", f"src-{i}", path=p) == str(i) for i in range(16))
 
 
+def test_codex_ingest_and_remote_mirror_share_one_parser(tmp_path):
+    """Review D: the core copy drifted from remote/notify.py (dropped
+    `local_image`). Both now call codex_helper.parse_codex_record_message."""
+    from agent_takkub import codex_helper
+    from agent_takkub.remote import notify
+
+    rec = {
+        "type": "event_msg",
+        "payload": {
+            "type": "item_completed",
+            "item": {
+                "type": "UserMessage",
+                "content": [
+                    {"type": "text", "text": "look"},
+                    {"type": "local_image", "path": "C:/shot.png"},
+                ],
+            },
+        },
+    }
+    p = tmp_path / "rollout-x.jsonl"
+    p.write_text(json.dumps(rec) + "\n", encoding="utf-8")
+    batch = ingest.adapter_for("codex").read_new(str(p), None)
+    assert [m.text for m in batch.messages] == ["look\n![รูปแนบ](<C:/shot.png>)"]
+    assert notify._codex_record_message is codex_helper.parse_codex_record_message
+
+
 def test_claude_ingest_resolves_inside_the_panes_own_config_dir(tmp_path):
     """Review B5: a cockpit claude pane writes under its CLAUDE_CONFIG_DIR +
     CLAUDE_CODE_PROJECT_DIR_NAME, never ~/.claude/projects/<encoded cwd>."""

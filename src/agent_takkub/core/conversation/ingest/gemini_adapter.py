@@ -1,22 +1,17 @@
 """Gemini/agy ingest adapter — WRAPS `gemini_helper.py`'s transcript
 resolvers (`resolve_antigravity_transcript` for the 2026-08 agy store,
 `resolve_gemini_jsonl_for_cwd` for the legacy `~/.gemini/tmp/.../chats/`
-one); neither is modified. New-store is tried first, same precedence
-`remote/notify.py::_resolve_gemini_jsonl_path` uses and documents (a machine
-that has used both keeps the old, frozen files around).
-
-`_parse_record`'s two record shapes (agy `USER_INPUT`/`PLANNER_RESPONSE`,
-and legacy `$set.messages` snapshot / incremental `{"type": "user"|"gemini"}`)
-are a DELIBERATE, DOCUMENTED duplicate of `remote/notify.py`'s
-`_antigravity_record_message`/`_gemini_record_messages`/`_gemini_message_text`
-— same `core-is-bottom-layer` boundary reason as `codex_adapter.py`'s
-docstring.
+one) AND its record parsers (`parse_antigravity_record_message`,
+`gemini_record_messages`, `gemini_message_text`) — the same functions the
+Remote mirror (`remote/notify.py`) uses, so a schema change is fixed in one
+place (2026-10-24 review D removed the old duplicate here). New-store is
+tried first, same precedence `remote/notify.py::_resolve_gemini_jsonl_path`
+uses (a machine that has used both keeps the old, frozen files around).
 """
 
 from __future__ import annotations
 
 import json
-import re
 from pathlib import Path
 
 from agent_takkub import gemini_helper
@@ -27,49 +22,14 @@ from .base import IngestBatch, IngestedMessage
 
 provider_id = "gemini"
 
-_ANTIGRAVITY_KINDS = {"USER_INPUT": MessageRole.USER, "PLANNER_RESPONSE": MessageRole.ASSISTANT}
-_USER_REQUEST_RE = re.compile(r"<USER_REQUEST>(.*?)</USER_REQUEST>", re.DOTALL)
+_KIND_ROLE = {"me": MessageRole.USER, "lead": MessageRole.ASSISTANT}
 
 
 def _antigravity_message(rec: dict) -> IngestedMessage | None:
-    role = _ANTIGRAVITY_KINDS.get(str(rec.get("type") or "").strip())
-    if role is None:
+    parsed = gemini_helper.parse_antigravity_record_message(rec)
+    if parsed is None:
         return None
-    content = rec.get("content")
-    if not isinstance(content, str) or not content.strip():
-        return None
-    if role is MessageRole.USER:
-        match = _USER_REQUEST_RE.search(content)
-        if match is None:
-            return None
-        content = match.group(1)
-    text = content.strip()
-    return IngestedMessage(role=role, text=text) if text else None
-
-
-def _legacy_message_text(message: dict) -> str:
-    content = message.get("content", [])
-    if isinstance(content, str):
-        return content.strip()
-    if isinstance(content, dict):
-        content = [content]
-    if not isinstance(content, list):
-        return ""
-    parts = [
-        item if isinstance(item, str) else item.get("text", "")
-        for item in content
-        if isinstance(item, str) or (isinstance(item, dict) and isinstance(item.get("text"), str))
-    ]
-    return "\n".join(p.strip() for p in parts if p.strip()).strip()
-
-
-def _legacy_messages(rec: dict) -> list[dict]:
-    patch = rec.get("$set")
-    if isinstance(patch, dict) and isinstance(patch.get("messages"), list):
-        return [m for m in patch["messages"] if isinstance(m, dict)]
-    if rec.get("id") and rec.get("type") in ("user", "gemini"):
-        return [rec]
-    return []
+    return IngestedMessage(role=_KIND_ROLE[parsed[0]], text=parsed[1])
 
 
 def resolve_source(cwd: str, session_id: str | None) -> str | None:
@@ -97,14 +57,14 @@ def read_new(source_id: str, cursor: str | None) -> IngestBatch:
         if antigravity is not None:
             messages.append(antigravity)
             continue
-        for m in _legacy_messages(rec):
+        for m in gemini_helper.gemini_record_messages(rec):
             mid = str(m.get("id", "")).strip()
             if mid:
                 if mid in seen_legacy_ids:
                     continue
                 seen_legacy_ids.add(mid)
             mtype = m.get("type")
-            text = _legacy_message_text(m)
+            text = gemini_helper.gemini_message_text(m)
             if not text:
                 continue
             if mtype == "user" and not text.startswith("<session_context>"):

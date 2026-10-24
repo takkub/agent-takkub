@@ -685,3 +685,69 @@ def gemini_exec(
             'pane instead: `takkub assign --role gemini "<task>"`.'
         )
     return True, out
+
+
+# ── transcript record parsing (ONE copy — Remote mirror + V2 ingest) ──────
+# Used to be duplicated in remote/notify.py and
+# core/conversation/ingest/gemini_adapter.py (2026-10-24 review D).
+#
+# agy (Antigravity CLI): one JSON object per line, e.g.
+#   {"type":"USER_INPUT","source":"USER_EXPLICIT","content":"<USER_REQUEST>…"}
+#   {"type":"PLANNER_RESPONSE","source":"MODEL","content":"…","thinking":"…"}
+# `thinking` is never forwarded, and CHECKPOINT / CONVERSATION_HISTORY /
+# ERROR_MESSAGE records are dropped — state dumps, not conversation.
+ANTIGRAVITY_KINDS = {"USER_INPUT": "me", "PLANNER_RESPONSE": "lead"}
+USER_REQUEST_RE = re.compile(r"<USER_REQUEST>(.*?)</USER_REQUEST>", re.DOTALL)
+
+
+def parse_antigravity_record_message(rec: object) -> tuple[str, str] | None:
+    if not isinstance(rec, dict):
+        return None
+    kind = ANTIGRAVITY_KINDS.get(str(rec.get("type") or "").strip())
+    if kind is None:
+        return None
+    content = rec.get("content")
+    if not isinstance(content, str) or not content.strip():
+        return None
+    if kind == "me":
+        # agy wraps the human's text in <USER_REQUEST> and appends its own
+        # <ADDITIONAL_METADATA>/<USER_SETTINGS_CHANGE> blocks — keep only
+        # what the user actually typed.
+        match = USER_REQUEST_RE.search(content)
+        if match is None:
+            return None
+        content = match.group(1)
+    text = content.strip()
+    return (kind, text) if text else None
+
+
+def gemini_record_messages(rec: object) -> list[dict]:
+    """Legacy Gemini CLI chat store: messages in one snapshot (`$set`) or
+    incremental record."""
+    if not isinstance(rec, dict):
+        return []
+    patch = rec.get("$set")
+    if isinstance(patch, dict) and isinstance(patch.get("messages"), list):
+        return [m for m in patch["messages"] if isinstance(m, dict)]
+    if rec.get("id") and rec.get("type") in ("user", "gemini"):
+        return [rec]
+    return []
+
+
+def gemini_message_text(message: dict) -> str:
+    """Visible text of a legacy message, excluding function call/response
+    payloads."""
+    content = message.get("content", [])
+    if isinstance(content, str):
+        return content.strip()
+    if isinstance(content, dict):
+        content = [content]
+    if not isinstance(content, list):
+        return ""
+    parts: list[str] = []
+    for item in content:
+        if isinstance(item, str):
+            parts.append(item)
+        elif isinstance(item, dict) and isinstance(item.get("text"), str):
+            parts.append(item["text"])
+    return "\n".join(part.strip() for part in parts if part.strip()).strip()

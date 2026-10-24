@@ -531,3 +531,73 @@ def codex_exec(
         tail = (proc.stderr or proc.stdout or "codex exec failed").strip()
         return False, tail
     return True, (proc.stdout or "").strip()
+
+
+# ── transcript record parsing (ONE copy — Remote mirror + V2 ingest) ──────
+# Codex 0.147 replaced `event_msg.agent_message`/`.user_message` with
+# `event_msg.item_completed` (#206/D3); `codex exec` (originator
+# `codex_exec`) still writes the old one while `codex-tui` writes only the
+# new one. This used to be duplicated in remote/notify.py and
+# core/conversation/ingest/codex_adapter.py, and the copies drifted (core
+# dropped `local_image` blocks) — 2026-10-24 review D.
+CODEX_ITEM_KINDS = {"AgentMessage": "lead", "UserMessage": "me"}
+
+
+def codex_item_text(item: dict) -> str:
+    """Join the text blocks of a Codex >= 0.147 message item.
+
+    Local image blocks become Markdown paths (the phone's inline preview).
+    Block-type casing differs per item (`Text` on agent messages, `text` on
+    user ones), so the comparison is case-insensitive.
+    """
+    blocks = item.get("content")
+    if not isinstance(blocks, list):
+        return ""
+    parts: list[str] = []
+    images: list[str] = []
+    for block in blocks:
+        if not isinstance(block, dict):
+            continue
+        block_type = str(block.get("type") or "").strip().lower()
+        if block_type == "local_image":
+            path = block.get("path")
+            if isinstance(path, str) and path.strip():
+                images.append(f"![รูปแนบ](<{path.strip()}>)")
+            continue
+        if block_type != "text":
+            continue
+        text = block.get("text")
+        if isinstance(text, str) and text.strip():
+            parts.append(text.strip())
+    return "\n".join([*parts, *images])
+
+
+def parse_codex_record_message(rec: object) -> tuple[str, str] | None:
+    """`("me" | "lead", text)` for a user/assistant record, else None.
+    Reasoning/CommandExecution/tool items are dropped by the kind map, so
+    the text-only contract holds for both schemas."""
+    if not isinstance(rec, dict) or rec.get("type") != "event_msg":
+        return None
+    payload = rec.get("payload")
+    if not isinstance(payload, dict):
+        return None
+    ptype = payload.get("type")
+    if ptype == "item_completed":  # codex >= 0.147 (TUI)
+        item = payload.get("item")
+        if not isinstance(item, dict):
+            return None
+        kind = CODEX_ITEM_KINDS.get(str(item.get("type") or "").strip())
+        if kind is None:
+            return None
+        text = codex_item_text(item)
+        return (kind, text) if text else None
+    if ptype == "agent_message":  # codex <= 0.146, and `codex exec` on 0.147
+        kind = "lead"
+    elif ptype == "user_message":
+        kind = "me"
+    else:
+        return None
+    text = payload.get("message")
+    if not isinstance(text, str) or not text.strip():
+        return None
+    return kind, text.strip()

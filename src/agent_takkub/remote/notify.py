@@ -54,7 +54,6 @@ way, per-project, for the same reason.
 from __future__ import annotations
 
 import json
-import re
 import sqlite3
 import threading
 import time
@@ -66,7 +65,7 @@ from pathlib import Path
 
 from PyQt6.QtCore import QObject, QTimer
 
-from .. import gemini_helper
+from .. import codex_helper, gemini_helper
 from ..orchestrator_text import _exit_key
 from ..user_profile import config_dir_for
 from . import config as _remote_config
@@ -1035,66 +1034,11 @@ def _resolve_gemini_jsonl_path(project_ns: str, session_uuid: str | None) -> Pat
     return _resolve_gemini_jsonl_for_cwd(cwd, session_uuid)
 
 
-# ── agy (Antigravity CLI) transcript records ──────────────────────────────
-# One JSON object per line, e.g.
-#   {"type":"USER_INPUT","source":"USER_EXPLICIT","content":"<USER_REQUEST>…"}
-#   {"type":"PLANNER_RESPONSE","source":"MODEL","content":"…","thinking":"…"}
-# `thinking` is never forwarded (same text-only contract as every other
-# provider), and CHECKPOINT / CONVERSATION_HISTORY / ERROR_MESSAGE records
-# are dropped — they carry state dumps, not conversation.
-_ANTIGRAVITY_KINDS = {"USER_INPUT": "me", "PLANNER_RESPONSE": "lead"}
-_USER_REQUEST_RE = re.compile(r"<USER_REQUEST>(.*?)</USER_REQUEST>", re.DOTALL)
-
-
-def _antigravity_record_message(rec: object) -> tuple[str, str] | None:
-    if not isinstance(rec, dict):
-        return None
-    kind = _ANTIGRAVITY_KINDS.get(str(rec.get("type") or "").strip())
-    if kind is None:
-        return None
-    content = rec.get("content")
-    if not isinstance(content, str) or not content.strip():
-        return None
-    if kind == "me":
-        # agy wraps the human's text in <USER_REQUEST> and appends its own
-        # <ADDITIONAL_METADATA>/<USER_SETTINGS_CHANGE> blocks — mirror only
-        # what the user actually typed.
-        match = _USER_REQUEST_RE.search(content)
-        if match is None:
-            return None
-        content = match.group(1)
-    text = content.strip()
-    return (kind, text) if text else None
-
-
-def _gemini_record_messages(rec: object) -> list[dict]:
-    """Return messages represented by one snapshot or incremental record."""
-    if not isinstance(rec, dict):
-        return []
-    patch = rec.get("$set")
-    if isinstance(patch, dict) and isinstance(patch.get("messages"), list):
-        return [m for m in patch["messages"] if isinstance(m, dict)]
-    if rec.get("id") and rec.get("type") in ("user", "gemini"):
-        return [rec]
-    return []
-
-
-def _gemini_message_text(message: dict) -> str:
-    """Extract visible text while excluding function call/response payloads."""
-    content = message.get("content", [])
-    if isinstance(content, str):
-        return content.strip()
-    if isinstance(content, dict):
-        content = [content]
-    if not isinstance(content, list):
-        return ""
-    parts: list[str] = []
-    for item in content:
-        if isinstance(item, str):
-            parts.append(item)
-        elif isinstance(item, dict) and isinstance(item.get("text"), str):
-            parts.append(item["text"])
-    return "\n".join(part.strip() for part in parts if part.strip()).strip()
+# ── agy (Antigravity CLI) / legacy Gemini transcript records ──────────────
+# Parsed by gemini_helper (one copy shared with the V2 conversation ingest).
+_antigravity_record_message = gemini_helper.parse_antigravity_record_message
+_gemini_record_messages = gemini_helper.gemini_record_messages
+_gemini_message_text = gemini_helper.gemini_message_text
 
 
 def _read_recent_gemini_messages(path: Path, limit: int = _DEFAULT_HISTORY_LIMIT) -> list[dict]:
@@ -1505,67 +1449,10 @@ def _resolve_codex_jsonl_path(
 # originator `codex_exec`) still writes it in 0.147 while `codex-tui` — the
 # mode every cockpit pane actually runs — writes only the new one. That split
 # is exactly why the schema flip went unnoticed: every exec-based probe kept
-# passing while Mobile went silent for `Lead = codex`.
-_CODEX_ITEM_KINDS = {"AgentMessage": "lead", "UserMessage": "me"}
-
-
-def _codex_item_text(item: dict) -> str:
-    """Join the text blocks of a Codex >= 0.147 message item.
-
-    Local image blocks become Markdown paths for the phone's inline preview.
-    Block-type casing differs per item (`Text` on agent messages,
-    `text` on user ones), so the comparison is case-insensitive.
-    """
-    blocks = item.get("content")
-    if not isinstance(blocks, list):
-        return ""
-    parts: list[str] = []
-    images: list[str] = []
-    for block in blocks:
-        if not isinstance(block, dict):
-            continue
-        block_type = str(block.get("type") or "").strip().lower()
-        if block_type == "local_image":
-            path = block.get("path")
-            if isinstance(path, str) and path.strip():
-                images.append(f"![รูปแนบ](<{path.strip()}>)")
-            continue
-        if block_type != "text":
-            continue
-        text = block.get("text")
-        if isinstance(text, str) and text.strip():
-            parts.append(text.strip())
-    return "\n".join([*parts, *images])
-
-
-def _codex_record_message(rec: object) -> tuple[str, str] | None:
-    if not isinstance(rec, dict) or rec.get("type") != "event_msg":
-        return None
-    payload = rec.get("payload")
-    if not isinstance(payload, dict):
-        return None
-    ptype = payload.get("type")
-    if ptype == "item_completed":  # codex >= 0.147 (TUI)
-        item = payload.get("item")
-        if not isinstance(item, dict):
-            return None
-        # Reasoning/CommandExecution/tool items land here too and are dropped
-        # by the kind map, so the text-only contract still holds.
-        kind = _CODEX_ITEM_KINDS.get(str(item.get("type") or "").strip())
-        if kind is None:
-            return None
-        text = _codex_item_text(item)
-        return (kind, text) if text else None
-    if ptype == "agent_message":  # codex <= 0.146, and `codex exec` on 0.147
-        kind = "lead"
-    elif ptype == "user_message":
-        kind = "me"
-    else:
-        return None
-    text = payload.get("message")
-    if not isinstance(text, str) or not text.strip():
-        return None
-    return kind, text.strip()
+# passing while Mobile went silent for `Lead = codex`. Parsed by codex_helper
+# (one copy shared with the V2 conversation ingest).
+_codex_item_text = codex_helper.codex_item_text
+_codex_record_message = codex_helper.parse_codex_record_message
 
 
 def _codex_live_text_blocks(rec: dict) -> list[str]:
