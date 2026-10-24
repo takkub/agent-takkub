@@ -15,17 +15,16 @@ from __future__ import annotations
 import json
 import os
 import re
-import shutil
-import subprocess
 import sys
 from pathlib import Path
-
-from ._win_console import SUBPROCESS_NO_WINDOW
 
 _MAX_EVENT_CHARS = 16000
 _SESSION_PREVIEW_CHARS = 140
 _TEAMMATE_TASK_PREFIXES = ("[ROLE:", "[SESSION GOAL")
-_REMOTE_PREFIX = "[remote → lead] "
+from .provider_cli_common import find_executable, run_cli  # noqa: E402
+from .provider_cli_common import live_user_payload as _live_user_payload  # noqa: E402
+from .provider_cli_common import strip_remote_prefix as _strip_remote_prefix  # noqa: E402
+
 _HISTORY_MAX_BYTES = 256 * 1024
 
 _TOOL_ACTIVITY: dict[str, str] = {
@@ -95,14 +94,9 @@ def _default_cursor_paths() -> list[Path]:
 def find_cursor_executable() -> str | None:
     """Return the absolute path to the `cursor-agent` / `agent` binary, or None when it
     can't be located."""
-    for name in ("cursor-agent", "cursor-agent.exe", "agent", "agent.exe"):
-        on_path = shutil.which(name)
-        if on_path:
-            return on_path
-    for candidate in _default_cursor_paths():
-        if candidate.is_file():
-            return str(candidate)
-    return None
+    return find_executable(
+        ("cursor-agent", "cursor-agent.exe", "agent", "agent.exe"), _default_cursor_paths()
+    )
 
 
 def cursor_projects_root() -> Path:
@@ -321,18 +315,6 @@ def cursor_live_text_blocks(rec: dict) -> list[str]:
     return []
 
 
-def _strip_remote_prefix(text: str) -> str:
-    return text[len(_REMOTE_PREFIX) :] if text.startswith(_REMOTE_PREFIX) else text
-
-
-def _live_user_payload(text: str | None) -> list[dict]:
-    if not text:
-        return []
-    remote = text.startswith(_REMOTE_PREFIX)
-    clean = _strip_remote_prefix(text).strip()
-    return [{"text": clean[:_MAX_EVENT_CHARS], "remote": remote}] if clean else []
-
-
 def cursor_live_users(rec: dict) -> list[dict]:
     """Extract user message payload from a Cursor JSONL record for SSE streaming."""
     parsed = parse_cursor_record_message(rec)
@@ -493,24 +475,9 @@ def cursor_exec(
     if model:
         argv = [binary, "--model", model, "-f", "--print", prompt]
 
-    try:
-        proc = subprocess.run(
-            argv,
-            cwd=cwd,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            check=False,
-            encoding="utf-8",
-            errors="replace",
-            creationflags=SUBPROCESS_NO_WINDOW,
-        )
-    except subprocess.TimeoutExpired:
-        return False, "cursor exec timed out"
-    except FileNotFoundError:
-        return False, "cursor executable not found"
-    except OSError as e:
-        return False, f"cursor exec failed: {e}"
-
+    run = run_cli(argv, cwd=cwd, timeout=timeout, label="cursor")
+    if run.proc is None:
+        return False, run.error
+    proc = run.proc
     combined = ((proc.stdout or "") + "\n" + (proc.stderr or "")).strip()
     return proc.returncode == 0, combined

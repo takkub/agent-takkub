@@ -26,11 +26,8 @@ import json
 import os
 import re
 import shutil
-import subprocess
 import sys
 from pathlib import Path
-
-from ._win_console import SUBPROCESS_NO_WINDOW
 
 
 def codex_home(project: str = "") -> Path:
@@ -520,26 +517,12 @@ def codex_exec(
         # treats `<prompt>` as the trailing positional, not as a
         # value for --model.
         argv = [binary, "exec", "--model", model, prompt]
-    try:
-        proc = subprocess.run(
-            argv,
-            cwd=cwd,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            check=False,
-            encoding="utf-8",
-            errors="replace",
-            creationflags=SUBPROCESS_NO_WINDOW,
-        )
-    except subprocess.TimeoutExpired:
-        return False, "codex exec timed out"
-    except FileNotFoundError:
-        # PATH had the binary at which() time but it disappeared
-        # between probes — rare but worth surfacing distinctly.
-        return False, "codex binary disappeared from PATH"
-    except Exception as e:
-        return False, f"codex exec failed: {e}"
+    from .provider_cli_common import run_cli
+
+    run = run_cli(argv, cwd=cwd, timeout=timeout, label="codex")
+    if run.proc is None:
+        return False, run.error
+    proc = run.proc
     if proc.returncode != 0:
         # Codex sometimes writes the response to stdout AND an
         # error to stderr (rate-limit, auth blob expired). Hand

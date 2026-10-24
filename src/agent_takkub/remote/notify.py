@@ -481,24 +481,9 @@ def _lead_user_text(rec: dict) -> str | None:
 # `orchestrator.send()`'s header for a remote-originated Lead message
 # (`from_role="remote"`) — stripped from history so the PWA doesn't echo its
 # own routing prefix back as part of the bubble text.
-_REMOTE_PREFIX = "[remote → lead] "
-
-
-def _strip_remote_prefix(text: str) -> str:
-    return text[len(_REMOTE_PREFIX) :] if text.startswith(_REMOTE_PREFIX) else text
-
-
-def _live_user_payload(text: str | None) -> list[dict]:
-    """Normalize a provider-owned user record for the live SSE stream.
-
-    ``remote`` lets the PWA suppress only its own optimistic echo while still
-    showing identical prompts deliberately typed twice on the desktop.
-    """
-    if not text:
-        return []
-    remote = text.startswith(_REMOTE_PREFIX)
-    clean = _strip_remote_prefix(text).strip()
-    return [{"text": clean[:_MAX_EVENT_CHARS], "remote": remote}] if clean else []
+from ..provider_cli_common import REMOTE_PREFIX as _REMOTE_PREFIX  # noqa: E402
+from ..provider_cli_common import live_user_payload as _live_user_payload  # noqa: E402
+from ..provider_cli_common import strip_remote_prefix as _strip_remote_prefix  # noqa: E402
 
 
 def _claude_live_users(rec: dict) -> list[dict]:

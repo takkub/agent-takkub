@@ -1,6 +1,6 @@
 {
   "generated_by": "grimp 3.14",
-  "module_count": 365,
+  "module_count": 366,
   "modules": [
     {
       "module": "agent_takkub",
@@ -69,12 +69,9 @@
         "agent_takkub.browser_chrome",
         "agent_takkub.claude_update",
         "agent_takkub.cli",
-        "agent_takkub.codex_helper",
         "agent_takkub.core.secrets.backends.keychain_backend",
-        "agent_takkub.cursor_helper",
         "agent_takkub.doctor",
         "agent_takkub.editor_widget",
-        "agent_takkub.gemini_helper",
         "agent_takkub.git_changes_service",
         "agent_takkub.git_status",
         "agent_takkub.graft_autobuild",
@@ -92,6 +89,7 @@
         "agent_takkub.project_file_index",
         "agent_takkub.project_rules",
         "agent_takkub.project_wizard",
+        "agent_takkub.provider_cli_common",
         "agent_takkub.provider_install",
         "agent_takkub.provider_model_refresh",
         "agent_takkub.provider_probe",
@@ -117,7 +115,7 @@
         "agent_takkub.verify",
         "agent_takkub.worktree_manager"
       ],
-      "fan_in": 53,
+      "fan_in": 51,
       "fan_out": 0
     },
     {
@@ -725,9 +723,9 @@
     {
       "module": "agent_takkub.codex_helper",
       "imports": [
-        "agent_takkub._win_console",
         "agent_takkub.codex_account",
-        "agent_takkub.config"
+        "agent_takkub.config",
+        "agent_takkub.provider_cli_common"
       ],
       "imported_by": [
         "agent_takkub.accounts_adapter",
@@ -2560,7 +2558,7 @@
     {
       "module": "agent_takkub.cursor_helper",
       "imports": [
-        "agent_takkub._win_console"
+        "agent_takkub.provider_cli_common"
       ],
       "imported_by": [
         "agent_takkub.core.conversation.ingest.cursor_adapter",
@@ -2821,7 +2819,7 @@
     {
       "module": "agent_takkub.gemini_helper",
       "imports": [
-        "agent_takkub._win_console"
+        "agent_takkub.provider_cli_common"
       ],
       "imported_by": [
         "agent_takkub.cli",
@@ -3369,7 +3367,8 @@
     {
       "module": "agent_takkub.opencode_helper",
       "imports": [
-        "agent_takkub.config"
+        "agent_takkub.config",
+        "agent_takkub.provider_cli_common"
       ],
       "imported_by": [
         "agent_takkub.core.conversation.ingest.opencode_adapter",
@@ -3382,7 +3381,7 @@
         "agent_takkub.usage_ledger"
       ],
       "fan_in": 8,
-      "fan_out": 1
+      "fan_out": 2
     },
     {
       "module": "agent_takkub.openviking_cleanup",
@@ -3923,6 +3922,21 @@
       "fan_out": 1
     },
     {
+      "module": "agent_takkub.provider_cli_common",
+      "imports": [
+        "agent_takkub._win_console"
+      ],
+      "imported_by": [
+        "agent_takkub.codex_helper",
+        "agent_takkub.cursor_helper",
+        "agent_takkub.gemini_helper",
+        "agent_takkub.opencode_helper",
+        "agent_takkub.remote.notify"
+      ],
+      "fan_in": 5,
+      "fan_out": 1
+    },
+    {
       "module": "agent_takkub.provider_config",
       "imports": [
         "agent_takkub._pty_backend",
@@ -4341,6 +4355,7 @@
         "agent_takkub.gemini_helper",
         "agent_takkub.opencode_helper",
         "agent_takkub.orchestrator_text",
+        "agent_takkub.provider_cli_common",
         "agent_takkub.provider_config",
         "agent_takkub.provider_spec",
         "agent_takkub.remote.config",
@@ -4353,7 +4368,7 @@
         "agent_takkub.remote.api"
       ],
       "fan_in": 2,
-      "fan_out": 14
+      "fan_out": 15
     },
     {
       "module": "agent_takkub.remote.reports",

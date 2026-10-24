@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import json
 import os
-import shutil
 import sqlite3
 import sys
 import time
@@ -25,7 +24,9 @@ from pathlib import Path
 _MAX_EVENT_CHARS = 16000
 _SESSION_PREVIEW_CHARS = 140
 _TEAMMATE_TASK_PREFIXES = ("[ROLE:", "[SESSION GOAL")
-_REMOTE_PREFIX = "[remote → lead] "
+from .provider_cli_common import find_executable  # noqa: E402
+from .provider_cli_common import live_user_payload as _live_user_payload  # noqa: E402
+from .provider_cli_common import strip_remote_prefix as _strip_remote_prefix  # noqa: E402
 
 _TOOL_ACTIVITY: dict[str, str] = {
     "read": "reading",
@@ -77,14 +78,7 @@ def _default_opencode_paths() -> list[Path]:
 def find_opencode_executable() -> str | None:
     """Return the absolute path to the `opencode` binary, or None when it
     can't be located."""
-    for name in ("opencode", "opencode.cmd", "opencode.exe"):
-        on_path = shutil.which(name)
-        if on_path:
-            return on_path
-    for candidate in _default_opencode_paths():
-        if candidate.is_file():
-            return str(candidate)
-    return None
+    return find_executable(("opencode", "opencode.cmd", "opencode.exe"), _default_opencode_paths())
 
 
 def opencode_db_path() -> Path | None:
@@ -155,18 +149,6 @@ def _connect_ro(db_path: Path) -> sqlite3.Connection | None:
         return conn
     except (sqlite3.Error, OSError):
         return None
-
-
-def _strip_remote_prefix(text: str) -> str:
-    return text[len(_REMOTE_PREFIX) :] if text.startswith(_REMOTE_PREFIX) else text
-
-
-def _live_user_payload(text: str) -> list[dict]:
-    if not text:
-        return []
-    remote = text.startswith(_REMOTE_PREFIX)
-    clean = _strip_remote_prefix(text).strip()
-    return [{"text": clean[:_MAX_EVENT_CHARS], "remote": remote}] if clean else []
 
 
 # Cache for resolved (db_path, cwd, session_uuid, not_before) -> session_id.

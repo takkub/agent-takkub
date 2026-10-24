@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from agent_takkub import gemini_helper
+from agent_takkub import gemini_helper, provider_cli_common
 
 
 def _proc(returncode: int = 0, stdout: str = "", stderr: str = ""):
@@ -133,7 +133,7 @@ class TestGeminiExec:
             seen["kwargs"] = kwargs
             return _proc(0, stdout="ok")
 
-        monkeypatch.setattr(gemini_helper.subprocess, "run", fake_run)
+        monkeypatch.setattr(provider_cli_common.subprocess, "run", fake_run)
         ok, msg = gemini_helper.gemini_exec("hello world")
         assert ok is True
         assert msg == "ok"
@@ -151,7 +151,7 @@ class TestGeminiExec:
             seen["argv"] = argv
             return _proc(0, stdout="out")
 
-        monkeypatch.setattr(gemini_helper.subprocess, "run", fake_run)
+        monkeypatch.setattr(provider_cli_common.subprocess, "run", fake_run)
         ok, _ = gemini_helper.gemini_exec("review", model="gemini-3.1-pro")
         assert ok is True
         assert seen["argv"] == [
@@ -172,7 +172,7 @@ class TestGeminiExec:
         # the interactive pane instead.
         monkeypatch.setattr(gemini_helper, "find_agy_executable", lambda: "/x/agy")
         monkeypatch.setattr(
-            gemini_helper.subprocess, "run", lambda *a, **k: _proc(0, stdout="   \n")
+            provider_cli_common.subprocess, "run", lambda *a, **k: _proc(0, stdout="   \n")
         )
         ok, msg = gemini_helper.gemini_exec("hi")
         assert ok is False
@@ -189,7 +189,7 @@ class TestGeminiExec:
             seen["argv"] = argv
             return _proc(0, stdout="ok")
 
-        monkeypatch.setattr(gemini_helper.subprocess, "run", fake_run)
+        monkeypatch.setattr(provider_cli_common.subprocess, "run", fake_run)
         gemini_helper.gemini_exec("hi", timeout=30)
         assert "--print-timeout" in seen["argv"]
         assert seen["argv"][seen["argv"].index("--print-timeout") + 1] == "25s"
@@ -202,7 +202,7 @@ class TestGeminiExec:
             seen["kwargs"] = kwargs
             return _proc(0)
 
-        monkeypatch.setattr(gemini_helper.subprocess, "run", fake_run)
+        monkeypatch.setattr(provider_cli_common.subprocess, "run", fake_run)
         gemini_helper.gemini_exec("hi", cwd="C:/projects/foo")
         assert seen["kwargs"]["cwd"] == "C:/projects/foo"
 
@@ -212,7 +212,7 @@ class TestGeminiExec:
         def fake_run(*args, **kwargs):
             raise subprocess.TimeoutExpired(cmd="agy", timeout=120.0)
 
-        monkeypatch.setattr(gemini_helper.subprocess, "run", fake_run)
+        monkeypatch.setattr(provider_cli_common.subprocess, "run", fake_run)
         ok, msg = gemini_helper.gemini_exec("hi")
         assert ok is False
         assert "timed out" in msg
@@ -223,7 +223,7 @@ class TestGeminiExec:
         def fake_run(*args, **kwargs):
             raise FileNotFoundError("agy")
 
-        monkeypatch.setattr(gemini_helper.subprocess, "run", fake_run)
+        monkeypatch.setattr(provider_cli_common.subprocess, "run", fake_run)
         ok, msg = gemini_helper.gemini_exec("hi")
         assert ok is False
         assert "disappeared" in msg
@@ -231,7 +231,7 @@ class TestGeminiExec:
     def test_surfaces_stderr_on_nonzero_exit(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(gemini_helper, "find_agy_executable", lambda: "/x/agy")
         monkeypatch.setattr(
-            gemini_helper.subprocess,
+            provider_cli_common.subprocess,
             "run",
             lambda *a, **k: _proc(1, stderr="ERROR: auth expired. Re-run `agy`."),
         )
@@ -242,7 +242,7 @@ class TestGeminiExec:
     def test_falls_back_to_stdout_when_stderr_empty(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(gemini_helper, "find_agy_executable", lambda: "/x/agy")
         monkeypatch.setattr(
-            gemini_helper.subprocess,
+            provider_cli_common.subprocess,
             "run",
             lambda *a, **k: _proc(2, stdout="rate-limited", stderr=""),
         )
@@ -253,7 +253,7 @@ class TestGeminiExec:
     def test_trims_trailing_whitespace_from_stdout(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(gemini_helper, "find_agy_executable", lambda: "/x/agy")
         monkeypatch.setattr(
-            gemini_helper.subprocess,
+            provider_cli_common.subprocess,
             "run",
             lambda *a, **k: _proc(0, stdout="answer text\n\n  "),
         )

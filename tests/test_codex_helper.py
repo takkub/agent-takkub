@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-from agent_takkub import codex_helper
+from agent_takkub import codex_helper, provider_cli_common
 
 
 def _proc(returncode: int = 0, stdout: str = "", stderr: str = ""):
@@ -268,7 +268,7 @@ class TestCodexExec:
             seen["kwargs"] = kwargs
             return _proc(0, stdout="ok")
 
-        monkeypatch.setattr(codex_helper.subprocess, "run", fake_run)
+        monkeypatch.setattr(provider_cli_common.subprocess, "run", fake_run)
         ok, msg = codex_helper.codex_exec("hello world")
         assert ok is True
         assert msg == "ok"
@@ -284,7 +284,7 @@ class TestCodexExec:
             seen["argv"] = argv
             return _proc(0, stdout="out")
 
-        monkeypatch.setattr(codex_helper.subprocess, "run", fake_run)
+        monkeypatch.setattr(provider_cli_common.subprocess, "run", fake_run)
         ok, _ = codex_helper.codex_exec("review", model="gpt-5-codex")
         assert ok is True
         assert seen["argv"] == ["/x/codex", "exec", "--model", "gpt-5-codex", "review"]
@@ -299,7 +299,7 @@ class TestCodexExec:
             seen["kwargs"] = kwargs
             return _proc(0)
 
-        monkeypatch.setattr(codex_helper.subprocess, "run", fake_run)
+        monkeypatch.setattr(provider_cli_common.subprocess, "run", fake_run)
         codex_helper.codex_exec("hi", cwd="C:/projects/foo")
         assert seen["kwargs"]["cwd"] == "C:/projects/foo"
 
@@ -309,7 +309,7 @@ class TestCodexExec:
         def fake_run(*args, **kwargs):
             raise subprocess.TimeoutExpired(cmd="codex", timeout=120.0)
 
-        monkeypatch.setattr(codex_helper.subprocess, "run", fake_run)
+        monkeypatch.setattr(provider_cli_common.subprocess, "run", fake_run)
         ok, msg = codex_helper.codex_exec("hi")
         assert ok is False
         assert "timed out" in msg
@@ -320,7 +320,7 @@ class TestCodexExec:
         def fake_run(*args, **kwargs):
             raise FileNotFoundError("codex")
 
-        monkeypatch.setattr(codex_helper.subprocess, "run", fake_run)
+        monkeypatch.setattr(provider_cli_common.subprocess, "run", fake_run)
         ok, msg = codex_helper.codex_exec("hi")
         assert ok is False
         assert "disappeared" in msg
@@ -331,7 +331,7 @@ class TestCodexExec:
         # reason instead of a generic "codex failed".
         monkeypatch.setattr(codex_helper, "find_codex_executable", lambda: "/x/codex")
         monkeypatch.setattr(
-            codex_helper.subprocess,
+            provider_cli_common.subprocess,
             "run",
             lambda *a, **k: _proc(1, stderr="ERROR: not logged in. Run `codex login`."),
         )
@@ -344,7 +344,7 @@ class TestCodexExec:
         # error). Surface whichever channel has content.
         monkeypatch.setattr(codex_helper, "find_codex_executable", lambda: "/x/codex")
         monkeypatch.setattr(
-            codex_helper.subprocess,
+            provider_cli_common.subprocess,
             "run",
             lambda *a, **k: _proc(2, stdout="rate-limited", stderr=""),
         )
@@ -357,7 +357,7 @@ class TestCodexExec:
         # the helper strips so the caller doesn't have to.
         monkeypatch.setattr(codex_helper, "find_codex_executable", lambda: "/x/codex")
         monkeypatch.setattr(
-            codex_helper.subprocess,
+            provider_cli_common.subprocess,
             "run",
             lambda *a, **k: _proc(0, stdout="answer text\n\n  "),
         )

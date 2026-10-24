@@ -33,14 +33,11 @@ import os
 import re
 import shutil
 import sqlite3
-import subprocess
 import sys
 import threading
 import time
 import urllib.parse
 from pathlib import Path
-
-from ._win_console import SUBPROCESS_NO_WINDOW
 
 # Install hint surfaced whenever the binary is missing. Antigravity ships
 # as a native binary (NOT npm) — the Windows installer drops `agy` under
@@ -666,24 +663,12 @@ def gemini_exec(
     argv: list[str] = [binary, "-p", prompt, "--print-timeout", agy_print_timeout]
     if model:
         argv = [binary, "-m", model, "-p", prompt, "--print-timeout", agy_print_timeout]
-    try:
-        proc = subprocess.run(
-            argv,
-            cwd=cwd,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            check=False,
-            encoding="utf-8",
-            errors="replace",
-            creationflags=SUBPROCESS_NO_WINDOW,
-        )
-    except subprocess.TimeoutExpired:
-        return False, "agy exec timed out"
-    except FileNotFoundError:
-        return False, "agy binary disappeared from PATH"
-    except Exception as e:
-        return False, f"agy exec failed: {e}"
+    from .provider_cli_common import run_cli
+
+    run = run_cli(argv, cwd=cwd, timeout=timeout, label="agy")
+    if run.proc is None:
+        return False, run.error
+    proc = run.proc
     if proc.returncode != 0:
         tail = (proc.stderr or proc.stdout or "agy exec failed").strip()
         return False, tail
