@@ -521,15 +521,34 @@ def _resolve_claude_jsonl_path(project_ns: str, session_uuid: str | None) -> Pat
     accurate), never to paper over with a guess here."""
     if not session_uuid:
         return None
+    # #915: the `*/<uuid>.jsonl` glob stats every project dir of the store and
+    # ran on the Qt main thread each poll (0.9-1.8 s stalls under disk load).
+    # A found transcript never moves, so remember it while it still exists. A
+    # miss is NOT cached — the file appears on the first turn and the mirror
+    # must pick it up on the next poll.
     try:
         base = config_dir_for(project_ns) / "projects"
-        named = base / f"takkub-project-{project_ns}" / f"{session_uuid}.jsonl"
-        if named.is_file():
-            return named
-        matches = list(base.glob(f"*/{session_uuid}.jsonl"))
     except OSError:
         return None
-    return matches[0] if matches else None
+    cache_key = (str(base), session_uuid)
+    hit = _jsonl_path_cache.get(cache_key)
+    if hit is not None and hit.is_file():
+        return hit
+    try:
+        named = base / f"takkub-project-{project_ns}" / f"{session_uuid}.jsonl"
+        if named.is_file():
+            found: Path | None = named
+        else:
+            matches = list(base.glob(f"*/{session_uuid}.jsonl"))
+            found = matches[0] if matches else None
+    except OSError:
+        return None
+    if found is not None:
+        _jsonl_path_cache[cache_key] = found
+    return found
+
+
+_jsonl_path_cache: dict[tuple[str, str], Path] = {}
 
 
 # Backward-compatible low-level name for callers/tests that explicitly scan

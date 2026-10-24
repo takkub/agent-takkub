@@ -901,7 +901,9 @@ def ensure_curated_claude_config_dir(
     allowed_names: set[str] = set()
     try:
         roots = _allowed_project_roots(project)
-        allowed_names.update(s.name for s in skill_scan.scan_skills(roots))
+        # #915: names only — `scan_skills` read + YAML-parsed every SKILL.md on
+        # the spawn path (main thread), 15 s at boot while graft walked the disk.
+        allowed_names.update(skill_scan.skill_dir_names(roots))
     except Exception:
         pass
     try:

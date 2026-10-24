@@ -107,6 +107,30 @@ def scan_skills(roots: Path | list[Path]) -> list[SkillInfo]:
     return sorted(seen.values(), key=lambda s: s.name)
 
 
+def skill_dir_names(roots: Path | list[Path]) -> set[str]:
+    """Names of the skills under each root's `.claude/skills/` WITHOUT reading
+    any file — one directory listing per root (`<name>/SKILL.md` dirs by
+    folder name, flat `*.md` by stem). For callers that only need "which
+    skills exist", e.g. the spawn path; `scan_skills` for descriptions."""
+    if isinstance(roots, Path):
+        roots = [roots]
+    names: set[str] = set()
+    for root in roots:
+        skills_dir = root / ".claude" / "skills"
+        try:
+            entries = list(os.scandir(skills_dir))
+        except OSError:
+            continue
+        for e in entries:
+            if e.name.startswith("."):
+                continue
+            if e.name.endswith(".md"):
+                names.add(e.name[:-3])
+            else:
+                names.add(e.name)
+    return names
+
+
 def validate_skill_name(name: str, existing: Iterable[str] = ()) -> tuple[bool, str]:
     """Return (ok, error_message) — error_message is "" when ok. Mirrors
     `custom_roles.validate_role_name`'s shape/tone for the settings UI's New
