@@ -2,6 +2,24 @@
 
 All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses [SemVer](https://semver.org/).
 
+## [v2.2.30] - 2026-10-24
+
+### Added (เพิ่ม)
+
+- **`takkub skills exclude|include NAME... --project P`:** ปิด skill กลาง (global store) เฉพาะโปรเจกต์ — เก็บใน projects.json `skills_exclude` แล้วถอน junction ใน `<project>/.claude/skills/` ทันที (ถอนเฉพาะลิงก์ที่ชี้ไป store เท่านั้น โฟลเดอร์จริงของโปรเจกต์ไม่แตะ) · gap: codex native skill home ใช้ร่วมกันทุกโปรเจกต์
+- **Role files ของ specialist ทุกตัว (claude/codex/gemini/opencode/cursor):** หัวข้อ "Surgical changes" — ทุกบรรทัดที่แก้ต้องโยงกับงาน ไม่ reformat/refactor โค้ดข้างเคียง
+- **skill `debug-mantra`:** เกณฑ์ "จบ" = มีคำสั่งที่รันแล้วยืนยันอาการเดียวกับที่ user เจอ แล้วค่อยตัดขั้นตอนให้เล็กที่สุด
+
+### Removed (เอาออก)
+
+- skill `cockpit-ui-style` (ไม่ถูกใช้ — user ปฏิเสธตั้งแต่ 2026-09-08)
+
+### Fixed (แก้)
+
+- **#916:** reprobe เจอบัญชีว่างแต่ pane ยัง park ตามนโยบาย → ไม่บอก "quota reset แล้ว กลับมาใช้ปกติได้" อีก บอกว่ายัง park และจะปลุกเองตอนกี่โมงแทน
+- **#915 (UI ค้าง):** spawn pane ไม่อ่าน/parse `SKILL.md` ทุกไฟล์แล้ว (list ชื่อโฟลเดอร์อย่างเดียว — เคยค้าง 15s ตอนบูต) · `claude_identity` cache 60s · mobile mirror จำ path transcript ที่หาเจอแทน glob ทุกรอบ poll
+- **#917:** watchdog stale-marker ระบุ provider ที่ pane รันอยู่จริง (เคยเอาจาก config → บอก codex ทั้งที่จอเป็น agy และตรวจ transcript ผิดตัว) · notice watchdog ที่ค้างคิวถูกทิ้งเมื่อ pane ปิดไปแล้วหรือได้งานใหม่ (เคยส่ง notice 09:33 ถึง Lead ตอน 11:14 หลัง pane ปิด)
+
 ## [v2.2.29] - 2026-10-23
 
 ออกรวมกับ 2.2.28 (2.2.28 ไม่ได้ publish แยก — ดูหัวข้อถัดไป)
