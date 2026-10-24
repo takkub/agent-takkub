@@ -16,18 +16,20 @@ A later phase that actually needs the V2 domain shape (e.g. a real
 
 from __future__ import annotations
 
-import json
-import os
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from agent_takkub.cached_read import invalidate
-
+# Re-exported: the writer lives in the storage layer now (2026-10-24 review D);
+# migration modules and their `patch.object(<module>, "write_json_atomic")`
+# test seams keep importing it from here.
+from ..storage.json_io import write_json_atomic
 from ..storage.legacy_reader import read_json
 from .backup import BackupManager
 from .journal import MigrationJournal
 from .report import StepReport
+
+__all__ = ["RegistryCopyStep", "RegistryMapping", "write_json_atomic"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -36,40 +38,6 @@ class RegistryMapping:
     source: Path
     target: Path
     note: str = ""
-
-
-def write_json_atomic(path: Path, payload: dict) -> None:
-    """Write *payload* to *path* via a tmp-file + `os.replace` (never a
-    partial file observable at *path*). #504 round4 T2: also fsyncs the
-    tmp file's content before the rename, and best-effort fsyncs the
-    parent directory afterward — every caller of this function (migration
-    ledgers/manifests included) needs the write to survive a hard crash,
-    not just an unhandled exception, before this returns.
-
-    Also drops *path* from `cached_read` (#658 contract: every in-process
-    writer invalidates). Every reader of these targets goes through
-    `legacy_reader.read_json`'s stat-free ≤3 s TTL, so without this the
-    caller's own next read — a step's post-apply `validate()`, a Role
-    Manager create's register/known_roles gate, `takkub mcp deny`'s
-    variant regen + verify — saw the pre-write parse."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(path.name + ".tmp")
-    tmp.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
-    with open(tmp, "r+b") as f:
-        os.fsync(f.fileno())
-    os.replace(tmp, path)
-    invalidate(path)
-    try:
-        fd = os.open(str(path.parent), os.O_RDONLY)
-        try:
-            os.fsync(fd)
-        finally:
-            os.close(fd)
-    except OSError:
-        return  # swallow-ok: directory-entry fsync is an extra durability
-        # margin on top of the file fsync above (which already made the
-        # content itself durable) — unsupported on some platforms (e.g.
-        # opening a directory this way on Windows).
 
 
 def _target_has_data(target: Path) -> bool:

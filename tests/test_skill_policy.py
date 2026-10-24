@@ -98,7 +98,7 @@ class TestSavePolicy:
 
     def test_atomic_write_leaves_no_tmp(self, policy_file: Path) -> None:
         skill_policy.save_policy({"qa": ["debug-mantra"]})
-        assert list(policy_file.parent.glob("*.json.tmp")) == []
+        assert list(policy_file.parent.glob("*.tmp")) == []
 
 
 class TestEffectiveSkills:

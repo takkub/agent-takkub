@@ -153,7 +153,7 @@ def _load_state() -> dict:
 def _save_state(state: dict) -> bool:
     global _persist_broken
     try:
-        from .core.migration.registry_copy_step import write_json_atomic
+        from .core.storage.json_io import write_json_atomic
 
         write_json_atomic(path(), state)
         _persist_broken = False

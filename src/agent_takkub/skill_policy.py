@@ -152,7 +152,7 @@ def save_policy(policy: dict[str, list[str]]) -> bool:
 
     payload = {"version": 1, "roles": policy}
     try:
-        from .core.migration.registry_copy_step import write_json_atomic
+        from .core.storage.json_io import write_json_atomic
 
         write_json_atomic(path(), payload)
         return True

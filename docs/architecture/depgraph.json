@@ -1,6 +1,6 @@
 {
   "generated_by": "grimp 3.14",
-  "module_count": 364,
+  "module_count": 365,
   "modules": [
     {
       "module": "agent_takkub",
@@ -217,7 +217,7 @@
       "module": "agent_takkub.auto_issue_capture",
       "imports": [
         "agent_takkub",
-        "agent_takkub.core.migration.registry_copy_step",
+        "agent_takkub.core.storage.json_io",
         "agent_takkub.core.storage.layout",
         "agent_takkub.core.storage.legacy_reader",
         "agent_takkub.core.storage.v2_target",
@@ -465,7 +465,7 @@
         "agent_takkub.backlog",
         "agent_takkub.config",
         "agent_takkub.core.migration.backup",
-        "agent_takkub.core.migration.registry_copy_step",
+        "agent_takkub.core.storage.json_io",
         "agent_takkub.core.storage.legacy_reader",
         "agent_takkub.core.storage.v2_target",
         "agent_takkub.mcp_bridge",
@@ -1406,7 +1406,7 @@
     {
       "module": "agent_takkub.core.conversation._json_io",
       "imports": [
-        "agent_takkub.core.storage.jsonl_store"
+        "agent_takkub.core.storage.json_io"
       ],
       "imported_by": [
         "agent_takkub.core.conversation.checkpoint",
@@ -1754,25 +1754,19 @@
     {
       "module": "agent_takkub.core.migration.registry_copy_step",
       "imports": [
-        "agent_takkub.cached_read",
         "agent_takkub.core.migration.backup",
         "agent_takkub.core.migration.journal",
         "agent_takkub.core.migration.report",
+        "agent_takkub.core.storage.json_io",
         "agent_takkub.core.storage.legacy_reader"
       ],
       "imported_by": [
-        "agent_takkub.auto_issue_capture",
         "agent_takkub.core.migration.pre_migrate_backup",
         "agent_takkub.core.migration.promote_v1",
         "agent_takkub.core.migration.steps_v1",
-        "agent_takkub.core.migration.wal",
-        "agent_takkub.core.storage.v2_target",
-        "agent_takkub.custom_roles",
-        "agent_takkub.pane_tools_policy",
-        "agent_takkub.provider_config",
-        "agent_takkub.skill_policy"
+        "agent_takkub.core.migration.wal"
       ],
-      "fan_in": 10,
+      "fan_in": 4,
       "fan_out": 5
     },
     {
@@ -2342,16 +2336,35 @@
       "fan_out": 0
     },
     {
+      "module": "agent_takkub.core.storage.json_io",
+      "imports": [
+        "agent_takkub.cached_read",
+        "agent_takkub.core.storage.jsonl_store"
+      ],
+      "imported_by": [
+        "agent_takkub.auto_issue_capture",
+        "agent_takkub.core.conversation._json_io",
+        "agent_takkub.core.migration.registry_copy_step",
+        "agent_takkub.core.storage.v2_target",
+        "agent_takkub.custom_roles",
+        "agent_takkub.pane_tools_policy",
+        "agent_takkub.provider_config",
+        "agent_takkub.skill_policy"
+      ],
+      "fan_in": 8,
+      "fan_out": 2
+    },
+    {
       "module": "agent_takkub.core.storage.jsonl_store",
       "imports": [],
       "imported_by": [
         "agent_takkub.core.accounts.registry",
         "agent_takkub.core.accounts.switch_log",
         "agent_takkub.core.brain.store",
-        "agent_takkub.core.conversation._json_io",
         "agent_takkub.core.conversation.ingest.cursor_store",
         "agent_takkub.core.conversation.store",
         "agent_takkub.core.migration.journal",
+        "agent_takkub.core.storage.json_io",
         "agent_takkub.design_actions",
         "agent_takkub.obsidian_dedup"
       ],
@@ -2440,7 +2453,7 @@
       "imports": [
         "agent_takkub.cached_read",
         "agent_takkub.config",
-        "agent_takkub.core.migration.registry_copy_step",
+        "agent_takkub.core.storage.json_io",
         "agent_takkub.core.storage.legacy_reader"
       ],
       "imported_by": [
@@ -2562,7 +2575,7 @@
       "module": "agent_takkub.custom_roles",
       "imports": [
         "agent_takkub.config",
-        "agent_takkub.core.migration.registry_copy_step",
+        "agent_takkub.core.storage.json_io",
         "agent_takkub.core.storage.layout",
         "agent_takkub.core.storage.legacy_reader",
         "agent_takkub.core.storage.v2_target",
@@ -3597,7 +3610,7 @@
       "module": "agent_takkub.pane_tools_policy",
       "imports": [
         "agent_takkub.cached_read",
-        "agent_takkub.core.migration.registry_copy_step",
+        "agent_takkub.core.storage.json_io",
         "agent_takkub.core.storage.layout",
         "agent_takkub.core.storage.legacy_reader",
         "agent_takkub.core.storage.v2_target",
@@ -3915,7 +3928,7 @@
         "agent_takkub._pty_backend",
         "agent_takkub.cached_read",
         "agent_takkub.config",
-        "agent_takkub.core.migration.registry_copy_step",
+        "agent_takkub.core.storage.json_io",
         "agent_takkub.core.storage.layout",
         "agent_takkub.core.storage.legacy_reader",
         "agent_takkub.core.storage.v2_target",
@@ -5416,7 +5429,7 @@
     {
       "module": "agent_takkub.skill_policy",
       "imports": [
-        "agent_takkub.core.migration.registry_copy_step",
+        "agent_takkub.core.storage.json_io",
         "agent_takkub.core.storage.layout",
         "agent_takkub.core.storage.legacy_reader",
         "agent_takkub.core.storage.v2_target",

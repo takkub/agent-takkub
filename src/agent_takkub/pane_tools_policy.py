@@ -236,7 +236,7 @@ def save_policy(policy: dict[str, dict[str, list[str]]]) -> bool:
         "roles": policy,
     }
     try:
-        from .core.migration.registry_copy_step import write_json_atomic
+        from .core.storage.json_io import write_json_atomic
 
         write_json_atomic(path(), payload)
         _regen_role_variants_best_effort()

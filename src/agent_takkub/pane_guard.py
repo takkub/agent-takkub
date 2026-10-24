@@ -1349,8 +1349,22 @@ def evaluate_lead_direct_edit(
 
             if lead_may_implement(project):
                 return _lead_backlog_gate(file_path, cwd, project) or Verdict(True)
-        except Exception:
-            pass
+        except Exception as exc:
+            # The team policy could not be READ (2026-10-24: a half-edited
+            # module broke this import chain) — that is not "the Lead may not
+            # implement". Silently falling through made a solo-lead Lead see
+            # "deep category, delegate" while delegation is impossible there.
+            # Deny with the real cause so the fix (repair the import, e.g.
+            # `git checkout -- <file>`) is obvious; Bash stays usable.
+            return Verdict(
+                False,
+                rule="lead_direct_edit:policy_unreadable",
+                reason=(
+                    f"อ่านนโยบายทีมของโปรเจกต์ {project} ไม่ได้ ({type(exc).__name__}: {exc}) "
+                    "— โค้ดในเครื่องพังอยู่ ไม่ใช่เรื่องสิทธิ์ · ซ่อม import ที่พังก่อน "
+                    "(เช่น `git checkout -- <ไฟล์ที่แก้ค้าง>`) แล้วแก้ไฟล์ต่อได้"
+                ),
+            )
 
     # Deep patterns on file path — checked before the runtime/outside-root
     # exemption below (#587 F3), see docstring.

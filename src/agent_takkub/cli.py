@@ -5202,8 +5202,16 @@ def cmd_context_guard(_: argparse.Namespace) -> dict:
             )
             return {"ok": True, "msg": "", "exit_code": 2}
     except Exception as exc:
-        print(f"[takkub guard: lead_context] cannot verify readiness: {exc}", file=sys.stderr)
-        return {"ok": True, "msg": "", "exit_code": 2}
+        # Fail OPEN on the guard's own failure (2026-10-24): this is a
+        # "read your context first" nudge, not a security boundary. When an
+        # import anywhere in the package broke, the old exit 2 denied EVERY
+        # tool — including the git checkout / Read / Edit needed to repair
+        # it — and only the user could unlock the Lead from outside.
+        print(
+            f"[takkub guard: lead_context] readiness check errored, allowing: {exc}",
+            file=sys.stderr,
+        )
+        return {"ok": True, "msg": ""}
     return {"ok": True, "msg": ""}
 
 

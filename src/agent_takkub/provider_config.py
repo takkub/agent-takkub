@@ -115,7 +115,7 @@ def _write_routing(global_data: dict, projects: dict) -> None:
     import time
 
     from .cached_read import invalidate
-    from .core.migration.registry_copy_step import write_json_atomic
+    from .core.storage.json_io import write_json_atomic
 
     target = _routing_target()
     write_json_atomic(

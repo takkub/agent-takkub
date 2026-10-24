@@ -28,7 +28,7 @@ from typing import Any
 from agent_takkub import config
 from agent_takkub.cached_read import invalidate
 
-from ..migration.registry_copy_step import write_json_atomic
+from .json_io import write_json_atomic
 from .legacy_reader import read_json
 
 _logger = logging.getLogger(__name__)

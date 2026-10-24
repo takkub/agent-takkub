@@ -155,7 +155,7 @@ def save_custom_roles(roles: dict[str, Role]) -> bool:
         },
     }
     try:
-        from .core.migration.registry_copy_step import write_json_atomic
+        from .core.storage.json_io import write_json_atomic
 
         write_json_atomic(path(), payload)
         return True
