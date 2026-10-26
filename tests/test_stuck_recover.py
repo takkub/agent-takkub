@@ -368,6 +368,25 @@ class TestCheckStuckPanes:
         assert "automatically deny this request in 1:49" in auto_deny[0]
         assert "takkub tail --role qa" in auto_deny[0]
 
+    def test_941_pane_mid_turn_is_not_waiting_for_the_user(self) -> None:
+        """#941: two panes at boot were reported "รอผู้ใช้ตอบคำถาม" while
+        streaming "Generating…" — picker chrome in the tail is not a picker."""
+        fake = _FakeOrch()
+        pane = _FakePane(last_out=1.0)
+        pane.model.provider_name = "claude"
+        pane.session.display_lines.return_value = [
+            "Esc to cancel",
+            "✻ Generating… (esc to interrupt)",
+        ]
+        pane.session.seconds_since_output.return_value = 0.5
+        pane.session.is_at_ready_prompt.return_value = False
+
+        assert fake._question_menu_waiting("backend", "p", pane) is False
+        assert not any("รอผู้ใช้ตอบคำถาม" in n for _, n, _ in fake.notify_calls)
+
+        pane.session.seconds_since_output.return_value = 30.0  # frozen = real picker
+        assert fake._question_menu_waiting("backend", "p", pane) is True
+
     def test_895_lead_auto_deny_prompt_goes_to_user_not_lead_inbox(self) -> None:
         """#895: the Lead pane is the one the user watches from the phone, so
         its auto-deny countdown is explained via the UI/Remote signal."""

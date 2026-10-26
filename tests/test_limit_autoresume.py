@@ -1132,6 +1132,16 @@ class TestQuotaReprobe:
 
 
 class TestPickRerouteProvider:
+    @pytest.fixture(autouse=True)
+    def _no_live_usage_meter(self, monkeypatch) -> None:
+        """The candidate check (#798) reads the real usage meter — a dev box
+        whose gemini really sat at >=90% turned 4 of these red (2026-10-27)."""
+        from agent_takkub import limit_autoresume
+
+        monkeypatch.setattr(
+            limit_autoresume, "confirm_verdict_for_provider", lambda *a, **k: ("unknown", 0.0)
+        )
+
     def test_picks_first_available_excluding_hit_provider(self, monkeypatch) -> None:
         from agent_takkub import provider_config
 

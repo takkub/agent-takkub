@@ -17045,7 +17045,12 @@ class Orchestrator(
                 provider = effective_provider_for(role, project=project)
             except Exception:
                 provider = None
-        waiting = picker_question_on_screen(getattr(pane, "session", None), provider)
+        # #941: a picker is a frozen screen; a pane still streaming its turn
+        # (spinner, "Generating…") is not waiting for anyone, whatever picker
+        # chrome sits in its scrollback — boot-time panes were flagged.
+        waiting = picker_question_on_screen(
+            getattr(pane, "session", None), provider
+        ) and not _pane_mid_turn(pane)
         if ps is None and waiting:
             ps = self._ps(key)
         if waiting and not ps.picker_wait_notice_active:
