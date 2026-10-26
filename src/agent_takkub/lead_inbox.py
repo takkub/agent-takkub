@@ -2140,8 +2140,19 @@ class LeadInboxMixin:
                 # was torn down while we waited: nothing left to paste into
                 # (no session exists, unlike the ready-prompt-timeout branch
                 # below). Warn instead of the silent drop this used to be.
+                # #942: and warn the Lead NOW — #280 parks "unconfirmed" in
+                # pane health for a watchdog to escalate, but a pane with no
+                # session has no watchdog: the task vanished, backlog stayed
+                # "กำลังทำ", nobody was told.
                 sent[0] = True
-                self._warn_lead_delivery_unconfirmed(role_name, project, max_wait_ms)
+                if self._project_panes(project).get(role_name) is pane:
+                    self._warn_lead_spawn_failed(
+                        role_name,
+                        project,
+                        f"pane ไม่มี session หลังรอ {max_wait_ms / 1000:g}s — งานไม่ถึง pane",
+                    )
+                else:  # replaced by a fresh spawn — that one carries on
+                    self._warn_lead_delivery_unconfirmed(role_name, project, max_wait_ms)
                 _log_event(
                     "task_deliver_timeout_no_session",
                     project=self._resolve_project(project),

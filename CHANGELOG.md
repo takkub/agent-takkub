@@ -20,6 +20,7 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 - **Lead ได้ done ซ้ำของเก่า 17 นาทีต่อมา + reminder backlog แนบทุก digest (#937)**
 - **done แล้วไม่มีไฟล์ report (#935):** ตัวกันซ้ำเคยดูแค่บรรทัดแรก (`STATUS: done [skill: X]`) ตลอดอายุ process
 - **`takkub worktree clean` ช้าเกิน 120 วินาที (#933):** ลบโฟลเดอร์ worktree แบบขนาน
+- **งานหายเงียบเมื่อ pane ที่ assign ไปไม่มี session เลย (#942):** แจ้ง Lead เป็น `spawn-failed` ทันทีให้ assign ใหม่ แทนที่จะเก็บเงียบไว้ใน pane health
 - **แจ้ง "⏳ <role> รอผู้ใช้ตอบคำถาม" ทั้งที่ pane กำลังทำงานอยู่ช่วง boot (#941):** pane ที่ยังส่ง output กลางเทิร์นไม่นับว่ารอผู้ใช้
 - **watchdog แจ้ง Lead ซ้ำทุก 30 นาทีสำหรับ shell pane ที่ idle (#940):** footer อ่านไม่ได้ลง log อย่างเดียว
 - **pane ลองคำสั่ง `rm -rf C:/x` ซ้ำ ค้าง prompt 2 นาทีทุกรอบ (#929):** guard ปฏิเสธทันทีพร้อมเหตุผลที่โมเดลอ่านได้

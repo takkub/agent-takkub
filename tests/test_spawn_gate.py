@@ -529,9 +529,11 @@ class TestSendWhenReadyOutlivesGateBlock:
                     "backend", "do something", max_wait_ms=1, project=TEST_PROJECT
                 )
 
-        assert any(
-            "delivery-unconfirmed" in c.args[0] for c in lead.session.write.call_args_list if c.args
-        )
+        # #942: no session ever = the task never reached a pane — said as a
+        # spawn failure the Lead must act on, not a maybe-landed paste that
+        # #280 parks in pane health (a session-less pane has no watchdog).
+        written = [c.args[0] for c in lead.session.write.call_args_list if c.args]
+        assert any("spawn-failed" in w and "ไม่มี session" in w for w in written)
 
     def test_gives_up_if_pane_torn_down_mid_extended_wait(self, qapp, monkeypatch):
         """Once gate_seen is sticky, the ONLY way out (besides the pane

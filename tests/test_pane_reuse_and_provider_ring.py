@@ -413,6 +413,11 @@ class TestProviderRing:
 
     def test_mid_task_reroute_uses_the_ring_too(self, orch, monkeypatch):
         monkeypatch.setattr(provider_config, "_provider_available", lambda p: True)
+        # never the live usage meter (a dev box's real gemini % decided this)
+        monkeypatch.setattr(
+            "agent_takkub.limit_autoresume.confirm_verdict_for_provider",
+            lambda *a, **k: ("unknown", 0.0),
+        )
         ps = orch._ps("proj::backend")
         assert orch._pick_reroute_provider("proj", "backend", ps, "codex") == "gemini"
         assert orch._pick_reroute_provider("proj", "backend", ps, "claude") == "codex"
