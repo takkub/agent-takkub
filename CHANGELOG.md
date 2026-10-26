@@ -2,6 +2,29 @@
 
 All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses [SemVer](https://semver.org/).
 
+## [v2.2.34] - 2026-10-26
+
+### Added (เพิ่ม)
+
+- **รายงานลูกค้าสวยพร้อมส่งโดยไม่ต้องเขียน `<style>` เอง (#927):** `--title` กลายเป็น hero (+`--subtitle`, ธีมสี `--accent`) · ตารางหัวสี/zebra/ขอบมน · **ตารางกลายเป็นการ์ดบนมือถือ** (builder เติมชื่อคอลัมน์ให้เอง) · component `callout` / `pill` / `td.hl` / `ref` · dark mode + พิมพ์ได้
+- **`takkub report check <file.html>` (#927):** จับภาพ 360/390/768/1440 + เช็กล้นจอ ใช้ได้กับรายงานใดก็ได้ · `mobile-check.cjs` ไม่ค้าง `#retest` แล้ว หา playwright เอง
+- **`takkub --version` (#939)** และ `takkub issue new` ใส่เวอร์ชัน cockpit ให้อัตโนมัติ
+
+### Fixed (แก้)
+
+- **cockpit crash ตอนตั้งเวลาปลุกหลังชนโควตา (#930, high):** reset ที่ไกลเกิน ~24.8 วัน (เช่นรอบรายเดือน) ทำ `QTimer` overflow ตอนนี้ตั้งเวลาเป็นช่วงๆ แทน (แก้ทั้ง 4 จุด)
+- **codex pane ตายเพราะบัญชีไม่รองรับโมเดลที่ตั้งไว้ (#931):** ระบบเห็น error `model not supported` แล้วย้ายงานไป provider อื่นต่อให้ ไม่ทิ้งงาน
+- **Lead ถูก park ว่าชนโควตาทั้งที่ยังทำงานได้ (#938):** มิเตอร์ 100% อย่างเดียวไม่ park pane ที่กำลังทำงานอยู่ และถ้า park ไปแล้วแต่ยังทำงานต่อ ระบบยกเลิกเอง
+- **worktree snapshot ตอนปิด commit ไฟล์ skill 207 ไฟล์เข้า branch งาน (#934):** ไม่กวาดไฟล์ของ cockpit/CLI (`.claude/` ฯลฯ) แล้ว และข้อความ "พร้อม merge" เตือนเมื่อ branch มี commit `wip(...)`/ไฟล์ `.claude/`
+- **assign ที่ถูกปฏิเสธทำให้ assign ใหม่ที่ถูกต้องหายเงียบ (#936):** ไม่ถูกนับเป็น "already queued" แล้ว
+- **Lead ได้ done ซ้ำของเก่า 17 นาทีต่อมา + reminder backlog แนบทุก digest (#937)**
+- **done แล้วไม่มีไฟล์ report (#935):** ตัวกันซ้ำเคยดูแค่บรรทัดแรก (`STATUS: done [skill: X]`) ตลอดอายุ process
+- **`takkub worktree clean` ช้าเกิน 120 วินาที (#933):** ลบโฟลเดอร์ worktree แบบขนาน
+- **watchdog แจ้ง Lead ซ้ำทุก 30 นาทีสำหรับ shell pane ที่ idle (#940):** footer อ่านไม่ได้ลง log อย่างเดียว
+- **pane ลองคำสั่ง `rm -rf C:/x` ซ้ำ ค้าง prompt 2 นาทีทุกรอบ (#929):** guard ปฏิเสธทันทีพร้อมเหตุผลที่โมเดลอ่านได้
+- **โฟลเดอร์ใน claude-config เป็นของ root ทำให้ pane เขียนไม่ได้ (#928, macOS/Linux):** ซ่อมเองโดยไม่ต้องใช้ sudo ข้อมูลเดิมเก็บไว้ข้างๆ
+- กฎใหม่ทุก provider: ไฟล์ชั่วคราวต้องอยู่ใต้ `$TAKKUB_ARTIFACTS_DIR` เท่านั้น
+
 ## [v2.2.33] - 2026-10-26
 
 ### Fixed (แก้)

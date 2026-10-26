@@ -4,7 +4,7 @@ requires-python = ">=3.11"
 
 [[package]]
 name = "agent-takkub"
-version = "2.2.33"
+version = "2.2.34"
 source = { editable = "." }
 dependencies = [
     { name = "markdown" },
