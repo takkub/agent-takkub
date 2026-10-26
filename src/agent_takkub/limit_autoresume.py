@@ -59,6 +59,19 @@ from .provider_config import CLAUDE, effective_provider_for
 from .roles import LEAD
 from .spawn_engine import PaneState
 
+# #930: QTimer takes a signed 32-bit ms delay (~24.8 days); a monthly meter
+# reset overflows it. Longer waits re-arm in hops of at most this size.
+_MAX_TIMER_HOP_MS = 2_000_000_000
+
+
+def _single_shot_at(fire_at: float, callback) -> None:
+    """Run ``callback`` at wall-clock ``fire_at`` however far away it is."""
+    delay_ms = max(0, int((fire_at - time.time()) * 1000))
+    if delay_ms > _MAX_TIMER_HOP_MS:
+        QTimer.singleShot(_MAX_TIMER_HOP_MS, lambda: _single_shot_at(fire_at, callback))
+    else:
+        QTimer.singleShot(delay_ms, callback)
+
 
 def quota_reprobe_verdict(usage, recorded_reset_at: float, now: float) -> tuple[str, float]:
     """#663: classify one usage probe of a quota-hit provider. Pure.
@@ -172,6 +185,18 @@ ACCOUNT_SWITCH_PROVIDERS = frozenset({"claude", "codex"})
 METER_SPENT_PCT = 100.0  # a working pane on this account is blocked now
 METER_PRESPAWN_PCT = 95.0  # don't START new work on an account this close
 METER_MAX_AGE_S = 900.0  # older snapshots are not trusted to block anything
+
+
+# #931: the provider rejected the pinned model for this account (codex prints
+# its 400 JSON; "not supported when using Codex with a ChatGPT account").
+_MODEL_UNSUPPORTED_RE = re.compile(
+    r"\"code\"\s*:\s*\"model_not_found\"|model is not supported when using", re.IGNORECASE
+)
+
+
+def model_unsupported_shown(lines: list[str]) -> bool:
+    """The pane's latest output is the provider refusing its pinned model."""
+    return any(_MODEL_UNSUPPORTED_RE.search(line) for line in lines[-30:])
 
 
 def codex_footer_spent(lines: list[str]) -> bool:
@@ -842,6 +867,45 @@ class AutoResumeMixin:
         override = getattr(ps, "account_override", None)
         return override if isinstance(override, str) and override else None
 
+    def _reroute_unsupported_model(self, project: str, role: str, pane, provider: str) -> bool:
+        """#931: a pane whose provider refuses its pinned model never starts
+        the task — it used to be closed with the task lost. Move it to another
+        provider (which drops the provider-specific pin) like a quota reroute.
+        True when a reroute was started."""
+        ps = self._pane_state.get(f"{project}::{role}")
+        if ps is None or role == LEAD.name or ps.quota_reroute_pending:
+            return False
+        if not ps.last_assigned_task:
+            return False
+        try:
+            lines = pane.session.display_lines()
+        except Exception:
+            return False
+        if not model_unsupported_shown(lines):
+            return False
+        from .provider_config import pick_substitute_provider
+
+        candidate = pick_substitute_provider({provider}, after=provider)
+        _log_event(
+            "pane_model_unsupported",
+            role=role,
+            project=project,
+            provider=provider,
+            to_provider=candidate,
+        )
+        if not candidate:
+            return False
+        self._reroute_pane_to_provider(
+            project,
+            role,
+            ps,
+            candidate,
+            provider,
+            0.0,
+            cause=f"{provider} ไม่รองรับโมเดลที่ตั้งไว้กับบัญชีนี้ (model not supported)",
+        )
+        return True
+
     def _reroute_or_park(self, project: str, role: str, ps: PaneState) -> None:
         hit_provider = ps.quota_provider or "claude"
         reset_at = ps.rate_limited_until
@@ -981,6 +1045,7 @@ class AutoResumeMixin:
         manual: bool = False,
         account: str | None = None,
         restoring: bool = False,
+        cause: str = "",
     ) -> None:
         """Close the quota-hit pane and respawn the SAME role on
         `new_provider`, resending its outstanding task with a short
@@ -1102,7 +1167,16 @@ class AutoResumeMixin:
             round=reroute_count,
             **({"to_account": account} if account else {}),
         )
-        if not is_lead:
+        if not is_lead and cause:
+            # #931: a non-quota reroute says what actually happened.
+            self._notify_lead(
+                project,
+                f"🔀 [auto-resume] {role}: {cause} → ย้ายไป {to_label} ทำงานเดิมต่อ",
+                from_role=role,
+                note="quota_rerouted",
+                kind="quota-rerouted",
+            )
+        elif not is_lead:
             lead_msg = (
                 (
                     f"🔀 [auto-resume] {hit_provider} บัญชี {running_account or 'ของโปรเจค'} "
@@ -1254,7 +1328,7 @@ class AutoResumeMixin:
                 self._send_when_ready(role, lead_takeover, project=project)
             elif task:
                 note = (
-                    f"\n\n[system] งานนี้ย้ายจาก {from_label} (ชนโควตา) มาที่ "
+                    f"\n\n[system] งานนี้ย้ายจาก {from_label} ({cause or 'ชนโควตา'}) มาที่ "
                     f"{to_label} — ทำต่อจากจุดที่ค้างไว้ (ถ้าเพิ่งเริ่มงานให้เริ่มใหม่ได้เลย), "
                     "ถ้าเสร็จแล้วรายงานด้วย `takkub done`"
                 )
@@ -1329,9 +1403,8 @@ class AutoResumeMixin:
         self, project: str, provider: str, reset_at: float
     ) -> None:
         """After the reset buffer, clear the hit and restore a fallback Lead."""
-        delay_ms = max(0, int((reset_at + auto_resume.WAKE_BUFFER_S - time.time()) * 1000))
-        QTimer.singleShot(
-            delay_ms,
+        _single_shot_at(
+            reset_at + auto_resume.WAKE_BUFFER_S,
             lambda: self._on_provider_quota_window_reset(project, provider, reset_at),
         )
 
@@ -1637,8 +1710,9 @@ class AutoResumeMixin:
             "ปลุกทำงานต่ออัตโนมัติตอน quota reset"
         )
         self._notify_lead(project, msg, from_role=role, note="limit_parked", kind="limit-parked")
-        delay_ms = max(0, int((reset_at + auto_resume.WAKE_BUFFER_S - time.time()) * 1000))
-        QTimer.singleShot(delay_ms, lambda: self._wake_parked_pane(project, role))
+        _single_shot_at(
+            reset_at + auto_resume.WAKE_BUFFER_S, lambda: self._wake_parked_pane(project, role)
+        )
 
     # ── wake ──────────────────────────────────────────────────────────────
     def _wake_parked_pane(self, project: str, role: str) -> None:
@@ -1790,8 +1864,9 @@ class AutoResumeMixin:
 
         ps.rate_limited_until = reset_at
         ps.limit_parked = True
-        delay_ms = max(0, int((reset_at + auto_resume.WAKE_BUFFER_S - now) * 1000))
-        QTimer.singleShot(delay_ms, lambda: self._wake_parked_pane(project, role))
+        _single_shot_at(
+            reset_at + auto_resume.WAKE_BUFFER_S, lambda: self._wake_parked_pane(project, role)
+        )
         _log_event(
             "pane_limit_park_restored",
             role=role,

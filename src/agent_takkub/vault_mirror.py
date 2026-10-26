@@ -220,22 +220,25 @@ def _render_decision_note(
 # Near-duplicate dedup filter (in-process; resets on cockpit restart)
 # ---------------------------------------------------------------------------
 
-# (project, role, md5-of-first-line) tuples seen this process run.
-_DEDUP_HASHES: set[tuple[str, str, str]] = set()
+# (project, role, md5-of-note) -> when it was last written.
+_DEDUP_HASHES: dict[tuple[str, str, str], float] = {}
+_DEDUP_WINDOW_S = 120.0
 
 
 def _is_dedup_note(project: str, role: str, note: str) -> bool:
-    """Return True (and swallow) when an identical first-line was already written
-    this session for the same project+role — prevents rapid-fire duplicate done
-    events from creating twin log files."""
-    scrubbed = _scrub_note(note)
-    first_line = scrubbed.splitlines()[0] if scrubbed else ""
-    h = hashlib.md5(first_line.encode()).hexdigest()
+    """Return True (and swallow) when the identical note was written for the
+    same project+role within ``_DEDUP_WINDOW_S`` — prevents rapid-fire duplicate
+    done events from creating twin log files.
+
+    #935: this used to key on the first line for the whole process life, and
+    the structured report's first line is ``STATUS: done [skill: X]`` — every
+    later done of that role+skill lost its report file."""
+    h = hashlib.md5(_scrub_note(note).encode()).hexdigest()
     key = (project, role, h)
-    if key in _DEDUP_HASHES:
-        return True
-    _DEDUP_HASHES.add(key)
-    return False
+    now = time.time()
+    last = _DEDUP_HASHES.get(key)
+    _DEDUP_HASHES[key] = now
+    return last is not None and now - last < _DEDUP_WINDOW_S
 
 
 # ---------------------------------------------------------------------------

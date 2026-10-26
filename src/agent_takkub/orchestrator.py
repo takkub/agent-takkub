@@ -1062,6 +1062,19 @@ def _pane_provider(pane) -> str | None:
     return provider.strip().lower() if isinstance(provider, str) and provider.strip() else None
 
 
+def _pane_mid_turn(pane) -> bool:
+    """#938: the pane is streaming a turn right now (fresh output, not at its
+    ready prompt) — proof its provider is still serving it. Any doubt → False."""
+    try:
+        sess = pane.session
+        quiet = sess.seconds_since_output()
+        if not isinstance(quiet, (int, float)) or quiet > 10.0:
+            return False
+        return sess.is_at_ready_prompt() is False
+    except Exception:
+        return False
+
+
 def _open_with_dialog_process_present() -> bool:
     """Best-effort corroboration for the #104 Windows Open-With dialog
     tripwire (issue #199): a transcript-text match alone false-positived
@@ -5645,6 +5658,10 @@ class Orchestrator(
                     folded_into_digest=skip_proposal_notice,
                 )
                 if not skip_proposal_notice:
+                    try:
+                        wip_commits, cockpit_files = mgr.branch_hygiene(info)
+                    except Exception:
+                        wip_commits, cockpit_files = 0, 0
                     proposal = build_merge_proposal(
                         from_role,
                         info,
@@ -5655,6 +5672,8 @@ class Orchestrator(
                         merge_conflicts=merge_conflicts,
                         conflict_files=conflict_files,
                         crlf_phantom=crlf_phantom,
+                        wip_commits=wip_commits,
+                        cockpit_files=cockpit_files,
                     )
                     self._notify_lead(
                         project_ns, proposal, from_role=from_role, note="", kind="worktree-proposal"
@@ -15557,14 +15576,16 @@ class Orchestrator(
             # cells means the probe could not READ the screen — "unverifiable"
             # is not "hung", and saying "อาจค้างจริง … ไม่ใช่แค่ idle ปกติ" off
             # an unreadable frame is a claim the evidence does not support.
+            # (#940) It asks nothing of anyone, so per #464 it goes to the
+            # event log only — paging it every 30 min for an idle shell pane
+            # was pure noise.
             footer_unreadable = not re.sub(r"[\s|─━│┃┌┐└┘├┤┬┴┼╭╮╯╰═║]+", "", tail or "")
             if footer_unreadable:
-                msg = (
-                    f"[watchdog] {name} marker จับไม่ได้ {streak} ครั้งติดกัน (เงียบ {quiet_s}s) แต่ "
-                    f"footer อ่านไม่ได้เลย (มีแต่เส้นกรอบ/ว่าง) — ตรวจไม่ได้ ≠ ค้าง: ไม่มีหลักฐานว่า "
-                    f"provider={provider} ล่ม ดูจอ pane ก่อนตัดสิน (#673)"
+                _log_event(
+                    "watchdog_footer_unreadable", role=name, project=project_name, streak=streak
                 )
-            elif provider == "claude":
+                return
+            if provider == "claude":
                 msg = (
                     f"[watchdog] {name} เงียบต่อเนื่อง {quiet_s}s (ครั้งที่ {streak} ที่ marker "
                     f"จับไม่ได้เลยติดกัน, ไม่มีสัญญาณชีวิตอื่นเลย) — อาจค้างจริง: provider ค้าง/"
@@ -17772,6 +17793,15 @@ class Orchestrator(
         existing = _ps_rl.rate_limited_until if _ps_rl is not None else 0.0
         if existing > 0.0:
             if now < existing:
+                if _ps_rl.quota_marker == "usage-meter" and _pane_mid_turn(pane):
+                    # #938: parked off the meter alone, yet it keeps working —
+                    # the provider is not refusing it. Cancel, and latch so the
+                    # same meter reading cannot re-park it.
+                    _ps_rl.rate_limited_until = 0.0
+                    _ps_rl.limit_parked = False
+                    _ps_rl.quota_false_positive_armed = True
+                    _log_event("rate_limit_meter_cancelled_active", role=role, project=project)
+                    return False
                 return True
             # Reset time reached — clear and let the watchdog behave normally.
             # The notice fires from its own QTimer scheduled at detection time.
@@ -17782,6 +17812,9 @@ class Orchestrator(
         if pane.session is None or not pane.session.is_alive:
             return False
         provider = getattr(pane.model, "provider_name", None) or "claude"
+        _model_reroute = getattr(self, "_reroute_unsupported_model", None)  # absent on doubles
+        if _model_reroute is not None and _model_reroute(project, role, pane, provider):
+            return True  # #931: refused model → moved to another provider
         # The usage meter first: it already knows the account's % and reset
         # time, with no dependence on how each CLI words its banner (codex's
         # went undetected on prod, #825). The on-screen banner remains the
@@ -17814,6 +17847,10 @@ class Orchestrator(
         except Exception:
             marker = ""
         if meter_reset and not marker:
+            if _pane_mid_turn(pane):
+                # #938: a meter-only reading on a pane that is mid-turn is not
+                # a block (Lead parked right after /compact while answering).
+                return False
             marker = "usage-meter"
         ps = self._ps(key)
         ps.rate_limited_until = reset_at
@@ -17898,8 +17935,10 @@ class Orchestrator(
 
     def _schedule_rate_limit_notice(self, project: str, role: str, reset_at: float) -> None:
         """Fire a single reset notice when the usage limit lifts."""
-        delay_ms = max(0, int((reset_at - time.time()) * 1000))
-        QTimer.singleShot(delay_ms, lambda: self._emit_rate_limit_reset(project, role))
+        from .limit_autoresume import _single_shot_at
+
+        # #930: a reset weeks away overflows a plain QTimer delay.
+        _single_shot_at(reset_at, lambda: self._emit_rate_limit_reset(project, role))
 
     def _emit_rate_limit_reset(self, project: str, role: str) -> None:
         """Tell the Lead a rate-limited pane's window has reset (notify-only)."""

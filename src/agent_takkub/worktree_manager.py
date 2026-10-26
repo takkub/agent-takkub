@@ -1523,6 +1523,18 @@ class WorktreeManager:
         merge proposal). Empty string if it can't be computed."""
         return self.diffstat_since(info.path, info.base_sha)
 
+    def branch_hygiene(self, info: WorktreeInfo) -> tuple[int, int]:
+        """(#934) ``(wip snapshot commits, cockpit-owned files)`` the branch
+        carries vs its base — either one means "ready to merge" is not true
+        as-is. ``(0, 0)`` when it can't be computed."""
+        log = self._run(["-C", info.path, "log", "--format=%s", f"{info.base_sha}..HEAD"], None)
+        wip = sum(1 for s in log.stdout.splitlines() if s.startswith("wip(")) if log.ok else 0
+        names = self._run(["-C", info.path, "diff", "--name-only", f"{info.base_sha}..HEAD"], None)
+        owned = (
+            sum(1 for p in names.stdout.splitlines() if is_cockpit_owned_path(p)) if names.ok else 0
+        )
+        return wip, owned
+
     def dirty_diffstat_at(self, cwd: str) -> str:
         """``N files, +A/-D`` summary of *cwd*'s CURRENT uncommitted state —
         tracked changes vs HEAD (staged + unstaged) plus a count of untracked
@@ -1864,9 +1876,15 @@ class WorktreeManager:
         # different states. Park the snapshot on a side ref instead — nothing
         # is lost, and the branch stays where the pane left it.
         overlap = self.sibling_dirty_overlap(info)
-        add = self._run(["-C", info.path, "add", "-A"], None)
+        # #934: never sweep the cockpit's/CLI's own files (207 skill-learning
+        # files under .claude/skills/ landed in a task branch) into the task.
+        excludes = [f":(exclude){p.rstrip('/')}" for p in COCKPIT_OWNED_PREFIXES]
+        add = self._run(["-C", info.path, "add", "-A", "--", ".", *excludes], None)
         if not add.ok:
             return False, None
+        staged = self._run(["-C", info.path, "diff", "--cached", "--quiet"], None)
+        if staged.returncode == 0:
+            return False, None  # only cockpit-owned files were dirty
         before = self.head_sha(info.path)
         if not overlap:
             commit = self._run(["-C", info.path, "commit", "-m", message], None)
@@ -2403,6 +2421,7 @@ class WorktreeManager:
             ]
         live = {str(Path(p).resolve()) for p in live_paths}
         out: list[str] = []
+        pending: list[tuple[int, dict, bool, str]] = []
         rows = self.list_isolated(git_root)
         if branch is not None:
             rows = [r for r in rows if r["branch"] == branch]
@@ -2460,10 +2479,26 @@ class WorktreeManager:
             if keep_reason:
                 out.append(f"KEEP  {row['branch']} — {keep_reason}")
                 continue
+            pending.append((len(out), row, cherry_picked, discard_stat))
+            out.append("")
+
+        def _delete_tree(row: dict) -> tuple[bool, str, str]:
             sweep_link_points(Path(row["path"]))
-            removed, disk_msg, leftover = remove_worktree_tree(Path(row["path"]))
+            return remove_worktree_tree(Path(row["path"]))
+
+        # #933: deleting the checkouts (node_modules, build output) is the slow
+        # part — 13 worktrees ran past 120 s one by one. Disk work runs in
+        # parallel (each tree stages under its own name); the git metadata
+        # steps below stay sequential since they share refs and locks.
+        from concurrent.futures import ThreadPoolExecutor
+
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            disk_results = list(pool.map(lambda p: _delete_tree(p[1]), pending))
+        for (slot, row, cherry_picked, discard_stat), (removed, disk_msg, leftover) in zip(
+            pending, disk_results, strict=True
+        ):
             if not removed:
-                out.append(
+                out[slot] = (
                     f"FAILED  {row['branch']} — {disk_msg} "
                     "(ไม่ได้ลบอะไร — worktree และ branch ยังอยู่ครบ)"
                 )
@@ -2472,7 +2507,7 @@ class WorktreeManager:
             self._run(["-C", git_root, "worktree", "prune"], None)
             if not rm.ok:
                 detail = (rm.stderr or rm.stdout).strip()[:120]
-                out.append(
+                out[slot] = (
                     f"FAILED  {row['branch']} — ลบไฟล์ออกจาก {row['path']} แล้ว "
                     f"แต่ git ยังลบ metadata ไม่ได้ ({detail or f'exit {rm.returncode}'}) "
                     "— รัน `worktree prune` เอง (branch ยังอยู่)"
@@ -2511,7 +2546,7 @@ class WorktreeManager:
                 note += f" · {remote_note}"
             if repair_note:
                 note += f" · {repair_note}"
-            out.append(note)
+            out[slot] = note
         return out
 
     def force_remove(self, info: WorktreeInfo) -> tuple[bool, str]:
@@ -2652,6 +2687,34 @@ def _parse_porcelain_entries(porcelain: str) -> list[tuple[str, str]]:
         if rest:
             entries.append((status, rest))
     return entries
+
+
+# #880: paths the cockpit or the pane's own CLI writes for ITSELF inside a
+# project checkout — Claude Code's `.claude/settings.local.json` permission
+# grants, skill-learning patches under `.claude/skills/`, agent files — and
+# the same per-CLI state dirs of the other providers (#103). Never a pane's
+# deliverable, so never "ไฟล์ที่แตะ" and never "ยังไม่ commit" of the task
+# (a verify-only frontend task reported "ไฟล์ที่แตะ:4 (.claude)").
+COCKPIT_OWNED_PREFIXES: tuple[str, ...] = (
+    ".claude/",
+    ".codex/",
+    ".gemini/",
+    ".agy/",
+    ".opencode/",
+    ".cursor/",
+    ".takkub/",
+)
+
+
+def is_cockpit_owned_path(path: str) -> bool:
+    """True for a repo-relative *path* under one of `COCKPIT_OWNED_PREFIXES`
+    (top level only — `src/.claude/x` is somebody's real file)."""
+    p = (path or "").replace("\\", "/")
+    if p.startswith("./"):
+        p = p[2:]
+    if not p.endswith("/"):
+        p += "/"
+    return any(p.startswith(prefix) for prefix in COCKPIT_OWNED_PREFIXES)
 
 
 def parse_porcelain_paths(porcelain: str) -> list[str]:
@@ -2862,6 +2925,8 @@ def build_merge_proposal(
     merge_conflicts: bool | None = None,
     conflict_files: list[str] | None = None,
     crlf_phantom: bool = False,
+    wip_commits: int = 0,
+    cockpit_files: int = 0,
 ) -> str:
     """Lead-facing PROPOSAL when an isolated pane finishes with commits to merge.
 
@@ -2898,6 +2963,19 @@ def build_merge_proposal(
             f"🌿 [{role} worktree] `{info.branch}` — ⚠ conflict กับ base ปัจจุบัน{where} — "
             "resolve ก่อน merge (ดูรายชื่อไฟล์อีกครั้งด้วย "
             f"`takkub worktree merge --check --branch {info.branch}`)"
+        )
+    if wip_commits or cockpit_files:
+        # #934: a close-snapshot commit or the cockpit's own files (.claude/
+        # skills...) on the branch — a straight merge would carry them in.
+        found = []
+        if wip_commits:
+            found.append(f"commit `wip(...)` snapshot {wip_commits} ตัว")
+        if cockpit_files:
+            found.append(f"ไฟล์ของ cockpit/CLI (.claude/ ฯลฯ) {cockpit_files} ไฟล์")
+        return (
+            f"🌿 [{role} worktree] `{info.branch}` — ⚠ ยังไม่ควร merge ตรงๆ: branch มี "
+            f"{' และ '.join(found)} ที่ไม่ใช่งานของ task — cherry-pick เฉพาะ commit งาน "
+            f"(`git -C {info.git_root} log --oneline {info.base_sha}..{info.branch}`)"
         )
     readiness = (
         "✅ พร้อม merge (merge-tree clean กับ base ปัจจุบัน)"

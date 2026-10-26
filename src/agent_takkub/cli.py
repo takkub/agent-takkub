@@ -2351,7 +2351,11 @@ def cmd_report(args: argparse.Namespace) -> dict:
                 lint_warn_lines.append(LINT_TEXT_ONLY_DISCLAIMER)
 
             # Build report
-            html = builder.build(title=args.title)
+            html = builder.build(
+                title=args.title,
+                subtitle=getattr(args, "subtitle", None),
+                accent=getattr(args, "accent", None),
+            )
 
             size_note = size_warning(html, int(getattr(args, "max_bytes", 0) or 4 * 1024 * 1024))
 
@@ -2371,6 +2375,20 @@ def cmd_report(args: argparse.Namespace) -> dict:
                 return {"ok": True, "msg": html}
         except Exception as e:
             return {"ok": False, "msg": f"build failed: {e}"}
+
+    if action == "check":
+        import tempfile
+
+        from agent_takkub.report_builder import check_report_file
+
+        out_dir = args.out or str(
+            Path(os.environ.get("TAKKUB_ARTIFACTS_DIR") or tempfile.gettempdir()) / "report-check"
+        )
+        try:
+            ok, lines = check_report_file(args.file, out_dir)
+        except Exception as e:
+            return {"ok": False, "msg": f"check failed: {e}"}
+        return {"ok": ok, "msg": "\n".join(lines)}
 
     try:
         reports_mod = _load_remote_reports()

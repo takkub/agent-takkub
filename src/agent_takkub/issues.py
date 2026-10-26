@@ -1002,6 +1002,12 @@ def cmd_issue_new(args: Any) -> dict:
             ),
         }
 
+    # #939: stamp the cockpit version unless the reporter already gave one.
+    if "version" not in body.lower():
+        from . import __version__
+
+        body = f"{body.rstrip()}\n\n---\ncockpit version: {__version__}".lstrip()
+
     if getattr(args, "issues_dir", None):
         print(
             "warn: --issues-dir is deprecated and ignored (issues now stored in GitHub)",

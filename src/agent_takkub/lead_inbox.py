@@ -1300,6 +1300,19 @@ class LeadInboxMixin:
         except Exception:
             pass
 
+    def _note_done_notices_written(self, project_ns: str, body: str) -> None:
+        """(#937) Stamp every done role in *body* as written into Lead's pane.
+        The #755 recovery exists for notices that never reached the pane; one
+        that was written but whose submit verification never settled (stuck in
+        composer, session swap) is still on Lead's screen — re-queueing it
+        produced a stale duplicate digest 17 min later."""
+        try:
+            written = self.__dict__.setdefault("_done_written", {})
+            for role in done_roles_in_notice(body or ""):
+                written[(project_ns, role)] = time.time()
+        except Exception:
+            pass
+
     # ------------------------------------------------------------------
     # Lead draft-typing guard (#3, 2026-07-09 core-upgrade plan)
     #
@@ -4567,6 +4580,15 @@ class LeadInboxMixin:
         except Exception:
             _log_event("backlog_digest_review_error", project=project_ns)
             overdue_reviews = []
+        # #937: the same overdue list on every digest is noise — repeat it only
+        # when the list changes or every 6 h.
+        overdue_ids = tuple(sorted(str(item.get("id")) for item in overdue_reviews))
+        reminded = self.__dict__.setdefault("_backlog_reminder_last", {})
+        last_ids, last_ts = reminded.get(project_ns, ((), 0.0))
+        if overdue_ids == last_ids and now_ts - last_ts < 6 * 60 * 60:
+            overdue_reviews = []
+        elif overdue_reviews:
+            reminded[project_ns] = (overdue_ids, now_ts)
         if overdue_reviews:
             reminders = [f"📋 Backlog รอ Lead ยืนยันเกิน 24 ชม.: {len(overdue_reviews)} ใบ"]
             reminders.extend(
@@ -5342,6 +5364,7 @@ class LeadInboxMixin:
         # until the Enter/submit verification settles; a paste still sitting
         # in the composer has not reached Lead as a turn.
         queue.popleft()
+        self._note_done_notices_written(project_ns, body)
         # #614: stamp when THIS notice landed in Lead's pane. The
         # proactive-compact watchdog uses it to keep the idle clock across
         # the brief not-ready stretch this injection itself causes (Lead
@@ -5526,6 +5549,8 @@ class LeadInboxMixin:
             project_ns, role = key
             if self._has_pending_lead_notice(project_ns, role):
                 continue
+            if self.__dict__.get("_done_written", {}).get(key, 0.0) >= marked_at:
+                continue  # #937: already on Lead's screen, not lost
             saved = getattr(self, "_done_unread_notice", {}).get(key)
             if not saved:
                 continue
@@ -5698,6 +5723,7 @@ class LeadInboxMixin:
             return
         self._pending_done_notices.pop(project_ns, None)
         self._save_pending_done_notices(project_ns)
+        self._note_done_notices_written(project_ns, body)
         delay = _enter_delay_ms(payload)
         if not hasattr(self, "_lead_notify_verify_active"):
             self._lead_notify_verify_active = set()

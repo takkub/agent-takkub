@@ -289,6 +289,42 @@ class TestHostDestructiveDenied:
         assert pane_guard.classify(command, "frontend").allowed, f"false positive: {command}"
 
 
+class TestRootLevelRmDenied929:
+    """#929: `rm -rf C:/tkb1b` hit Claude Code's own critical-path prompt,
+    sat ~2 min until auto-denied with no reason, and was re-issued 3 times."""
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "rm -rf C:/tkb1b",
+            "rm -rf /c/tkb1b",
+            r"Remove-Item -Recurse -Force C:\tkb1b",
+            r"rd /s /q C:\tkb1b",
+            "cd x && rm -rf ~/scratch",
+        ],
+    )
+    def test_denied_with_readable_reason(self, command: str) -> None:
+        verdict = pane_guard.classify(command, "backend")
+        assert not verdict.allowed
+        assert verdict.rule == "host_destructive:root_level_rm"
+        assert "TAKKUB_ARTIFACTS_DIR" in verdict.reason
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "rm -rf ./build",
+            "rm -rf node_modules dist",
+            "rm -rf /tmp/foo/bar",
+            'rm -rf "$TAKKUB_ARTIFACTS_DIR/x"',
+            "rm C:/x.txt",
+            "rd /s /q build",
+            "git rm -r src",
+        ],
+    )
+    def test_ordinary_deletes_still_allowed(self, command: str) -> None:
+        assert pane_guard.classify(command, "backend").rule != "host_destructive:root_level_rm"
+
+
 class TestPipEditableDenied:
     """#202: `pip install -e .` rewrites the SHARED venv's
     `__editable__*.pth` to point at the caller's cwd — the exact incident was

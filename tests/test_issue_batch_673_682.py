@@ -159,7 +159,8 @@ class TestIssueNewBodyFile:
         monkeypatch.setattr(issues_mod, "new_issue", fake_new_issue)
         resp = issues_mod.cmd_issue_new(self._args(body_file=str(p)))
         assert resp["ok"], resp
-        assert seen["body"] == body
+        # verbatim, then the #939 cockpit-version stamp after it
+        assert seen["body"].startswith(body + "\n\n---\ncockpit version: ")
 
     def test_body_and_body_file_are_mutually_exclusive(self) -> None:
         resp = issues_mod.cmd_issue_new(self._args(body="x", body_file="y"))

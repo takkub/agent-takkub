@@ -653,6 +653,7 @@ class TestSnapshotDirtyWorktree:
         r = FakeRunner(
             [
                 (["add", "-A"], _ok()),
+                (["diff", "--cached", "--quiet"], _fail("", 1)),
                 (["rev-parse", "HEAD"], [_ok("before\n"), _ok("after\n")]),
                 (["commit", "-m"], _ok()),
             ]
@@ -674,6 +675,7 @@ class TestSnapshotDirtyWorktree:
         r = FakeRunner(
             [
                 (["add", "-A"], _ok()),
+                (["diff", "--cached", "--quiet"], _fail("", 1)),
                 # HEAD never moves — the `git commit` below fails.
                 (["rev-parse", "HEAD"], [_ok("before\n"), _ok("before\n")]),
                 (["commit", "-m"], _fail("pre-commit hook failed", 1)),
@@ -712,6 +714,7 @@ class TestSnapshotDirtyWorktree:
         r = FakeRunner(
             [
                 (["add", "-A"], _ok()),
+                (["diff", "--cached", "--quiet"], _fail("", 1)),
                 (["rev-parse", "HEAD"], [_ok("before\n"), _ok("before\n")]),
                 (["commit", "-m"], _fail("pre-commit hook failed", 1)),
                 (["write-tree"], _fail("fatal: cannot write tree", 128)),
@@ -724,6 +727,63 @@ class TestSnapshotDirtyWorktree:
         assert wip_ref is None
         assert not r.ran("commit-tree")
         assert not r.ran("update-ref")
+
+
+class TestSnapshotSkipsCockpitFiles934:
+    """#934 (real git): the close snapshot committed 207 skill-learning files
+    under .claude/skills/ into the task branch and the notice said ready."""
+
+    def _repo(self, tmp_path):
+        import subprocess
+
+        def git(*a):
+            subprocess.run(["git", "-C", str(tmp_path), *a], check=True, capture_output=True)
+
+        git("init", "-q")
+        git("config", "user.email", "t@t")
+        git("config", "user.name", "t")
+        (tmp_path / "a.txt").write_text("a\n", encoding="utf-8")
+        git("add", "-A")
+        git("commit", "-q", "-m", "base")
+        base = subprocess.run(
+            ["git", "-C", str(tmp_path), "rev-parse", "HEAD"], capture_output=True, text=True
+        ).stdout.strip()
+        info = WorktreeInfo(path=str(tmp_path), branch="wt/x-1", base_sha=base, git_root="")
+        return info, git
+
+    def _skill_file(self, tmp_path):
+        skill = tmp_path / ".claude" / "skills" / "learned" / "SKILL.md"
+        skill.parent.mkdir(parents=True)
+        skill.write_text("x\n", encoding="utf-8")
+
+    def test_only_cockpit_files_dirty_commits_nothing(self, tmp_path):
+        info, _git = self._repo(tmp_path)
+        self._skill_file(tmp_path)
+        mgr = WorktreeManager()
+        assert mgr.snapshot_dirty_worktree(info, "backend", "close") == (False, None)
+        assert mgr.branch_hygiene(info) == (0, 0)
+
+    def test_real_work_committed_without_cockpit_files(self, tmp_path):
+        info, _git = self._repo(tmp_path)
+        self._skill_file(tmp_path)
+        (tmp_path / "a.txt").write_text("changed\n", encoding="utf-8")
+        mgr = WorktreeManager()
+        assert mgr.snapshot_dirty_worktree(info, "backend", "close") == (True, None)
+        # the wip commit is flagged; the skill file stayed out of the branch
+        assert mgr.branch_hygiene(info) == (1, 0)
+
+    def test_proposal_refuses_ready_when_branch_carries_wip(self):
+        text = build_merge_proposal(
+            "backend",
+            WorktreeInfo(path="/wt", branch="wt/b-1", base_sha="abc", git_root="/r"),
+            2,
+            "",
+            merge_conflicts=False,
+            wip_commits=1,
+            cockpit_files=207,
+        )
+        assert "พร้อม merge" not in text
+        assert "207" in text
 
 
 class TestDirtyDiffstat:

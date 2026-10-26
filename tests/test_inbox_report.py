@@ -125,6 +125,23 @@ class TestInboxReportSurfacesEveryQueueTier:
         assert queued[0]["body"] == "[backend done] report"
         assert queued[0]["note"] == "done_recovered"
 
+    def test_done_already_written_to_lead_is_not_recovered(
+        self, orch: Orchestrator, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """#937: a digest written into Lead's pane whose submit verification
+        never settled must not come back as a stale duplicate."""
+        monkeypatch.setattr("agent_takkub.lead_inbox.time.time", lambda: 300.0)
+        monkeypatch.setattr(orch, "_save_pending_done_notices", lambda project: None)
+        orch._done_unread = {(PROJECT, "qa"): 100.0}
+        orch._done_unread_notice = {(PROJECT, "qa"): ("[qa done] PASS", "tok")}
+        orch._note_done_notices_written(
+            PROJECT, "📬 [Lead Inbox Digest — 1 update]\n• [00:01:40 · 2s ago] [qa] done: PASS"
+        )
+
+        orch._reap_pending_done_notices()
+
+        assert not getattr(orch, "_pending_done_notices", {}).get(PROJECT)
+
     def test_all_three_tiers_combined(self, orch: Orchestrator) -> None:
         orch._lead_digest_queue = {PROJECT: collections.deque([("[a done] x", None)])}
         orch._lead_notify_queue = {PROJECT: collections.deque([("[b done] y", None)])}

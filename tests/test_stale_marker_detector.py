@@ -920,8 +920,8 @@ class TestIdleAfterTurnEndNotPaged:
         self, orch: Orchestrator, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """#673 item 2: a footer of nothing but box-drawing rules means the
-        probe could not read the screen — "ตรวจไม่ได้" must not be worded as
-        "อาจค้างจริง … ไม่ใช่แค่ idle ปกติ"."""
+        probe could not read the screen — "ตรวจไม่ได้" is not "ค้าง". #940:
+        it asks nothing of anyone, so it is logged and never paged."""
         monkeypatch.setattr(
             "agent_takkub.provider_config.effective_provider_for", lambda *a, **k: "claude"
         )
@@ -931,7 +931,7 @@ class TestIdleAfterTurnEndNotPaged:
             "lead",
             _sess(quiet=STALE_MARKER_QUIET_S + 10, lines=["", "─" * 120, ""]),
         )
-        _capture_events(monkeypatch)
+        events = _capture_events(monkeypatch)
         notify_calls = _capture_notify(monkeypatch)
         monkeypatch.setattr(
             Orchestrator,
@@ -941,10 +941,8 @@ class TestIdleAfterTurnEndNotPaged:
 
         _tick_n_cooldowns(orch, _STALE_MARKER_ESCALATE_EVERY + 1)
 
-        assert len(notify_calls) == 1
-        msg = notify_calls[0][0][1]
-        assert "ตรวจไม่ได้ ≠ ค้าง" in msg
-        assert "อาจค้างจริง" not in msg
+        assert notify_calls == []
+        assert any(ev == "watchdog_footer_unreadable" for ev, _ in events)
 
 
 def test_liveness_dead_non_claude_provider_uses_softer_wording(

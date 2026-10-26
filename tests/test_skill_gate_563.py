@@ -12,7 +12,10 @@ Verifies:
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
+
+import pytest
 
 from agent_takkub import doctor, pane_env, skill_policy, user_profile
 
@@ -153,3 +156,23 @@ def test_inject_curated_claude_config_dir(monkeypatch, tmp_path):
     env3: dict[str, str] = {}
     pane_env.inject_curated_claude_config_dir(env3, "default")
     assert "CLAUDE_CONFIG_DIR" not in env3
+
+
+@pytest.mark.skipif(os.name == "nt" or os.geteuid() == 0, reason="POSIX ownership (#928)")
+def test_unwritable_claude_dirs_are_reclaimed_without_data_loss(tmp_path: Path) -> None:
+    """#928: root-owned session-env/projects made every pane fail EACCES."""
+    cfg = tmp_path / "claude-config"
+    _write_file(cfg / "projects" / "p" / "s.jsonl", "line\n")
+    (cfg / "session-env").mkdir()
+    for d in (cfg / "projects" / "p", cfg / "projects", cfg / "session-env"):
+        os.chmod(d, 0o555)  # stands in for root:staff 755 — not writable by us
+    try:
+        reclaimed = user_profile.reclaim_unwritable_claude_dirs(cfg)
+    finally:
+        for d in cfg.rglob("*"):
+            if d.is_dir():
+                os.chmod(d, 0o755)
+    assert sorted(Path(p).name for p in reclaimed) == ["projects", "session-env"]
+    assert os.access(cfg / "projects" / "p", os.W_OK)
+    assert (cfg / "projects" / "p" / "s.jsonl").read_text(encoding="utf-8") == "line\n"
+    assert len(list(cfg.glob("projects.unwritable-*"))) == 1  # original kept aside

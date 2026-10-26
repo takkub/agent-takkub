@@ -11,12 +11,14 @@
         "agent_takkub.auto_migrate_boot",
         "agent_takkub.boot_flow",
         "agent_takkub.boot_flow_window",
+        "agent_takkub.cli_parser",
         "agent_takkub.core.migration.steps",
         "agent_takkub.core.versioning.store",
+        "agent_takkub.issues",
         "agent_takkub.ram_report",
         "agent_takkub.remote.api"
       ],
-      "fan_in": 9,
+      "fan_in": 11,
       "fan_out": 0
     },
     {
@@ -99,6 +101,7 @@
         "agent_takkub.qa_gate",
         "agent_takkub.remote.cloudflared_install",
         "agent_takkub.remote.settings_dialog",
+        "agent_takkub.report_builder",
         "agent_takkub.services",
         "agent_takkub.settings_management.pages.skills_page",
         "agent_takkub.shared_dev_tools",
@@ -115,7 +118,7 @@
         "agent_takkub.verify",
         "agent_takkub.worktree_manager"
       ],
-      "fan_in": 51,
+      "fan_in": 52,
       "fan_out": 0
     },
     {
@@ -611,6 +614,7 @@
     {
       "module": "agent_takkub.cli_parser",
       "imports": [
+        "agent_takkub",
         "agent_takkub.issues",
         "agent_takkub.skill_learning.cli_commands"
       ],
@@ -618,7 +622,7 @@
         "agent_takkub.cli"
       ],
       "fan_in": 1,
-      "fan_out": 2
+      "fan_out": 3
     },
     {
       "module": "agent_takkub.cli_server",
@@ -2974,6 +2978,7 @@
     {
       "module": "agent_takkub.issues",
       "imports": [
+        "agent_takkub",
         "agent_takkub._win_console",
         "agent_takkub.config",
         "agent_takkub.core.storage.layout",
@@ -2987,7 +2992,7 @@
         "agent_takkub.update_worker"
       ],
       "fan_in": 5,
-      "fan_out": 4
+      "fan_out": 5
     },
     {
       "module": "agent_takkub.job_object_manager",
@@ -4469,13 +4474,14 @@
     {
       "module": "agent_takkub.report_builder",
       "imports": [
+        "agent_takkub._win_console",
         "agent_takkub.config"
       ],
       "imported_by": [
         "agent_takkub.cli"
       ],
       "fan_in": 1,
-      "fan_out": 1
+      "fan_out": 2
     },
     {
       "module": "agent_takkub.resource_governor",

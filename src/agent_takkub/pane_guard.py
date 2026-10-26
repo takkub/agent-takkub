@@ -483,6 +483,42 @@ _HOST_DESTRUCTIVE_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ),
 )
 
+# #929: a recursive delete one level under a drive/filesystem root (`rm -rf
+# C:/tkb1b`) trips Claude Code's own "dangerous rm on critical path" prompt,
+# which sits ~2 min until auto-denied and tells the model nothing — the pane
+# re-issued it three times. Denying it here returns a reason it can read.
+_ROOT_RM = re.compile(
+    rf"{_CMD_START}(?P<cmd>rm|Remove-Item|ri|rmdir|rd)(?![\w-])(?P<args>[^;&|\r\n]*)",
+    re.I | re.M,
+)
+_RECURSIVE_FLAG = re.compile(r"^(?:-[a-zA-Z]*[rR][a-zA-Z]*|--recursive|-Recurse\w*|/s)$", re.I)
+_ROOT_LEVEL_PATH = re.compile(
+    r"^(?:[A-Za-z]:[\\/]*|[\\/]+|/[A-Za-z]/?|~[\\/]*)(?:[^\\/]+[\\/]*)?$"  # C:/x, /x, /c/x, ~/x
+)
+ROOT_RM_RULE_TEXT = (
+    "ห้ามลบแบบ recursive ที่ path ระดับ root ของไดรฟ์/บ้าน (เช่น `C:/tkb1b`, `/c/x`, `~/x`) — "
+    "ไฟล์ชั่วคราวต้องอยู่ใต้ `$TAKKUB_ARTIFACTS_DIR` เท่านั้น แล้วลบที่นั่นแทน "
+    "ถ้าจำเป็นต้องลบ path นี้จริง ให้แจ้ง Lead ให้ user ลบเอง อย่าลองคำสั่งเดิมซ้ำ"
+)
+
+
+def _root_rm_target(cmd: str) -> str | None:
+    """#929: the root-level path a recursive delete in *cmd* targets, if any."""
+    for m in _ROOT_RM.finditer(cmd):
+        tokens = [t.strip("'\"") for t in m.group("args").split()]
+        windows_rd = m.group("cmd").lower() in {"rmdir", "rd"}
+        if not windows_rd and not any(_RECURSIVE_FLAG.match(t) for t in tokens):
+            continue
+        for tok in tokens:
+            if not tok or tok.startswith("-"):
+                continue
+            if windows_rd and re.fullmatch(r"/[a-zA-Z]", tok):
+                continue  # `rd /s /q` switches, not paths
+            if _ROOT_LEVEL_PATH.match(tok):
+                return tok
+    return None
+
+
 # Host network reconfiguration (#400): the host machine's network belongs to
 # the user at the keyboard, not a sandboxed pane. Root incident: a pane ran
 # `netsh wlan connect` to test a networking change and dropped the whole
@@ -4544,6 +4580,14 @@ def classify(
                     f"role `{name}` ใช้คำสั่งนี้ไม่ได้ (นโยบาย cockpit). {HOST_DESTRUCTIVE_RULE_TEXT}"
                 ),
             )
+
+    root_rm = _root_rm_target(cmd)
+    if root_rm is not None:
+        return Verdict(
+            False,
+            rule="host_destructive:root_level_rm",
+            reason=f"role `{name}` ลบ `{root_rm}` ไม่ได้ (นโยบาย cockpit). {ROOT_RM_RULE_TEXT}",
+        )
 
     for rule, pattern in _HOST_NETWORK_PATTERNS:
         if pattern.search(cmd):

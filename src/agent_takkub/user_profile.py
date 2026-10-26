@@ -843,6 +843,42 @@ def curated_config_dir_for(project: str, account: str | None = None) -> Path:
     return DATA_HOME / "providers" / "claude" / f"{account}-{slug}"
 
 
+_CLAUDE_WRITABLE_SUBDIRS = ("session-env", "projects", "todos", "plugins", "plugins/data")
+
+
+def reclaim_unwritable_claude_dirs(config_dir: Path) -> list[str]:
+    """#928: Claude Code dirs in *config_dir* this user can no longer write
+    (left root-owned by a `sudo` run) make every pane fail EACCES on its
+    session-env/transcripts. The parent is ours, so each one is renamed aside
+    (kept, nothing deleted) and replaced by an owned copy. POSIX only —
+    Windows ownership never blocks this way. Returns the dirs reclaimed."""
+    import shutil
+    import time
+
+    if os.name == "nt":
+        return []
+    reclaimed: list[str] = []
+    for rel in _CLAUDE_WRITABLE_SUBDIRS:
+        path = config_dir / rel
+        if path.is_symlink() or not path.is_dir() or os.access(path, os.W_OK | os.X_OK):
+            continue
+        aside = path.with_name(f"{path.name}.unwritable-{int(time.time())}")
+        try:
+            path.rename(aside)
+            shutil.copytree(aside, path, symlinks=True, dirs_exist_ok=True)
+            # copytree carries the old modes over — make the copy ours to write.
+            for root, _dirs, files in os.walk(path):
+                os.chmod(root, os.stat(root).st_mode | 0o700)
+                for name in files:
+                    f = os.path.join(root, name)
+                    if not os.path.islink(f):
+                        os.chmod(f, os.stat(f).st_mode | 0o600)
+        except OSError:
+            continue
+        reclaimed.append(str(path))
+    return reclaimed
+
+
 def ensure_curated_claude_config_dir(
     project: str, base_dir: Path | None = None, account: str | None = None
 ) -> Path:
@@ -871,6 +907,11 @@ def ensure_curated_claude_config_dir(
         dest_dir.mkdir(parents=True, exist_ok=True)
     except OSError:
         return base_dir
+    for config_dir in (base_dir, dest_dir):
+        reclaimed = reclaim_unwritable_claude_dirs(config_dir)
+        _orch = sys.modules.get("agent_takkub.orchestrator") if reclaimed else None
+        if _orch is not None:  # proxy, not an import: worktree_manager is a leaf
+            _orch._log_event("claude_config_reclaimed_unwritable", project=project, dirs=reclaimed)
 
     # 1. Mirror auth credentials and user settings
     for fname in (

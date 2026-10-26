@@ -766,6 +766,24 @@ class TestAssignDedup:
         assert "deduped" not in _replies(s2)[0]["msg"]
         assert len(orch.assign_calls) == 2
 
+    def test_retry_after_rejected_backlog_is_not_deduped(self, qapp: QCoreApplication) -> None:
+        """#936: a closed --backlog rejects the assign; the retry after the
+        card is reopened must dispatch, not answer 'already queued'."""
+        orch = _FakeOrch()
+        verdicts = [(False, "err: backlog [c57cefcd] ปิดไปแล้ว (done)", None), (True, "", "c57")]
+        orch.backlog_for_assign = lambda *a, **k: verdicts.pop(0)
+        srv = CliServer(orch)
+        srv._spawn_gap_ms = 0
+
+        s1, s2 = _FakeSock(), _FakeSock()
+        srv._dispatch(s1, _auth({"cmd": "assign", "role": "backend", "task": "fix x"}))
+        srv._dispatch(s2, _auth({"cmd": "assign", "role": "backend", "task": "fix x"}))
+        qapp.processEvents()
+
+        assert _replies(s1)[0]["ok"] is False
+        assert "deduped" not in _replies(s2)[0]["msg"]
+        assert len(orch.assign_calls) == 1
+
     def test_retry_after_window_expires_is_not_deduped(
         self, qapp: QCoreApplication, monkeypatch: pytest.MonkeyPatch
     ) -> None:

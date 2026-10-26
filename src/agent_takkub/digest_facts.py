@@ -23,34 +23,11 @@ import re
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 
+# #880: defined in the leaf worktree_manager since #934 (the close snapshot
+# needs them too); re-exported here for existing callers.
+from .worktree_manager import COCKPIT_OWNED_PREFIXES as COCKPIT_OWNED_PREFIXES
+from .worktree_manager import is_cockpit_owned_path as is_cockpit_owned_path
 from .worktree_manager import parse_porcelain_paths
-
-# #880: paths the cockpit or the pane's own CLI writes for ITSELF inside a
-# project checkout — Claude Code's `.claude/settings.local.json` permission
-# grants, skill-learning patches under `.claude/skills/`, agent files — and
-# the same per-CLI state dirs of the other providers (#103). Never a pane's
-# deliverable, so never "ไฟล์ที่แตะ" and never "ยังไม่ commit" of the task
-# (a verify-only frontend task reported "ไฟล์ที่แตะ:4 (.claude)").
-COCKPIT_OWNED_PREFIXES: tuple[str, ...] = (
-    ".claude/",
-    ".codex/",
-    ".gemini/",
-    ".agy/",
-    ".opencode/",
-    ".cursor/",
-    ".takkub/",
-)
-
-
-def is_cockpit_owned_path(path: str) -> bool:
-    """True for a repo-relative *path* under one of `COCKPIT_OWNED_PREFIXES`
-    (top level only — `src/.claude/x` is somebody's real file)."""
-    p = (path or "").replace("\\", "/")
-    if p.startswith("./"):
-        p = p[2:]
-    if not p.endswith("/"):
-        p += "/"
-    return any(p.startswith(prefix) for prefix in COCKPIT_OWNED_PREFIXES)
 
 
 @dataclass(frozen=True)

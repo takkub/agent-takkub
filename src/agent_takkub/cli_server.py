@@ -1097,8 +1097,10 @@ class CliServer(QObject):
                         and needs_spec_confirmation(str(req.get("task", "") or ""))
                     )
                     now_fp = time.time()
+                    # #936: stamped only once the assign is accepted (below) —
+                    # a rejected one (closed --backlog, impact error) must not
+                    # make the corrected retry look like a duplicate.
                     last_seen = self._recent_assign_fingerprints.get(fp)
-                    self._recent_assign_fingerprints[fp] = now_fp
                     if last_seen is not None and (now_fp - last_seen) < _ASSIGN_DEDUP_WINDOW_S:
                         self._reply(
                             sock,
@@ -1158,6 +1160,8 @@ class CliServer(QObject):
                         _act(from_project, str(role), str(req.get("task", "") or ""))
                     if callable(_forget):
                         _forget(from_project, str(role))
+                if cmd == "assign":
+                    self._recent_assign_fingerprints[fp] = now_fp
                 if cmd == "assign" and mode == "subagent":
                     ok, msg = self._orch.assign(
                         role,

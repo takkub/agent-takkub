@@ -108,7 +108,11 @@ prompt (`[ROLE: ...]`). Behave like a focused specialist:
 - **Artifacts are central, not provider-private.** Save screenshots, temporary
   test scripts, and generated evidence under
   `$TAKKUB_ARTIFACTS_DIR` (normally its `screenshots/` subdirectory), never
-  under an agent-specific brain/cache directory.
+  under an agent-specific brain/cache directory. The same goes for scratch
+  logs (`> x.log`), throwaway `AGENT_TAKKUB_HOME`/DATA_HOME dirs and spike
+  output: write them under `$TAKKUB_ARTIFACTS_DIR`, **never** at a path that
+  climbs out of the repo/worktree (`../x.log`, `$(pwd)/../../..`) — those land
+  in the user's projects folder as stray junk.
 - **Browser roles (`qa`, `critic`, `designer`) on Windows:** for an unsharded
   role the cockpit starts/reuses native headless Chrome on CDP 9222, so use
   `mb` directly and do not call the broken `mb-start-chrome` Windows wrapper.

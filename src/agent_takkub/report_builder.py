@@ -15,6 +15,7 @@ and work on both Windows ConPTY and macOS.
 
 import base64
 import hashlib
+import html
 import io
 import os
 import re
@@ -121,6 +122,116 @@ EXTRA_CSS = """
   @media (max-width:640px){.imgpair{grid-template-columns:minmax(0,1fr)}.imgpair .pair-cap{grid-column:auto}}
 """
 
+# (#927) The customer kit: hero, styled tables (accent head, zebra, rounded),
+# tables that turn into cards on phones, and the components a customer-facing
+# document needs — so no content has to ship its own <style> block.
+REPORT_KIT_CSS = """
+  :root{--zebra:#faf9f6;--on-accent:#fff;--warn-bg:#fffbeb;--warn-ink:#92400e;--warn-line:#fde68a;
+    --info-bg:#eff6ff;--info-ink:#1e40af;--info-line:#bfdbfe;--red-bg:#fef2f2;--red-ink:#b91c1c}
+  @media (prefers-color-scheme: dark){:root:not([data-theme="light"]){--zebra:#22221f;--on-accent:#131311;
+    --warn-bg:#2d2410;--warn-ink:#f5c56b;--warn-line:#5c4818;--info-bg:#15213a;--info-ink:#9ec1f5;
+    --info-line:#2a3f66;--red-bg:#3b1d16;--red-ink:#f0a58f}}
+  :root[data-theme="dark"]{--zebra:#22221f;--on-accent:#131311;--warn-bg:#2d2410;--warn-ink:#f5c56b;
+    --warn-line:#5c4818;--info-bg:#15213a;--info-ink:#9ec1f5;--info-line:#2a3f66;--red-bg:#3b1d16;--red-ink:#f0a58f}
+  .hero{background:linear-gradient(135deg,var(--accent),color-mix(in srgb,var(--accent) 72%,#000));
+    color:var(--on-accent);border-radius:16px;padding:clamp(18px,3vw,32px);margin:0 0 clamp(20px,3vw,32px)}
+  .hero h1{margin:0 0 6px;font-size:clamp(1.4rem,3vw,2.1rem);line-height:1.3;color:inherit}
+  .hero p{margin:0;opacity:.92;color:inherit}
+  table{border-collapse:separate;border-spacing:0;border:1px solid var(--line);border-radius:12px;
+    overflow:hidden;background:var(--paper)}
+  th{background:var(--accent);color:var(--on-accent);font-weight:600;font-size:.9rem;padding:12px}
+  td{padding:12px;line-height:1.55}
+  tbody tr:nth-child(even) td{background:var(--zebra)}
+  tr:last-child td{border-bottom:0}
+  td.hl{background:var(--member-soft)!important;color:var(--member);font-weight:600}
+  .ref{color:var(--muted);font-size:.8em}
+  .callout{border:1px solid var(--info-line);background:var(--info-bg);color:var(--info-ink);
+    border-radius:12px;padding:12px 16px;margin:12px 0}
+  .callout.warn{border-color:var(--warn-line);background:var(--warn-bg);color:var(--warn-ink)}
+  .callout.ok{border-color:var(--member);background:var(--member-soft);color:var(--member)}
+  .pill{display:inline-block;border-radius:999px;padding:1px 10px;font-size:.8rem;font-weight:600;white-space:nowrap}
+  .pill.red{background:var(--red-bg);color:var(--red-ink)}
+  .pill.green{background:var(--member-soft);color:var(--member)}
+  .pill.amber{background:var(--warn-bg);color:var(--warn-ink)}
+  .pill.gray{background:var(--bg);color:var(--muted);border:1px solid var(--line)}
+  @media (max-width:640px){
+    table.cards,table.cards tbody,table.cards tr,table.cards td{display:block;width:auto;min-width:0}
+    table.cards{border:0;border-radius:0;background:transparent;overflow:visible}
+    table.cards thead,table.cards tr.head-row{display:none}
+    table.cards tr{border:1px solid var(--line);border-radius:12px;margin:0 0 12px;overflow:hidden;background:var(--paper)}
+    table.cards tbody tr:nth-child(even) td{background:var(--paper)}
+    table.cards td{border-bottom:0;border-top:1px solid var(--line);white-space:normal}
+    table.cards td:first-child{border-top:0}
+    table.cards td[data-l]::before{content:attr(data-l);display:block;font-size:.78rem;font-weight:600;
+      color:var(--muted);margin-bottom:2px}
+    .table-wrap{overflow-x:visible}
+  }
+  @media print{
+    body{background:#fff;color:#000}
+    .hero{background:none;color:#000;border:2px solid var(--accent)}
+    tr,figure,.callout{break-inside:avoid}
+    .lb{display:none}
+  }
+"""
+
+_ACCENT_RE = re.compile(r"^(?:#[0-9a-fA-F]{3,8}|[a-zA-Z]{3,20})$")
+
+
+def _strip_tags(fragment: str) -> str:
+    return " ".join(re.sub(r"<[^>]+>", " ", fragment).split())
+
+
+def label_table_cells(body: str) -> str:
+    """(#927) Give every header-led table phone card mode: class ``cards`` on
+    the table, ``head-row`` on a header row outside <thead>, and each cell
+    a ``data-l`` copied from its column's <th> (author-set ``data-l`` wins).
+    Tables without a <th> header are left untouched."""
+
+    def one_table(m: re.Match) -> str:
+        table = m.group(0)
+        rows = re.findall(r"<tr\b[^>]*>.*?</tr>", table, flags=re.S | re.I)
+        head = next((r for r in rows if re.search(r"<th\b", r, re.I)), None)
+        if head is None:
+            return table
+        labels = [
+            html.escape(_strip_tags(t), quote=True)
+            for t in re.findall(r"<th\b[^>]*>(.*?)</th>", head, re.S | re.I)
+        ]
+
+        def one_row(rm: re.Match) -> str:
+            row = rm.group(0)
+            if row == head:
+                return row
+            col = [-1]
+
+            def one_cell(cm: re.Match) -> str:
+                col[0] += 1
+                i = col[0]
+                attrs = cm.group(1)
+                if "data-l=" in attrs or i >= len(labels) or not labels[i]:
+                    return cm.group(0)
+                return f'<td{attrs} data-l="{labels[i]}">'
+
+            return re.sub(r"<td\b([^>]*)>", one_cell, row, flags=re.I)
+
+        out = re.sub(r"<tr\b[^>]*>.*?</tr>", one_row, table, flags=re.S | re.I)
+        if not re.search(r"<thead\b", table, re.I):
+            out = out.replace(head, re.sub(r"^<tr\b", '<tr class="head-row"', head, count=1), 1)
+        return re.sub(
+            r"^<table\b([^>]*)>",
+            lambda t: (
+                t.group(0)
+                if re.search(r"\bcards\b", t.group(1))
+                else re.sub(r'class="', 'class="cards ', t.group(0), count=1)
+                if 'class="' in t.group(1)
+                else f'<table class="cards"{t.group(1)}>'
+            ),
+            out,
+            count=1,
+        )
+
+    return re.sub(r"<table\b.*?</table>", one_table, body, flags=re.S | re.I)
+
 
 class ReportBuilder:
     def __init__(self, report_type: str, content_dir: str, max_width: int = 1440):
@@ -200,11 +311,16 @@ class ReportBuilder:
 
         return f"data:image/jpeg;base64,{base64.b64encode(buf.getvalue()).decode()}"
 
-    def build(self, title: str | None = None) -> str:
+    def build(
+        self, title: str | None = None, subtitle: str | None = None, accent: str | None = None
+    ) -> str:
         """Build the complete HTML report.
 
         Args:
-            title: HTML title (default: based on report type)
+            title: HTML title, also shown as the hero heading (default: based
+                on report type)
+            subtitle: hero's second line, e.g. "project · date" (#927)
+            accent: theme colour (``#0f766e``) for hero, table heads, KPIs (#927)
 
         Returns:
             Complete HTML document as string
@@ -219,18 +335,31 @@ class ReportBuilder:
                 "dev": "Technical Report",
                 "boss": "Executive Summary",
             }[self.report_type]
+        accent_css = ""
+        if accent:
+            if not _ACCENT_RE.match(accent):
+                raise ValueError(f"--accent ต้องเป็นสี เช่น #0f766e (ได้ {accent!r})")
+            accent_css = (
+                f'\n  :root,:root[data-theme="dark"]{{--accent:{accent};--on-accent:#fff}}'
+                '\n  @media (prefers-color-scheme: dark){:root:not([data-theme="light"])'
+                f"{{--accent:{accent};--on-accent:#fff}}}}\n"
+            )
 
         # Split template
         style_end = template_html.index("</style>")
         head = (
             template_html[:style_end]
             + EXTRA_CSS
+            + REPORT_KIT_CSS
+            + accent_css
             + template_html[style_end : template_html.index("<body>") + len("<body>")]
         )
         tail = template_html[template_html.index('<div class="lb" id="lb"') :]
 
         # Update title
-        head = re.sub(r"<title>.*?</title>", f"<title>{title}</title>", head)
+        head = re.sub(
+            r"<title>.*?</title>", lambda _m: f"<title>{html.escape(title)}</title>", head
+        )
 
         # Replace image placeholders and handle special sections
         body = content_html
@@ -295,6 +424,13 @@ class ReportBuilder:
             # as an ordinary "build failed: ..." instead of a bare SystemExit
             # escaping the except.
             raise ValueError(f"Missing images: {', '.join(sorted(set(missing)))}")
+
+        body = label_table_cells(body)
+        # (#927) --title used to reach <title> only; the page opened on its
+        # first <h2>. A hero from it, unless the content brings its own heading.
+        if not re.search(r'<h1\b|class="[^"]*\bhero\b', body, re.I):
+            sub = f"<p>{html.escape(subtitle)}</p>" if subtitle else ""
+            body = f'<header class="hero"><h1>{html.escape(title)}</h1>{sub}</header>\n{body}'
 
         # Combine and return
         return head + "\n" + body + "\n" + tail
@@ -524,6 +660,82 @@ def check_mobile(html: str, viewports: list[int] | None = None) -> list[str]:
     return issues
 
 
+CHECK_WIDTHS = (360, 390, 768, 1440)
+
+
+def check_report_file(html_path: str, out_dir: str) -> tuple[bool, list[str]]:
+    """(#927) `takkub report check`: open a built report at 360/390/768/1440,
+    save a full-page screenshot of each into *out_dir* and report the page's
+    scrollWidth — works on any report (no hardcoded section like `#retest`).
+
+    Python Playwright first; without it, the shipped Node script
+    `mobile-check.cjs`; with neither, one SKIPPED line (never a pass)."""
+    src = Path(html_path).resolve()
+    if not src.is_file():
+        return False, [f"ไม่พบไฟล์ {html_path}"]
+    out = Path(out_dir)
+    out.mkdir(parents=True, exist_ok=True)
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        return _check_with_node(src, out)
+
+    lines: list[str] = []
+    ok = True
+    with sync_playwright() as p:
+        browser = p.chromium.launch()
+        try:
+            for width in CHECK_WIDTHS:
+                page = browser.new_page(viewport={"width": width, "height": 900})
+                try:
+                    page.goto(src.as_uri(), wait_until="load")
+                    scroll = int(page.evaluate("document.documentElement.scrollWidth"))
+                    shot = out / f"report-{width}.png"
+                    page.screenshot(path=str(shot), full_page=True)
+                finally:
+                    page.close()
+                verdict = "OK" if scroll <= width else "ล้นจอ"
+                ok = ok and scroll <= width
+                lines.append(f"{width}px: scrollWidth {scroll} — {verdict} · {shot}")
+        finally:
+            browser.close()
+    return ok, lines
+
+
+def _check_with_node(src: Path, out: Path) -> tuple[bool, list[str]]:
+    import json
+    import shutil
+    import subprocess
+
+    from ._win_console import SUBPROCESS_NO_WINDOW
+
+    node = shutil.which("node")
+    script = report_asset_root() / "mobile-check.cjs"
+    if not node or not script.is_file():
+        return False, [MOBILE_CHECK_SKIPPED]
+    res = subprocess.run(
+        [node, str(script), str(src), "--out", str(out)],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=180,
+        creationflags=SUBPROCESS_NO_WINDOW,
+    )
+    try:
+        data = json.loads(res.stdout)
+    except ValueError:
+        detail = (res.stderr or res.stdout).strip().splitlines()
+        return False, [f"{MOBILE_CHECK_SKIPPED} ({detail[-1] if detail else res.returncode})"]
+    lines = []
+    for width, row in data.items():
+        verdict = "OK" if row["scrollWidth"] <= int(width) else "ล้นจอ"
+        lines.append(
+            f"{width}px: scrollWidth {row['scrollWidth']} — {verdict} · {row['screenshot']}"
+        )
+    return res.returncode == 0, lines
+
+
 def report_asset_root() -> Path:
     """Where the report kit (template + mobile-check scripts) lives.
 
@@ -548,6 +760,8 @@ def build_report(
     out_file: str | None = None,
     title: str | None = None,
     max_width: int = 1440,
+    subtitle: str | None = None,
+    accent: str | None = None,
 ) -> str:
     """Build a report and optionally write to file.
 
@@ -562,7 +776,7 @@ def build_report(
         HTML content as string
     """
     builder = ReportBuilder(report_type, content_dir, max_width=max_width)
-    html = builder.build(title)
+    html = builder.build(title, subtitle=subtitle, accent=accent)
 
     if out_file:
         Path(out_file).write_text(html, encoding="utf-8")

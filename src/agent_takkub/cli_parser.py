@@ -773,7 +773,15 @@ def _add_report(sub: Any, c: ModuleType) -> None:
         "--content", required=True, help="directory with content.html, images.txt, etc."
     )
     sr_build.add_argument("--out", default=None, help="output HTML file (default: stdout)")
-    sr_build.add_argument("--title", default=None, help="HTML page title (default: based on type)")
+    sr_build.add_argument(
+        "--title", default=None, help="page title, shown as the hero heading (default: by type)"
+    )
+    sr_build.add_argument(
+        "--subtitle", default=None, help="hero second line, e.g. 'project · date' (#927)"
+    )
+    sr_build.add_argument(
+        "--accent", default=None, help="theme colour (hex or CSS name) for hero/table heads (#927)"
+    )
     sr_build.add_argument(
         "--lint", action="store_true", help="check content for issues before building"
     )
@@ -797,6 +805,15 @@ def _add_report(sub: Any, c: ModuleType) -> None:
         ),
     )
     sr_build.set_defaults(func=c.cmd_report)
+    sr_check = sr_sub.add_parser(
+        "check",
+        help="screenshot a built report at 360/390/768/1440 and report sideways overflow (#927)",
+    )
+    sr_check.add_argument("file", help="built report .html")
+    sr_check.add_argument(
+        "--out", default=None, help="screenshot dir (default: $TAKKUB_ARTIFACTS_DIR/report-check)"
+    )
+    sr_check.set_defaults(func=c.cmd_report)
 
 
 def _add_cleanup(sub: Any, c: ModuleType) -> None:
@@ -2120,7 +2137,11 @@ def _add_lead_edits(sub: Any, c: ModuleType) -> None:
 
 
 def build_parser(c: ModuleType) -> argparse.ArgumentParser:
+    from . import __version__
+
     p = argparse.ArgumentParser(prog="takkub", description="agent-takkub cockpit CLI")
+    # #939: issue reports need the cockpit version without a venv one-liner.
+    p.add_argument("--version", "-V", action="version", version=f"takkub {__version__}")
     sub = p.add_subparsers(dest="command", required=True)
     _add_spawn(sub, c)
     _add_assign(sub, c)

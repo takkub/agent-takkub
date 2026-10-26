@@ -250,6 +250,57 @@ def test_watchdog_detects_limit_from_meter_with_no_banner_on_screen() -> None:
     assert ps.quota_marker == "usage-meter"
 
 
+def _meter_only_fake(states: dict, reset: float, *, mid_turn: bool):
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+
+    from agent_takkub.spawn_engine import PaneState
+
+    session = MagicMock(is_alive=True)
+    session.rate_limit_reset_at.return_value = None
+    session.quota_stall_marker.return_value = None
+    session.is_at_limit_choice_modal.return_value = False
+    session.seconds_since_output.return_value = 1.0 if mid_turn else 60.0
+    session.is_at_ready_prompt.return_value = not mid_turn
+    pane = SimpleNamespace(session=session, model=SimpleNamespace(provider_name="claude"))
+    fake = SimpleNamespace(
+        _pane_state=states,
+        _ps=lambda key: states.setdefault(key, PaneState()),
+        _meter_limit_reset_at=lambda project, role, provider, now: reset,
+        _schedule_rate_limit_notice=MagicMock(),
+        _notify_quota_hit=MagicMock(),
+    )
+    return fake, pane
+
+
+def test_meter_only_reading_does_not_park_a_pane_mid_turn() -> None:
+    """#938: Lead parked as quota-hit right after /compact while answering."""
+    from agent_takkub.orchestrator import Orchestrator
+
+    states: dict = {}
+    fake, pane = _meter_only_fake(states, time.time() + 7200, mid_turn=True)
+    assert Orchestrator._rate_limit_suppressed(fake, "p", "lead", pane, time.time()) is False
+    fake._notify_quota_hit.assert_not_called()
+
+
+def test_meter_park_is_cancelled_when_the_pane_keeps_working() -> None:
+    from agent_takkub.orchestrator import Orchestrator
+
+    states: dict = {}
+    fake, pane = _meter_only_fake(states, time.time() + 7200, mid_turn=False)
+    assert Orchestrator._rate_limit_suppressed(fake, "p", "lead", pane, time.time()) is True
+    pane.session.seconds_since_output.return_value = 1.0
+    pane.session.is_at_ready_prompt.return_value = False
+    assert Orchestrator._rate_limit_suppressed(fake, "p", "lead", pane, time.time()) is False
+    ps = states["p::lead"]
+    assert ps.rate_limited_until == 0.0
+    assert ps.quota_false_positive_armed is True
+    # Same meter reading on the next idle tick must not re-park it.
+    pane.session.seconds_since_output.return_value = 60.0
+    pane.session.is_at_ready_prompt.return_value = True
+    assert Orchestrator._rate_limit_suppressed(fake, "p", "lead", pane, time.time()) is False
+
+
 def test_running_account_comes_from_the_live_pane_not_rebuilt_state() -> None:
     """prod 2026-10-08: PaneState was rebuilt after the switch, the watchdog
     read the project's (spent) account again and re-switched every tick."""

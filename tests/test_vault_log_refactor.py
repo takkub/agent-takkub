@@ -275,6 +275,21 @@ class TestDedupNote:
         _is_dedup_note("proj", "backend", "added /login endpoint with auth")
         assert _is_dedup_note("proj", "backend", "added /logout endpoint cleanup") is False
 
+    def test_same_status_line_different_body_not_dedup(self) -> None:
+        """#935: the structured report always opens with the same STATUS
+        line — a later done with a different body must keep its report."""
+        _is_dedup_note("proj", "devops", "STATUS: done [skill: x]\nCHANGED: rebuilt api")
+        assert (
+            _is_dedup_note("proj", "devops", "STATUS: done [skill: x]\nCHANGED: cleanup") is False
+        )
+
+    def test_identical_note_outside_window_not_dedup(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        clock = [1000.0]
+        monkeypatch.setattr("agent_takkub.vault_mirror.time.time", lambda: clock[0])
+        _is_dedup_note("proj", "devops", "STATUS: done\nCHANGED: same")
+        clock[0] += 600
+        assert _is_dedup_note("proj", "devops", "STATUS: done\nCHANGED: same") is False
+
     def test_dedup_suppresses_vault_write(
         self, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:

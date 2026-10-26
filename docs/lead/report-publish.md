@@ -21,8 +21,12 @@ takkub report build --type customer|dev|boss \
   --content ./report-content \
   [--out report.html] \
   [--title "My Report Title"] \
+  [--subtitle "โปรเจกต์ · วันที่"] [--accent "<สี hex>"] \
   [--lint]        # customer เท่านั้น: เตือนคำต้องห้ามก่อน publish
+takkub report check report.html [--out <dir>]   # จับภาพ 360/390/768/1440 + เช็กล้นจอ (#927)
 ```
+
+**สไตล์มาให้ครบ — ห้ามเขียน `<style>` เองใน content (#927):** `--title` กลายเป็น hero (+`--subtitle`) เว้นแต่ content มี `<h1>` เอง · ตารางทุกตัวที่มี `<th>` ได้หัวสี accent/zebra/ขอบมน และ **กลายเป็นการ์ดบนมือถือ ≤640px** (builder เติม `data-l` จาก `<th>` ให้เอง) · component: `<div class="callout warn|info|ok">` · `<span class="pill red|green|amber|gray">` · `<td class="hl">` (ช่องเน้นคำตอบตั้งต้น) · `<span class="ref">` · dark mode + `@media print` มาในชุด
 
 ### โครงสร้าง content dir
 
@@ -47,7 +51,7 @@ report-content/
 
 ### Mobile check (360/390/768 + dark/light)
 - ต้องผ่านเช็กมือถือ: viewport 360 (เล็ก)/390 (ปกติ)/768 (แท็บเล็ต) → ไม่มี element ล้น viewport, ตารางไม่ต้องเลื่อนข้าง
-- พร้อมใช้งานในโค้ดเป็น `report_builder.check_mobile(html)` (playwright; ถ้า Python นั้นไม่มี playwright จะคืน `MOBILE_CHECK_SKIPPED` 1 รายการ = **ยังไม่ได้ตรวจ** ห้ามรายงานว่าผ่าน — ไปรัน `mobile-check.cjs` ด้วย Node แทน, #805) + สคริปต์อ้างอิง Node/Playwright `assets/report/mobile-check.cjs`, `tables-check.cjs`
+- ใช้ **`takkub report check <file.html>`** (#927) — ใช้ได้กับรายงานใดก็ได้ จับภาพเต็มหน้าลง `$TAKKUB_ARTIFACTS_DIR/report-check/` แล้วพิมพ์ `scrollWidth` ต่อความกว้าง · ใช้ Python playwright ก่อน ถ้าไม่มีจะเรียก `assets/report/mobile-check.cjs` ด้วย Node (`node mobile-check.cjs <html> [--out dir] [--playwright <path>]` หา playwright จาก cwd/`NODE_PATH` เอง) · ไม่มีทั้งคู่ = `MOBILE_CHECK_SKIPPED` = **ยังไม่ได้ตรวจ** ห้ามรายงานว่าผ่าน (#805)
 - template ที่ ship มากันทะลุไว้แล้ว ≤900px → `grid-template-columns:1fr`, `minmax(0,1fr)`, `.shots` เป็น `minmax(min(260px,100%),1fr)`, `pre` → `white-space:pre-wrap`; ≤640px → ถอด `nowrap` จาก `td:first-child`/`.status`, `overflow-wrap:break-word` (**ห้าม `anywhere`** — ตัดคำไทยกลางคำ)
 
 ---

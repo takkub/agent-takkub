@@ -230,6 +230,39 @@ def _pane_alive():
     return p
 
 
+_CODEX_MODEL_ERROR = (
+    '■ {"type":"error","status":400,"error":{"type":"invalid_request_error","message":'
+    "\"The 'gpt-6.1-sol' model is not supported when using Codex with a ChatGPT\""
+)
+
+
+def test_unsupported_model_reroutes_pane_to_another_provider(monkeypatch) -> None:
+    """#931: the provider refusing the pinned model must move the task, not
+    close the pane and lose it."""
+    from agent_takkub import provider_config
+
+    o = _bare_orch()
+    pane = _pane_alive()
+    pane.session.display_lines.return_value = ["• Working", _CODEX_MODEL_ERROR]
+    o._pane_state = {"proj::backend": PaneState(last_assigned_task="fix x")}
+    monkeypatch.setattr(provider_config, "pick_substitute_provider", lambda *a, **k: "claude")
+    with patch.object(o, "_reroute_pane_to_provider") as reroute:
+        assert o._reroute_unsupported_model("proj", "backend", pane, "codex") is True
+    args, kwargs = reroute.call_args
+    assert args[3:5] == ("claude", "codex")
+    assert "model not supported" in kwargs["cause"]
+
+
+def test_ordinary_output_does_not_trigger_model_reroute() -> None:
+    o = _bare_orch()
+    pane = _pane_alive()
+    pane.session.display_lines.return_value = ["• grep model_not_found src/x.py", "done"]
+    o._pane_state = {"proj::backend": PaneState(last_assigned_task="fix x")}
+    with patch.object(o, "_reroute_pane_to_provider") as reroute:
+        assert o._reroute_unsupported_model("proj", "backend", pane, "codex") is False
+    reroute.assert_not_called()
+
+
 def test_quota_probe_restores_live_fallback_lead(monkeypatch) -> None:
     from agent_takkub import limit_autoresume as la
     from agent_takkub import provider_config

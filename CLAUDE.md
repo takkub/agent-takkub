@@ -14,6 +14,8 @@ Teammates: frontend · backend · mobile · devops · qa · reviewer · critic �
 
 > **Cross-platform (Windows ConPTY + macOS `_pty_backend`):** ทุกการเปลี่ยนแปลงต้องทำงานทั้ง 2 OS — ห้าม hardcode path/command เฉพาะ platform · CI matrix `windows-latest`+`macos-latest` ต้องเขียวทั้งคู่ก่อน merge
 
+> **ไฟล์ชั่วคราว (log/scratch/smoke home/spike output) → `$TAKKUB_ARTIFACTS_DIR` เท่านั้น** — ห้ามเขียน path ที่ปีนออกนอก repo/worktree (`../x.log`, `$(pwd)/../../..`) มันไปตกเป็นขยะใน `WebstormProjects/` ของ user (2026-10-26 กวาดทิ้ง 20 ชิ้น)
+
 > **Test tiers (#485/#585 — ทดสอบของจริง ไม่ใช่เขียนไฟล์เทส):** specialist **ห้ามรัน `takkub qa-gate` เอง** — ทดสอบสิ่งที่แก้ด้วยของจริงแล้วเขียนในโน้ตว่าเห็นอะไร · เขียนไฟล์เทสใหม่เฉพาะ scope=deep / bug ที่เคยหลุด / Lead สั่ง (งาน UI ห้ามเขียน) · รันได้แค่ **targeted เฉพาะไฟล์ที่แก้** และห้าม build/รัน suite ตอนเครื่องไม่ว่าง แล้ว `takkub done` · qa-gate ครั้งเดียวท้าย batch **เฉพาะ batch ที่มีงาน deep** · รายละเอียดเต็ม → `docs/qa-gate-policy.md`
 
 ## กฎสำหรับคนพัฒนาตัว cockpit (repo นี้เท่านั้น — Lead ที่ทำ batch/release)
