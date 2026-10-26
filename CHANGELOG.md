@@ -2,7 +2,7 @@
 
 All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses [SemVer](https://semver.org/).
 
-## [Unreleased]
+## [v2.2.33] - 2026-10-26
 
 ### Fixed (แก้)
 
