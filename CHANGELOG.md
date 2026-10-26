@@ -2,6 +2,13 @@
 
 All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses [SemVer](https://semver.org/).
 
+## [Unreleased]
+
+### Fixed (แก้)
+
+- **`takkub ma` ตรวจ Security tab ของ GitHub ไม่ครบ:** เดิมดูแค่ code scanning จึงบอกว่า "ไม่มี alert" ทั้งที่ GitHub ขึ้น 5 ใบ (Dependabot) ตอนนี้มีหัวข้อ **Dependabot alert** (เรียงตามความรุนแรง บอกเวอร์ชันที่แก้) และ **Secret scanning alert** (ไม่พิมพ์ตัว secret ออกมา) พร้อมขั้นตอนทำต่อในแผน
+- **deps:** virtualenv 21.14.13 + filelock 4.2.1 (#925 #924) ปิด Dependabot alert 5 ใบ (high 2)
+
 ## [v2.2.32] - 2026-10-24
 
 ### Added (เพิ่ม)

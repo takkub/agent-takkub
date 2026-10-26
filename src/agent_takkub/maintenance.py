@@ -1,8 +1,9 @@
 """`takkub ma` — the cockpit's own maintenance sweep.
 
 One command that walks the standing checklist instead of the operator
-remembering it: open issues, open PRs and their CI, open code-scanning alerts
-(GitHub Security tab — never surfaced by `gh issue list`), what the running cockpit's
+remembering it: open issues, open PRs and their CI, every open alert family on
+the GitHub Security tab (code scanning, Dependabot, secret scanning — none of
+them surfaced by `gh issue list`), what the running cockpit's
 own `events.log` says went wrong recently, and whether this checkout is in a
 state where a fix could actually be shipped.
 
@@ -433,6 +434,111 @@ def check_code_scanning(repo_dir: Path, limit: int = 100) -> Check:
         summary,
         details,
         {"numbers": [r.get("number") for r in rows], "by_severity": dict(counts)},
+    )
+
+
+# ── 2c/2d. the rest of the Security tab: Dependabot + secret scanning ────────
+#
+# GitHub's "Security and quality" counter sums code scanning, Dependabot and
+# secret scanning. Checking code scanning alone printed "ไม่มี alert" while the
+# tab showed 5 (2026-10-26: filelock/virtualenv advisories, two `high`), so
+# every alert family the counter adds up gets its own section.
+
+_DA_TITLE = "Dependabot alert (dependency ที่มีช่องโหว่)"
+_SS_TITLE = "Secret scanning alert (secret หลุดเข้า repo)"
+
+
+def _open_security_alerts(
+    repo_dir: Path, key: str, title: str, endpoint: str, limit: int
+) -> tuple[list[dict] | None, Check | None]:
+    """Fetch `repos/<slug>/<endpoint>?state=open` — rows, or the Check to return."""
+    slug = _gh_repo_slug(repo_dir)
+    if slug is None:
+        return None, Check(key, title, "error", "หา owner/repo ของ remote ไม่ได้ (gh repo view)")
+    ok, out = _run(
+        ["gh", "api", f"repos/{slug}/{endpoint}?state=open&per_page={limit}"], cwd=repo_dir
+    )
+    if not ok:
+        low = out.lower()
+        if "disabled" in low or "not enabled" in low or "404" in low:
+            return None, Check(key, title, "skip", "repo นี้ยังไม่ได้เปิดฟีเจอร์นี้")
+        return None, Check(key, title, "error", out)
+    try:
+        rows = json.loads(out or "[]")
+    except json.JSONDecodeError:
+        return None, Check(key, title, "error", "อ่านผลจาก gh api ไม่ได้")
+    if not isinstance(rows, list):
+        return None, Check(key, title, "error", "gh api ตอบรูปแบบที่ไม่รู้จัก")
+    if not rows:
+        return None, Check(key, title, "ok", "ไม่มี alert เปิดค้าง")
+    return rows, None
+
+
+def check_dependabot(repo_dir: Path, limit: int = 100) -> Check:
+    """Open alerts under Security → Dependabot. The fix is usually an
+    already-open dependabot PR, so each line names the patched version."""
+    rows, done = _open_security_alerts(
+        repo_dir, "dependabot", _DA_TITLE, "dependabot/alerts", limit
+    )
+    if done is not None:
+        return done
+    assert rows is not None
+
+    def _sev(row: dict) -> str:
+        return str((row.get("security_advisory") or {}).get("severity") or "").lower()
+
+    rows.sort(key=lambda r: (_CS_SEVERITY_RANK.get(_sev(r), 9), -int(r.get("number") or 0)))
+    counts = Counter(_sev(r) or "unknown" for r in rows)
+    details: list[str] = []
+    for row in rows:
+        dep = row.get("dependency") or {}
+        pkg = str((dep.get("package") or {}).get("name") or "?")
+        vuln = row.get("security_vulnerability") or {}
+        fix = str((vuln.get("first_patched_version") or {}).get("identifier") or "")
+        summary = str((row.get("security_advisory") or {}).get("summary") or "")
+        details.append(
+            f"#{row.get('number')} [{_sev(row) or '?'}] {pkg}"
+            + (f" → {fix}" if fix else " (ยังไม่มีเวอร์ชันแก้)")
+            + (f" — {dep.get('manifest_path')}" if dep.get("manifest_path") else "")
+            + f" · {summary[:70]}"
+        )
+    ordered = [
+        f"{k} {counts[k]}" for k in sorted(counts, key=lambda k: _CS_SEVERITY_RANK.get(k, 9))
+    ]
+    return Check(
+        "dependabot",
+        _DA_TITLE,
+        "attention",
+        f"{len(rows)} ใบ ({' · '.join(ordered)})",
+        details,
+        {"numbers": [r.get("number") for r in rows], "by_severity": dict(counts)},
+    )
+
+
+def check_secret_scanning(repo_dir: Path, limit: int = 100) -> Check:
+    """Open alerts under Security → Secret scanning. Never prints the secret
+    itself — only its type, where, and the alert URL."""
+    rows, done = _open_security_alerts(
+        repo_dir, "secret_scanning", _SS_TITLE, "secret-scanning/alerts", limit
+    )
+    if done is not None:
+        return done
+    assert rows is not None
+    rows.sort(key=lambda r: -int(r.get("number") or 0))
+    details = [
+        f"#{row.get('number')} "
+        f"{str(row.get('secret_type_display_name') or row.get('secret_type') or '?')[:60]}"
+        + (" · ยังใช้งานได้" if str(row.get("validity") or "") == "active" else "")
+        + f" · {row.get('html_url') or ''}"
+        for row in rows
+    ]
+    return Check(
+        "secret_scanning",
+        _SS_TITLE,
+        "attention",
+        f"{len(rows)} ใบ",
+        details,
+        {"numbers": [r.get("number") for r in rows]},
     )
 
 
@@ -1034,6 +1140,19 @@ def build_actions(checks: list[Check]) -> list[str]:
             "ปิด code scanning alert: อ่านโค้ดตรงบรรทัดที่ชี้ก่อน — fix จริงถ้าเป็นช่องโหว่ "
             "หรือ dismiss พร้อมเหตุผลบน GitHub ถ้าเป็น false positive (ห้ามปล่อยค้างเงียบ)"
         )
+    secrets = by_key.get("secret_scanning")
+    if secrets is not None and secrets.status == "attention":
+        steps.append(
+            "Secret หลุด: revoke/rotate secret ที่ต้นทางก่อน แล้วค่อยลบออกจาก repo และปิด alert "
+            "— ลบออกจากโค้ดอย่างเดียวไม่พอ (ยังอยู่ใน git history)"
+        )
+    dependabot = by_key.get("dependabot")
+    if dependabot is not None and dependabot.status == "attention":
+        steps.append(
+            "ปิด Dependabot alert: merge PR ของ dependabot ที่ bump ถึงเวอร์ชันแก้ "
+            "(ใบที่แตะ lockfile เดียวกันต้อง `@dependabot rebase` หลัง merge ใบแรก) "
+            "หรือ bump เองถ้ายังไม่มี PR"
+        )
     backlog = by_key.get("local_issues")
     if backlog is not None and backlog.status == "attention":
         steps.append("ส่ง issue ที่ค้างในเครื่องขึ้น GitHub ก่อน — ตอนนี้ยังไม่มีใครนอกเครื่องนี้เห็น")
@@ -1069,10 +1188,14 @@ def run_maintenance(
         checks.append(check_issues(repo_dir))
         checks.append(check_prs(repo_dir))
         checks.append(check_code_scanning(repo_dir))
+        checks.append(check_dependabot(repo_dir))
+        checks.append(check_secret_scanning(repo_dir))
     else:
         checks.append(Check("issues", "Issue ที่เปิดค้าง", "skip", "ข้าม (--no-net)"))
         checks.append(Check("prs", "Pull request ที่เปิดค้าง", "skip", "ข้าม (--no-net)"))
         checks.append(Check("code_scanning", _CS_TITLE, "skip", "ข้าม (--no-net)"))
+        checks.append(Check("dependabot", _DA_TITLE, "skip", "ข้าม (--no-net)"))
+        checks.append(Check("secret_scanning", _SS_TITLE, "skip", "ข้าม (--no-net)"))
     checks.append(scan_events(log_path or EVENTS_LOG, since_hours=since_hours))
     checks.append(check_local_issue_backlog())
     checks.append(

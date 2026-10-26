@@ -353,6 +353,8 @@ class TestRunMaintenance:
             "issues",
             "prs",
             "code_scanning",
+            "dependabot",
+            "secret_scanning",
             "logs",
             "local_issues",
             "lead_noise",
@@ -510,6 +512,95 @@ class TestCheckCodeScanning:
         report = maintenance.run_maintenance(tmp_path, include_network=False, log_path=log)
         cs = [c for c in report.checks if c.key == "code_scanning"]
         assert cs and cs[0].status == "skip"
+
+
+class TestSecurityTabFamilies:
+    """The Security tab counts Dependabot + secret scanning too — checking code
+    scanning alone said "no alerts" while GitHub showed 5 (2026-10-26)."""
+
+    def _fake_run(self, monkeypatch, api_ok: bool, api_out: str):
+        calls: list[list[str]] = []
+
+        def fake(cmd, cwd=None, timeout=60.0):
+            calls.append(cmd)
+            if cmd[:3] == ["gh", "repo", "view"]:
+                return True, "takkub/agent-takkub"
+            return api_ok, api_out
+
+        monkeypatch.setattr(maintenance, "_run", fake)
+        return calls
+
+    def test_empty_is_ok(self, tmp_path: Path, monkeypatch) -> None:
+        self._fake_run(monkeypatch, True, "[]")
+        assert maintenance.check_dependabot(tmp_path).status == "ok"
+        assert maintenance.check_secret_scanning(tmp_path).status == "ok"
+
+    def test_dependabot_sorted_by_severity_with_fix_version(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        rows = [
+            {
+                "number": 16,
+                "security_advisory": {"severity": "low", "summary": "side files"},
+                "dependency": {"package": {"name": "filelock"}, "manifest_path": "uv.lock"},
+                "security_vulnerability": {"first_patched_version": {"identifier": "4.2.1"}},
+            },
+            {
+                "number": 12,
+                "security_advisory": {"severity": "high", "summary": "PS1 unescaped"},
+                "dependency": {"package": {"name": "virtualenv"}, "manifest_path": "uv.lock"},
+                "security_vulnerability": {"first_patched_version": {"identifier": "21.14.13"}},
+            },
+        ]
+        calls = self._fake_run(monkeypatch, True, json.dumps(rows))
+        check = maintenance.check_dependabot(tmp_path)
+        assert check.status == "attention" and check.key == "dependabot"
+        assert check.data["numbers"] == [12, 16]
+        assert "high 1" in check.summary and "low 1" in check.summary
+        assert "virtualenv → 21.14.13" in check.details[0]
+        assert "uv.lock" in check.details[0]
+        api = next(c for c in calls if c[:2] == ["gh", "api"])
+        assert "repos/takkub/agent-takkub/dependabot/alerts?state=open" in api[2]
+
+    def test_secret_alert_never_prints_the_secret(self, tmp_path: Path, monkeypatch) -> None:
+        rows = [
+            {
+                "number": 2,
+                "secret_type_display_name": "GitHub Personal Access Token",
+                "secret": "ghp_SHOULD_NOT_APPEAR",
+                "validity": "active",
+                "html_url": "https://github.com/takkub/agent-takkub/security/secret-scanning/2",
+            }
+        ]
+        calls = self._fake_run(monkeypatch, True, json.dumps(rows))
+        check = maintenance.check_secret_scanning(tmp_path)
+        assert check.status == "attention" and check.key == "secret_scanning"
+        text = " ".join(check.details) + check.summary
+        assert "ghp_SHOULD_NOT_APPEAR" not in text
+        assert "GitHub Personal Access Token" in text and "ยังใช้งานได้" in text
+        api = next(c for c in calls if c[:2] == ["gh", "api"])
+        assert "repos/takkub/agent-takkub/secret-scanning/alerts?state=open" in api[2]
+
+    def test_disabled_is_skip_and_failure_is_error(self, tmp_path: Path, monkeypatch) -> None:
+        for fn in (maintenance.check_dependabot, maintenance.check_secret_scanning):
+            self._fake_run(monkeypatch, False, "HTTP 403: alerts are disabled for this repository")
+            assert fn(tmp_path).status == "skip"
+            self._fake_run(monkeypatch, False, "gh auth required")
+            assert fn(tmp_path).status == "error"
+
+    def test_plan_mentions_each_family_only_when_present(self) -> None:
+        for key, word in (("dependabot", "Dependabot"), ("secret_scanning", "Secret")):
+            hit = maintenance.build_actions([maintenance.Check(key, "t", "attention", "1")])
+            assert any(word in a for a in hit)
+            clean = maintenance.build_actions([maintenance.Check(key, "t", "ok", "")])
+            assert not any(word in a for a in clean)
+
+    def test_no_net_skips_both(self, tmp_path: Path) -> None:
+        log = _write_events(tmp_path / "events.log", [])
+        report = maintenance.run_maintenance(tmp_path, include_network=False, log_path=log)
+        by_key = {c.key: c for c in report.checks}
+        assert by_key["dependabot"].status == "skip"
+        assert by_key["secret_scanning"].status == "skip"
 
 
 class TestCheckLeadNoise:
