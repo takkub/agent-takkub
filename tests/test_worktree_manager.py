@@ -910,11 +910,66 @@ class TestGenericCwdProbes:
         r = FakeRunner([(["status", "--porcelain"], _fail())])
         assert WorktreeManager(r).status_porcelain("/repo") == ""
 
-    def test_commit_count_delegates_to_commits_since_with_same_args(self):
+    def test_commit_count_excludes_base_main_head_and_remotes(self):
         info = WorktreeInfo(path="/w", branch="wt/x-1", base_sha="base123", git_root="/repo")
-        r = FakeRunner([(["rev-list", "--count", "base123..HEAD"], _ok("2\n"))])
+        r = FakeRunner(
+            [
+                (["rev-parse", "HEAD"], _ok("roothead\n")),
+                (["rev-list", "--count"], _ok("2\n")),
+            ]
+        )
         assert WorktreeManager(r).commit_count(info) == 2
-        assert r.ran("-C", "/w", "rev-list", "--count", "base123..HEAD")
+        assert r.ran(
+            "-C", "/w", "rev-list", "--count", "--ignore-missing", "HEAD", "--not", "base123",
+            "roothead", "--exclude=refs/remotes/*/wt/*", "--remotes",
+        )  # fmt: skip
+
+
+class TestNewWorkIgnoresMergedUpstream957:
+    """#957 (real git): a pane that merges its newer base must not be told
+    the upstream commits it pulled in are its own (count + AI-trailer scan)."""
+
+    def test_only_own_commits_counted_and_scanned(self, tmp_path):
+        import subprocess
+
+        def git(cwd, *a):
+            return subprocess.run(
+                ["git", "-C", str(cwd), *a], check=True, capture_output=True, text=True
+            ).stdout.strip()
+
+        origin = tmp_path / "origin"
+        git(tmp_path, "init", "-q", "--bare", str(origin))
+        main = tmp_path / "main"
+        git(tmp_path, "clone", "-q", str(origin), str(main))
+        for d in (main,):
+            git(d, "config", "user.email", "t@t")
+            git(d, "config", "user.name", "t")
+        (main / "a.txt").write_text("a\n", encoding="utf-8")
+        git(main, "add", "-A")
+        git(main, "commit", "-qm", "base")
+        git(main, "push", "-q", "origin", "HEAD:main")
+        base = git(main, "rev-parse", "HEAD")
+        wt = tmp_path / "wt"
+        git(main, "worktree", "add", "-q", str(wt), "-b", "wt/x-1", base)
+        # upstream moves on — with an AI trailer the pane is not responsible for
+        (main / "b.txt").write_text("b\n", encoding="utf-8")
+        git(main, "add", "-A")
+        git(main, "commit", "-qm", "upstream\n\nCo-Authored-By: Claude <noreply@anthropic.com>")
+        git(main, "push", "-q", "origin", "HEAD:main")
+        git(main, "reset", "-q", "--hard", base)  # main checkout stays stale
+        git(wt, "config", "user.email", "t@t")
+        git(wt, "config", "user.name", "t")
+        git(wt, "fetch", "-q", "origin")
+        git(wt, "merge", "-q", "--no-edit", "origin/main")
+        (wt / "c.txt").write_text("c\n", encoding="utf-8")
+        git(wt, "add", "-A")
+        git(wt, "commit", "-qm", "own work")
+        info = WorktreeInfo(path=str(wt), branch="wt/x-1", base_sha=base, git_root=str(main))
+
+        mgr = WorktreeManager()
+
+        assert mgr.commit_count(info) == 1
+        assert mgr.ai_trailer_commits(info) == []
 
 
 class TestParsePorcelainPaths:

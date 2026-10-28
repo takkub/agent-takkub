@@ -41,7 +41,7 @@ import subprocess
 import sys
 import tempfile
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -858,6 +858,71 @@ def _make_link(src: Path, dst: Path) -> str | None:
         return str(exc)
 
 
+def _git_dirs_for(path: Path) -> tuple[Path, Path] | None:
+    """``(work_tree_top, common_git_dir)`` of the checkout holding *path*, or
+    None outside git. Reads the ``.git`` file/dir directly (no subprocess —
+    this runs on every spawn): a linked worktree's ``.git`` FILE points at
+    ``<common>/worktrees/<id>``, whose ``commondir`` names the shared dir that
+    holds ``info/exclude`` for every worktree of the repo."""
+    for top in (path, *path.parents):
+        dot_git = top / ".git"
+        if dot_git.is_dir():
+            return top, dot_git
+        if dot_git.is_file():
+            try:
+                text = dot_git.read_text(encoding="utf-8", errors="replace").strip()
+            except OSError:
+                return None
+            if not text.startswith("gitdir:"):
+                return None
+            gitdir = Path(text[len("gitdir:") :].strip())
+            if not gitdir.is_absolute():
+                gitdir = top / gitdir
+            try:
+                common = (gitdir / "commondir").read_text(encoding="utf-8").strip()
+            except OSError:
+                return top, gitdir  # submodule: its own git dir
+            common_dir = Path(common) if Path(common).is_absolute() else gitdir / common
+            return top, common_dir.resolve()
+    return None
+
+
+def ensure_git_excluded(paths: Iterable[Path]) -> None:
+    """Add each cockpit link point in *paths* to its repo's ``info/exclude``.
+
+    Git does not see an NTFS junction as a link: it walks into it, so
+    ``git add -A`` commits the linked store's files and ``git reset --hard`` /
+    ``git worktree remove`` then delete them through the link — that wiped
+    the global skill store twice (#958; probed on git 2.52.0.windows.1).
+    Excluded, the link point is invisible to add/commit/reset. ``info/exclude``
+    is per-clone and never committed, so the user's ``.gitignore`` is never
+    touched. Best-effort, never raises."""
+    by_exclude: dict[Path, list[str]] = {}
+    for path in paths:
+        dirs = _git_dirs_for(Path(path).parent)
+        if dirs is None:
+            continue
+        top, common = dirs
+        try:
+            rel = Path(path).relative_to(top).as_posix()
+        except ValueError:
+            continue
+        by_exclude.setdefault(common / "info" / "exclude", []).append(f"/{rel}")
+    for exclude, lines in by_exclude.items():
+        try:
+            existing = exclude.read_text(encoding="utf-8") if exclude.is_file() else ""
+            have = {ln.strip() for ln in existing.splitlines()}
+            missing = [ln for ln in dict.fromkeys(lines) if ln not in have]
+            if not missing:
+                continue
+            exclude.parent.mkdir(parents=True, exist_ok=True)
+            prefix = "" if (not existing or existing.endswith("\n")) else "\n"
+            with exclude.open("a", encoding="utf-8") as fh:
+                fh.write(prefix + "".join(f"{ln}\n" for ln in missing))
+        except OSError:
+            continue
+
+
 def _remove_link(p: Path) -> None:
     """Remove a link point WITHOUT ever recursing into its target.
 
@@ -1206,6 +1271,22 @@ class WorktreeManager:
             return GitResult(0, "", "")
         return self._run(["-C", git_root, "branch", flag, branch], None)
 
+    def _upstream_if_strictly_ahead(self, cwd: str, head: str) -> str:
+        """#959: the checkout's upstream (as last fetched — no network here,
+        `create` can run on the UI thread) when local HEAD is a strict
+        ancestor of it, else *head*. A main checkout left 35 files behind
+        `origin/main` seeded a worktree the pane then could not even sync.
+        Nothing local is dropped: the upstream already contains HEAD."""
+        up = self._run(
+            ["-C", cwd, "rev-parse", "--verify", "--quiet", "@{upstream}^{commit}"], None
+        )
+        up_sha = up.stdout.strip() if up.ok else ""
+        if not up_sha or up_sha == head:
+            return head
+        if self._run(["-C", cwd, "merge-base", "--is-ancestor", head, up_sha], None).ok:
+            return up_sha
+        return head
+
     def _branch_override_error(self, root: str, name: str) -> str:
         """Why *name* can't be a new branch in *root* ("" = fine)."""
         if name.startswith("-"):
@@ -1269,6 +1350,7 @@ class WorktreeManager:
             base_sha = self.head_sha(base_cwd)
             if not base_sha:
                 return None, "repo ยังไม่มี commit (HEAD ว่าง) — ใช้ shared cwd แทน"
+            base_sha = self._upstream_if_strictly_ahead(base_cwd, base_sha)
         if branch_override:
             err = self._branch_override_error(root, branch_override)
             if err:
@@ -1401,9 +1483,31 @@ class WorktreeManager:
         except ValueError:
             return 0
 
+    def _new_work_revs(self, info: WorktreeInfo) -> list[str]:
+        """rev-list/log arguments selecting the branch's OWN commits (#957).
+
+        ``base_sha..HEAD`` alone counts every upstream commit a pane pulls in
+        by merging its (newer) base: one branch read "38 commit ahead" and was
+        flagged for an AI trailer on a commit already on origin, while the
+        pane had added 5. Commits reachable from any remote branch (except the
+        cockpit's own pushed ``wt/*`` branches) or from the main checkout's
+        HEAD are not the pane's work."""
+        revs = ["--ignore-missing", "HEAD", "--not", info.base_sha]
+        same_tree = os.path.normcase(os.path.abspath(info.git_root or info.path)) == (
+            os.path.normcase(os.path.abspath(info.path))
+        )
+        root_head = None if same_tree else self.head_sha(info.git_root)
+        if root_head:
+            revs.append(root_head)
+        return [*revs, f"--exclude=refs/remotes/*/{_BRANCH_PREFIX}/*", "--remotes"]
+
     def commit_count(self, info: WorktreeInfo) -> int:
         """Commits the pane added on its branch beyond the creation base."""
-        return self.commits_since(info.path, info.base_sha)
+        res = self._run(["-C", info.path, "rev-list", "--count", *self._new_work_revs(info)], None)
+        try:
+            return int(res.stdout.strip() or "0") if res.ok else 0
+        except ValueError:
+            return 0
 
     def status_porcelain(self, cwd: str) -> str:
         """Raw ``git status --porcelain`` output for *cwd* (empty string on
@@ -1548,7 +1652,7 @@ class WorktreeManager:
         """(#934) ``(wip snapshot commits, cockpit-owned files)`` the branch
         carries vs its base — either one means "ready to merge" is not true
         as-is. ``(0, 0)`` when it can't be computed."""
-        log = self._run(["-C", info.path, "log", "--format=%s", f"{info.base_sha}..HEAD"], None)
+        log = self._run(["-C", info.path, "log", "--format=%s", *self._new_work_revs(info)], None)
         wip = sum(1 for s in log.stdout.splitlines() if s.startswith("wip(")) if log.ok else 0
         names = self._run(["-C", info.path, "diff", "--name-only", f"{info.base_sha}..HEAD"], None)
         owned = (
@@ -1562,7 +1666,7 @@ class WorktreeManager:
         neutral: the CLI's own setting may not exist or may change, so the
         branch itself is checked before the Lead merges it. ``[]`` on error."""
         log = self._run(
-            ["-C", info.path, "log", "--format=%h%x00%B%x1e", f"{info.base_sha}..HEAD"], None
+            ["-C", info.path, "log", "--format=%h%x00%B%x1e", *self._new_work_revs(info)], None
         )
         if not log.ok:
             return []
@@ -1850,6 +1954,10 @@ class WorktreeManager:
         add = self._run(["-C", info.path, "add", "-A"], None)
         if not add.ok:
             return False
+        # #959: never snapshot the cockpit's own `.claude/` surface (skill
+        # links/copies, ledgers) — a wip commit of 156 such files is what a
+        # later `git reset --hard` deleted through the junctions (#958).
+        self._run(["-C", info.path, "reset", "-q", "--", ":(glob)**/.claude/**"], None)
         first_line = next((ln.strip() for ln in summary.splitlines() if ln.strip()), "")
         if first_line:
             if len(first_line) > 72:

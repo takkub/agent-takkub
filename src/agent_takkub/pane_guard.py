@@ -2086,6 +2086,27 @@ def _git_config_verdict(cmd: str, in_worktree: bool) -> bool:
 # necessarily one scoped to the caller's own worktree.
 _WORKTREE_SAFE_RULES = frozenset({"reset-hard", "checkout", "restore", "clean-force", "switch"})
 
+# #958: raw `git worktree remove` is denied for EVERY role, the Lead included.
+# Git for Windows walks into the NTFS junctions the cockpit plants in a
+# worktree (`.claude/skills/<name>` → the central skill store, node_modules
+# → the main tree) and deletes the targets' files: a takma Lead's plain
+# `git worktree remove` emptied 24 global skills in one second (2026-10-27).
+# `takkub worktree clean/merge` unlinks every link point before deleting.
+# Its own command start: the real incident ran `for w in …; do rtk proxy git
+# worktree remove …; done`, and `_CMD_START` does not treat `do`/`then` as one.
+_RAW_WORKTREE_REMOVE = re.compile(
+    rf"(?:{_CMD_START}|\b(?:do|then|else)\s+{_ENV_ASSIGN_PREFIX}{_RTK_PREFIX})"
+    rf"{_GIT_BIN}(?![\w-]){_GIT_SUBCMD_GAP}worktree{_SUBCMD_END}{_SAME_CMD}\bremove\b",
+    re.M,
+)
+RAW_WORKTREE_REMOVE_RULE_TEXT = (
+    "ห้ามรัน `git worktree remove` เอง — git บน Windows ลบทะลุ junction ใน worktree "
+    "(.claude/skills → skill store กลาง, node_modules → main tree) ทำ skill ของทุกโปรเจคหาย (#958). "
+    "ใช้ `takkub worktree merge --branch <wt/...>` (merge แล้วลบให้) หรือ "
+    "`takkub worktree clean [--branch <wt/...>] [--cwd <repo>]` (ลบที่ merge แล้ว · `--force` ทิ้ง "
+    "commit ที่ยังไม่ merge · `--discard` ทิ้งงานที่ยังไม่ commit)"
+)
+
 # `git merge` (#385): Lead-only on the shared tree, ALLOWED from inside a
 # pane's own `--isolation worktree` checkout. There the pane's branch is the
 # only thing that moves — merging base INTO it is how a second worktree pane
@@ -2194,11 +2215,25 @@ _EXPLICIT_TARGET_RE = re.compile(
 )
 
 
+_GIT_INVOCATION_RE = re.compile(rf"{_CMD_START}{_GIT_BIN}(?![\w-])", re.I | re.M)
+_SHELL_LOOP_RE = re.compile(r"(?:^|[\s;&|(])(?:for|while|until)\s", re.M)
+
+
 def _explicit_git_target(cmd: str) -> str | None:
     """The LAST explicit `-C`/`--git-dir`/`--work-tree`/`cd` path named in
-    *cmd*, quotes stripped — or `None` if the command names no target."""
+    *cmd*, quotes stripped — or `None` if the command names no target.
+
+    #959: a `cd` that comes after the last git invocation cannot move it —
+    `cd <own worktree> && git merge …; cd .. && ls` was judged by the
+    trailing `cd ..` (the shared parent) and denied. Such a `cd` is skipped
+    unless the command loops (`for`/`while`/`until`), where a later `cd`
+    does reach the next iteration's git. `-C`/`--git-dir` always count."""
+    git_starts = [m.start() for m in _GIT_INVOCATION_RE.finditer(cmd)]
+    cd_limit = git_starts[-1] if git_starts and not _SHELL_LOOP_RE.search(cmd) else len(cmd)
     last: str | None = None
     for m in _EXPLICIT_TARGET_RE.finditer(cmd):
+        if m.group("cd") and m.start() > cd_limit:
+            continue
         path = m.group("c") or m.group("gd") or m.group("cd")
         if path:
             last = _strip_matching_quotes(path)
@@ -4500,6 +4535,14 @@ def classify(
             False,
             rule="cockpit_issue:use_takkub_issue_new",
             reason=f"role `{name}`: {RAW_COCKPIT_ISSUE_RULE_TEXT}",
+        )
+
+    # #958: before _UNGUARDED_ROLES — the Lead is who ran it.
+    if name and name != "shell" and _RAW_WORKTREE_REMOVE.search(_strip_heredoc_bodies(cmd)):
+        return Verdict(
+            False,
+            rule="worktree_remove:use_takkub_worktree",
+            reason=f"role `{name}`: {RAW_WORKTREE_REMOVE_RULE_TEXT}",
         )
 
     # #585 round 2/4: Deny heavy build or full suite when machine is busy

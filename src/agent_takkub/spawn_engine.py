@@ -546,9 +546,11 @@ def _skill_roots_for_project(project_ns: str, pane_cwd: str | None = None) -> li
             # under the managed worktree root, where the gitignored
             # `.claude/skills/` links do not exist — claude answered
             # "Unknown skill" for a skill the task block named.
+            # #958: copies, not junctions — git walks into a junction, so
+            # `git worktree remove` / `reset --hard` there deleted the store.
             wt = _managed_worktree_cwd(project_ns, pane_cwd)
             if wt is not None:
-                ensure_project_skill_links(wt, project_ns)
+                ensure_project_skill_links(wt, project_ns, copy=True)
         except Exception:
             _log.exception("could not repair project skill links; spawning without them")
     roots.append(REPO_ROOT)

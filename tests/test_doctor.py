@@ -1541,6 +1541,7 @@ class TestRunAllChecks:
         no_findings = (
             "check_installed_integrity",
             "check_capability_skill_store",
+            "check_memory_index_size",
             "check_design_integrations",
             "check_env_path",
             "check_npm_registry",
@@ -1875,3 +1876,33 @@ class TestNpmRegistryCheck:
 
         monkeypatch.setattr("agent_takkub.doctor.subprocess.run", timed_out)
         assert check_npm_registry()[0].status == Status.SKIP
+
+
+def _memory_index(root: Path, dir_name: str, size: int) -> Path:
+    index = root / "projects" / dir_name / "memory" / "MEMORY.md"
+    index.parent.mkdir(parents=True)
+    index.write_bytes(b"x" * size)
+    return index
+
+
+def test_memory_index_size_ok_when_small(tmp_path: Path) -> None:
+    from agent_takkub.doctor import check_memory_index_size
+
+    _memory_index(tmp_path, "takkub-project-a", 4_000)
+    assert check_memory_index_size([tmp_path])[0].status == Status.OK
+
+
+def test_memory_index_size_warns_on_largest_bloated_index(tmp_path: Path) -> None:
+    from agent_takkub.doctor import check_memory_index_size
+
+    _memory_index(tmp_path, "takkub-project-small", 4_000)
+    _memory_index(tmp_path, "takkub-project-mid", 12_000)
+    big = _memory_index(tmp_path, "takkub-project-big", 24_000)
+    # a non-cockpit Claude project is not ours to judge
+    _memory_index(tmp_path, "C--Users-x-elsewhere", 50_000)
+
+    finding = check_memory_index_size([tmp_path])[0]
+
+    assert finding.status == Status.WARN
+    assert finding.detail.startswith("2 MEMORY.md")
+    assert str(big) in finding.detail

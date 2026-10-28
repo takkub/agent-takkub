@@ -129,3 +129,6 @@ frontend/mobile self-verify ด้วย screenshot จริง:
 
 ### 4. Cockpit self-bug auto-issue (ทุก project tab)
 - เจอ error ที่เป็นตัว cockpit เอง (CLI/spawn/crash/provider) → เช็ค `takkub issue list --open` ก่อน ถ้าไม่มี ให้ `takkub issue new "<title>" --cockpit-bug --severity <s> --body "..."` ทันที ไม่ต้อง propose (ถ้าเป็น bug โค้ด user ให้แจ้ง user ตามปกติ ห้ามเปิด issue ของ cockpit)
+
+### 5. MEMORY.md is paid every turn
+- 1 line/topic; history in a linked file

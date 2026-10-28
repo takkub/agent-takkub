@@ -23,7 +23,7 @@ import yaml
 
 from . import config, token_estimate
 from ._win_console import SUBPROCESS_NO_WINDOW
-from .worktree_manager import _make_link, _remove_link
+from .worktree_manager import _make_link, _remove_link, ensure_git_excluded
 
 _log = logging.getLogger(__name__)
 
@@ -147,8 +147,60 @@ def validate_skill_name(name: str, existing: Iterable[str] = ()) -> tuple[bool, 
     return True, ""
 
 
+_COPY_MARKER = ".takkub-copy"
+
+
+def _tree_stamp(src: Path) -> str:
+    """Cheap change stamp of a skill dir: (path, size, mtime) of every file."""
+    parts = []
+    for f in sorted(p for p in src.rglob("*") if p.is_file()):
+        st = f.stat()
+        parts.append(f"{f.relative_to(src).as_posix()}:{st.st_size}:{st.st_mtime_ns}")
+    return "|".join(parts)
+
+
+def _copy_owner(dst: Path) -> str | None:
+    """The store dir a cockpit copy at *dst* was made from, else None."""
+    try:
+        lines = (dst / _COPY_MARKER).read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return None
+    return lines[1] if len(lines) > 1 else None
+
+
+def _copy_skill_into_project(central: Path, dst: Path) -> str | None:
+    """#958 worktree mode: a plain copy of *central* at *dst*, refreshed when
+    the store copy changes. Deleting it — by git or anything else — can never
+    reach the store, unlike a junction git walks straight into."""
+    from .native_skills import _is_link
+
+    stamp = _tree_stamp(central)
+    if _is_link(dst):
+        _remove_link(dst)  # a junction planted by an older version
+    elif dst.exists():
+        if _copy_owner(dst) is None:
+            return None  # the user's own skill at this name
+        try:
+            if (dst / _COPY_MARKER).read_text(encoding="utf-8").splitlines()[0] == stamp:
+                return None
+        except (OSError, IndexError):
+            pass
+        shutil.rmtree(dst, ignore_errors=True)  # our copy: real files, no links
+    try:
+        shutil.copytree(central, dst, symlinks=True)
+        (dst / _COPY_MARKER).write_text(f"{stamp}\n{central}\n", encoding="utf-8")
+    except OSError as exc:
+        return str(exc)
+    return None
+
+
 def _link_skill_into_project(
-    project_root: Path, project_ns: str, name: str, *, central: Path | None = None
+    project_root: Path,
+    project_ns: str,
+    name: str,
+    *,
+    central: Path | None = None,
+    copy: bool = False,
 ) -> str | None:
     """Ensure `<project_root>/.claude/skills/<name>` links to the central
     real skill dir `project_skills_dir(project_ns)/<name>` — or to *central*
@@ -166,6 +218,8 @@ def _link_skill_into_project(
     if not central.is_dir():
         return f"central skill missing: {central}"
     dst = project_root / ".claude" / "skills" / name
+    if copy:
+        return _copy_skill_into_project(central, dst)
     try:
         real_dst = os.path.realpath(str(dst))
     except OSError:
@@ -196,6 +250,11 @@ def _prune_dangling_store_links(project_root: Path) -> None:
         os.path.realpath(str(config.global_skills_dir())),
     )
     for entry in skills.iterdir():
+        owner = _copy_owner(entry) if not _is_link(entry) else None
+        if owner is not None:
+            if not Path(owner).is_dir():  # #958 copy whose store skill is gone
+                shutil.rmtree(entry, ignore_errors=True)
+            continue
         if not _is_link(entry) or entry.exists():
             continue
         try:
@@ -224,6 +283,11 @@ def _unlink_excluded_skill(project_root: Path, store_dir: Path) -> None:
     from .native_skills import _is_link
 
     dst = project_root / ".claude" / "skills" / store_dir.name
+    owner = _copy_owner(dst)
+    if owner is not None:
+        if os.path.normcase(owner) == os.path.normcase(str(store_dir)):
+            shutil.rmtree(dst, ignore_errors=True)
+        return
     if not _is_link(dst):
         return
     try:
@@ -234,7 +298,9 @@ def _unlink_excluded_skill(project_root: Path, store_dir: Path) -> None:
         _remove_link(dst)
 
 
-def ensure_project_skill_links(project_root: str | Path, project_ns: str) -> list[str]:
+def ensure_project_skill_links(
+    project_root: str | Path, project_ns: str, *, copy: bool = False
+) -> list[str]:
     """(Re)create the junction/symlink for every central skill of
     `project_ns` into `<project_root>/.claude/skills/`. Idempotent — safe to
     call on every project open. Returns a list of error strings (empty when
@@ -243,6 +309,9 @@ def ensure_project_skill_links(project_root: str | Path, project_ns: str) -> lis
     This is the "repair on open" half of the central-skills design: a skill
     created in one session, or a link deleted/broken between sessions, is
     re-linked here so claude/codex/agy keep discovering it from cwd.
+
+    *copy* (#958) plants marked copies instead of links — used for disposable
+    worktree checkouts, where git and agents delete trees wholesale.
     """
     project_root = Path(project_root)
     errors: list[str] = []
@@ -259,7 +328,7 @@ def ensure_project_skill_links(project_root: str | Path, project_ns: str) -> lis
             # half-built `.tmp-*`) — never a skill to link.
             if skill_dir.name.startswith(".") or not skill_dir.is_dir():
                 continue
-            err = _link_skill_into_project(project_root, project_ns, skill_dir.name)
+            err = _link_skill_into_project(project_root, project_ns, skill_dir.name, copy=copy)
             if err:
                 errors.append(f"{skill_dir.name}: {err}")
     # #419: cockpit-level skills ride the SAME surface — linked after the
@@ -275,11 +344,28 @@ def ensure_project_skill_links(project_root: str | Path, project_ns: str) -> lis
                 _unlink_excluded_skill(project_root, skill_dir)
                 continue
             err = _link_skill_into_project(
-                project_root, project_ns, skill_dir.name, central=skill_dir
+                project_root, project_ns, skill_dir.name, central=skill_dir, copy=copy
             )
             if err:
                 errors.append(f"{skill_dir.name} (global): {err}")
+    _exclude_skill_links_from_git(project_root)
     return errors
+
+
+def _exclude_skill_links_from_git(project_root: Path) -> None:
+    """#958: keep every link point (and worktree copy) in `.claude/skills/`
+    out of git — see `worktree_manager.ensure_git_excluded` for how a visible
+    junction let `git reset --hard` / `git worktree remove` wipe the central
+    store, and #959 for the `done` wip commit that swept 156 of them in."""
+    from .native_skills import _is_link
+
+    skills = project_root / ".claude" / "skills"
+    try:
+        links = [e for e in skills.iterdir() if _is_link(e) or _copy_owner(e) is not None]
+    except OSError:
+        return
+    if links:
+        ensure_git_excluded(links)
 
 
 def migrate_skill_to_global(

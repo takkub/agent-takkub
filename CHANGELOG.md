@@ -2,6 +2,23 @@
 
 All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses [SemVer](https://semver.org/).
 
+## [v2.2.36] - 2026-10-28
+
+### Fixed (แก้)
+
+- **skill กลางของทุกโปรเจคถูกลบเหลือแต่โฟลเดอร์ว่าง (#958) — ร้ายแรง:** บน Windows git มองทะลุ junction `.claude/skills/<name>` ที่ cockpit ทำไว้ใน worktree แล้วลบไฟล์ของ skill store กลางทิ้ง (เกิดจริง 2 ครั้ง: `git worktree remove` ล้าง 24 skill ใน 1 วินาที · `git reset --hard` หลัง commit wip ที่มีไฟล์ `.claude/` อีก 4) · แก้: worktree ได้**สำเนา** skill แทน junction · link point ทุกตัวถูกใส่ใน `.git/info/exclude` (git ไม่เห็น ไม่ add ไม่ลบ) · guard ห้ามทุก role รวม Lead รัน `git worktree remove` เอง ให้ใช้ `takkub worktree merge/clean` ที่ถอด link ก่อนลบ
+- **worktree สร้างจาก HEAD เก่าของเครื่อง ไม่ใช่ upstream (#959):** ถ้า checkout หลักตามหลัง upstream ที่ fetch ไว้แล้ว (และไม่มี commit ของตัวเองที่ยังไม่ push) worktree จะเริ่มจาก upstream · `done` auto-commit ไม่เก็บไฟล์ใต้ `.claude/` อีก · guard ไม่ตัดสิน git ด้วย `cd` ที่อยู่หลังคำสั่ง git แล้ว (`cd <worktree> && git merge …; cd .. && ls` เคยโดนบล็อกเหมือนอยู่ shared tree)
+- **done notice นับ "38 commit ahead" และเตือน trailer AI ของ commit ที่อยู่บน origin อยู่แล้ว (#957):** นับ/สแกนเฉพาะ commit ที่ยังไม่อยู่บน remote branch ใดๆ และไม่อยู่ใน HEAD ของ checkout หลัก
+
+### Added (เพิ่ม)
+
+- **Cloudflare security-audit skill มากับโปรแกรม:** audit ความปลอดภัยของ source code แบบหลาย agent (MIT, upstream c1c8a8c) ติดตั้งให้ทุกโปรเจคผ่าน global skill store อัตโนมัติ (ไม่ทับ skill ชื่อเดียวกันของ user · ปิดรายโปรเจคด้วย `skills_exclude`) · validator ใช้บน Windows ได้แล้ว · wheel รวมไฟล์ทุกไฟล์ของ skill ที่ ship (เดิมใส่แค่ `SKILL.md`)
+- **`takkub doctor` เตือน MEMORY.md บวม:** index ของ memory ถูกส่งซ้ำทุก turn (วัดจริง 23.9KB ≈ 10.6k token/turn) → เตือนเมื่อเกิน 10KB
+
+### Changed (เปลี่ยน)
+
+- **ลด token ต่อ turn:** คำอธิบายของ skill ที่ ship 6 ตัวสั้นลง (ทุก pane แบก catalog นี้ทุก turn) · กฎ Lead เรื่องเก็บ MEMORY.md ให้สั้น
+
 ## [v2.2.35] - 2026-10-28
 
 ### Added (เพิ่ม)

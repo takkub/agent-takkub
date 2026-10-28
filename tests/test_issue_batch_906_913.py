@@ -149,15 +149,18 @@ def test_worktree_pane_gets_skill_links(tmp_path, monkeypatch) -> None:
     main = tmp_path / "main"
     main.mkdir()
     monkeypatch.setattr(spawn_engine, "_allowed_project_roots", lambda p: [main])
-    linked: list[Path] = []
+    linked: list[tuple[Path, bool]] = []
     monkeypatch.setattr(
-        skill_scan, "ensure_project_skill_links", lambda root, ns: linked.append(Path(root))
+        skill_scan,
+        "ensure_project_skill_links",
+        lambda root, ns, copy=False: linked.append((Path(root), copy)),
     )
     spawn_engine._skill_roots_for_project("proj", str(wt))
-    assert linked == [main, wt]
+    # #958: the worktree gets copies — git walks into junctions and deletes the store
+    assert linked == [(main, False), (wt, True)]
     linked.clear()
     spawn_engine._skill_roots_for_project("proj", str(main))
-    assert linked == [main]
+    assert linked == [(main, False)]
 
 
 # --- #914 -------------------------------------------------------------------

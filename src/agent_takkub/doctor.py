@@ -1838,6 +1838,65 @@ def check_capability_skill_store() -> list[Finding]:
     return findings
 
 
+# Claude Code loads a pane's whole memory index (MEMORY.md) into the system
+# prompt and re-sends it every turn. Measured 2026-10-28: a 23.9KB Thai-heavy
+# index cost ~10.6k tokens per turn — the single biggest piece of the Lead's
+# 49k baseline. Thai runs ~2.4 bytes/token, English ~4; 2.4 keeps the
+# estimate on the safe (higher) side.
+_MEMORY_INDEX_WARN_BYTES = 10_000
+_MEMORY_BYTES_PER_TOKEN = 2.4
+
+
+def _claude_config_roots() -> list[Path]:
+    from .config import DATA_HOME
+
+    roots = [Path.home() / ".claude"]
+    env_dir = os.environ.get("CLAUDE_CONFIG_DIR")
+    if env_dir:
+        roots.append(Path(env_dir))
+    curated = DATA_HOME / "providers" / "claude"
+    if curated.is_dir():
+        roots.extend(p for p in curated.iterdir() if p.is_dir())
+    seen: set[str] = set()
+    unique: list[Path] = []
+    for root in roots:
+        key = os.path.normcase(str(root))
+        if key not in seen:
+            seen.add(key)
+            unique.append(root)
+    return unique
+
+
+def check_memory_index_size(roots: Sequence[Path] | None = None) -> list[Finding]:
+    """[token-cost] — warn when a cockpit pane's MEMORY.md index has grown
+    big enough to be a real per-turn cost (it is part of every prompt)."""
+    bloated: list[tuple[int, Path]] = []
+    for root in roots if roots is not None else _claude_config_roots():
+        for index in sorted((root / "projects").glob("takkub-project-*/memory/MEMORY.md")):
+            try:
+                size = index.stat().st_size
+            except OSError:
+                continue
+            if size > _MEMORY_INDEX_WARN_BYTES:
+                bloated.append((size, index))
+    if not bloated:
+        return [Finding("token-cost", "memory-index-size", Status.OK, "memory indexes are small")]
+    bloated.sort(reverse=True)
+    size, worst = bloated[0]
+    return [
+        Finding(
+            "token-cost",
+            "memory-index-size",
+            Status.WARN,
+            f"{len(bloated)} MEMORY.md index(es) over {_MEMORY_INDEX_WARN_BYTES // 1000}KB; "
+            f"largest {size / 1000:.1f}KB ≈ {int(size / _MEMORY_BYTES_PER_TOKEN):,} tokens "
+            f"re-sent every turn: {worst}",
+            "keep one short line per topic in MEMORY.md; move per-release/batch notes "
+            "into a single history file it links to",
+        )
+    ]
+
+
 # ---------------------------------------------------------------------------
 # [design-integrations] — #365 phase 7
 # ---------------------------------------------------------------------------
@@ -4094,6 +4153,7 @@ def run_all_checks() -> list[Finding]:
         ("check_graft", check_graft),
         ("check_installed_integrity", check_installed_integrity),
         ("check_capability_skill_store", check_capability_skill_store),
+        ("check_memory_index_size", check_memory_index_size),
         ("check_design_integrations", check_design_integrations),
         ("check_editable_install", check_editable_install),
         ("check_arch", check_arch),
