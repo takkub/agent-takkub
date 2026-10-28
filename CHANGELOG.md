@@ -6,7 +6,7 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 
 ### Added (เพิ่ม)
 
-- **PM — แชท project manager ดูภาพรวมทุกโปรเจค:** ปุ่ม **🧭 PM** บน status bar เปิดแท็บ PM ซึ่งเป็นแชทแบบเดียวกับ Lead (เลือก provider claude/codex/gemini ได้ด้วยเมนู Lead provider ตอนอยู่ที่แท็บ PM) · PM อ่านอย่างเดียวและไม่มีทีม ใช้ตอบคำถามเช่น "2 วันที่ผ่านมามีโปรเจคไหนค้างอะไรบ้าง" · บทบาทอยู่ที่ `docs/pm/role.md`
+- **PM — แชท project manager ดูภาพรวมทุกโปรเจค:** ปุ่ม **🧭 PM** ที่หัว sidebar (ข้าง PROJECTS) กดเพื่อเปิด/ปิดแท็บ PM ซึ่งปักไว้บนสุดของรายการ — แท็บ PM ซึ่งเป็นแชทแบบเดียวกับ Lead (เลือก provider claude/codex/gemini ได้ด้วยเมนู Lead provider ตอนอยู่ที่แท็บ PM) · PM อ่านอย่างเดียวและไม่มีทีม ใช้ตอบคำถามเช่น "2 วันที่ผ่านมามีโปรเจคไหนค้างอะไรบ้าง" · บทบาทอยู่ที่ `docs/pm/role.md`
 - **`takkub pm summary --days N [--pending] [--project X]` / `takkub pm projects` / `takkub pm backlog --project X`:** รายงานข้ามโปรเจคแบบอ่านอย่างเดียว ดึงจาก ledger, done report (รวม REMAINING) และ backlog · ใบงานที่เป็นแค่ `อ่านไฟล์นี้: "<path>"` จะแสดงหัวข้อจริงจากไฟล์ใบงานแทน
 - **issue ของ cockpit ต้องมีเลขเวอร์ชันเสมอ:** `takkub issue new` เติม `cockpit version: <ver> · <os>` ทุกครั้ง (เดิมจะข้ามถ้าเนื้อหามีคำว่า "version" อยู่แล้ว) · guard ไม่ให้ใช้ `gh issue create --repo takkub/agent-takkub` ตรงๆ · ฟอร์ม issue บน GitHub บังคับกรอกเวอร์ชันกับ OS
 - **`takkub provider list` แสดง claude ด้วย (#955)** พร้อมสถานะปิด (toggle) และติดโควตาของทุก provider

@@ -320,6 +320,7 @@ class MainWindow(
         self.tabs.closeRequested.connect(self._on_tab_close_requested)
         self.tabs.contextMenuRequested.connect(self._on_tab_context_menu)
         self.tabs.openProjectRequested.connect(self._open_project_tab)
+        self.tabs.pmToggleRequested.connect(self._on_open_pm_clicked)
         # NOTE: `currentChanged` is connected further down in __init__ — once
         # the widgets its slot (`_on_tab_switched`) touches (the usage corner,
         # `_limit_label_host`, ...) exist. Connecting right here, before the
@@ -1640,7 +1641,14 @@ class MainWindow(
         self._ensure_project_skill_links(project_name)
 
         tab = ProjectTab(project_name, lead_pane=None)
-        idx = self.tabs.addTab(tab, project_name)
+        from .pm_project import is_pm_project
+
+        # The PM tab is pinned above every project in the sidebar (owner ask).
+        idx = (
+            self.tabs.insertTab(0, tab, project_name)
+            if is_pm_project(project_name)
+            else self.tabs.addTab(tab, project_name)
+        )
         self._wire_project_tab(tab)
         if make_current:
             self.tabs.setCurrentIndex(idx)

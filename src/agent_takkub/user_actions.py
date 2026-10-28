@@ -451,11 +451,14 @@ class UserActionsMixin:
         self._status.showMessage(f"💻 {msg}", 5_000)
 
     def _on_open_pm_clicked(self) -> None:
-        """🧭 PM button: open (or focus) the cross-project PM tab.
+        """🧭 PM toggle (sidebar header): open the cross-project PM tab, or
+        close it when it is already open — the owner turns it off when not
+        in use, it costs a live CLI session otherwise.
 
         The PM is a registered project (`pm_project.ensure_pm_project`) whose
         Lead pane reads docs/pm/role.md, so opening it is the same path as any
-        project tab — and its provider is chosen the same way as a Lead's."""
+        project tab — and its provider is chosen the same way as a Lead's.
+        It is pinned at the top of the sidebar (`_open_project_tab`)."""
         from . import pm_project
 
         try:
@@ -463,14 +466,22 @@ class UserActionsMixin:
         except Exception as exc:
             _log_event("ui_open_pm_failed", error=str(exc)[:200])
             self._status.showMessage(f"🧭 PM: {exc}", 8_000)
+            self._sync_pm_toggle()
             return
         tab = self._tab_for_project(name)
         if tab is not None:
-            self.tabs.setCurrentIndex(self.tabs.indexOf(tab))
-            _log_event("ui_open_pm", reused=True)
-            return
-        self._open_project_tab(name, make_current=True)
-        _log_event("ui_open_pm", reused=False)
+            ok, msg = self._close_project_tab(name, confirm=False)
+            _log_event("ui_close_pm", ok=ok, msg=msg)
+            self._status.showMessage("🧭 ปิด PM แล้ว" if ok else f"🧭 PM: {msg}", 5_000)
+        else:
+            self._open_project_tab(name, make_current=True)
+            _log_event("ui_open_pm")
+        self._sync_pm_toggle()
+
+    def _sync_pm_toggle(self) -> None:
+        sync = getattr(self.tabs, "_sync_pm_button", None)
+        if callable(sync):
+            sync()
 
     def _on_doctor_clicked(self) -> None:
         """🩺 Doctor button: run environment checks and display a report dialog.

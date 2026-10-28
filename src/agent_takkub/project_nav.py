@@ -155,6 +155,25 @@ QListWidget#projectList::item:selected {{
     font-size: 12px;
     font-weight: 600;
 }}
+#pmToggleBtn {{
+    background: transparent;
+    color: {cockpit_theme.TEXT_MUTED};
+    border: 1px solid {cockpit_theme.BORDER_HAIRLINE};
+    border-radius: {cockpit_theme.RADIUS_SM}px;
+    padding: 2px 8px;
+    margin-top: 6px;
+    font-size: 11px;
+    font-weight: 600;
+}}
+#pmToggleBtn:hover {{
+    background: {cockpit_theme.GROUND_PANEL};
+    color: {cockpit_theme.ACCENT_GOLD};
+}}
+#pmToggleBtn:checked {{
+    background: {cockpit_theme.GOLD_CHIP_BG};
+    color: {cockpit_theme.GOLD_CHIP_TEXT};
+    border-color: {cockpit_theme.GOLD_CHIP_BORDER};
+}}
 #tunnelIndicator {{
     border-radius: 5px;
     background: {cockpit_theme.TEXT_FAINT};
@@ -487,6 +506,9 @@ class ProjectNav(QWidget):
     # project *name* to open, not how to build/register its tab (that's
     # main_window._open_project_tab's job), so it hands the request up.
     openProjectRequested = pyqtSignal(str)
+    # 🧭 PM toggle in the header: open the cross-project PM tab, or close it
+    # when it is already open (main_window owns tabs, so it hands this up).
+    pmToggleRequested = pyqtSignal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -533,6 +555,16 @@ class ProjectNav(QWidget):
         self._header.setObjectName("projectSidebarHeader")
         hr.addWidget(self._header)
         hr.addStretch(1)
+        self._pm_btn = QPushButton("🧭 PM", header_row)
+        self._pm_btn.setObjectName("pmToggleBtn")
+        self._pm_btn.setCheckable(True)
+        self._pm_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._pm_btn.setToolTip(
+            "เปิด/ปิดแชท PM — ภาพรวมทุกโปรเจค (อ่านอย่างเดียว)\n"
+            "กดอีกครั้งเพื่อปิดเมื่อไม่ใช้ · แท็บ PM จะอยู่บนสุดของรายการ"
+        )
+        self._pm_btn.clicked.connect(lambda: self.pmToggleRequested.emit())
+        hr.addWidget(self._pm_btn)
         self._tunnel_indicator = QLabel(header_row)
         self._tunnel_indicator.setObjectName("tunnelIndicator")
         self._tunnel_indicator.setFixedSize(10, 10)
@@ -949,6 +981,7 @@ class ProjectNav(QWidget):
         )
         self.refresh_pending_projects()  # opened project drops out of "pending"
         self._schedule_fit_explorer()
+        self._sync_pm_button()
         return index
 
     def insertTab(self, index: int, w: QWidget, label: str) -> int:
@@ -961,6 +994,7 @@ class ProjectNav(QWidget):
         )
         self.refresh_pending_projects()
         self._schedule_fit_explorer()
+        self._sync_pm_button()
         return index
 
     def removeTab(self, index: int) -> None:
@@ -995,10 +1029,21 @@ class ProjectNav(QWidget):
             del item
         self.refresh_pending_projects()  # closed project may reappear as pending
         self._schedule_fit_explorer()
+        self._sync_pm_button()
         if was_current:
             # -1 when the list is now empty -> `_on_tab_switched(-1)` clears
             # `active` (#102's contract), same as before for the last tab.
             self._on_row_changed(self._list.currentRow())
+
+    def _sync_pm_button(self) -> None:
+        """Show the 🧭 PM header toggle as pressed while the PM tab is open."""
+        from .pm_project import is_pm_project
+
+        is_open = any(
+            is_pm_project(getattr(self._stack.widget(i), "project_name", None))
+            for i in range(self._stack.count())
+        )
+        self._pm_btn.setChecked(is_open)
 
     def setTabText(self, index: int, text: str) -> None:
         rw = self._row_widget(index)

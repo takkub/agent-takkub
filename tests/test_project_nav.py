@@ -654,3 +654,26 @@ def test_pending_scan_is_pure_and_matches_sync_refresh(monkeypatch) -> None:
     monkeypatch.setattr(ProjectNav, "_pending_task_count", staticmethod(lambda n: counts[n]))
     assert ProjectNav._scan_pending(["a", "b", "c"], {"c"}) == [("a", 2)]
     assert ProjectNav._scan_pending(["a", "b", "c"], set()) == [("a", 2), ("c", 1)]
+
+
+def test_pm_toggle_sits_in_the_header_and_follows_the_pm_tab(qapp) -> None:
+    """Owner 2026-10-28: PM lives at the top and can be switched off when not
+    in use — the header 🧭 PM toggle reflects whether the PM tab is open."""
+    nav = ProjectNav()
+    hits: list[int] = []
+    nav.pmToggleRequested.connect(lambda: hits.append(1))
+
+    def _tab(name: str) -> QWidget:
+        w = QWidget()
+        w.project_name = name  # type: ignore[attr-defined]
+        return w
+
+    nav.addTab(_tab("alpha"), "alpha")
+    assert not nav._pm_btn.isChecked()
+    pm = _tab("PM")
+    nav.insertTab(0, pm, "PM")
+    assert nav.widget(0) is pm and nav._pm_btn.isChecked()
+    nav._pm_btn.click()
+    assert hits == [1]
+    nav.removeTab(nav.indexOf(pm))
+    assert not nav._pm_btn.isChecked()
