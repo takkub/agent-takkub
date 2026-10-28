@@ -88,3 +88,52 @@ def test_ensure_surface_reports_link_failure(
     errors = skill_store.ensure_shipped_skill_surface()
 
     assert errors == ["alpha: simulated link failure"]
+
+
+def _seed_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> tuple[Path, Path]:
+    monkeypatch.setattr(config_mod, "ASSETS_ROOT", tmp_path / "assets")
+    monkeypatch.setattr(config_mod, "GLOBAL_SKILLS_HOME", tmp_path / "global")
+    monkeypatch.setattr(skill_store, "GLOBAL_SHIPPED_SKILLS", ("sa",))
+    src = tmp_path / "assets" / "capabilities" / "skills" / "sa"
+    src.mkdir(parents=True)
+    (src / "SKILL.md").write_text("v1", encoding="utf-8")
+    (src / "HUNTING.md").write_text("h", encoding="utf-8")
+    return src, tmp_path / "global" / "sa"
+
+
+def test_seed_copies_every_file_into_global_store(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _src, dst = _seed_env(monkeypatch, tmp_path)
+
+    assert skill_store.seed_global_shipped_skills() == []
+    assert (dst / "SKILL.md").read_text(encoding="utf-8") == "v1"
+    assert (dst / "HUNTING.md").is_file()
+    assert (dst / ".takkub-shipped").is_file()
+
+
+def test_seed_refreshes_own_copy_when_shipped_changes(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    src, dst = _seed_env(monkeypatch, tmp_path)
+    skill_store.seed_global_shipped_skills()
+    (src / "SKILL.md").write_text("v2", encoding="utf-8")
+    (src / "HUNTING.md").unlink()
+
+    assert skill_store.seed_global_shipped_skills() == []
+    assert (dst / "SKILL.md").read_text(encoding="utf-8") == "v2"
+    assert not (dst / "HUNTING.md").exists()
+
+
+def test_seed_never_touches_users_own_same_named_skill(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _src, dst = _seed_env(monkeypatch, tmp_path)
+    dst.mkdir(parents=True)
+    (dst / "SKILL.md").write_text("mine", encoding="utf-8")
+    (dst / "notes.md").write_text("keep", encoding="utf-8")
+
+    assert skill_store.seed_global_shipped_skills() == []
+    assert (dst / "SKILL.md").read_text(encoding="utf-8") == "mine"
+    assert (dst / "notes.md").is_file()
+    assert not (dst / ".takkub-shipped").exists()

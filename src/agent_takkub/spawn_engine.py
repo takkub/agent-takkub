@@ -519,9 +519,13 @@ def _skill_roots_for_project(project_ns: str, pane_cwd: str | None = None) -> li
     being discovered. Never blocks a spawn on a link failure.
     """
     try:
-        from .core.capabilities.skill_store import ensure_shipped_skill_surface
+        from .core.capabilities.skill_store import (
+            ensure_shipped_skill_surface,
+            seed_global_shipped_skills,
+        )
 
         ensure_shipped_skill_surface()
+        seed_global_shipped_skills()
     except Exception:
         _log.exception("could not repair shipped-skill surface; spawning without it")
     roots = list(_allowed_project_roots(project_ns)) if project_ns else []

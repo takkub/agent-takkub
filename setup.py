@@ -156,10 +156,14 @@ def _stage_assets() -> None:
     if not skills_src.is_dir():
         skills_src = _ROOT / ".claude" / "skills"
     if skills_src.is_dir():
-        skill_files = sorted(skills_src.glob("*/SKILL.md"))
-        if skill_files:
-            skills_dst = _ASSETS / "capabilities" / "skills"
-            for f in skill_files:
+        # Every top-level file of a skill dir, not just SKILL.md — a skill
+        # like security-audit ships companion .md / schema / validator files
+        # its SKILL.md links to.
+        skills_dst = _ASSETS / "capabilities" / "skills"
+        for skill_md in sorted(skills_src.glob("*/SKILL.md")):
+            for f in sorted(skill_md.parent.iterdir()):
+                if not f.is_file():
+                    continue
                 dst = skills_dst / f.parent.name / f.name
                 dst.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(f, dst)

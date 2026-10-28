@@ -31,6 +31,7 @@ Never raises.
 
 from __future__ import annotations
 
+import hashlib
 import logging
 from pathlib import Path
 
@@ -82,4 +83,65 @@ def ensure_shipped_skill_surface() -> list[str]:
         err = _make_link(skill_dir, dst)
         if err:
             errors.append(f"{skill_dir.name}: {err}")
+    return errors
+
+
+# Shipped skills that also go into the cockpit-level global store
+# (`config.global_skills_dir()`, #419) so EVERY project's panes discover them
+# through the normal `ensure_project_skill_links` surface — an installed
+# cockpit has no other way to put a bundled skill in front of a project pane.
+# Opt-out per project via `skills_exclude`. Keep this list short: each entry
+# costs one skill-catalog line in every pane.
+GLOBAL_SHIPPED_SKILLS: tuple[str, ...] = ("security-audit",)
+
+# Written last into a seeded copy; holds the content hash it was seeded from.
+# A same-named global skill WITHOUT this marker is the user's own — never touched.
+_SEED_MARKER = ".takkub-shipped"
+
+
+def _skill_fingerprint(skill_dir: Path) -> str:
+    h = hashlib.sha256()
+    for f in sorted(p for p in skill_dir.iterdir() if p.is_file()):
+        h.update(f.name.encode("utf-8") + b"\0")
+        h.update(f.read_bytes())
+        h.update(b"\0")
+    return h.hexdigest()
+
+
+def seed_global_shipped_skills() -> list[str]:
+    """Copy each `GLOBAL_SHIPPED_SKILLS` entry from the shipped store into
+    the global skill store, refreshing a copy we seeded earlier when the
+    shipped content changed (new release). Idempotent, cheap when current
+    (one hash of a few hundred KB), never raises. Returns error strings."""
+    errors: list[str] = []
+    try:
+        src_root = shipped_skills_root()
+        dst_root = config.global_skills_dir()
+    except Exception as exc:
+        return [f"seed: {exc}"]
+    for name in GLOBAL_SHIPPED_SKILLS:
+        src = src_root / name
+        dst = dst_root / name
+        marker = dst / _SEED_MARKER
+        try:
+            if not (src / "SKILL.md").is_file():
+                continue
+            if dst.exists() and not marker.is_file():
+                continue  # user's own skill at this name — leave it alone
+            stamp = _skill_fingerprint(src)
+            if marker.is_file() and marker.read_text(encoding="utf-8").strip() == stamp:
+                continue
+            # The old marker stays until the copy finishes: a refresh cut
+            # short keeps a stale stamp and simply re-runs next time.
+            dst.mkdir(parents=True, exist_ok=True)
+            wanted = {f.name for f in src.iterdir() if f.is_file()}
+            for f in dst.iterdir():
+                if f.is_file() and f.name not in wanted:
+                    f.unlink()
+            for f in src.iterdir():
+                if f.is_file():
+                    (dst / f.name).write_bytes(f.read_bytes())
+            marker.write_text(stamp, encoding="utf-8")
+        except OSError as exc:
+            errors.append(f"{name}: {exc}")
     return errors
