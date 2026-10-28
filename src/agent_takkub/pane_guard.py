@@ -502,6 +502,18 @@ ROOT_RM_RULE_TEXT = (
 )
 
 
+# An issue on the cockpit's own repo must say which cockpit version hit the
+# bug (owner request 2026-10-28). `takkub issue new` stamps it; a raw
+# `gh issue create --repo takkub/agent-takkub` does not, so it is refused.
+_RAW_COCKPIT_ISSUE = re.compile(
+    r"\bgh(?:\.exe)?\s+issue\s+create\b[^\r\n;&|]*takkub/agent-takkub\b", re.I
+)
+RAW_COCKPIT_ISSUE_RULE_TEXT = (
+    'เปิด issue ของ cockpit ด้วย `takkub issue new "<title>" --body-file <file>` แทน '
+    "`gh issue create` — คำสั่งนี้ใส่เลขเวอร์ชัน cockpit ให้อัตโนมัติ จะได้รู้ว่าบั๊กเกิดในเวอร์ชันไหน"
+)
+
+
 def _root_rm_target(cmd: str) -> str | None:
     """#929: the root-level path a recursive delete in *cmd* targets, if any."""
     for m in _ROOT_RM.finditer(cmd):
@@ -4481,6 +4493,14 @@ def classify(
             wait_verdict = _lead_wait_verdict(code)
             if wait_verdict is not None:
                 return wait_verdict
+
+    # Before _UNGUARDED_ROLES: the Lead is the one filing most cockpit issues.
+    if name and name != "shell" and _RAW_COCKPIT_ISSUE.search(_strip_heredoc_bodies(cmd)):
+        return Verdict(
+            False,
+            rule="cockpit_issue:use_takkub_issue_new",
+            reason=f"role `{name}`: {RAW_COCKPIT_ISSUE_RULE_TEXT}",
+        )
 
     # #585 round 2/4: Deny heavy build or full suite when machine is busy
     # (other pane working or RAM/CPU overloaded).

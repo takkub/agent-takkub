@@ -1584,6 +1584,41 @@ def _pane_quota_stalled(orch: object, project: str, role: str, now: float) -> bo
     return ps is not None and ps.rate_limited_until > now
 
 
+# #954: how long a closed pane's undelivered task waits before it is forwarded
+# to a replacement pane — a re-assign by the Lead inside it wins instead.
+_CLOSE_FORWARD_GRACE_MS = 10_000
+
+_POST_COMPACT_ESC_RE = re.compile(
+    r"\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b[@-Z\\-_]|[\x00-\x08\x0b-\x1f\x7f]"
+)
+
+
+def _post_compact_screen_tail(pane, limit: int = 5) -> list[str]:
+    """#956: the last few readable lines a live pane shows, for Lead's
+    post-compact status. The rendered screen first; the raw transcript is a
+    PTY byte stream (cursor moves, OSC titles) and only a fallback, stripped
+    of every escape and capped. Each line is cut so a wide TUI row can't eat
+    the 2 KB brief."""
+    rows: list[str] = []
+    try:
+        rows = [str(r) for r in (pane.session.display_lines() or [])]
+    except Exception:
+        rows = []
+    if not any(r.strip() for r in rows):
+        path = getattr(pane, "_transcript_path", None)
+        if path:
+            try:
+                with open(path, "rb") as fh:
+                    fh.seek(0, os.SEEK_END)
+                    fh.seek(max(0, fh.tell() - 16_384))
+                    rows = fh.read().decode("utf-8", errors="replace").splitlines()
+            except OSError:
+                rows = []
+    clean = [" ".join(_POST_COMPACT_ESC_RE.sub("", r).split()) for r in rows]
+    clean = [r[:160] for r in clean if r and any(ch.isalnum() for ch in r)]
+    return clean[-limit:]
+
+
 def _session_has_draft(sess) -> bool:
     """#748: True when the pane's composer holds unsubmitted input. Any
     cockpit-originated text written while this is True lands on top of the draft."""
@@ -3931,11 +3966,26 @@ class Orchestrator(
         )
         return True
 
-    def _resume_after_close(self, project: str, role: str, state: PaneState | None, cwd) -> None:
+    def _resume_after_close(
+        self,
+        project: str,
+        role: str,
+        state: PaneState | None,
+        cwd,
+        retained_task: str | None = None,
+    ) -> None:
         key = _exit_key(project, role)
         # Another assign/spawn may already have taken over this slot.
         pane = self._project_panes(project).get(role)
         if pane is not None and pane.session is not None and pane.session.is_alive:
+            return
+        if (
+            state is not None
+            and retained_task is not None
+            and state.last_assigned_task != retained_task
+        ):
+            # #954: a newer assign replaced the retained task during the grace.
+            _log_event("close_forward_superseded", role=role, project=project)
             return
         if state is not None and self._pane_state.get(key) is state:
             ok, message = self.spawn(role, cwd=cwd, project=project, _from_auto_respawn=True)
@@ -7459,8 +7509,10 @@ class Orchestrator(
                 self._notify_lead(
                     project_ns,
                     f"⚠️ [close-undelivered] {role_name} ถูก close ทั้งที่ task ล่าสุดยังไม่เคย "
-                    f"ถึงมือ pane เลย (ค้างอยู่ก่อน close, ไม่ใช่ทำเสร็จแล้วปิด) — text กู้คืนได้ด้วย "
-                    f"`takkub task show --role {role_name}` ก่อน assign ใหม่ (issue #484)",
+                    f"ถึงมือ pane เลย (ค้างอยู่ก่อน close, ไม่ใช่ทำเสร็จแล้วปิด) — ถ้าไม่ assign "
+                    f"{role_name} ใหม่ภายใน {_CLOSE_FORWARD_GRACE_MS // 1000} วิ ระบบจะเปิด pane ใหม่"
+                    "แล้วส่งงานนี้ต่อให้เอง · assign ใหม่ภายในเวลานั้น = ใบใหม่แทนใบนี้ (ไม่ซ้ำ) · "
+                    f"ดู text เดิม: `takkub task show --role {role_name}` (#484/#954)",
                     from_role=role_name,
                     note="close_undelivered",
                     kind="close-undelivered",
@@ -7722,8 +7774,17 @@ class Orchestrator(
         ):
             retained = _ps_close if _task_undelivered_close else None
             closing_cwd = getattr(pane, "_session_cwd", None)
+            retained_task = getattr(retained, "last_assigned_task", None) if retained else None
+            # #954: the Lead usually closes a stuck pane to re-assign the same
+            # work right away (often `--provider claude`). Forwarding the old,
+            # undelivered task at once handed the new pane that task AND the
+            # new assign. Give the Lead a short grace; a new assign in it
+            # replaces the retained task instead of queueing behind it.
             QTimer.singleShot(
-                0, lambda: self._resume_after_close(project_ns, role_name, retained, closing_cwd)
+                _CLOSE_FORWARD_GRACE_MS if retained is not None else 0,
+                lambda: self._resume_after_close(
+                    project_ns, role_name, retained, closing_cwd, retained_task
+                ),
             )
         if role_name != LEAD.name and not preserve_resume and not recovery_close:
             try:
@@ -13848,18 +13909,11 @@ class Orchestrator(
             lines.append(f"### {role} ({state}) — last progress: {age_str} ({ts_abs})")
             lines.append("")
 
-            transcript_path = getattr(pane, "_transcript_path", None)
-            if transcript_path:
-                try:
-                    raw = pathlib.Path(transcript_path).read_bytes()
-                    raw_lines = raw.decode("utf-8", errors="replace").splitlines()
-                    tail = [ln for ln in raw_lines if ln.strip()][-5:]
-                    if tail:
-                        lines.append("```")
-                        lines.extend(tail)
-                        lines.append("```")
-                except OSError:
-                    pass
+            tail = _post_compact_screen_tail(pane)
+            if tail:
+                lines.append("```")
+                lines.extend(tail)
+                lines.append("```")
             lines.append("")
 
         brief = "\n".join(lines)

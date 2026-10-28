@@ -27,17 +27,25 @@ def _write(path: Path, state: dict) -> None:
 
 def _sources(project: str, cwd: str) -> tuple[str, dict, dict]:
     from . import config, lead_context, team_preset
+    from .pm_project import is_pm_project, role_doc_path
 
     paths = []
+    pm = is_pm_project(project)
+    if pm:
+        # The PM tab's only policy is its role doc (docs/pm/role.md).
+        pm_doc = role_doc_path()
+        if not pm_doc.exists():
+            raise ValueError(f"required PM context is missing: {pm_doc}")
+        paths.append(pm_doc)
     claude_md = lead_context.ASSETS_ROOT / "CLAUDE.md"
     if not claude_md.exists():
         repo_claude = Path(__file__).resolve().parents[2] / "CLAUDE.md"
         if repo_claude.exists():
             claude_md = repo_claude
-    if claude_md.exists():
+    if claude_md.exists() and not pm:
         paths.append(claude_md)
 
-    for doc in REQUIRED_DOCS:
+    for doc in () if pm else REQUIRED_DOCS:
         candidate = lead_context.ASSETS_ROOT / "docs" / "lead" / doc
         if not candidate.exists():
             pkg_fallback = Path(__file__).resolve().parent / "_assets" / "docs" / "lead" / doc
@@ -91,7 +99,12 @@ def _sources(project: str, cwd: str) -> tuple[str, dict, dict]:
 
 def _policy_block(facts: dict) -> str:
     policy = facts["team"]
-    if policy["preset"] == "auto":
+    if facts.get("project_config", {}).get("kind") == "pm":
+        rule = (
+            "PM: read-only across every project. No team — takkub assign/send/close are refused. "
+            "Answer from `takkub pm summary/projects/backlog` and the files they point to."
+        )
+    elif policy["preset"] == "auto":
         rule = "Run takkub team suggest for this task; explain and honor the routing/size decision."
     elif policy["lead_may_implement"]:
         rule = "Lead may implement and self-verify. Honor the configured checker and disabled development positions."

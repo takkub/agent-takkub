@@ -4,7 +4,18 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 
 ## [v2.2.35] - 2026-10-28
 
+### Added (เพิ่ม)
+
+- **PM — แชท project manager ดูภาพรวมทุกโปรเจค:** ปุ่ม **🧭 PM** บน status bar เปิดแท็บ PM ซึ่งเป็นแชทแบบเดียวกับ Lead (เลือก provider claude/codex/gemini ได้ด้วยเมนู Lead provider ตอนอยู่ที่แท็บ PM) · PM อ่านอย่างเดียวและไม่มีทีม ใช้ตอบคำถามเช่น "2 วันที่ผ่านมามีโปรเจคไหนค้างอะไรบ้าง" · บทบาทอยู่ที่ `docs/pm/role.md`
+- **`takkub pm summary --days N [--pending] [--project X]` / `takkub pm projects` / `takkub pm backlog --project X`:** รายงานข้ามโปรเจคแบบอ่านอย่างเดียว ดึงจาก ledger, done report (รวม REMAINING) และ backlog · ใบงานที่เป็นแค่ `อ่านไฟล์นี้: "<path>"` จะแสดงหัวข้อจริงจากไฟล์ใบงานแทน
+- **issue ของ cockpit ต้องมีเลขเวอร์ชันเสมอ:** `takkub issue new` เติม `cockpit version: <ver> · <os>` ทุกครั้ง (เดิมจะข้ามถ้าเนื้อหามีคำว่า "version" อยู่แล้ว) · guard ไม่ให้ใช้ `gh issue create --repo takkub/agent-takkub` ตรงๆ · ฟอร์ม issue บน GitHub บังคับกรอกเวอร์ชันกับ OS
+- **`takkub provider list` แสดง claude ด้วย (#955)** พร้อมสถานะปิด (toggle) และติดโควตาของทุก provider
+
 ### Fixed (แก้)
+
+- **close pane ที่มีงานค้างแล้ว assign ใหม่ทันที ทำให้ได้งานซ้ำ 2 ใบ (#954):** งานที่ยังไม่ถึง pane จะรอ 10 วินาทีก่อนส่งต่อให้ pane ใหม่ ถ้า Lead assign ใหม่ภายในช่วงนั้น ใบใหม่จะใช้แทนใบเดิม
+- **post-compact status ใส่ byte ดิบของ terminal ลงใน prompt ของ Lead (#956):** ใช้หน้าจอที่ render แล้ว (หรือ transcript ที่ตัด escape ออกหมด) ไม่กี่บรรทัด
+- **prompt ของ Lead บอกว่า "claude ปิด → Claude รับแทน" (#955):** ไม่ใส่ claude ในรายการ provider ที่ถูกแทนแล้ว และบอกชัดว่าเป็นสถานะตอน spawn
 
 - **โควตาหมดแล้ว pane ถูก park รอ 5 ชม./44 ชม. แทนที่จะย้าย provider (#951):** นโยบาย `park` ใช้กับการรอสั้นๆ เท่านั้น ถ้า reset ไกลกว่า `park_max_wait_min` (ค่าเริ่มต้น 30 นาที ตั้งได้ใน `quota-policy.json` หรือ `quota_reroute` ของโปรเจค · ≤0 = รอเสมอแบบเดิม) งานจะย้ายไป provider ที่ว่าง และ park ก็ต่อเมื่อไม่มี provider อื่นให้ย้ายแล้ว
 - **assign ใหม่ด้วย `--provider claude` ยังติดสถานะ stalled:quota ของ gemini (#945):** assign ใหม่ล้างสถานะโควตาของงานเดิมทิ้ง จึงไม่ถูก park ซ้ำ 19 วินาทีหลัง spawn

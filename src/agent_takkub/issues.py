@@ -910,6 +910,15 @@ def _looks_truncated_body(body: str) -> str | None:
     return None
 
 
+def cockpit_version_line() -> str:
+    """`cockpit version: 2.2.35 · windows` — the footer every cockpit issue
+    carries so a bug can be tied to the build (and OS) that hit it."""
+    from . import __version__
+
+    os_name = {"win32": "windows", "darwin": "macos"}.get(sys.platform, sys.platform)
+    return f"cockpit version: {__version__} · {os_name}"
+
+
 def cmd_issue_new(args: Any) -> dict:
     """Handler for `takkub issue new`."""
     title: str = args.title
@@ -1003,10 +1012,10 @@ def cmd_issue_new(args: Any) -> dict:
         }
 
     # #939: stamp the cockpit version unless the reporter already gave one.
-    if "version" not in body.lower():
-        from . import __version__
-
-        body = f"{body.rstrip()}\n\n---\ncockpit version: {__version__}".lstrip()
+    # Only an explicit "cockpit version:" line counts — a body that merely
+    # mentions some other "version" (node, codex…) used to skip the stamp.
+    if "cockpit version:" not in body.lower():
+        body = f"{body.rstrip()}\n\n---\n{cockpit_version_line()}".lstrip()
 
     if getattr(args, "issues_dir", None):
         print(

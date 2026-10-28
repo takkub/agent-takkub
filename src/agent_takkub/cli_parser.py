@@ -541,6 +541,25 @@ def _add_ma(sub: Any, c: ModuleType) -> None:
     sma.set_defaults(func=c.cmd_ma)
 
 
+def _add_pm(sub: Any, c: ModuleType) -> None:
+
+    spm = sub.add_parser(
+        "pm",
+        help="(PM / any) ภาพรวมทุกโปรเจค: งานย้อนหลัง N วัน, งานค้าง, backlog (อ่านอย่างเดียว)",
+    )
+    pm_sub = spm.add_subparsers(dest="pm_action", required=True)
+    psum = pm_sub.add_parser(
+        "summary", help="ทุกโปรเจคใน N วันล่าสุด: done / ยังไม่ส่ง done / FAILED / REMAINING / backlog"
+    )
+    psum.add_argument("--days", type=int, default=2, help="ย้อนหลังกี่วัน (default 2 = วันนี้+เมื่อวาน)")
+    psum.add_argument("--project", default=None, help="เจาะโปรเจคเดียว")
+    psum.add_argument("--pending", action="store_true", help="เฉพาะโปรเจคที่ยังมีงานค้าง")
+    pm_sub.add_parser("projects", help="รายชื่อโปรเจคทั้งหมด + อันที่เปิด tab อยู่ + folder")
+    pbl = pm_sub.add_parser("backlog", help="backlog ทุกสถานะของโปรเจคหนึ่ง")
+    pbl.add_argument("--project", required=True)
+    spm.set_defaults(func=c.cmd_pm)
+
+
 def _add_progress(sub: Any, c: ModuleType) -> None:
 
     spg = sub.add_parser(
@@ -2155,6 +2174,7 @@ def build_parser(c: ModuleType) -> argparse.ArgumentParser:
     _add_done(sub, c)
     _add_subagent_done(sub, c)
     _add_ma(sub, c)
+    _add_pm(sub, c)
     _add_progress(sub, c)
     _add_end_session(sub, c)
     _add_goal(sub, c)

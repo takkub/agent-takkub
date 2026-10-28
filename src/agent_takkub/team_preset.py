@@ -616,6 +616,14 @@ def can_spawn(role: str, project: str | None = None) -> tuple[bool, str]:
     ``"auto"`` never restricts (advisory-only, #512 item 5) — nothing to
     enforce until a task override pins a concrete preset.
     """
+    from .pm_project import is_pm_project
+
+    base = role.split("#", 1)[0].strip().lower()
+    if base not in ("lead", "shell") and is_pm_project(project):
+        # The PM tab oversees every project read-only; it has no team.
+        return False, (
+            "แท็บ PM ไม่มีทีม — สั่งงานต้องทำที่ Lead ของโปรเจคนั้น (PM เขียนข้อความสั่งงานให้ copy ไปวางได้)"
+        )
     return _can_spawn_from_cfg(role, current(project), project)
 
 

@@ -120,6 +120,14 @@ def _stage_assets() -> None:
         docs_lead_dst.mkdir(parents=True)
         for f in docs_lead_files:
             shutil.copy2(f, docs_lead_dst / f.name)
+    # PM role doc (docs/pm/role.md) — pm_project.py reads it as the PM pane's
+    # whole system prompt, so an installed build must carry it too.
+    docs_pm_src = _ROOT / "docs" / "pm"
+    if docs_pm_src.is_dir():
+        docs_pm_dst = _ASSETS / "docs" / "pm"
+        docs_pm_dst.mkdir(parents=True, exist_ok=True)
+        for f in sorted(docs_pm_src.glob("*.md")):
+            shutil.copy2(f, docs_pm_dst / f.name)
 
     # Fail the build fast if CLAUDE.md references a docs/lead/*.md file that
     # isn't actually staged (missing on disk, or docs/lead/ absent entirely)

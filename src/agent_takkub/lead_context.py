@@ -394,6 +394,19 @@ def _build_lead_context_text(
     Returns the rendered text, or None if there's no cockpit CLAUDE.md to
     render from.
     """
+    from .pm_project import is_pm_project
+
+    if is_pm_project(project):
+        # The PM tab's "Lead" is the cross-project PM: its whole role is
+        # docs/pm/role.md, never the Lead playbook (it has no team to route).
+        from .pm_project import role_text
+
+        try:
+            return role_text()
+        except ValueError:
+            _log_event("pm_role_doc_missing", project=project)
+            return None
+
     cockpit_md = ASSETS_ROOT / "CLAUDE.md"
     if not cockpit_md.exists():
         _log_event("lead_context_missing", assets_root=str(ASSETS_ROOT))
@@ -645,6 +658,12 @@ Lead ทำเองได้เฉพาะงานเล็กเมื่อ
         elif not _check_available(_prov):
             _not_installed.append(_prov)
 
+    # #955: claude is the substitute in this section, so listing it here
+    # ("claude off -> Claude takes over") contradicts itself — and this text is
+    # a spawn-time snapshot the Lead kept after claude was re-enabled. A
+    # disabled claude is handled by the provider ring + [system] notices.
+    _toggled_off = [p for p in _toggled_off if p != "claude"]
+    _not_installed = [p for p in _not_installed if p != "claude"]
     if _toggled_off or _not_installed:
         _sub_parts: list[str] = []
         if _toggled_off:
@@ -671,7 +690,7 @@ provider ต่อไปนี้ใช้ไม่ได้ → **Claude รั
 - orchestrator จะ spawn pane ชื่อ role เดิมแต่รันด้วย claude
 - เวลา propose/fire ให้ **บอก user 1 บรรทัด** ว่า "{_all_unavailable} ใช้ไม่ได้ → Claude รับแทน (เสีย model diversity)" แล้วเดินงานต่อ ไม่ต้องหยุดรอ
 
-Status เปลี่ยนระหว่าง session: cockpit จะ inject `[system] <provider> ENABLED/DISABLED` message
+รายการนี้คือสถานะ**ตอน spawn** — ถ้าภายหลังมี `[system] <provider> ENABLED/DISABLED` ให้ถือตามข้อความล่าสุด · เช็คสถานะปัจจุบัน: `takkub provider list`
 """
     # #510: roles toggled OFF in THIS project's Settings → Providers & Roles
     # (`pipeline_config.rolesEnabled` — a whole role gone from the roster, not

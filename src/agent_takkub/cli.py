@@ -1824,6 +1824,28 @@ def cmd_ma(args: argparse.Namespace) -> dict:
     }
 
 
+def cmd_pm(args: argparse.Namespace) -> dict:
+    """(PM pane / anyone) cross-project read-only report — see `pm_report`.
+    Pure file reads: works whether or not a cockpit is running."""
+    from . import backlog, pm_report
+
+    action = getattr(args, "pm_action", "summary")
+    if action == "projects":
+        _utf8_print(pm_report.projects_table())
+    elif action == "backlog":
+        items = backlog.list_items(args.project)
+        _utf8_print(
+            "\n".join(backlog.render_line(it) for it in items) or f"{args.project}: ไม่มี backlog"
+        )
+    else:
+        days = max(1, int(getattr(args, "days", 2) or 2))
+        reports = pm_report.build(days, project=getattr(args, "project", None))
+        _utf8_print(
+            pm_report.render(reports, days, pending_only=bool(getattr(args, "pending", False)))
+        )
+    return {"ok": True, "msg": "", "quiet": True}
+
+
 def cmd_lock(args: argparse.Namespace) -> dict:
     """(any pane) `takkub lock <name>` — advisory per-project lock around a
     shared resource (#430: two panes building into the same `web/.next`
@@ -4842,17 +4864,27 @@ def cmd_provider(args: argparse.Namespace) -> dict:
     from .provider_spec import PROVIDER_REGISTRY
 
     if args.provider_cmd == "list":
+        from . import provider_state
+
         lines = []
+        # #955: claude is listed too — it can be toggled off and hit quota like
+        # any other provider, and the Lead had no CLI way to check it.
         for name, spec in PROVIDER_REGISTRY.items():
-            if name == "claude":
-                continue
-            path = _discover(spec)
+            try:
+                path = _discover(spec)
+            except Exception:
+                path = None
             if path:
                 state = f"installed  {path}"
             elif spec.install_command:
                 state = f"not installed  (takkub provider install {name})"
             else:
                 state = "not installed  (manual — see takkub doctor)"
+            if provider_state.is_disabled(name):
+                state += " · ปิดอยู่ (toggle)"
+            reset_at = provider_state.quota_reset_at(name)
+            if reset_at and reset_at > time.time():
+                state += f" · ติดโควตา (reset อีก ~{_human_duration(reset_at - time.time())})"
             configured_model = model_for(name)
             if configured_model:
                 state += f" · model: {configured_model}"

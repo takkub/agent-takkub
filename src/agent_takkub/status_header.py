@@ -529,6 +529,18 @@ class StatusHeaderMixin:
         self._btn_open_shell.setStyleSheet(self._ghost_button_style())
         self._btn_open_shell.clicked.connect(self._on_open_shell_clicked)
 
+        # 🧭 PM: the cross-project project-manager chat (docs/pm/role.md). It is
+        # its own tab — a Lead pane whose role is PM — so it keeps the Lead's
+        # provider choice (claude/codex/gemini…), resume and composer.
+        self._btn_pm = QPushButton("🧭 PM", self)
+        self._btn_pm.setToolTip(
+            "เปิดแชท PM — ดูภาพรวมทุกโปรเจค (ที่เปิดอยู่และย้อนหลัง N วัน)\n"
+            'เช่น "2 วันที่ผ่านมามีโปรเจคไหนค้างอะไรบ้าง" · อ่านอย่างเดียว ไม่สั่งงาน pane\n'
+            "เปลี่ยน provider ของ PM: อยู่ที่แท็บ PM แล้วใช้เมนู Lead provider เหมือนโปรเจคอื่น"
+        )
+        self._btn_pm.setStyleSheet(self._ghost_button_style())
+        self._btn_pm.clicked.connect(self._on_open_pm_clicked)
+
         # 📋 Tasks: toggle the right-hand Task List dock (A8) — previously
         # only reachable via the Ctrl+Shift+T shortcut, which nobody
         # discovers on their own (default-hidden, no visible entry point).
@@ -607,6 +619,7 @@ class StatusHeaderMixin:
         #     2b. session   — remote · graft build status
         #     2c. system    — restart · team · provider · update
         for w in (
+            self._btn_pm,
             self._btn_open_shell,
             self._chip_tasks,
             self._btn_doctor,

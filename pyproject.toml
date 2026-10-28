@@ -82,6 +82,7 @@ agent_takkub = [
     "_assets/.claude/agents/*.md",
     "_assets/capabilities/skills/*/SKILL.md",
     "_assets/docs/lead/*.md",
+    "_assets/docs/pm/*.md",
     # Report builder kit (#626) — template + mobile/tables checks, staged by
     # setup.py from repo-root assets/report/. report_builder.py reads it from
     # here on an installed build (dev checkout reads the repo-root source).

@@ -1,0 +1,36 @@
+name: บั๊ก / Bug report
+description: แจ้งบั๊กของ cockpit (ต้องใส่เวอร์ชันที่ใช้อยู่)
+labels: ["bug"]
+body:
+  - type: input
+    id: version
+    attributes:
+      label: cockpit version
+      description: >-
+        เวอร์ชัน cockpit ที่เกิดบั๊ก ดูได้จาก `takkub --version` (หรือมุมหน้าต่าง cockpit)
+        — ถ้าเปิด issue จาก pane ให้ใช้ `takkub issue new` ซึ่งใส่ให้อัตโนมัติ
+      placeholder: "2.2.35"
+    validations:
+      required: true
+  - type: dropdown
+    id: os
+    attributes:
+      label: OS
+      options:
+        - Windows
+        - macOS
+        - อื่นๆ
+    validations:
+      required: true
+  - type: input
+    id: provider
+    attributes:
+      label: provider ของ pane ที่เกิดเรื่อง
+      placeholder: "claude / codex / gemini (agy) / opencode / cursor"
+  - type: textarea
+    id: what
+    attributes:
+      label: เกิดอะไรขึ้น
+      description: ขั้นตอนที่ทำ, สิ่งที่เห็น, สิ่งที่ควรเป็น (แนบ log / notice / screenshot ได้)
+    validations:
+      required: true

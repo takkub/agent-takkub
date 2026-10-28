@@ -2484,3 +2484,30 @@ class TestTakkubTextPayloadInert:
         for command in ['takkub done "x" && npm run build', 'bash -c "npm run build"']:
             verdict = pane_guard.classify(command, "lead", machine_state_path=ms)
             assert verdict.rule == "busy_machine:pm_build", command
+
+
+class TestRawCockpitIssue:
+    """Owner 2026-10-28: a cockpit issue must say which version hit the bug.
+    `takkub issue new` stamps it; raw `gh issue create` on the cockpit repo
+    is refused, other repos are untouched."""
+
+    @pytest.mark.parametrize("role", ["backend", "lead"])
+    def test_raw_gh_issue_on_cockpit_repo_is_refused(self, role: str) -> None:
+        verdict = pane_guard.classify(
+            'gh issue create --repo takkub/agent-takkub --title "x" --body "y"', role
+        )
+        assert not verdict.allowed
+        assert verdict.rule == "cockpit_issue:use_takkub_issue_new"
+        assert "takkub issue new" in verdict.reason
+
+    def test_other_repos_and_reads_are_allowed(self) -> None:
+        assert pane_guard.classify('gh issue create --repo me/app --title "x"', "backend").allowed
+        assert pane_guard.classify("gh issue view 5 --repo takkub/agent-takkub", "backend").allowed
+
+    def test_text_in_a_heredoc_is_data_not_a_command(self) -> None:
+        # Found on day one: a commit message describing this very rule.
+        cmd = (
+            "cat > msg.txt <<'EOF'\nguard refuses raw gh issue create on takkub/agent-takkub\nEOF\n"
+            "git commit -F msg.txt"
+        )
+        assert pane_guard.classify(cmd, "lead").allowed
