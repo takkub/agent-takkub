@@ -656,12 +656,14 @@ def test_pending_scan_is_pure_and_matches_sync_refresh(monkeypatch) -> None:
     assert ProjectNav._scan_pending(["a", "b", "c"], set()) == [("a", 2), ("c", 1)]
 
 
-def test_pm_toggle_sits_in_the_header_and_follows_the_pm_tab(qapp) -> None:
-    """Owner 2026-10-28: PM lives at the top and can be switched off when not
-    in use — the header 🧭 PM toggle reflects whether the PM tab is open."""
+def test_pm_bar_stands_in_for_a_hidden_pm_row(qapp) -> None:
+    """Owner 2026-10-28: PM is not a project — it gets its own bar above
+    PROJECTS (open/go-to + ⏻ close) and its row never shows in the list."""
     nav = ProjectNav()
-    hits: list[int] = []
-    nav.pmToggleRequested.connect(lambda: hits.append(1))
+    opened: list[int] = []
+    closed: list[int] = []
+    nav.pmOpenRequested.connect(lambda: opened.append(1))
+    nav.pmCloseRequested.connect(lambda: closed.append(1))
 
     def _tab(name: str) -> QWidget:
         w = QWidget()
@@ -669,11 +671,17 @@ def test_pm_toggle_sits_in_the_header_and_follows_the_pm_tab(qapp) -> None:
         return w
 
     nav.addTab(_tab("alpha"), "alpha")
-    assert not nav._pm_btn.isChecked()
+    nav._pm_btn.click()  # PM not open yet -> ask main_window to open it
+    assert opened == [1] and not nav._pm_close_btn.isVisibleTo(nav)
     pm = _tab("PM")
     nav.insertTab(0, pm, "PM")
-    assert nav.widget(0) is pm and nav._pm_btn.isChecked()
-    nav._pm_btn.click()
-    assert hits == [1]
-    nav.removeTab(nav.indexOf(pm))
+    assert nav._list.isRowHidden(0) and not nav._list.isRowHidden(1)
+    assert nav._pm_close_btn.isVisibleTo(nav)
+    nav.setCurrentIndex(1)
     assert not nav._pm_btn.isChecked()
+    nav._pm_btn.click()  # already open -> just go there
+    assert opened == [1] and nav.currentWidget() is pm and nav._pm_btn.isChecked()
+    nav._pm_close_btn.click()
+    assert closed == [1]
+    nav.removeTab(nav.indexOf(pm))
+    assert not nav._pm_btn.isChecked() and not nav._pm_close_btn.isVisibleTo(nav)

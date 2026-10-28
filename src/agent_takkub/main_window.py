@@ -320,7 +320,8 @@ class MainWindow(
         self.tabs.closeRequested.connect(self._on_tab_close_requested)
         self.tabs.contextMenuRequested.connect(self._on_tab_context_menu)
         self.tabs.openProjectRequested.connect(self._open_project_tab)
-        self.tabs.pmToggleRequested.connect(self._on_open_pm_clicked)
+        self.tabs.pmOpenRequested.connect(self._on_open_pm_clicked)
+        self.tabs.pmCloseRequested.connect(self._on_close_pm_clicked)
         # NOTE: `currentChanged` is connected further down in __init__ — once
         # the widgets its slot (`_on_tab_switched`) touches (the usage corner,
         # `_limit_label_host`, ...) exist. Connecting right here, before the

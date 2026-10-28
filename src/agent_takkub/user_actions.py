@@ -451,14 +451,14 @@ class UserActionsMixin:
         self._status.showMessage(f"💻 {msg}", 5_000)
 
     def _on_open_pm_clicked(self) -> None:
-        """🧭 PM toggle (sidebar header): open the cross-project PM tab, or
-        close it when it is already open — the owner turns it off when not
-        in use, it costs a live CLI session otherwise.
+        """🧭 PM bar (above PROJECTS): open the cross-project PM tab, or go to
+        it when it is already open.
 
         The PM is a registered project (`pm_project.ensure_pm_project`) whose
         Lead pane reads docs/pm/role.md, so opening it is the same path as any
         project tab — and its provider is chosen the same way as a Lead's.
-        It is pinned at the top of the sidebar (`_open_project_tab`)."""
+        Its list row is hidden: the PM bar stands in for it (owner: PM must
+        not look like a project)."""
         from . import pm_project
 
         try:
@@ -470,12 +470,19 @@ class UserActionsMixin:
             return
         tab = self._tab_for_project(name)
         if tab is not None:
-            ok, msg = self._close_project_tab(name, confirm=False)
-            _log_event("ui_close_pm", ok=ok, msg=msg)
-            self._status.showMessage("🧭 ปิด PM แล้ว" if ok else f"🧭 PM: {msg}", 5_000)
+            self.tabs.setCurrentIndex(self.tabs.indexOf(tab))
         else:
             self._open_project_tab(name, make_current=True)
             _log_event("ui_open_pm")
+        self._sync_pm_toggle()
+
+    def _on_close_pm_clicked(self) -> None:
+        """⏻ on the PM bar: close the PM tab and its session when not in use."""
+        from . import pm_project
+
+        ok, msg = self._close_project_tab(pm_project.PM_PROJECT, confirm=False)
+        _log_event("ui_close_pm", ok=ok, msg=msg)
+        self._status.showMessage("🧭 ปิด PM แล้ว" if ok else f"🧭 PM: {msg}", 5_000)
         self._sync_pm_toggle()
 
     def _sync_pm_toggle(self) -> None:

@@ -155,23 +155,35 @@ QListWidget#projectList::item:selected {{
     font-size: 12px;
     font-weight: 600;
 }}
-#pmToggleBtn {{
+#pmBarBtn {{
     background: transparent;
     color: {cockpit_theme.TEXT_MUTED};
     border: 1px solid {cockpit_theme.BORDER_HAIRLINE};
     border-radius: {cockpit_theme.RADIUS_SM}px;
-    padding: 2px 8px;
-    margin-top: 6px;
-    font-size: 11px;
+    padding: 8px 10px;
+    text-align: left;
+    font-size: 12px;
     font-weight: 600;
 }}
-#pmToggleBtn:hover {{
+#pmBarBtn:hover {{
     background: {cockpit_theme.GROUND_PANEL};
     color: {cockpit_theme.ACCENT_GOLD};
 }}
-#pmToggleBtn:checked {{
+#pmBarBtn:checked {{
     background: {cockpit_theme.GOLD_CHIP_BG};
     color: {cockpit_theme.GOLD_CHIP_TEXT};
+    border-color: {cockpit_theme.GOLD_CHIP_BORDER};
+}}
+#pmCloseBtn {{
+    background: transparent;
+    color: {cockpit_theme.TEXT_FAINT};
+    border: 1px solid {cockpit_theme.BORDER_HAIRLINE};
+    border-radius: {cockpit_theme.RADIUS_SM}px;
+    padding: 8px 9px;
+    font-size: 12px;
+}}
+#pmCloseBtn:hover {{
+    color: {cockpit_theme.ACCENT_GOLD};
     border-color: {cockpit_theme.GOLD_CHIP_BORDER};
 }}
 #tunnelIndicator {{
@@ -506,9 +518,11 @@ class ProjectNav(QWidget):
     # project *name* to open, not how to build/register its tab (that's
     # main_window._open_project_tab's job), so it hands the request up.
     openProjectRequested = pyqtSignal(str)
-    # 🧭 PM toggle in the header: open the cross-project PM tab, or close it
-    # when it is already open (main_window owns tabs, so it hands this up).
-    pmToggleRequested = pyqtSignal()
+    # 🧭 PM bar above PROJECTS: the PM is not a project, so its tab's list row
+    # stays hidden and this bar stands in for it. main_window owns tab
+    # creation/teardown, so open and close are handed up.
+    pmOpenRequested = pyqtSignal()
+    pmCloseRequested = pyqtSignal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -547,6 +561,30 @@ class ProjectNav(QWidget):
         # chip answers "is remote control on", this dot answers "is the
         # tunnel itself actually up right now" (a tunnel can die silently
         # after remote control started fine — see remote/tunnel.py).
+        pm_bar = QWidget(sidebar)
+        pm_bar.setObjectName("pmBar")
+        pb = QHBoxLayout(pm_bar)
+        pb.setContentsMargins(8, 8, 8, 0)
+        pb.setSpacing(4)
+        self._pm_btn = QPushButton("🧭  PM · ภาพรวมทุกโปรเจค", pm_bar)
+        self._pm_btn.setObjectName("pmBarBtn")
+        self._pm_btn.setCheckable(True)  # checked = PM is the page on screen
+        self._pm_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._pm_btn.setToolTip(
+            "PM — แชทดูภาพรวมทุกโปรเจค (อ่านอย่างเดียว ไม่สั่งงาน pane)\n"
+            "กดเพื่อเปิด/ไปที่ PM · ปุ่ม ⏻ ด้านขวาปิด PM เมื่อไม่ใช้"
+        )
+        self._pm_btn.clicked.connect(self._on_pm_bar_clicked)
+        pb.addWidget(self._pm_btn, 1)
+        self._pm_close_btn = QPushButton("⏻", pm_bar)
+        self._pm_close_btn.setObjectName("pmCloseBtn")
+        self._pm_close_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._pm_close_btn.setToolTip("ปิด PM (ปิด session ของ PM — เปิดใหม่ได้ทุกเมื่อ)")
+        self._pm_close_btn.clicked.connect(lambda: self.pmCloseRequested.emit())
+        self._pm_close_btn.hide()
+        pb.addWidget(self._pm_close_btn)
+        sb.addWidget(pm_bar)
+
         header_row = QWidget(sidebar)
         hr = QHBoxLayout(header_row)
         hr.setContentsMargins(0, 0, 12, 0)
@@ -555,16 +593,6 @@ class ProjectNav(QWidget):
         self._header.setObjectName("projectSidebarHeader")
         hr.addWidget(self._header)
         hr.addStretch(1)
-        self._pm_btn = QPushButton("🧭 PM", header_row)
-        self._pm_btn.setObjectName("pmToggleBtn")
-        self._pm_btn.setCheckable(True)
-        self._pm_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._pm_btn.setToolTip(
-            "เปิด/ปิดแชท PM — ภาพรวมทุกโปรเจค (อ่านอย่างเดียว)\n"
-            "กดอีกครั้งเพื่อปิดเมื่อไม่ใช้ · แท็บ PM จะอยู่บนสุดของรายการ"
-        )
-        self._pm_btn.clicked.connect(lambda: self.pmToggleRequested.emit())
-        hr.addWidget(self._pm_btn)
         self._tunnel_indicator = QLabel(header_row)
         self._tunnel_indicator.setObjectName("tunnelIndicator")
         self._tunnel_indicator.setFixedSize(10, 10)
@@ -808,6 +836,7 @@ class ProjectNav(QWidget):
                 rw.set_collapsed(collapsed)
                 self._sync_row_size(i)
         self._header.setVisible(not collapsed)
+        self._sync_pm_button()
         self._add_btn.setText("+" if collapsed else "+   New project")
         self._toggle_btn.setText("»" if collapsed else "«  Collapse")
         # Pending section only makes sense expanded (it's read as list rows,
@@ -876,7 +905,7 @@ class ProjectNav(QWidget):
         headers = 0
         for i in range(self._list.count()):
             rw = self._row_widget(i)
-            if rw is None:
+            if rw is None or self._list.isRowHidden(i):
                 continue
             headers += rw.header_height()
             if rw._explorer_container.isVisibleTo(rw):
@@ -919,6 +948,7 @@ class ProjectNav(QWidget):
                 rw.set_selected(i == row)
                 self._sync_row_size(i)
         self._schedule_fit_explorer()
+        self._sync_pm_button()
         self.currentChanged.emit(row)
 
     def _load_explorer_expanded(self, project_key: str) -> bool:
@@ -1035,15 +1065,33 @@ class ProjectNav(QWidget):
             # `active` (#102's contract), same as before for the last tab.
             self._on_row_changed(self._list.currentRow())
 
-    def _sync_pm_button(self) -> None:
-        """Show the 🧭 PM header toggle as pressed while the PM tab is open."""
+    def _pm_index(self) -> int:
         from .pm_project import is_pm_project
 
-        is_open = any(
-            is_pm_project(getattr(self._stack.widget(i), "project_name", None))
-            for i in range(self._stack.count())
-        )
-        self._pm_btn.setChecked(is_open)
+        for i in range(self._stack.count()):
+            if is_pm_project(getattr(self._stack.widget(i), "project_name", None)):
+                return i
+        return -1
+
+    def _on_pm_bar_clicked(self) -> None:
+        index = self._pm_index()
+        if index < 0:
+            self.pmOpenRequested.emit()
+        else:
+            self.setCurrentIndex(index)
+        self._sync_pm_button()
+
+    def _sync_pm_button(self) -> None:
+        """The PM bar mirrors the hidden PM row: pressed while PM is the page
+        on screen, ⏻ shown while PM is open at all; the PM row itself stays
+        out of the project list."""
+        index = self._pm_index()
+        if 0 <= index < self._list.count() and not self._list.isRowHidden(index):
+            self._list.setRowHidden(index, True)
+        is_open = index >= 0
+        self._pm_btn.setChecked(is_open and self._stack.currentIndex() == index)
+        self._pm_btn.setText("🧭" if self._collapsed else "🧭  PM · ภาพรวมทุกโปรเจค")
+        self._pm_close_btn.setVisible(is_open and not self._collapsed)
 
     def setTabText(self, index: int, text: str) -> None:
         rw = self._row_widget(index)
