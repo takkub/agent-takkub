@@ -785,6 +785,26 @@ class TestSnapshotSkipsCockpitFiles934:
         assert "พร้อม merge" not in text
         assert "207" in text
 
+    def test_ai_trailer_commits_are_found_on_the_branch(self, tmp_path):
+        """#950: pane commits carried "Co-Authored-By: Claude" against the
+        owner's rule — the branch is checked whatever provider made it."""
+        info, git = self._repo(tmp_path)
+        (tmp_path / "a.txt").write_text("b\n", encoding="utf-8")
+        git("commit", "-q", "-am", "fix: clean message")
+        (tmp_path / "a.txt").write_text("c\n", encoding="utf-8")
+        git(
+            "commit",
+            "-q",
+            "-am",
+            "fix: x\n\nCo-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>",
+        )
+        (tmp_path / "a.txt").write_text("d\n", encoding="utf-8")
+        git("commit", "-q", "-am", "feat: y\n\nCo-authored-by: Pat <pat@example.com>")
+        found = WorktreeManager().ai_trailer_commits(info)
+        assert len(found) == 1
+        text = build_merge_proposal("backend", info, 3, "", ai_trailer_commits=found)
+        assert "พร้อม merge" not in text and found[0] in text
+
 
 class TestDirtyDiffstat:
     def test_empty_when_nothing_uncommitted(self):

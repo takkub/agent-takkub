@@ -269,7 +269,7 @@ class TestAssignWithWorktree:
         know how many OTHER panes are already sitting in that same cwd
         (the ones it can actually collide with), not just that isolation
         failed."""
-        fake = _FakeMgr(info=None, reason="git worktree add ล้มเหลว — ใช้ shared cwd แทน")
+        fake = _FakeMgr(info=None, reason="ไม่ใช่ git repo — ใช้ shared cwd แทน")
         monkeypatch.setattr(wm_mod, "WorktreeManager", lambda *a, **k: fake)
         orch._assign_dispatch = MagicMock(return_value=(True, "ok"))  # type: ignore[assignment]
 
@@ -285,6 +285,23 @@ class TestAssignWithWorktree:
         )
         warn = orch._notify_lead.call_args[0][1]
         assert "อีก 2 pane" in warn
+
+    def test_git_failure_refuses_instead_of_main_checkout(self, orch, monkeypatch):
+        """#949: `git worktree add` timed out on a big repo and the pane was
+        dropped into the main checkout. Inside a git repo the assign is
+        refused instead — nothing is dispatched."""
+        fake = _FakeMgr(
+            info=None,
+            reason="git worktree add ล้มเหลว (git timed out after 30s) — ใช้ shared cwd แทน",
+        )
+        monkeypatch.setattr(wm_mod, "WorktreeManager", lambda *a, **k: fake)
+        orch._assign_dispatch = MagicMock(return_value=(True, "ok"))  # type: ignore[assignment]
+
+        ok, msg = orch._assign_with_worktree(
+            "backend", "/repo/api", "t", False, False, 0, False, "proj"
+        )
+        assert not ok and "timed out" in msg and "ใช้ shared cwd" not in msg
+        orch._assign_dispatch.assert_not_called()
 
     def test_fallback_when_no_cwd(self, orch, monkeypatch):
         monkeypatch.setattr(orch_mod, "default_cwd_for_role", lambda *a, **k: None)

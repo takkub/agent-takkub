@@ -87,6 +87,35 @@ if TYPE_CHECKING:
 
 _log = logging.getLogger(__name__)
 
+
+def _linked_worktree_common_dir(cwd: str | None) -> str | None:
+    """(#947) The main repo's `.git` dir when *cwd* is a linked git worktree
+    (its `.git` is a file `gitdir: <main>/.git/worktrees/<name>`), else None.
+    Pure file reads — spawn must not shell out to git."""
+    if not cwd:
+        return None
+    try:
+        dot_git = pathlib.Path(cwd) / ".git"
+        if not dot_git.is_file():
+            return None
+        text = dot_git.read_text(encoding="utf-8", errors="replace").strip()
+        if not text.startswith("gitdir:"):
+            return None
+        gitdir = pathlib.Path(text[len("gitdir:") :].strip())
+        if not gitdir.is_absolute():
+            gitdir = (pathlib.Path(cwd) / gitdir).resolve()
+        common_file = gitdir / "commondir"
+        if common_file.is_file():
+            common = pathlib.Path(common_file.read_text(encoding="utf-8").strip())
+            if not common.is_absolute():
+                common = (gitdir / common).resolve()
+        else:
+            common = gitdir.parent.parent
+        return str(common) if common.is_dir() else None
+    except (OSError, ValueError):
+        return None
+
+
 # ── test-mockability shim ────────────────────────────────────────
 # Tests written before the spawn_engine extraction patch symbols at
 # agent_takkub.orchestrator.* (e.g. `patch("agent_takkub.orchestrator.PtySession")`).
@@ -3593,6 +3622,13 @@ class SpawnEngineMixin:
                 writable_dir = env.get(env_key)
                 if writable_dir:
                     autonomy_argv.extend(["--add-dir", writable_dir])
+            # #947: in a linked worktree, `git add/commit` writes the index
+            # under <main>/.git/worktrees/<name> and objects/refs under
+            # <main>/.git — all outside the workspace-write sandbox, so the
+            # pane could edit but never commit on its wt/ branch.
+            common_git_dir = _linked_worktree_common_dir(spawn_cwd)
+            if common_git_dir:
+                autonomy_argv.extend(["--add-dir", common_git_dir])
         if spec.trust_argv is not None and spawn_cwd:
             # #730: Pass trusted folder config via session-scoped argv override (-c).
             # Codex 0.157.1 prompts "Trust this folder?" on untrusted directories,

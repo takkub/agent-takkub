@@ -5215,7 +5215,10 @@ def cmd_context_guard(_: argparse.Namespace) -> dict:
         if error and not lead_readiness.bootstrap_allowed(tool_name, tool_input):
             print(
                 f"[takkub guard: lead_context] {error} "
-                "(as its own command: no pipe; a trailing 2>&1 is fine)",
+                "(run it exactly as `takkub context read`, as its own command: "
+                "no pipe and no `> file` redirect — the read only counts when the "
+                "output reaches you; a trailing 2>&1 is fine and long output is "
+                "saved for you automatically)",
                 file=sys.stderr,
             )
             return {"ok": True, "msg": "", "exit_code": 2}

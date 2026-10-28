@@ -940,6 +940,30 @@ class AutoResumeMixin:
             self._schedule_provider_quota_reset_notice(project, hit_provider, reset_at)
 
         policy = auto_resume.effective_quota_policy(project)
+        park_wait_s = max(0.0, reset_at - time.time()) if reset_at else 0.0
+        if (
+            policy == auto_resume.QUOTA_POLICY_PARK
+            and park_wait_s > auto_resume.park_max_wait_s(project)
+            and ps.quota_reroute_count < auto_resume.MAX_REROUTE_ROUNDS
+        ):
+            # #951: "park" was meant for a short wait. A 5 h / 44 h reset left
+            # the task frozen and the Lead re-assigning by hand — past the
+            # limit the task moves to a free provider (#514); it parks only
+            # when no other provider can take it.
+            far_candidate = self._pick_reroute_provider(project, role, ps, hit_provider)
+            if far_candidate is not None:
+                _log_event(
+                    "pane_quota_park_too_long_reroute",
+                    role=role,
+                    project=project,
+                    hit_provider=hit_provider,
+                    to_provider=far_candidate,
+                    wait_s=int(park_wait_s),
+                )
+                self._reroute_pane_to_provider(
+                    project, role, ps, far_candidate, hit_provider, reset_at
+                )
+                return
         if policy == auto_resume.QUOTA_POLICY_PARK:
             _log_event(
                 "pane_quota_policy_park",

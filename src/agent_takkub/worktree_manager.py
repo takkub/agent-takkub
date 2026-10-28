@@ -53,6 +53,10 @@ from .config import DATA_HOME
 # main thread — see orchestrator._assign_with_worktree, which additionally moves
 # the slow `worktree add` off-thread via QProcess).
 _GIT_TIMEOUT_S = 30
+# #949: `git worktree add` checks out the whole tree — a large repo on Windows
+# (Defender scanning every new file) took longer than 30 s, and the pane was
+# silently dropped into the main checkout. It gets its own, longer bound.
+_GIT_WORKTREE_ADD_TIMEOUT_S = int(os.environ.get("TAKKUB_GIT_WORKTREE_ADD_TIMEOUT_S") or 300)
 
 # Branch/dir prefix so isolated worktrees are unmistakable in `git worktree
 # list`, `git branch`, and the pane title chip.
@@ -279,6 +283,9 @@ def _default_runner(args: list[str], cwd: str | None) -> GitResult:
     caller's fallback logic (shared cwd + warn) stays branch-based, not
     exception-based.
     """
+    timeout = _GIT_TIMEOUT_S
+    if "worktree" in args and "add" in args:
+        timeout = _GIT_WORKTREE_ADD_TIMEOUT_S
     try:
         proc = subprocess.run(
             ["git", *args],
@@ -287,17 +294,31 @@ def _default_runner(args: list[str], cwd: str | None) -> GitResult:
             text=True,
             encoding="utf-8",
             errors="replace",
-            timeout=_GIT_TIMEOUT_S,
+            timeout=timeout,
             creationflags=SUBPROCESS_NO_WINDOW,
         )
         return GitResult(proc.returncode, proc.stdout, proc.stderr)
     except subprocess.TimeoutExpired:
-        return GitResult(124, "", f"git timed out after {_GIT_TIMEOUT_S}s")
+        return GitResult(124, "", f"git timed out after {timeout}s")
     except (OSError, ValueError) as exc:  # git missing, bad cwd, etc.
         return GitResult(127, "", str(exc))
 
 
 # ── Pure helpers (no I/O — unit-tested directly) ────────────────────────────
+
+
+def shared_fallback_is_safe(reason: str) -> bool:
+    """(#949) Whether a failed worktree create may degrade to the shared cwd.
+    Only when there is no worktree to be had at all — not a git repo, or a repo
+    with no commit yet. Inside a real repo (timeout, bad --base/--branch, git
+    error) the main checkout is exactly where the pane must not land."""
+    return (
+        not reason
+        or reason.startswith("ไม่ใช่ git repo")
+        or "ยังไม่มี commit" in reason
+        or reason.startswith("ไม่มี cwd")
+    )
+
 
 _SHORTSTAT_RE = re.compile(
     r"(?P<files>\d+) files? changed"
@@ -1534,6 +1555,23 @@ class WorktreeManager:
             sum(1 for p in names.stdout.splitlines() if is_cockpit_owned_path(p)) if names.ok else 0
         )
         return wip, owned
+
+    def ai_trailer_commits(self, info: WorktreeInfo) -> list[str]:
+        """(#950) Short shas of branch commits whose message carries an AI
+        co-author trailer (Claude/Codex/Gemini/Cursor/Copilot…). Provider-
+        neutral: the CLI's own setting may not exist or may change, so the
+        branch itself is checked before the Lead merges it. ``[]`` on error."""
+        log = self._run(
+            ["-C", info.path, "log", "--format=%h%x00%B%x1e", f"{info.base_sha}..HEAD"], None
+        )
+        if not log.ok:
+            return []
+        out: list[str] = []
+        for rec in log.stdout.split("\x1e"):
+            sha, _, body = rec.strip().partition("\x00")
+            if sha and _AI_TRAILER_RE.search(body):
+                out.append(sha)
+        return out
 
     def dirty_diffstat_at(self, cwd: str) -> str:
         """``N files, +A/-D`` summary of *cwd*'s CURRENT uncommitted state —
@@ -2914,6 +2952,14 @@ def summarize_diffstat(diffstat: str) -> tuple[int, list[str]]:
     return files, dirs
 
 
+# #950: an AI co-author / "generated with" trailer in a pane's commit.
+_AI_TRAILER_RE = re.compile(
+    r"^(?:co-authored-by:.*(?:claude|anthropic|codex|openai|gemini|google|cursor|copilot|"
+    r"opencode|antigravity|\bai\b)|.*generated with \[?(?:claude|codex|cursor|gemini|opencode))",
+    re.IGNORECASE | re.MULTILINE,
+)
+
+
 def build_merge_proposal(
     role: str,
     info: WorktreeInfo,
@@ -2927,6 +2973,7 @@ def build_merge_proposal(
     crlf_phantom: bool = False,
     wip_commits: int = 0,
     cockpit_files: int = 0,
+    ai_trailer_commits: list[str] | None = None,
 ) -> str:
     """Lead-facing PROPOSAL when an isolated pane finishes with commits to merge.
 
@@ -2963,6 +3010,15 @@ def build_merge_proposal(
             f"🌿 [{role} worktree] `{info.branch}` — ⚠ conflict กับ base ปัจจุบัน{where} — "
             "resolve ก่อน merge (ดูรายชื่อไฟล์อีกครั้งด้วย "
             f"`takkub worktree merge --check --branch {info.branch}`)"
+        )
+    if ai_trailer_commits:
+        # #950: the owner's projects forbid AI co-author trailers; say so
+        # before the merge instead of after the push.
+        shas = ", ".join(ai_trailer_commits[:6])
+        return (
+            f"🌿 [{role} worktree] `{info.branch}` — ⚠ ยังไม่ควร merge ตรงๆ: commit {shas} "
+            "มี trailer ของ AI (Co-Authored-By/Generated with) — ให้ pane แก้ข้อความ commit "
+            "เอา trailer ออกก่อน merge"
         )
     if wip_commits or cockpit_files:
         # #934: a close-snapshot commit or the cockpit's own files (.claude/

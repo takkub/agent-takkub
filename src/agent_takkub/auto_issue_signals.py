@@ -35,9 +35,8 @@ from pathlib import Path
 
 from .config import EVENTS_LOG
 from .maintenance import (
-    PROCESS_PAUSE_MARKER_EVENT,
     ROUTINE_EVENT_REASONS,
-    collect_event_stamps,
+    collect_pause_marks,
     stall_is_process_pause,
 )
 
@@ -259,9 +258,7 @@ def scan_for_signals(
     last_chain: dict[tuple[str, str], datetime] = {}
     # #884-#887: sleep-gap markers, read once up front, only when a rule cares.
     pause_marks: list[datetime] = (
-        collect_event_stamps(path, PROCESS_PAUSE_MARKER_EVENT, cutoff)
-        if any(r.skip_process_pauses for r in rules)
-        else []
+        collect_pause_marks(path, cutoff) if any(r.skip_process_pauses for r in rules) else []
     )
     try:
         with path.open(encoding="utf-8", errors="replace") as fh:

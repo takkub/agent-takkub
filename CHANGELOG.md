@@ -2,6 +2,22 @@
 
 All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses [SemVer](https://semver.org/).
 
+## [v2.2.35] - 2026-10-28
+
+### Fixed (แก้)
+
+- **โควตาหมดแล้ว pane ถูก park รอ 5 ชม./44 ชม. แทนที่จะย้าย provider (#951):** นโยบาย `park` ใช้กับการรอสั้นๆ เท่านั้น ถ้า reset ไกลกว่า `park_max_wait_min` (ค่าเริ่มต้น 30 นาที ตั้งได้ใน `quota-policy.json` หรือ `quota_reroute` ของโปรเจค · ≤0 = รอเสมอแบบเดิม) งานจะย้ายไป provider ที่ว่าง และ park ก็ต่อเมื่อไม่มี provider อื่นให้ย้ายแล้ว
+- **assign ใหม่ด้วย `--provider claude` ยังติดสถานะ stalled:quota ของ gemini (#945):** assign ใหม่ล้างสถานะโควตาของงานเดิมทิ้ง จึงไม่ถูก park ซ้ำ 19 วินาทีหลัง spawn
+- **Lead ได้ done digest ซ้ำ (#948):** ถ้าบรรทัด digest มีชื่อ provider (`[frontend · claude] done`) ระบบจะหา role ไม่เจอ เลยนึกว่ายังส่งไม่ถึงแล้วส่งซ้ำอีกรอบใน 2 นาทีต่อมา
+- **`git worktree add` timeout แล้วถอยไปรันใน checkout หลักแบบเงียบๆ (#949):** timeout ของ `worktree add` เพิ่มเป็น 300 วินาที (`TAKKUB_GIT_WORKTREE_ADD_TIMEOUT_S`) และถ้าเป็น git repo จะปฏิเสธ assign แทน · จะถอยไปใช้ shared cwd ก็ต่อเมื่อไม่ใช่ git repo หรือ repo ยังไม่มี commit เท่านั้น
+- **codex ใน `--isolation worktree` ทำ `git add/commit` ไม่ได้ (#947):** pane ได้สิทธิ์เขียน `.git` ของ repo หลักผ่าน `--add-dir` (ซึ่งเก็บ index/objects/refs ของ worktree)
+- **commit จาก pane มี `Co-Authored-By: Claude` (#950):** Claude pane ปิด attribution (`attribution` + `includeCoAuthoredBy`) · ข้อความเสนอ merge จะเตือนเมื่อ branch มี trailer ของ AI ไม่ว่ามาจาก provider ไหน (codex/agy/opencode/cursor ไม่มี setting ให้ปิด จึงตรวจที่ branch แทน)
+- **การ์ด backlog ที่ assign สร้างเองไม่ปิดเองหลัง done (#953):** การ์ดที่ระบบสร้างให้จะปิดเองเมื่อทุก pane ส่ง done ครบ ส่วนการ์ดที่เจ้าของเขียนเองยังรอยืนยันเหมือนเดิม · `backlog list/pending` เคลียร์การ์ดที่งานจบไปโดยไม่มี done (pane ถูกปิด/ถูกแทนที่) ไปที่ "รอยืนยัน" · ป้าย "ดอง" ขึ้นเฉพาะการ์ดที่ยังเปิดอยู่
+- **auto-issue "UI ค้าง" ทั้งที่ทั้งเครื่องค้าง (#946):** stall ที่เกิดใกล้ stall แบบ whole-process ±120 วินาที ถือเป็นการค้างของเครื่องเดียวกัน (marker sleep-gap ถูกเขียนหลังจาก scan ไปแล้ว)
+- **ข้อความ guard `lead_context` (#952):** บอกให้ชัดว่า `> file` ใช้ไม่ได้เหมือนกับ pipe (การอ่านจะนับก็ต่อเมื่อ output ถึง Lead)
+- **CodeQL #62/#63:** เทส #928 ใช้ chmod 0o500/0o700 แทน 0o555/0o755
+- deps: ruff 0.17.2 · github/codeql-action 4.39.1
+
 ## [v2.2.34] - 2026-10-26
 
 ### Added (เพิ่ม)

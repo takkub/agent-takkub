@@ -165,13 +165,13 @@ def test_unwritable_claude_dirs_are_reclaimed_without_data_loss(tmp_path: Path) 
     _write_file(cfg / "projects" / "p" / "s.jsonl", "line\n")
     (cfg / "session-env").mkdir()
     for d in (cfg / "projects" / "p", cfg / "projects", cfg / "session-env"):
-        os.chmod(d, 0o555)  # stands in for root:staff 755 — not writable by us
+        os.chmod(d, 0o500)  # stands in for root:staff 755 — not writable by us
     try:
         reclaimed = user_profile.reclaim_unwritable_claude_dirs(cfg)
     finally:
         for d in cfg.rglob("*"):
             if d.is_dir():
-                os.chmod(d, 0o755)
+                os.chmod(d, 0o700)
     assert sorted(Path(p).name for p in reclaimed) == ["projects", "session-env"]
     assert os.access(cfg / "projects" / "p", os.W_OK)
     assert (cfg / "projects" / "p" / "s.jsonl").read_text(encoding="utf-8") == "line\n"

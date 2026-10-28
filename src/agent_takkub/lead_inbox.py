@@ -411,7 +411,10 @@ _DONE_NOTICE_TAG_RE = re.compile(r"\[([\w][\w#-]*)\s+(?:done|FAILED)\]", re.IGNO
 _DIGEST_DONE_LINE_RE = re.compile(
     # #764: `_occurred_stamp` ends with a space ("[10:08:26 · 3s ago] "), so the
     # stamp and "[role]" are separated by whitespace — `\s*` between them.
-    r"^\s*•\s*(?:\[[^\]\r\n]*\]\s*)?\[([\w][\w#-]*)\]\s+(?:done|FAILED|PASS|FAIL|BLOCKED)\b",
+    # #948: a fact line names the provider inside the tag ("[frontend · claude]
+    # done"); missing it made a delivered digest look lost, so it was re-sent.
+    r"^\s*•\s*(?:\[[^\]\r\n]*\]\s*)?\[([\w][\w#-]*)(?:\s*·[^\]\r\n]*)?\]\s+"
+    r"(?:done|FAILED|PASS|FAIL|BLOCKED)\b",
     re.IGNORECASE | re.MULTILINE,
 )
 _DIGEST_READ_LINE_RE = re.compile(

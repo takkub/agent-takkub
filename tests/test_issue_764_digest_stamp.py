@@ -14,3 +14,13 @@ def test_stamped_digest_bullets_are_recognised():
         line = _format_digest_item("[devops done] x", t, t + 3, facts=facts)
         body = "📬 [Lead Inbox Digest — 1 update]\n" + line
         assert done_roles_in_notice(body) == {"devops"}
+
+
+def test_fact_line_with_provider_is_recognised():
+    """#948: `[frontend · claude] done` — the provider inside the tag hid the
+    role, so a delivered done was recovered and re-sent 2 min later."""
+    t = time.time()
+    facts = DigestFacts(role="frontend", provider="claude")
+    line = _format_digest_item("[frontend done] x", t, t + 3, facts=facts)
+    body = "📬 [Lead Inbox Digest — 1 update]\n" + line
+    assert done_roles_in_notice(body) == {"frontend"}

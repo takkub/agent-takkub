@@ -250,7 +250,9 @@ class TestAutomatedClosePathsBypassConfirm:
         from agent_takkub import backlog
 
         monkeypatch.setattr(backlog, "RUNTIME_DIR", tmp_path / "runtime")
-        card, _ = backlog.ensure_for_assign(TEST_PROJECT, "backend", "ตรวจงาน")
+        # An owner-written card: assign-made ones close themselves on done (#953).
+        card = backlog.add_item(TEST_PROJECT, "ตรวจงาน")
+        backlog.ensure_for_assign(TEST_PROJECT, "backend", "ตรวจงาน", card["id"])
         backlog.bind_task_id(TEST_PROJECT, "backend", "task-1", item_id=card["id"])
         backlog.on_ledger_done(TEST_PROJECT, "task-1", item_id=card["id"], role="backend")
         pane = _make_pane("active")

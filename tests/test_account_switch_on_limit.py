@@ -378,6 +378,7 @@ def test_park_policy_keeps_the_task_on_its_own_account(accounts, monkeypatch) ->
     monkeypatch.setattr(provider_state, "set_quota_reset_at", lambda p, t: None)
     monkeypatch.setattr(auto_resume, "effective_quota_policy", lambda project=None: "park")
     monkeypatch.setattr(auto_resume, "park_account_failover_enabled", lambda project=None: False)
+    monkeypatch.setattr(auto_resume, "park_max_wait_s", lambda project=None: float("inf"))
     moved: list = []
     parked: list = []
     host = SimpleNamespace(
@@ -447,3 +448,40 @@ def test_claude_curated_dir_is_per_account(monkeypatch) -> None:
     other = user_profile.curated_config_dir_for("proj", "work")
     assert base != other
     assert Path(other).name.startswith("work-")
+
+
+def test_park_policy_reroutes_when_the_reset_is_far(monkeypatch) -> None:
+    """#951: under park a 5 h / 44 h reset froze the task until the Lead
+    re-assigned by hand. Past `park_max_wait_min` the task moves to a free
+    provider; with none free it still parks."""
+    from agent_takkub import auto_resume, provider_state
+    from agent_takkub.spawn_engine import PaneState
+
+    monkeypatch.setattr(provider_state, "set_quota_reset_at", lambda p, t: None)
+    monkeypatch.setattr(auto_resume, "effective_quota_policy", lambda project=None: "park")
+    monkeypatch.setattr(auto_resume, "account_switch_allowed", lambda project=None: False)
+    monkeypatch.setattr(auto_resume, "park_max_wait_s", lambda project=None: 30 * 60.0)
+    moved: list = []
+    parked: list = []
+    free: list = ["claude"]
+    host = SimpleNamespace(
+        _running_account=lambda project, role, ps: None,
+        _reroute_pane_to_provider=lambda *a, **k: moved.append(a[3]),
+        _schedule_provider_quota_reset_notice=lambda *a: None,
+        _park_pane_for_limit=lambda project, role, ps: parked.append(role),
+        _pick_reroute_provider=lambda project, role, ps, hit: free[0] if free else None,
+    )
+
+    def _hit(wait_s: float) -> PaneState:
+        ps = PaneState()
+        ps.quota_provider = "gemini"
+        ps.rate_limited_until = time.time() + wait_s
+        return ps
+
+    limit_autoresume.AutoResumeMixin._reroute_or_park(host, "p", "qa", _hit(10 * 60))
+    assert (moved, parked) == ([], ["qa"])  # short reset: park as chosen
+    limit_autoresume.AutoResumeMixin._reroute_or_park(host, "p", "qa", _hit(44 * 3600))
+    assert moved == ["claude"]
+    free.clear()
+    limit_autoresume.AutoResumeMixin._reroute_or_park(host, "p", "qa", _hit(44 * 3600))
+    assert parked == ["qa", "qa"]  # nobody free: park after all

@@ -226,6 +226,12 @@ def _rendered_settings(*, concise: bool = False, remote_control: bool = True) ->
     if concise:
         settings["outputStyle"] = _CONCISE_OUTPUT_STYLE
     settings["remoteControlAtStartup"] = remote_control
+    # #950: pane commits must not carry an AI "Co-Authored-By" trailer or a
+    # "Generated with Claude Code" PR line — the owner's projects forbid them,
+    # and the Lead had to rebuild commits by hand before pushing. Both keys:
+    # `attribution` is current, `includeCoAuthoredBy` covers older CLIs.
+    settings["attribution"] = {"commit": "", "pr": ""}
+    settings["includeCoAuthoredBy"] = False
     return settings
 
 

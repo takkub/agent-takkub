@@ -320,8 +320,10 @@ class BacklogCardWidget(QFrame):
         hdr.addStretch(1)
 
         # Age badge
-        age = backlog.age_days(self._item)
+        age = backlog.aging_days(self._item)
         age_text = "วันนี้" if age == 0 else f"ดอง {age}d"
+        if self._item.get("status") not in backlog._OPEN_STATUSES:
+            age_text = "ปิดแล้ว"
         age_fg = t.BADGE_AGE_WARN if age > 0 else t.TEXT_MUTED
         age_badge = QLabel(age_text, self)
         age_badge.setStyleSheet(f"""
@@ -950,7 +952,7 @@ class BacklogDialog(cockpit_theme.CockpitDialog):
         label = backlog.STATUS_LABELS.get(it.get("status", ""), it.get("status", ""))
         sev = it.get("severity", "")
         imp = " 🧑‍💼ลูกค้า" if it.get("impact") == "customer" else ""
-        age = backlog.age_days(it)
+        age = backlog.aging_days(it)
         aged = f"  · ดอง {age}d" if age > 0 else ""
         prefix = ""
         if self._order_mode and it.get("id") in self._picked:
@@ -1021,13 +1023,18 @@ class BacklogDialog(cockpit_theme.CockpitDialog):
         self._meta_impact_val.setText(
             "ลูกค้า (customer)" if item.get("impact") == "customer" else "ภายใน (internal)"
         )
-        age = backlog.age_days(item)
+        age = backlog.aging_days(item)
         ts = item.get("created_ts", 0)
         try:
             fmt_date = datetime.fromtimestamp(ts).strftime("%Y-%m-%d") if ts else ""
         except (OverflowError, OSError, ValueError):
             fmt_date = ""
-        self._meta_age_val.setText(f"ดอง {age} วัน ({fmt_date})" if age > 0 else f"วันนี้ ({fmt_date})")
+        if item.get("status") not in backlog._OPEN_STATUSES:
+            self._meta_age_val.setText(f"สร้าง {fmt_date}")
+        else:
+            self._meta_age_val.setText(
+                f"ดอง {age} วัน ({fmt_date})" if age > 0 else f"วันนี้ ({fmt_date})"
+            )
 
         source = (item.get("source") or "").strip()
         self._cell_src.setVisible(bool(source))

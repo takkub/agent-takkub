@@ -72,6 +72,33 @@ class TestThresholds:
         log = _log(tmp_path / "events.log", [rec])
         assert sig.scan_for_signals(log, now=now) == []
 
+    def test_stall_amid_whole_process_pauses_does_not_fire(self, tmp_path: Path) -> None:
+        """#946: prod 2026-10-27 11:15:35 — an 11.5 s stall reading a tiny
+        json, 23 s after a 27.7 s whole-process pause; the sleep-gap marker
+        only came 108 s later, after the scan had filed the issue. A
+        neighbouring whole-process stall is the same machine-wide pause."""
+        now = datetime(2026, 10, 27, 11, 16, 0)
+        pause = {
+            "ts": datetime(2026, 10, 27, 11, 15, 12).isoformat(),
+            "event": "main_thread_stall",
+            "duration_ms": 27687,
+            "watchdog_gap_ms": 7437,
+            "whole_process": True,
+        }
+        stall = {
+            "ts": datetime(2026, 10, 27, 11, 15, 35).isoformat(),
+            "event": "main_thread_stall",
+            "duration_ms": 11563,
+            "watchdog_gap_ms": 812,
+            "stack": ["agent_takkub/cached_read.py:read_cached:99"],
+        }
+        log = _log(tmp_path / "events.log", [pause, stall])
+        assert sig.scan_for_signals(log, now=now) == []
+        _log(log, [stall])  # the same stall on its own is still a real hang
+        assert [h.rule.key for h in sig.scan_for_signals(log, now=now)] == [
+            "main_thread_stall_long"
+        ]
+
     def test_stall_next_to_sleep_gap_marker_does_not_fire(self, tmp_path: Path) -> None:
         """#884-#887: prod 2026-10-16 14:38:03 logged a 26 s stall (stack:
         pathlib.stat) 31 s after the orchestrator absorbed an 80 s clock

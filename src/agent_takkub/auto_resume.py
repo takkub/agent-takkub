@@ -289,6 +289,41 @@ def set_quota_exclude_providers(
     tmp.replace(path)
 
 
+_PARK_MAX_WAIT_KEY = "park_max_wait_min"
+_PARK_MAX_WAIT_DEFAULT_MIN = 30.0
+
+
+def park_max_wait_s(project: str | None = None) -> float:
+    """(#951) Longest reset a `park` policy waits out in place. A longer one
+    reroutes to a free provider instead (parks only when none is free).
+    `park_max_wait_min` per project (`quota_reroute`) or in the global
+    `quota-policy.json`; default 30 min. 0 or less = always wait (old park)."""
+    raw = None
+    if project:
+        try:
+            from .config import _project_dict
+
+            p_cfg = _project_dict(project).get("quota_reroute", {})
+            if isinstance(p_cfg, dict):
+                raw = p_cfg.get(_PARK_MAX_WAIT_KEY)
+        except Exception:
+            pass
+    if raw is None:
+        path = _quota_policy_path()
+        if path.exists():
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))
+                if isinstance(data, dict):
+                    raw = data.get(_PARK_MAX_WAIT_KEY)
+            except (OSError, json.JSONDecodeError):
+                pass
+    try:
+        minutes = float(raw) if raw is not None else _PARK_MAX_WAIT_DEFAULT_MIN
+    except (TypeError, ValueError):
+        minutes = _PARK_MAX_WAIT_DEFAULT_MIN
+    return float("inf") if minutes <= 0 else minutes * 60.0
+
+
 def effective_quota_policy(project: str | None = None) -> str:
     return quota_policy(project)
 

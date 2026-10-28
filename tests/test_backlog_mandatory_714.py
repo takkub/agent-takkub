@@ -84,7 +84,7 @@ class TestTaskBinding:
         backlog.ensure_for_assign("p", "backend", "แก้ JOKER", card["id"])
         backlog.bind_task_id("p", "backend", "completed-task", item_id=card["id"])
         changed = backlog.on_ledger_done("p", "completed-task", item_id=card["id"], role="backend")
-        assert changed["status"] == "review"
+        assert changed["status"] == "done"  # #953: an assign-made card closes itself
         assert all(link.get("superseded") for link in changed["links"][:2])
 
     def test_done_keeps_newer_unbound_work_open(self, runtime) -> None:
@@ -100,12 +100,12 @@ class TestTaskBinding:
         backlog.retarget_unstarted_link("p", card["id"], "reviewer", "qa")
         backlog.bind_task_id("p", "qa", "task-qa", item_id=card["id"])
         changed = backlog.on_ledger_done("p", "task-qa", item_id=card["id"], role="qa")
-        assert changed["status"] == "review"
+        assert changed["status"] == "done"  # #953: an assign-made card closes itself
 
     def test_old_reviewer_card_is_repaired_when_qa_reports_done(self, runtime) -> None:
         card, _ = backlog.ensure_for_assign("p", "reviewer", "ตรวจงานเก่า")
         changed = backlog.on_ledger_done("p", "task-qa", item_id=card["id"], role="qa")
-        assert changed["status"] == "review"
+        assert changed["status"] == "done"  # #953: an assign-made card closes itself
         assert changed["links"][0]["role"] == "qa"
 
     def test_rejected_spec_does_not_leave_an_auto_card_doing(self, runtime) -> None:
@@ -127,17 +127,20 @@ class TestTaskBinding:
         backlog.bind_task_id("p", "backend", "task-first", item_id=first["id"])
         backlog.bind_task_id("p", "backend", "task-second", item_id=second["id"])
         backlog.on_ledger_done("p", "task-first", item_id=first["id"], role="backend")
-        assert backlog.get_item("p", first["id"])["status"] == "review"
+        assert (
+            backlog.get_item("p", first["id"])["status"] == "done"
+        )  # #953: an assign-made card closes itself
         assert backlog.get_item("p", second["id"])["status"] == "doing"
 
     def test_done_repairs_an_old_card_with_a_missing_task_binding(self, runtime) -> None:
         card, _ = backlog.ensure_for_assign("p", "backend", "งานค้าง")
         changed = backlog.on_ledger_done("p", "actual-task", item_id=card["id"], role="backend")
-        assert changed["status"] == "review"
+        assert changed["status"] == "done"  # #953: an assign-made card closes itself
         assert changed["links"][0]["task_id"] == "actual-task"
 
     def test_review_age_is_measured_from_completion(self, runtime, monkeypatch) -> None:
-        card, _ = backlog.ensure_for_assign("p", "backend", "งาน")
+        card = backlog.add_item("p", "งานจากเจ้าของ")  # owner cards still wait in review
+        backlog.ensure_for_assign("p", "backend", "งาน", card["id"])
         backlog.bind_task_id("p", "backend", "task", item_id=card["id"])
         backlog.on_ledger_done("p", "task", item_id=card["id"], role="backend")
         assert backlog.review_items("p", min_age_s=24 * 3600) == []
@@ -149,7 +152,9 @@ class TestTaskBinding:
         item, _ = backlog.ensure_for_assign("p", "backend", "งาน")
         backlog.bind_task_id("p", "backend", "t1")
         backlog.on_ledger_done("p", "t1")
-        assert backlog.get_item("p", item["id"])["status"] == "review"
+        assert (
+            backlog.get_item("p", item["id"])["status"] == "done"
+        )  # #953: an assign-made card closes itself
 
     def test_reroute_moves_link_to_new_task_id(self, runtime) -> None:
         item, _ = backlog.ensure_for_assign("p", "backend", "งาน")
@@ -157,7 +162,9 @@ class TestTaskBinding:
         # quota reroute re-assigns the same work: new task id, no new card
         backlog.bind_task_id("p", "backend", "t2")
         backlog.on_ledger_done("p", "t2")
-        assert backlog.get_item("p", item["id"])["status"] == "review"
+        assert (
+            backlog.get_item("p", item["id"])["status"] == "done"
+        )  # #953: an assign-made card closes itself
 
     def test_new_card_for_same_role_gets_the_new_task_id(self, runtime) -> None:
         old, _ = backlog.ensure_for_assign("p", "backend", "งานแรก")
@@ -175,7 +182,9 @@ class TestTaskBinding:
         backlog.on_ledger_done("p", "s1")
         assert backlog.get_item("p", item["id"])["status"] == "doing"
         backlog.on_ledger_done("p", "s2")
-        assert backlog.get_item("p", item["id"])["status"] == "review"
+        assert (
+            backlog.get_item("p", item["id"])["status"] == "done"
+        )  # #953: an assign-made card closes itself
 
     def test_legacy_ledger_task_id_still_flips(self, runtime) -> None:
         card = backlog.add_item("p", "เก่า")
@@ -319,3 +328,42 @@ class TestLeadEditGate:
             "Write", {"file_path": str(scratch), "content": "x"}, cwd=str(tmp_path), project="p"
         )
         assert outside.rule != "lead_direct_edit:no_backlog_card"
+
+
+class TestAutoCardClosesItself953:
+    def test_owner_card_still_goes_to_review(self, runtime) -> None:
+        card = backlog.add_item("p", "งานจากเจ้าของ")
+        backlog.ensure_for_assign("p", "backend", "งาน", card["id"])
+        backlog.bind_task_id("p", "backend", "t1", item_id=card["id"])
+        backlog.on_ledger_done("p", "t1", item_id=card["id"], role="backend")
+        assert backlog.get_item("p", card["id"])["status"] == "review"
+
+    def test_reconcile_closes_a_card_whose_done_never_reached_it(self, runtime) -> None:
+        card, _ = backlog.ensure_for_assign("p", "backend", "งาน")
+        backlog.bind_task_id("p", "backend", "t1", item_id=card["id"])
+        backlog.reconcile_ended_tasks("p", {"t1": "ok"})
+        assert backlog.get_item("p", card["id"])["status"] == "done"
+
+    def test_reconcile_sends_a_closed_without_done_card_to_review(self, runtime) -> None:
+        card, _ = backlog.ensure_for_assign("p", "devops", "งาน")
+        backlog.bind_task_id("p", "devops", "t1", item_id=card["id"])
+        backlog.reconcile_ended_tasks("p", {"t1": "closed"})
+        assert backlog.get_item("p", card["id"])["status"] == "review"
+
+    def test_reconcile_leaves_failed_and_running_tasks_alone(self, runtime) -> None:
+        failed, _ = backlog.ensure_for_assign("p", "qa", "ทดสอบ")
+        backlog.bind_task_id("p", "qa", "tf", item_id=failed["id"])
+        running, _ = backlog.ensure_for_assign("p", "backend", "งานยาว")
+        backlog.bind_task_id("p", "backend", "tr", item_id=running["id"])
+        assert backlog.reconcile_ended_tasks("p", {"tf": "fail", "tr": "working"}) == []
+        assert backlog.get_item("p", failed["id"])["status"] == "doing"
+        assert backlog.get_item("p", running["id"])["status"] == "doing"
+
+    def test_finished_card_is_not_labelled_aging(self, runtime) -> None:
+        card = backlog.add_item("p", "เก่า")
+        backlog.mark_done("p", card["id"])
+        later = backlog.get_item("p", card["id"])
+        assert "ดอง" not in backlog.render_line(later, now=later["created_ts"] + 3 * 86400)
+        backlog.set_status("p", card["id"], "todo")
+        reopened = backlog.get_item("p", card["id"])
+        assert "ดอง 3d" in backlog.render_line(reopened, now=reopened["created_ts"] + 3 * 86400)

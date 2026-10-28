@@ -289,12 +289,72 @@ def on_ledger_done(
                 ):
                     link["superseded"] = True
         if all(ln.get("done") or ln.get("superseded") for ln in links if ln.get("role") != "lead"):
-            it["status"] = "review"
-            it["review_since"] = _now()
+            _finish_card(it)
         it["updated_ts"] = _now()
         _save(project, store)
         return it
     return None
+
+
+def _finish_card(it: dict) -> None:
+    """Every pane linked to *it* has finished. #953: a card that `takkub assign`
+    created on its own (``auto_task``) closes itself — nobody wrote it, so
+    nobody comes back to confirm it, and 6 such cards sat open for days after
+    their work was merged. A card the owner or Lead wrote still goes to review
+    for that person to confirm."""
+    if it.get("auto_task"):
+        it["status"] = "done"
+        it["review_since"] = None
+        it["reason"] = "ปิดอัตโนมัติ"
+    else:
+        it["status"] = "review"
+        it["review_since"] = _now()
+
+
+def reconcile_ended_tasks(project: str, task_status: dict[str, str]) -> list[dict]:
+    """#953: release cards whose linked tasks ended without a usable `done`.
+
+    *task_status* maps ledger task ids to their ledger status. A task that was
+    superseded by a later assign or whose pane closed without `done` will never
+    report, so its link is marked ended; once no link is still running the card
+    leaves `doing` (closed when some pane did finish an auto card, else review
+    so the Lead decides). Failed tasks are left alone for the fix loop.
+    Returns the cards that changed."""
+    if not task_status:
+        return []
+    store = load(project)
+    changed: list[dict] = []
+    for it in store["items"]:
+        if it.get("status") != "doing":
+            continue
+        links = [ln for ln in it.get("links") or [] if ln.get("role") != "lead"]
+        touched = False
+        for ln in links:
+            tid = ln.get("task_id")
+            if not tid or ln.get("done") or ln.get("superseded") or ln.get("ended"):
+                continue
+            status = task_status.get(tid)
+            if status == "ok":
+                ln["done"] = True
+                touched = True
+            elif status in ("closed", "superseded"):
+                ln["ended"] = True
+                touched = True
+        if not touched or not links:
+            continue
+        if not all(ln.get("done") or ln.get("superseded") or ln.get("ended") for ln in links):
+            continue
+        if any(ln.get("done") for ln in links):
+            _finish_card(it)
+        else:
+            it["status"] = "review"
+            it["review_since"] = _now()
+            it["reason"] = "งานจบโดยไม่มี done"
+        it["updated_ts"] = _now()
+        changed.append(it)
+    if changed:
+        _save(project, store)
+    return changed
 
 
 # ── #714: backlog is the mandatory entry point for new work ──────────────────
@@ -564,6 +624,14 @@ def age_days(item: dict, *, now: float | None = None) -> int:
     return max(0, int((now - item.get("created_ts", now)) // 86400))
 
 
+def aging_days(item: dict, *, now: float | None = None) -> int:
+    """Days a card has sat open — the "ดอง" label. A finished card is not
+    aging (#953: 'เสร็จ' cards still showed 'ดอง 1d'), so it reads 0."""
+    if item.get("status") not in _OPEN_STATUSES:
+        return 0
+    return age_days(item, now=now)
+
+
 # ── Markdown-table import (`takkub backlog import`) ──────────────────────────
 # Audit reports are already markdown tables with the right columns; don't make
 # the Lead retype 22 rows. Parse a GitHub-flavoured pipe table, map columns by
@@ -680,7 +748,7 @@ def import_markdown(project: str, text: str, *, source: str = "") -> list[dict]:
 
 def render_line(item: dict, *, now: float | None = None) -> str:
     """One-line CLI rendering for `takkub backlog list`."""
-    age = age_days(item, now=now)
+    age = aging_days(item, now=now)
     label = STATUS_LABELS.get(item.get("status", ""), item.get("status", ""))
     sev = item.get("severity", "")
     imp = "🧑‍💼" if item.get("impact") == "customer" else ""

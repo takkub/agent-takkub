@@ -177,6 +177,35 @@ def collect_event_stamps(log_path: Path, event: str, cutoff: datetime) -> list[d
     return stamps
 
 
+def collect_pause_marks(log_path: Path, cutoff: datetime) -> list[datetime]:
+    """Every moment the whole process is known to have paused: sleep-gap
+    markers plus `main_thread_stall` records flagged `whole_process`.
+
+    #946: an 11.5 s "main thread" stall (reading a tiny json) sat inside a
+    10-minute storm of whole-process pauses (up to 29.8 s). The sleep-gap
+    marker that would have excused it was only written 108 s LATER, after the
+    auto-issue scan had already filed it — the neighbouring whole-process
+    stalls were on record the whole time."""
+    marks = collect_event_stamps(log_path, PROCESS_PAUSE_MARKER_EVENT, cutoff)
+    try:
+        with log_path.open(encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                if '"whole_process": true' not in line or "main_thread_stall" not in line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if rec.get("event") != "main_thread_stall" or not rec.get("whole_process"):
+                    continue
+                ts = _parse_ts(rec.get("ts"))
+                if ts is not None and ts >= cutoff:
+                    marks.append(ts)
+    except OSError:
+        pass
+    return marks
+
+
 def near_any(stamp: datetime, stamps: list[datetime], window_s: float) -> bool:
     """True when `stamp` lies within ±`window_s` of any entry in `stamps`."""
     return any(abs((stamp - other).total_seconds()) <= window_s for other in stamps)
@@ -567,7 +596,7 @@ def scan_events(log_path: Path, since_hours: float = 24.0, now: datetime | None 
     routine: Counter[str] = Counter()  # #870: `<event>:<reason>` not counted as 🔴/🟡
     whole_process_stalls: list[int] = []  # #871: duration_ms of process-wide pauses
     # #884-#887: stalls next to a sleep-gap marker are the same pause.
-    pause_marks = collect_event_stamps(log_path, PROCESS_PAUSE_MARKER_EVENT, cutoff)
+    pause_marks = collect_pause_marks(log_path, cutoff)
     total = 0
     try:
         with log_path.open(encoding="utf-8", errors="replace") as fh:

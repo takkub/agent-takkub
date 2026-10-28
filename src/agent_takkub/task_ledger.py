@@ -140,6 +140,20 @@ def index_path(project: str) -> pathlib.Path:
     return _index_path(project)
 
 
+def task_statuses(project: str) -> dict[str, str]:
+    """``{task_id: status}`` for every ledger row that carries a task id — the
+    backlog reconcile (#953) uses it to spot cards whose task ended without a
+    usable done (pane closed / superseded)."""
+    out: dict[str, str] = {}
+    for group in _load_state(project).get("groups", []):
+        for feat in group.get("features", []):
+            for row in feat.get("rows", []):
+                tid = row.get("task_id")
+                if tid:
+                    out[str(tid)] = str(row.get("status") or "")
+    return out
+
+
 def list_projects_with_ledger() -> list[str]:
     """Every project namespace with a ledger on disk — the startup reconcile
     scan (issue #166) walks this list rather than requiring a project arg."""

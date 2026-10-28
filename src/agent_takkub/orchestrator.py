@@ -2586,6 +2586,15 @@ class Orchestrator(
                 worktree = info.as_dict()
                 task = _append_worktree_hint(task, info.branch, cfg.post_create, info.port)
             else:
+                from .worktree_manager import shared_fallback_is_safe
+
+                if not shared_fallback_is_safe(warning):
+                    # #949: same rule as the pane path — never the main checkout.
+                    why = warning.replace(" — ใช้ shared cwd แทน", "")
+                    return False, (
+                        f"[{role_name}] สร้าง worktree ไม่สำเร็จ: {why} — ไม่ได้ assign "
+                        "(ไม่ถอยไปรันใน main checkout เพราะขอ --isolation worktree ไว้)"
+                    )
                 sibling_shared = 0
                 if run_cwd:
                     sibling_shared = sum(
@@ -4890,6 +4899,15 @@ class Orchestrator(
         ps_assign.limit_park_rounds = 0
         ps_assign.limit_park_wake_ts = 0.0
         ps_assign.limit_park_stopped = False
+        # #945: the quota hit belongs to the task/provider that hit it. A
+        # fresh assign (typically onto another provider) inherited the old
+        # gemini "resets in 50h" stall, so the new claude pane was listed
+        # stalled:quota and parked again 19 s after spawn. If this provider
+        # really is still out, the screen banner trips detection again.
+        ps_assign.rate_limited_until = 0.0
+        ps_assign.quota_marker = ""
+        ps_assign.limit_confirm_first_attempt_ts = 0.0
+        ps_assign.limit_confirm_last_attempt_ts = 0.0
         # #514: a fresh task is a fresh reroute budget + cross-check pairing —
         # neither carries over from whatever this pane was doing before.
         ps_assign.quota_reroute_count = 0
@@ -5300,7 +5318,30 @@ class Orchestrator(
                 branch_override=wt_branch,
             )
         if info is None:
-            return _fallback(reason)
+            from .worktree_manager import shared_fallback_is_safe
+
+            if shared_fallback_is_safe(reason):
+                return _fallback(reason)
+            # #949: this IS a git repo and the worktree was asked for — running
+            # in the main checkout instead (local hacks, other panes, branch
+            # switches) is the very thing isolation exists to prevent. Refuse.
+            _log_event(
+                "worktree_create_refused", role=role_name, project=project_ns, reason=reason[:200]
+            )
+            try:
+                from . import backlog
+
+                taken = self._take_assign_backlog(project_ns, role_name)
+                if taken:
+                    backlog.cancel_unstarted_assign(project_ns, taken, role_name)
+            except Exception:
+                _log_event("backlog_assign_cancel_error", role=role_name)
+            why = reason.replace(" — ใช้ shared cwd แทน", "")
+            return False, (
+                f"[{role_name}] สร้าง worktree ไม่สำเร็จ: {why} — ไม่ได้ assign "
+                "(ไม่ถอยไปรันใน main checkout เพราะขอ --isolation worktree ไว้) · "
+                "ลองใหม่อีกครั้ง หรือ assign โดยไม่ใส่ --isolation ถ้าตั้งใจให้รันใน checkout หลัก"
+            )
         reused = reusable is not None and reusable.path == info.path
         worktree_reuse.record(project_ns, backlog_wt, base_role_wt, info)
 
@@ -5657,6 +5698,30 @@ class Orchestrator(
                     conflict_files=(conflict_files or [])[:20],
                     folded_into_digest=skip_proposal_notice,
                 )
+                try:
+                    ai_trailers = mgr.ai_trailer_commits(info)
+                except Exception:
+                    ai_trailers = []
+                if ai_trailers:
+                    _log_event(
+                        "worktree_ai_trailer",
+                        role=from_role,
+                        project=project_ns,
+                        branch=info.branch,
+                        commits=ai_trailers[:20],
+                    )
+                if skip_proposal_notice and ai_trailers:
+                    # #950: the merge line rides the digest here, so the
+                    # trailer warning needs its own short notice.
+                    self._notify_lead(
+                        project_ns,
+                        build_merge_proposal(
+                            from_role, info, commits, "", ai_trailer_commits=ai_trailers
+                        ),
+                        from_role=from_role,
+                        note="",
+                        kind="worktree-proposal",
+                    )
                 if not skip_proposal_notice:
                     try:
                         wip_commits, cockpit_files = mgr.branch_hygiene(info)
@@ -5674,6 +5739,7 @@ class Orchestrator(
                         crlf_phantom=crlf_phantom,
                         wip_commits=wip_commits,
                         cockpit_files=cockpit_files,
+                        ai_trailer_commits=ai_trailers,
                     )
                     self._notify_lead(
                         project_ns, proposal, from_role=from_role, note="", kind="worktree-proposal"
@@ -13214,6 +13280,15 @@ class Orchestrator(
                     severity=req.get("severity", "med"),
                 )
                 return True, f"เพิ่ม backlog [{item['id']}] {item['title']}", {"id": item["id"]}
+            if verb in ("list", "pending"):
+                # #953: release cards whose linked task ended in the ledger
+                # without a done that reached the card (closed/superseded).
+                try:
+                    from . import task_ledger
+
+                    backlog.reconcile_ended_tasks(project_ns, task_ledger.task_statuses(project_ns))
+                except Exception:
+                    _log_event("backlog_reconcile_error", project=project_ns)
             if verb == "list":
                 status = (req.get("status") or "").strip() or None
                 items = backlog.list_items(project_ns, status=status)
@@ -13509,7 +13584,7 @@ class Orchestrator(
         if item.get("detail"):
             lines.append("\n" + item["detail"])
         lines.append(f"\nเข้ามา: {backlog._fmt_ts(item.get('created_ts', 0))}")
-        lines.append(f"ดอง: {backlog.age_days(item)} วัน")
+        lines.append(f"ดอง: {backlog.aging_days(item)} วัน")
         return "\n".join(lines)
 
     def task_show_info(self, role: str, project: str | None = None) -> tuple[bool, str, dict]:
