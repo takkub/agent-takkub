@@ -1416,6 +1416,10 @@ def cmd_worktree(args: argparse.Namespace) -> dict:
         # swept every `clean` call, unlike the gated `--orphans` report
         # below — no separate manual run needed to finish the job.
         lines = lines + mgr.sweep_trash(root, live_paths=live_paths)
+        # #961: wt/* branches whose checkout is already gone are a trace of the
+        # cockpit left in the user's repo — sweep them with the worktrees.
+        if not getattr(args, "branch", None):
+            lines = lines + mgr.clean_dangling_branches(root, force=bool(args.force))
         if lines:
             for line in lines:
                 _utf8_print(f"  {line}")

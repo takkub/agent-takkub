@@ -349,6 +349,13 @@ class TestDeliveryFailureReasons:
         log = _log(tmp_path / "events.log", _delivery_failures(now, 8, "pane_closed"))
         assert sig.scan_for_signals(log, now=now) == []
 
+    def test_session_replaced_failures_never_file_an_issue(self, tmp_path: Path) -> None:
+        """#963: a respawn/restart swapping the session mid-delivery is the
+        pane_closed shape — the replacing path owns the task."""
+        now = datetime(2026, 8, 21, 12, 0, 0)
+        log = _log(tmp_path / "events.log", _delivery_failures(now, 8, "session_replaced"))
+        assert sig.scan_for_signals(log, now=now) == []
+
     def test_real_delivery_failures_still_fire(self, tmp_path: Path) -> None:
         """The rule must not be neutered — a task that genuinely never reached
         the pane is exactly what this signal is for."""

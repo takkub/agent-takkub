@@ -839,6 +839,18 @@ _STALE_MARKER_CHECKS_TRIED = (
 LEAD_DONE_IDLE_GRACE_S = 1800.0
 
 
+def _worktree_paths_held_by_others(pane_state: dict, project_ns: str, role_name: str) -> set[str]:
+    """#960: worktree paths other panes of *project_ns* are bound to — a reuse
+    candidate in this set belongs to a sibling and must never be shared."""
+    held: set[str] = set()
+    for key, ps in pane_state.items():
+        if key.startswith(f"{project_ns}::") and key != f"{project_ns}::{role_name}":
+            path = (getattr(ps, "worktree", None) or {}).get("path")
+            if path:
+                held.add(os.path.normcase(os.path.normpath(str(path))))
+    return held
+
+
 def _stale_marker_footer(sess: PtySession) -> str:
     """Bottom-of-screen diagnostic text for the stale-marker log/escalation —
     factored out so _resolve_stale_marker_nudge can re-capture it (phase 2,
@@ -5188,12 +5200,17 @@ class Orchestrator(
         if not base_ref and not wt_branch:  # #813: a named branch is always new
             from . import worktree_reuse
 
+            # #960: keyed by the instance id (frontend#2), not the base role —
+            # shards of one card used to all reuse shard 1's worktree.
             found = worktree_reuse.find(
                 project_ns,
                 (getattr(self, "_peek_assign_backlog", None) or (lambda *_: ""))(
                     project_ns, role_name
                 ),
-                base_role,
+                role_name,
+                exclude_paths=_worktree_paths_held_by_others(
+                    getattr(self, "_pane_state", {}), project_ns, role_name
+                ),
             )
             reuse = found.as_dict() if found else None
         sibling_ports = {
@@ -5217,7 +5234,7 @@ class Orchestrator(
         from . import worktree_reuse
 
         pns = self._resolve_project(project)
-        worktree_reuse.forget(pns, self._peek_assign_backlog(pns, role), _split_shard(role)[0])
+        worktree_reuse.forget(pns, self._peek_assign_backlog(pns, role), role)
 
     def done_git_inputs(self, from_role: str, project: str | None = None) -> dict | None:
         """(#408) The cheap, main-thread half of `done()`'s git fact gather:
@@ -5340,7 +5357,9 @@ class Orchestrator(
         } - {0}
         from . import worktree_reuse
 
-        base_role_wt = _split_shard(role_name)[0]
+        # #960: the instance id (frontend#2), not the base role — keyed by base
+        # role, every shard of one card reused shard 1's worktree.
+        base_role_wt = role_name
         backlog_wt = (getattr(self, "_peek_assign_backlog", None) or (lambda *_: ""))(
             project_ns, role_name
         )
@@ -5349,7 +5368,15 @@ class Orchestrator(
         reusable = (
             None
             if base_ref or wt_branch
-            else worktree_reuse.find(project_ns, backlog_wt, base_role_wt, mgr)
+            else worktree_reuse.find(
+                project_ns,
+                backlog_wt,
+                base_role_wt,
+                mgr,
+                exclude_paths=_worktree_paths_held_by_others(
+                    getattr(self, "_pane_state", {}), project_ns, role_name
+                ),
+            )
         )
         if prepared is not None:
             # #408: `git worktree add` already ran off the Qt thread
@@ -15590,11 +15617,9 @@ class Orchestrator(
           * logs under a distinct event name maintenance.py classifies 🔴
             (`_SEVERE_EVENTS`), not 🟡 — the routine event stayed 🟡-only for
             the entire ~9h #343 episode, which is the gap this closes
-          * pings Lead directly via _notify_lead — including when *this* pane
-            IS Lead: that call still lands in the durable pending-notice
-            fallback (see _notify_lead's docstring) when live delivery can't
-            reach a genuinely wedged pane, so the diagnostic is waiting
-            whenever that pane is next recovered/respawned rather than lost
+          * pings Lead directly via _notify_lead — except when *this* pane
+            IS Lead (#962): injecting the notice into Lead itself only wakes
+            an idle Lead waiting for the human; the 🔴 event is the record
 
         Best-effort end to end — a failed diagnostic dump must never take the
         sweep down with it (matches this file's surrounding
@@ -15712,6 +15737,17 @@ class Orchestrator(
             if footer_unreadable:
                 _log_event(
                     "watchdog_footer_unreadable", role=name, project=project_name, streak=streak
+                )
+                return
+            # (#962) The pane in question IS Lead: the notice would be
+            # injected into that same pane as a user turn. A Lead that is
+            # merely idle waiting for the human (the common case) gets woken
+            # for nothing and burns a turn; a Lead that is really wedged can't
+            # read it anyway. The 🔴 `ready_marker_stale_prolonged` event above
+            # already puts it in `takkub ma` — that is where it belongs (#464).
+            if name == LEAD.name:
+                _log_event(
+                    "watchdog_lead_not_paged", role=name, project=project_name, streak=streak
                 )
                 return
             if provider == "claude":

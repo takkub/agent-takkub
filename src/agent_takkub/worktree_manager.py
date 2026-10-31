@@ -2695,6 +2695,55 @@ class WorktreeManager:
             out[slot] = note
         return out
 
+    def clean_dangling_branches(self, git_root: str, force: bool = False) -> list[str]:
+        """#961: ``wt/*`` branches no worktree has checked out any more (the
+        checkout was deleted by hand, a crash between remove and ``branch
+        -D``, an older version that never deleted) — a trace in the user's
+        repo that `clean_isolated` cannot see, since it walks ``git worktree
+        list``. Merged (or cherry-picked) ones are deleted; one still
+        carrying unmerged commits is kept unless *force*."""
+        if _stuck_git_op(git_root):
+            return []
+        refs = self._run(
+            [
+                "-C",
+                git_root,
+                "for-each-ref",
+                "--format=%(refname:short)",
+                f"refs/heads/{_BRANCH_PREFIX}/",
+            ],
+            None,
+        )
+        if not refs.ok:
+            return []
+        wt = self._run(["-C", git_root, "worktree", "list", "--porcelain"], None)
+        held = {e.get("branch") for e in parse_worktree_list(wt.stdout)} if wt.ok else None
+        if held is None:
+            return []  # can't tell which branches are checked out — touch nothing
+        out: list[str] = []
+        for branch in (b.strip() for b in refs.stdout.splitlines()):
+            if not branch.startswith(f"{_BRANCH_PREFIX}/") or branch in held:
+                continue
+            ahead = self.commits_ahead(git_root, branch)
+            if (
+                ahead
+                and not force
+                and not self._all_commits_landed_via_cherry_pick(git_root, branch)
+            ):
+                out.append(
+                    f"KEEP  {branch} — ไม่มี worktree แล้ว แต่มี {ahead} commit ยังไม่ merge (--force เพื่อลบ)"
+                )
+                continue
+            res = self._delete_branch(git_root, branch)
+            if res.ok:
+                out.append(f"REMOVED {branch} (branch ค้างที่ไม่มี worktree แล้ว)")
+            else:
+                detail = (res.stderr or res.stdout).strip().splitlines()
+                out.append(
+                    f"FAILED  {branch} — {detail[-1] if detail else f'exit {res.returncode}'}"
+                )
+        return out
+
     def force_remove(self, info: WorktreeInfo) -> tuple[bool, str]:
         """Unconditional teardown (``--force`` + prune + branch -D). Used for
         explicit cleanup where losing uncommitted scratch is acceptable."""

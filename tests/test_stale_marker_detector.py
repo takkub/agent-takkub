@@ -205,8 +205,22 @@ def test_escalates_after_n_consecutive_occurrences(
         "is_blocked_on_permission_prompt",
         "is_at_update_splash",
     ]
-    # escalating past the routine 🟡 line means actually telling someone —
-    # even (especially) when the wedged pane IS Lead itself, per #343.
+    # (#962) the pane IS Lead: the 🔴 event is the record — injecting the
+    # notice into Lead itself only wakes an idle Lead waiting for its user.
+    assert not notify_calls
+    assert [e for e in events if e[0] == "watchdog_lead_not_paged"]
+
+
+def test_teammate_escalation_pages_lead(
+    orch: Orchestrator, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A teammate pane past the threshold still pages Lead (#343)."""
+    _add_pane(orch, "projX", "backend", _sess(quiet=STALE_MARKER_QUIET_S + 10))
+    _capture_events(monkeypatch)
+    notify_calls = _capture_notify(monkeypatch)
+
+    _tick_n_cooldowns(orch, _STALE_MARKER_ESCALATE_EVERY + 1)
+
     assert len(notify_calls) == 1
     assert notify_calls[0][0][0] == "projX"
     assert "#343" in notify_calls[0][0][1]
@@ -346,7 +360,7 @@ def test_nudge_phase_2_escalates_when_not_recovered(
     marker recognises, phase 2 logs the full before/after comparison and
     falls straight through to the loud escalation — in that same tick, not
     after another _STALE_MARKER_ESCALATE_EVERY streak."""
-    _add_pane(orch, "projX", "lead", _sess(quiet=STALE_MARKER_QUIET_S + 10))
+    _add_pane(orch, "projX", "backend", _sess(quiet=STALE_MARKER_QUIET_S + 10))
     events = _capture_events(monkeypatch)
     notify_calls = _capture_notify(monkeypatch)
 
@@ -403,7 +417,7 @@ def test_empty_composer_shape_ignored_for_non_claude_provider(
         lambda *a, **k: "codex",
     )
     sess = _sess(quiet=STALE_MARKER_QUIET_S + 10, empty_composer=True)
-    _add_pane(orch, "projX", "lead", sess)
+    _add_pane(orch, "projX", "backend", sess)
     events = _capture_events(monkeypatch)
     notify_calls = _capture_notify(monkeypatch)
 
@@ -425,7 +439,7 @@ def test_composer_stability_requires_both_sides_of_the_nudge(
     screen genuinely changing BETWEEN phase 1 and phase 2 (two separate
     sweep ticks), not a canned before/after pair consumed within one call."""
     sess = _sess(quiet=STALE_MARKER_QUIET_S + 10, empty_composer=True)
-    _add_pane(orch, "projX", "lead", sess)
+    _add_pane(orch, "projX", "backend", sess)
     events = _capture_events(monkeypatch)
     notify_calls = _capture_notify(monkeypatch)
 
@@ -474,7 +488,7 @@ def test_claude_empty_composer_with_busy_spinner_escalates_not_recovered(
     sess.is_at_claude_empty_composer.side_effect = lambda: _is_claude_empty_composer(
         sess.display_lines()
     )
-    _add_pane(orch, "projX", "lead", sess)
+    _add_pane(orch, "projX", "backend", sess)
     events = _capture_events(monkeypatch)
     notify_calls = _capture_notify(monkeypatch)
 
@@ -745,7 +759,7 @@ def test_lead_escalates_once_grace_window_elapses(
     assert len(escalations) == 1
     assert escalations[0][1]["role"] == "lead"
     assert escalations[0][1]["streak"] == _STALE_MARKER_ESCALATE_EVERY
-    assert len(notify_calls) == 1
+    assert not notify_calls  # #962: Lead is never paged about itself
 
 
 def test_lead_with_no_teammates_ever_assigned_gets_no_grace(
@@ -833,7 +847,7 @@ def test_liveness_dead_claude_pane_uses_definitive_wording(
     monkeypatch.setattr(
         "agent_takkub.provider_config.effective_provider_for", lambda *a, **k: "claude"
     )
-    _add_pane(orch, "projX", "lead", _sess(quiet=STALE_MARKER_QUIET_S + 10))
+    _add_pane(orch, "projX", "backend", _sess(quiet=STALE_MARKER_QUIET_S + 10))
     _capture_events(monkeypatch)
     notify_calls = _capture_notify(monkeypatch)
     monkeypatch.setattr(
@@ -913,8 +927,7 @@ class TestIdleAfterTurnEndNotPaged:
 
         _tick_n_cooldowns(orch, _STALE_MARKER_ESCALATE_EVERY + 1)
 
-        assert len(notify_calls) == 1
-        assert "อาจค้างจริง" in notify_calls[0][0][1]
+        assert not notify_calls  # #962: still 🔴-logged, not injected
 
     def test_unreadable_footer_says_unverifiable_not_hung(
         self, orch: Orchestrator, monkeypatch: pytest.MonkeyPatch
@@ -1079,5 +1092,5 @@ def test_lead_grace_voided_by_a_still_working_teammate(
     escalations = [e for e in events if e[0] == "ready_marker_stale_prolonged"]
     assert len(escalations) == 1
     assert escalations[0][1]["role"] == "lead"
-    assert len(notify_calls) == 1
+    assert not notify_calls  # #962: Lead is never paged about itself
     assert "projX" not in orch._team_idle_since

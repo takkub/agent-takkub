@@ -30,7 +30,19 @@ from pathlib import Path
 # ours and safe to refresh.
 TAKKUB_MARKER = "<!-- takkub-managed AGENTS.md · do not commit -->"
 
+# #961: this file sits in the project cwd, so a codex/agy/opencode/cursor the
+# user opens there by hand reads it too — and used to obey the whole cockpit
+# rulebook ("One task per session", "YOU MUST call takkub done") instead of the
+# user. The opt-out has to be the very first thing read, and cover every rule.
+STANDALONE_GATE = """> **Not inside an agent-takkub cockpit pane?** If the environment variable
+> `TAKKUB_ROLE` is unset (you were started directly from a terminal or IDE),
+> **ignore this entire file** and work for the user normally — none of the
+> rules below apply to you, and never run `takkub` commands.
+"""
+
 CODEX_AGENTS_MD = f"""{TAKKUB_MARKER}
+
+{STANDALONE_GATE}
 
 # agent-takkub Teammate
 

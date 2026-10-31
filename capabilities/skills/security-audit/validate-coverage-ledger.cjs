@@ -729,16 +729,13 @@ function readFileWithinLimit(file) {
   }
 
   let descriptor;
-  let before = null;
   try {
     if (hasNoFollow) {
       descriptor = fs.openSync(file, fs.constants.O_RDONLY | noFollow | nonBlock);
     } else {
-      // agent-takkub patch: Windows has no O_NOFOLLOW. lstat rejects
-      // symlinks/junctions, then fstat must match the same file identity.
-      before = fs.lstatSync(file, { bigint: true });
-      if (before.isSymbolicLink()) throw new SafeInputError("input must not be a symlink");
-      if (!before.isFile()) throw new SafeInputError("input must be a regular file");
+      // agent-takkub patch: Windows has no O_NOFOLLOW. Open first, then lstat
+      // the path: it must be a plain file with the same identity as the open
+      // descriptor (no check-then-use window, CodeQL js/file-system-race).
       descriptor = fs.openSync(file, fs.constants.O_RDONLY);
     }
   } catch (error) {
@@ -746,9 +743,12 @@ function readFileWithinLimit(file) {
     throw error;
   }
   try {
-    if (before) {
+    if (!hasNoFollow) {
+      const after = fs.lstatSync(file, { bigint: true });
+      if (after.isSymbolicLink()) throw new SafeInputError("input must not be a symlink");
+      if (!after.isFile()) throw new SafeInputError("input must be a regular file");
       const opened = fs.fstatSync(descriptor, { bigint: true });
-      if (opened.dev !== before.dev || opened.ino !== before.ino) {
+      if (opened.dev !== after.dev || opened.ino !== after.ino) {
         throw new SafeInputError("input changed while opening");
       }
     }

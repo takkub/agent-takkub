@@ -1592,6 +1592,9 @@ class TestWorktreeCli:
             type(self).trash_live_paths_calls.append(set(live_paths))
             return type(self).trash_lines
 
+        def clean_dangling_branches(self, root, force=False):
+            return []
+
     @staticmethod
     def _no_cockpit(_payload):
         raise RuntimeError("agent-takkub cockpit is not running (no port file).")

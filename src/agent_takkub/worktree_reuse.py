@@ -13,12 +13,13 @@ atomic write). Everything here is best-effort: any failure means "create new".
 from __future__ import annotations
 
 import json
+import os
 import threading
 import time
 from pathlib import Path
 
+from . import config as _config
 from .backlog import _atomic_write
-from .config import RUNTIME_DIR
 from .path_safe import safe_segment
 
 _MAX_ENTRIES = 100
@@ -27,7 +28,7 @@ _LOCK = threading.Lock()
 
 
 def _path(project: str) -> Path:
-    return RUNTIME_DIR / "worktree_reuse" / f"{safe_segment(project)}.json"
+    return _config.RUNTIME_DIR / "worktree_reuse" / f"{safe_segment(project)}.json"
 
 
 def _key(backlog_id: str, base_role: str) -> str:
@@ -71,12 +72,13 @@ def forget(project: str, backlog_id: str, base_role: str) -> None:
         pass
 
 
-def find(project: str, backlog_id: str, base_role: str, mgr=None):
+def find(project: str, backlog_id: str, base_role: str, mgr=None, *, exclude_paths=()):
     """The still-live, unmerged WorktreeInfo recorded for this card+role, or
     None. "Live" = checkout dir still exists and its branch is still there;
     "unmerged" = it has commits beyond the repo HEAD, or it is still an
     untouched checkout at its own base commit (a merged branch has a tip that
-    is neither ahead of HEAD nor equal to its base — never reused)."""
+    is neither ahead of HEAD nor equal to its base — never reused).
+    *exclude_paths* (normcased): checkouts another live pane holds (#960)."""
     if not backlog_id:
         return None
     try:
@@ -86,6 +88,8 @@ def find(project: str, backlog_id: str, base_role: str, mgr=None):
         if not entry:
             return None
         info = WorktreeInfo.from_dict(entry["info"])
+        if os.path.normcase(os.path.normpath(info.path)) in exclude_paths:
+            return None
         if not (Path(info.path) / ".git").exists():
             return None
         mgr = mgr or WorktreeManager()

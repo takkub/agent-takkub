@@ -88,8 +88,15 @@ _WARN_EVENTS: dict[str, str] = {
 # both when the task never reached the pane AND when a teammate simply ran
 # `takkub done --fail`). Shared with `auto_issue_signals` so the sweep and the
 # auto-issue scanner read the same event the same way.
+# #963: `session_replaced` is the pane_closed shape for a respawn — the pane got
+# a new session (crash/stuck auto-respawn, manual restart, a superseding
+# assign) while a delivery was in flight. The replacing path owns the task
+# (`respawn_replay_task` / the new assign), and the respawn is its own event.
 ROUTINE_EVENT_REASONS: dict[str, tuple[str, frozenset[str]]] = {
-    "task_delivery_failed": ("reason", frozenset({"agent_reported_failed", "pane_closed"})),
+    "task_delivery_failed": (
+        "reason",
+        frozenset({"agent_reported_failed", "pane_closed", "session_replaced"}),
+    ),
 }
 
 

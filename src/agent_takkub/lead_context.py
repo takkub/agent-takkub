@@ -959,7 +959,7 @@ def render_lead_agents_md_with_reason(
     except Exception:
         _log_event("lead_memory_inject_failed", project=project)
 
-    from .codex_agents_md import TAKKUB_MARKER, _ensure_git_excluded
+    from .codex_agents_md import STANDALONE_GATE, TAKKUB_MARKER, _ensure_git_excluded
 
     target = pathlib.Path(spawn_cwd) / "AGENTS.md"
     try:
@@ -969,7 +969,7 @@ def render_lead_agents_md_with_reason(
             first = head[0] if head else ""
             if existing.strip() and TAKKUB_MARKER not in first:
                 return None, "user-owned", text  # user-owned — don't clobber (#830)
-        target.write_text(f"{TAKKUB_MARKER}\n\n{text}", encoding="utf-8")
+        target.write_text(f"{TAKKUB_MARKER}\n\n{STANDALONE_GATE}\n{text}", encoding="utf-8")
         _ensure_git_excluded(pathlib.Path(spawn_cwd), "AGENTS.md")
     except OSError as e:
         return None, f"write failed: {e}", text

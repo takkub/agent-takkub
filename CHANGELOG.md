@@ -2,6 +2,16 @@
 
 All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses [SemVer](https://semver.org/).
 
+## [v2.2.37] - 2026-10-31
+
+### Fixed (แก้)
+
+- **shard ของ `--shards N --isolation worktree` ใช้ worktree อันเดียวกัน (#960):** registry ที่จำ worktree ไว้ใช้ซ้ำตอน fix-loop ใช้ key (card, role หลัก) shard 2 จึงไปหยิบ worktree ของ shard 1 · ตอนนี้ key ด้วยชื่อ instance (`frontend#2`) และไม่ reuse worktree ที่ pane อื่นถืออยู่
+- **AGENTS.md ที่ cockpit วางไว้บล็อก CLI ที่ user เปิดเองในโปรเจค (#961, บางส่วน):** บรรทัดแรกของไฟล์ (ทั้ง teammate และ Lead) บอกตรงๆ ว่าถ้าไม่มี `TAKKUB_ROLE` (ไม่ได้อยู่ใน pane) ให้ข้ามไฟล์ทั้งไฟล์ · `takkub worktree clean` กวาด branch `wt/*` ที่ worktree หายไปแล้วด้วย (merge แล้ว = ลบ, ยังมี commit ไม่ merge = เก็บ เว้นแต่ `--force`) · ส่วนที่ยังค้าง: ส่ง instruction ผ่านช่องทางของ provider แทนไฟล์ใน repo
+- **watchdog ปลุก Lead ที่ idle รอ user ตอบ (#962):** แจ้ง "lead เงียบ อาจค้างจริง" ยิงเข้า pane ของ Lead เองเป็น user turn · ตอนนี้ถ้า pane ที่ค้างคือ Lead จะลง event 🔴 ใน `takkub ma` อย่างเดียว ไม่ inject (teammate ยังแจ้ง Lead ตามเดิม)
+- **auto-issue เปิดบั๊ก "ส่งใบงานไม่สำเร็จ" จาก respawn ปกติ (#963):** `task_delivery_failed reason=session_replaced` (session ถูกแทนระหว่างส่ง — respawn/restart/assign ทับ ซึ่ง path ใหม่รับงานต่อเอง) นับเป็น routine แบบเดียวกับ `pane_closed`
+- **CodeQL file-system race 2 จุดใน validator ของ security-audit skill (#64/#65):** Windows path เปิดไฟล์ก่อนแล้วค่อย lstat + เทียบ identity กับ descriptor (ไม่มีช่อง check-then-use)
+
 ## [v2.2.36] - 2026-10-28
 
 ### Fixed (แก้)
