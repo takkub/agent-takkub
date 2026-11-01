@@ -1379,6 +1379,12 @@ def _codex_session_meta(path: Path) -> dict:
     return read_codex_session_meta(path)
 
 
+def _is_codex_headless(meta: dict) -> bool:
+    """True for a `codex exec` rollout (#964): headless reviews/critics run in
+    the project cwd too, but a Lead pane is always the interactive TUI."""
+    return str(meta.get("originator") or "").strip().lower() == "codex_exec"
+
+
 _CODEX_RESOLVE_CACHE: dict[tuple[str, str, int], Path] = {}
 
 
@@ -1427,6 +1433,13 @@ def _resolve_codex_jsonl_path(
     # file may be created just before AgentPane stamps spawn_ts after attach,
     # so allow a small clock/order tolerance without admitting old sessions.
     earliest = max(0.0, float(not_before or 0.0) - 15.0)
+    # #964: every Codex pane of a project shares this cwd, so "newest rollout
+    # for the cwd" is usually a teammate's (a reviewer spawned today beats a
+    # Lead that has been running since yesterday). Teammate sessions are
+    # recognisable by their opening line, exactly as the resume picker
+    # filters them. A candidate with no user line yet can't be classified:
+    # it is only a fallback and never cached, so a later resync re-checks it.
+    fallback: Path | None = None
     for path in _codex_rollout_candidates(root, not_before=not_before):
         # `continue`, not `break` (#293): the candidate stream is ordered by
         # day directory then mtime, so a single file whose mtime trails its
@@ -1435,11 +1448,18 @@ def _resolve_codex_jsonl_path(
         if earliest and _safe_mtime(path) < earliest:
             continue
         meta = _codex_session_meta(path)
-        if _norm_cwd(meta.get("cwd")) != wanted_cwd:
+        if _norm_cwd(meta.get("cwd")) != wanted_cwd or _is_codex_headless(meta):
+            continue
+        first_line = _first_codex_user_line(path)
+        if not first_line:
+            if fallback is None:
+                fallback = path
+            continue
+        if _is_teammate_session_line(first_line):
             continue
         _CODEX_RESOLVE_CACHE[cache_key] = path
         return path
-    return None
+    return fallback
 
 
 # Codex 0.147 replaced the flat `event_msg.agent_message` / `.user_message`
@@ -1458,6 +1478,27 @@ _codex_record_message = codex_helper.parse_codex_record_message
 def _codex_live_text_blocks(rec: dict) -> list[str]:
     parsed = _codex_record_message(rec)
     return [parsed[1]] if parsed is not None and parsed[0] == "lead" else []
+
+
+def _first_codex_user_line(path: Path) -> str:
+    """Codex's raw first user line, for role classification only (#964).
+
+    Unlike `_first_codex_user_preview` it keeps the generated spawn opener:
+    that opener is what marks a one-shot teammate session."""
+    try:
+        with path.open("r", encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                try:
+                    parsed = _codex_record_message(json.loads(line))
+                except (ValueError, TypeError):
+                    continue
+                if parsed is not None and parsed[0] == "me":
+                    text = _strip_remote_prefix(parsed[1]).strip()
+                    if text:
+                        return text
+    except OSError:
+        pass
+    return ""
 
 
 def _first_codex_user_preview(path: Path) -> str:
@@ -1533,7 +1574,7 @@ def _list_recent_codex_sessions(
     try:
         for path in root.rglob("rollout-*.jsonl"):
             meta = _codex_session_meta(path)
-            if _norm_cwd(meta.get("cwd")) != wanted_cwd:
+            if _norm_cwd(meta.get("cwd")) != wanted_cwd or _is_codex_headless(meta):
                 continue
             session_uuid = str(meta.get("id") or meta.get("session_id") or "").strip()
             if not session_uuid:
@@ -1548,9 +1589,11 @@ def _list_recent_codex_sessions(
     capped = max(1, min(limit, _SESSION_LIST_MAX_LIMIT))
     out: list[dict] = []
     for mtime, path, meta in found:
-        preview = _first_codex_user_preview(path)
-        if preview.startswith(_TEAMMATE_TASK_PREFIXES):
+        # Classify on the raw first line: the preview skips the one-shot
+        # spawn opener, which is exactly what marks a teammate session.
+        if _is_teammate_session_line(_first_codex_user_line(path)):
             continue
+        preview = _first_codex_user_preview(path)
         out.append(
             {
                 "uuid": str(meta.get("id") or meta.get("session_id")),

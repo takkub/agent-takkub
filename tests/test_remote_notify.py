@@ -2182,6 +2182,98 @@ class TestCodexRemoteHistory:
         assert [item["uuid"] for item in sessions] == ["lead-new", "lead-old"]
         assert sessions[0]["preview"] == "งานใหม่"
 
+    def _write_day(
+        self, day: str, uuid: str, first_user: str | None, originator: str = "codex-tui"
+    ) -> Path:
+        """A rollout in Codex's real `YYYY/MM/DD` layout (#964)."""
+        day_dir = self.root.joinpath(*day.split("-"))
+        day_dir.mkdir(parents=True, exist_ok=True)
+        path = day_dir / f"rollout-{day}T10-00-00-{uuid}.jsonl"
+        records = [
+            {
+                "type": "session_meta",
+                "payload": {
+                    "id": uuid,
+                    "session_id": uuid,
+                    "cwd": str(self.cwd),
+                    "originator": originator,
+                },
+            }
+        ]
+        if first_user is not None:
+            records.append(
+                {"type": "event_msg", "payload": {"type": "user_message", "message": first_user}}
+            )
+        path.write_text("\n".join(json.dumps(r) for r in records) + "\n", encoding="utf-8")
+        return path
+
+    def test_uuidless_lead_from_yesterday_beats_newer_same_cwd_teammates(self):
+        """#964: Lead running since yesterday, reviewer/backend spawned today
+        in the same cwd, no Lead UUID, and the Lead file's mtime trails its
+        content (Windows keeps it open). The teammate must never be bound."""
+        from datetime import datetime
+
+        spawn = datetime(2026, 10, 31, 22, 38, 16).timestamp()
+        lead = self._write_day("2026-10-31", "lead", "[remote → lead] สวัสดี")
+        reviewer = self._write_day("2026-11-01", "reviewer", "[ROLE: reviewer] review diff")
+        backend = self._write_day("2026-11-01", "backend", notify_mod._SPAWN_TASK_TRIGGER)
+        review = self._write_day("2026-11-01", "exec", "Review the diff", "codex_exec")
+        os.utime(lead, (spawn + 60, spawn + 60))
+        os.utime(reviewer, (spawn + 70_000, spawn + 70_000))
+        os.utime(backend, (spawn + 71_000, spawn + 71_000))
+        os.utime(review, (spawn + 72_000, spawn + 72_000))
+
+        assert notify_mod._resolve_codex_jsonl_path("proj", None, spawn) == lead
+        # cached answer is the Lead, not a teammate
+        assert notify_mod._resolve_codex_jsonl_path("proj", None, spawn) == lead
+
+    def test_uuidless_unclassifiable_candidate_is_fallback_and_never_cached(self):
+        """A rollout with no user line yet can't be told apart: it may be
+        returned, but must not be pinned in the cache — once the teammate's
+        `[ROLE:` line lands the next resolve has to move to the Lead."""
+        from datetime import datetime
+
+        spawn = datetime(2026, 10, 31, 22, 38, 16).timestamp()
+        lead = self._write_day("2026-10-31", "lead", None)
+        fresh = self._write_day("2026-11-01", "fresh", None)
+        os.utime(lead, (spawn + 60, spawn + 60))
+        os.utime(fresh, (spawn + 70_000, spawn + 70_000))
+
+        assert notify_mod._resolve_codex_jsonl_path("proj", None, spawn) == fresh
+        assert notify_mod._CODEX_RESOLVE_CACHE == {}
+
+        with fresh.open("a", encoding="utf-8") as fh:
+            fh.write(
+                json.dumps(
+                    {
+                        "type": "event_msg",
+                        "payload": {"type": "user_message", "message": "[ROLE: qa] smoke"},
+                    }
+                )
+                + "\n"
+            )
+        assert notify_mod._resolve_codex_jsonl_path("proj", None, spawn) == lead
+
+    def test_mobile_picker_filters_one_shot_spawn_teammates(self):
+        """#964: a one-shot teammate's only typed line is the spawn opener,
+        which the preview skips — classification must use the raw line."""
+        self._write(
+            "backend-oneshot",
+            [
+                {
+                    "type": "event_msg",
+                    "payload": {"type": "user_message", "message": notify_mod._SPAWN_TASK_TRIGGER},
+                }
+            ],
+        )
+        self._write(
+            "lead",
+            [{"type": "event_msg", "payload": {"type": "user_message", "message": "takkub ma"}}],
+        )
+
+        sessions = notify_mod.list_recent_lead_sessions("proj", provider="codex")
+        assert [item["uuid"] for item in sessions] == ["lead"]
+
     def test_mobile_picker_excludes_other_cwd(self):
         path = self._write(
             "other-project",

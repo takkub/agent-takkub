@@ -2,6 +2,12 @@
 
 All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses [SemVer](https://semver.org/).
 
+## [v2.2.38] - 2026-11-01
+
+### Fixed (แก้)
+
+- **Remote PWA ไม่เห็นคำตอบของ Lead ที่เป็น codex (#964):** ตอนที่ยังไม่รู้ session id ของ Lead ตัวหาไฟล์ rollout จะเลือก "ไฟล์ใหม่สุดที่ cwd ตรงกัน" แต่ pane codex ทุกตัวในโปรเจคใช้ cwd เดียวกัน มันเลยไปจับไฟล์ของ reviewer ที่เพิ่ง spawn วันนี้แทน Lead ที่รันมาตั้งแต่เมื่อวาน แล้ว cache ค้างไว้ · ตอนนี้ข้าม session ของ teammate (บรรทัดแรกเป็น `[ROLE:` / `[SESSION GOAL` / spawn opener) และ `codex exec` (review/critic แบบ headless) · ไฟล์ที่ยังไม่มีบรรทัด user จะใช้เป็นตัวสำรองเท่านั้นและไม่ cache · resume picker บนมือถือคัด teammate แบบ one-shot และ `codex exec` ออกด้วย
+
 ## [v2.2.37] - 2026-10-31
 
 ### Fixed (แก้)
