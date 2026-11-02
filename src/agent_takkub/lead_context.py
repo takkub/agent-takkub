@@ -925,11 +925,41 @@ def render_lead_agents_md_with_reason(
       - `(None, "no_context", None)` — no cockpit CLAUDE.md available.
       - `(None, "<error>", text)` — disk write failure.
     """
+    text = build_lead_agents_text(project, spawn_cwd, post_compact_brief=post_compact_brief)
+    if text is None:
+        return None, "no_context", None
+
+    from .codex_agents_md import STANDALONE_GATE, TAKKUB_MARKER, _ensure_git_excluded
+
+    target = pathlib.Path(spawn_cwd) / "AGENTS.md"
+    try:
+        if target.exists():
+            existing = target.read_text(encoding="utf-8", errors="replace")
+            head = existing.splitlines()
+            first = head[0] if head else ""
+            if existing.strip() and TAKKUB_MARKER not in first:
+                return None, "user-owned", text  # user-owned — don't clobber (#830)
+        target.write_text(f"{TAKKUB_MARKER}\n\n{STANDALONE_GATE}\n{text}", encoding="utf-8")
+        _ensure_git_excluded(pathlib.Path(spawn_cwd), "AGENTS.md")
+    except OSError as e:
+        return None, f"write failed: {e}", text
+    return str(target), "written", text
+
+
+def build_lead_agents_text(
+    project: str,
+    spawn_cwd: str,
+    post_compact_brief: str | None = None,
+) -> str | None:
+    """The non-claude Lead's instruction text (cockpit CLAUDE.md + BLOCKED_DIRS
+    + brief + central memory pointer), or None without a cockpit CLAUDE.md.
+    Written to AGENTS.md by `render_lead_agents_md_with_reason`, or handed
+    over a provider channel by `pane_instructions` (#961)."""
     text = _build_lead_context_text(
         project, post_compact_brief=post_compact_brief, claude_cwd=spawn_cwd
     )
     if text is None:
-        return None, "no_context", None
+        return None
 
     # (#687) a non-Claude Lead has no native auto-memory (/memory is a
     # claude-CLI feature keyed to CLAUDE_CONFIG_DIR) — before this block,
@@ -958,22 +988,7 @@ def render_lead_agents_md_with_reason(
 """
     except Exception:
         _log_event("lead_memory_inject_failed", project=project)
-
-    from .codex_agents_md import STANDALONE_GATE, TAKKUB_MARKER, _ensure_git_excluded
-
-    target = pathlib.Path(spawn_cwd) / "AGENTS.md"
-    try:
-        if target.exists():
-            existing = target.read_text(encoding="utf-8", errors="replace")
-            head = existing.splitlines()
-            first = head[0] if head else ""
-            if existing.strip() and TAKKUB_MARKER not in first:
-                return None, "user-owned", text  # user-owned — don't clobber (#830)
-        target.write_text(f"{TAKKUB_MARKER}\n\n{STANDALONE_GATE}\n{text}", encoding="utf-8")
-        _ensure_git_excluded(pathlib.Path(spawn_cwd), "AGENTS.md")
-    except OSError as e:
-        return None, f"write failed: {e}", text
-    return str(target), "written", text
+    return text
 
 
 def render_lead_agents_md(

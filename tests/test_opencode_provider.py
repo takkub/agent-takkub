@@ -197,11 +197,22 @@ class TestOpencodeSpawnThroughGenericBranch:
         assert env["TAKKUB_ROLE"] == "opencode"
         assert env["TAKKUB_PROJECT"] == TEST_PROJECT
 
-    def test_agents_md_cheatsheet_planted(self, qapp, monkeypatch, tmp_path) -> None:
-        """opencode reads AGENTS.md natively → the generic branch must plant
-        the takkub cheatsheet exactly like it does for codex/gemini."""
-        _, mock_agents_md, _ = self._spawn_and_capture(qapp, monkeypatch, tmp_path)
-        assert mock_agents_md.called
+    def test_cheatsheet_rides_config_content_not_agents_md(
+        self, qapp, monkeypatch, tmp_path
+    ) -> None:
+        """#961: the takkub cheatsheet reaches opencode through
+        OPENCODE_CONFIG_CONTENT `instructions` (a file outside the project),
+        so nothing is planted in the project cwd."""
+        import json
+
+        spawn_kw, mock_agents_md, _ = self._spawn_and_capture(qapp, monkeypatch, tmp_path)
+        assert not mock_agents_md.called
+        cfg = json.loads(spawn_kw["env"]["OPENCODE_CONFIG_CONTENT"])
+        (path,) = cfg["instructions"]
+        assert "pane-instructions" in path
+        assert not (tmp_path / "AGENTS.md").exists()
+        with open(path, encoding="utf-8") as fh:
+            assert fh.read().startswith("# agent-takkub Teammate")
 
     def test_recent_exit_auto_resumes_native_session(self, qapp, monkeypatch, tmp_path) -> None:
         session_id = "ses_01j_resume_723"

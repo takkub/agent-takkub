@@ -1,6 +1,6 @@
 {
   "generated_by": "grimp 3.14",
-  "module_count": 369,
+  "module_count": 370,
   "modules": [
     {
       "module": "agent_takkub",
@@ -834,6 +834,7 @@
         "agent_takkub.orchestrator_text",
         "agent_takkub.pane_env",
         "agent_takkub.pane_guard",
+        "agent_takkub.pane_instructions",
         "agent_takkub.pane_tools_dialog",
         "agent_takkub.performance_settings",
         "agent_takkub.pipeline_config",
@@ -902,7 +903,7 @@
         "agent_takkub.worktree_manager",
         "agent_takkub.worktree_reuse"
       ],
-      "fan_in": 129,
+      "fan_in": 130,
       "fan_out": 2
     },
     {
@@ -3601,6 +3602,17 @@
       "fan_out": 0
     },
     {
+      "module": "agent_takkub.pane_instructions",
+      "imports": [
+        "agent_takkub.config"
+      ],
+      "imported_by": [
+        "agent_takkub.spawn_engine"
+      ],
+      "fan_in": 1,
+      "fan_out": 1
+    },
+    {
       "module": "agent_takkub.pane_provider_label",
       "imports": [],
       "imported_by": [
@@ -5591,6 +5603,7 @@
         "agent_takkub.opencode_helper",
         "agent_takkub.orchestrator_text",
         "agent_takkub.pane_env",
+        "agent_takkub.pane_instructions",
         "agent_takkub.permission_gates",
         "agent_takkub.pipeline_config",
         "agent_takkub.pipeline_executor",
@@ -5622,7 +5635,7 @@
         "agent_takkub.remote.api"
       ],
       "fan_in": 3,
-      "fan_out": 52
+      "fan_out": 53
     },
     {
       "module": "agent_takkub.spawn_gate",

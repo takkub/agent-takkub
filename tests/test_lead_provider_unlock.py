@@ -158,12 +158,17 @@ class TestLeadThroughCodexBranch:
             # policy denies all MCPs (lead's case) — pin it so this test
             # never depends on codex being installed on the CI runner.
             patch("agent_takkub.mcp_bridge._codex_resolved_mcp_names", return_value=[]),
+            patch(
+                "agent_takkub.spawn_engine.build_lead_agents_text",
+                return_value="LEAD POLICY TEXT",
+            ),
         )
         assert call["cwd"] == str(tmp_path)
         assert call["env"]["TAKKUB_LEAD_TOKEN"] == "test-lead-token"
         assert "TAKKUB_PANE_TOKEN" not in call["env"]
-        assert agents_md_calls, "render_lead_agents_md was not called for a codex-backed Lead"
-        assert agents_md_calls[0][0][:2] == (TEST_PROJECT, str(tmp_path))
+        # #961: Lead policy rides `-c developer_instructions`, no repo AGENTS.md.
+        assert not agents_md_calls
+        assert "developer_instructions='''LEAD POLICY TEXT'''" in call["argv"]
         mock_ensure.assert_not_called()
 
     def test_resume_uses_subcommand_and_exact_session_id(self, qapp, monkeypatch, tmp_path):

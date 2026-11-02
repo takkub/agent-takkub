@@ -68,11 +68,12 @@ def assemble_generic_argv(
     autocompact_argv: Sequence[str] = (),
     tools_argv: Sequence[str] = (),
     provider_id: str | None = None,
+    instruction_argv: Sequence[str] = (),
     cwd: str | None = None,
 ) -> list[str]:
     """Pure re-assembly of the generic non-claude branch's argv, same order
     the branch builds it in: bin, autonomy flags, model, effort, MCP,
-    project-scope, resume, tools. Every *_argv piece is caller-resolved (already
+    pane instructions (#961), project-scope, resume, tools. Every *_argv piece is caller-resolved (already
     empty when that piece doesn't apply) — this function only concatenates.
     """
     trust_argv: Sequence[str] = ()
@@ -89,6 +90,7 @@ def assemble_generic_argv(
         *model_argv,
         *effort_argv,
         *mcp_argv,
+        *instruction_argv,
         *project_scope_argv,
         *resume_argv,
         *autocompact_argv,

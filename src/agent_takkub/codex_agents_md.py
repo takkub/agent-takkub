@@ -40,11 +40,10 @@ STANDALONE_GATE = """> **Not inside an agent-takkub cockpit pane?** If the envir
 > rules below apply to you, and never run `takkub` commands.
 """
 
-CODEX_AGENTS_MD = f"""{TAKKUB_MARKER}
-
-{STANDALONE_GATE}
-
-# agent-takkub Teammate
+# The cheatsheet itself. A provider with a per-process instruction channel
+# (pane_instructions.py, #961) gets this body as-is — no marker, no gate,
+# nothing in the repo. The AGENTS.md file form below wraps it.
+TEAMMATE_INSTRUCTIONS = """# agent-takkub Teammate
 
 You are running inside an **agent-takkub** pane spawned by a human
 operator (or by a Claude Lead pane via `takkub assign --role <you>
@@ -307,6 +306,12 @@ The cockpit set your cwd to the project the operator is currently
 focused on. Treat that as your workspace root. Read files, run tests.
 """
 
+CODEX_AGENTS_MD = f"""{TAKKUB_MARKER}
+
+{STANDALONE_GATE}
+
+{TEAMMATE_INSTRUCTIONS}"""
+
 
 def _ensure_git_excluded(repo_cwd: Path, filename: str) -> None:
     """Add `filename` to `<repo_cwd>/.git/info/exclude` so a cockpit-planted
@@ -323,17 +328,7 @@ def _ensure_git_excluded(repo_cwd: Path, filename: str) -> None:
     to the nearest `.git` so a subdir cwd inside a repo still finds it.
     """
     try:
-        git_dir: Path | None = None
-        for base in (repo_cwd, *repo_cwd.parents):
-            cand = base / ".git"
-            if cand.is_dir():
-                git_dir = cand
-                break
-            if cand.is_file():
-                # A git worktree/submodule uses a `.git` FILE ("gitdir: ...").
-                # Skip auto-exclude there rather than parse it — the marker
-                # already says "do not commit"; visibility is the only cost.
-                return
+        git_dir = _find_git_dir(repo_cwd)
         if git_dir is None:
             return
         exclude = git_dir / "info" / "exclude"
@@ -347,7 +342,56 @@ def _ensure_git_excluded(repo_cwd: Path, filename: str) -> None:
         exclude.parent.mkdir(parents=True, exist_ok=True)
         prefix = "" if (not existing or existing.endswith("\n")) else "\n"
         with exclude.open("a", encoding="utf-8") as f:
-            f.write(f"{prefix}{line}\n")
+            # #961: tag the line so close-time cleanup can take it back out.
+            f.write(f"{prefix}{_EXCLUDE_TAG}\n{line}\n")
+    except OSError:
+        return
+
+
+# Comment line written above every exclude entry we add (gitignore has no
+# trailing comments). Only a line right after this tag is ever removed.
+_EXCLUDE_TAG = "# takkub-managed (removed when the pane closes)"
+
+
+def _find_git_dir(repo_cwd: Path) -> Path | None:
+    """Nearest `.git` directory at or above *repo_cwd*. None for no repo and
+    for a worktree/submodule (`.git` FILE, "gitdir: ...") — skipped rather
+    than parsed; the marker already says "do not commit"."""
+    for base in (repo_cwd, *repo_cwd.parents):
+        cand = base / ".git"
+        if cand.is_dir():
+            return cand
+        if cand.is_file():
+            return None
+    return None
+
+
+def _drop_git_exclude(repo_cwd: Path, filename: str) -> None:
+    """Undo `_ensure_git_excluded` for *filename*: remove our tagged entry
+    from `.git/info/exclude`. A bare entry without the tag (the user's own,
+    or one written before 2.2.39) is left alone. Never raises."""
+    try:
+        git_dir = _find_git_dir(repo_cwd)
+        if git_dir is None:
+            return
+        exclude = git_dir / "info" / "exclude"
+        if not exclude.is_file():
+            return
+        lines = exclude.read_text(encoding="utf-8", errors="replace").splitlines()
+        kept: list[str] = []
+        i = 0
+        while i < len(lines):
+            if (
+                lines[i].strip() == _EXCLUDE_TAG
+                and i + 1 < len(lines)
+                and lines[i + 1].strip() == filename
+            ):
+                i += 2
+                continue
+            kept.append(lines[i])
+            i += 1
+        if len(kept) != len(lines):
+            exclude.write_text("\n".join(kept) + ("\n" if kept else ""), encoding="utf-8")
     except OSError:
         return
 
@@ -405,6 +449,7 @@ def remove_managed_context_files(cwd: str | Path) -> list[str]:
         except OSError:
             continue
         removed.append(name)
+        _drop_git_exclude(base, name)
     return removed
 
 

@@ -2,6 +2,12 @@
 
 All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses [SemVer](https://semver.org/).
 
+## [v2.2.39] - 2026-11-02
+
+### Fixed (แก้)
+
+- **pane codex/opencode ไม่วาง `AGENTS.md` ลง repo ของ user อีกแล้ว (#961):** คำสั่งของ pane (cheatsheet teammate และ policy ของ Lead) ส่งผ่านช่องทางของ CLI เองแทน · codex ใช้ `-c developer_instructions` (ข้อความยาวเกินบรรทัดคำสั่ง Windows จะชี้ไปที่ไฟล์แทน) · opencode ใช้ `instructions` ใน `OPENCODE_CONFIG_CONTENT` · ไฟล์จริงอยู่ที่ `runtime/pane-instructions/` ไม่ใช่ในโปรเจค · ทดสอบกับ codex-cli 0.164 และ opencode 1.19.4 ของจริงแล้ว · agy และ cursor ยังไม่มีช่องทางที่ยืนยันได้ เลยยังวาง `AGENTS.md` ระหว่างที่ pane เปิดอยู่ (ลบตอนปิดเหมือนเดิม) · บรรทัดที่เพิ่มใน `.git/info/exclude` ติดป้ายไว้แล้ว และถูกลบออกตอนเก็บกวาด
+
 ## [v2.2.38] - 2026-11-01
 
 ### Fixed (แก้)

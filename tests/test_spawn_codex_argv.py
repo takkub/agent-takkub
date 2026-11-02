@@ -128,6 +128,8 @@ def _assert_windows_codex_trust_and_policy(argv):
     # On a case-sensitive host the resolved path may already be lowercase,
     # so the duplicate lowercase trust override is unnecessary.
     config_values = [argv[i + 1] for i, arg in enumerate(argv[:-1]) if arg == "-c"]
+    # #961: the pane cheatsheet (developer_instructions) is checked on its own.
+    config_values = [v for v in config_values if not v.startswith("developer_instructions=")]
     trust_values = [value for value in config_values if value.startswith("projects.'")]
     assert 1 <= len(trust_values) <= 2
     assert all(value.endswith('\'.trust_level="trusted"') for value in trust_values)

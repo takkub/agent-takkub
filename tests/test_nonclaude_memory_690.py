@@ -89,6 +89,17 @@ def _run(
         captured["extra"] = extra
         return agents_md
 
+    # #961: codex/opencode get the same text over their instruction channel.
+    from agent_takkub import pane_instructions
+
+    _real_deliver = pane_instructions.deliver
+
+    def spy_deliver(channel, text, *a, **kw):
+        captured["extra"] = text
+        return _real_deliver(channel, text, *a, **kw)
+
+    monkeypatch.setattr(pane_instructions, "deliver", spy_deliver)
+
     events: list[tuple[str, dict]] = []
     pty_calls: list[dict] = []
     spec = _spec(provider)
@@ -178,7 +189,7 @@ def test_user_owned_agents_md_carries_memory_through_the_paste(qapp, monkeypatch
         qapp,
         monkeypatch,
         tmp_path,
-        provider="codex",
+        provider="gemini",  # #961: codex/opencode no longer read a cwd AGENTS.md
         agents_md=(False, "user-owned"),
         via_assign=True,
     )
@@ -204,7 +215,7 @@ def test_user_owned_keeps_the_language_line_first(qapp, monkeypatch, tmp_path):
         qapp,
         monkeypatch,
         tmp_path,
-        provider="codex",
+        provider="gemini",  # #961: codex/opencode no longer read a cwd AGENTS.md
         agents_md=(False, "user-owned"),
         via_assign=True,
     )

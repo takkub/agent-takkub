@@ -215,6 +215,14 @@ class ProviderSpec:
     native_skill_dir: str | None = None
     native_skill_home_var: str | None = None
     cheatsheet_filename: str | None = None
+    # #961: a per-process channel that carries the pane's instructions so
+    # nothing is written into the project (see pane_instructions.py). None =
+    # no verified channel yet: the agents_md_file strategy still plants
+    # AGENTS.md in the cwd while the pane is live (removed on close).
+    # Gap 2026-11-02: gemini/agy (only --agent custom agents, which replace
+    # the default agent and are ignored on resume) and cursor (CLI not
+    # installed on the probe machine).
+    instruction_channel: str | None = None
     inline_learned_notes: bool = False
     use_file_guards: bool = False
 
@@ -1012,6 +1020,9 @@ codex_spec = ProviderSpec(
     native_skill_home_var="CODEX_HOME",
     context_strategy="agents_md_file",
     cheatsheet_filename="AGENTS.md",
+    # Verified live on codex-cli 0.164 (2026-11-02): `-c developer_instructions`
+    # reaches the model; 15k chars of multi-line Thai/quotes survive argv.
+    instruction_channel="codex_developer_instructions",
     inline_learned_notes=False,
     use_file_guards=False,
     mcp_adapter_variant="session_override",  # issue #100 — native `-c mcp_servers.<name>.<key>=…`
@@ -1508,6 +1519,9 @@ opencode_spec = ProviderSpec(
     ready_wait_ms=90_000,  # cold-boot allowance, parity with codex/gemini
     context_strategy="agents_md_file",  # opencode reads AGENTS.md natively
     cheatsheet_filename="AGENTS.md",
+    # Verified live on opencode 1.19.4 (2026-11-02): an `instructions` file
+    # in OPENCODE_CONFIG_CONTENT is followed, merged over the user's config.
+    instruction_channel="opencode_config_instructions",
     inline_learned_notes=False,
     use_file_guards=False,
     mcp_adapter_variant="none",  # opencode's MCP lives in opencode.json config;

@@ -119,6 +119,11 @@ def _spawn_codex_and_capture_argv(qapp, monkeypatch, tmp_path) -> tuple[list[str
 def test_assemble_generic_argv_reproduces_live_branch_argv(qapp, monkeypatch, tmp_path):
     real_argv, spawn_cwd = _spawn_codex_and_capture_argv(qapp, monkeypatch, tmp_path)
 
+    # #961: the teammate cheatsheet rides in argv, not in an AGENTS.md.
+    instr = [a for a in real_argv if a.startswith("developer_instructions=")]
+    assert len(instr) == 1, real_argv
+    assert instr[0].startswith("developer_instructions='''# agent-takkub Teammate")
+
     reassembled = assemble_generic_argv(
         "codex",
         provider_id="codex",
@@ -131,6 +136,7 @@ def test_assemble_generic_argv_reproduces_live_branch_argv(qapp, monkeypatch, tm
         model_argv=["--model", "gpt-5-codex"],
         effort_argv=["-c", "model_reasoning_effort=high"],
         mcp_argv=FAKE_MCP_ARGV,
+        instruction_argv=["-c", instr[0]],
         project_scope_argv=[],
         resume_argv=["resume", RESUME_UUID],
     )
@@ -151,13 +157,23 @@ def _assign_codex_and_capture_paste(
     to the delivered paste text when `ensure_agents_md` reports a user-owned
     AGENTS.md — is exercised end to end, same as a real Lead `takkub assign`
     onto a fresh codex pane would."""
+    import dataclasses
+
     from agent_takkub import shared_dev_tools as sdt
     from agent_takkub.provider_config import CODEX
+    from agent_takkub.provider_spec import PROVIDER_REGISTRY
 
     orch = _make_orchestrator(qapp, monkeypatch)
     pane = _make_codex_pane()
     orch._panes_by_project[TEST_PROJECT] = {"codex": pane}
     monkeypatch.setattr(sdt, "SHARED_MCP_FILE", tmp_path / "shared-mcp.json")
+    # The AGENTS.md path and its user-owned fallback are what providers
+    # without an instruction channel still use (#961) — exercise that.
+    monkeypatch.setitem(
+        PROVIDER_REGISTRY,
+        "codex",
+        dataclasses.replace(PROVIDER_REGISTRY["codex"], instruction_channel=None),
+    )
 
     pty_spawn_calls: list[dict] = []
 

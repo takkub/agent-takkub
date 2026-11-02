@@ -57,6 +57,7 @@ from .lead_context import (
     _allowed_project_roots,
     _default_plugin_dirs,
     _render_lead_context,
+    build_lead_agents_text,
     render_lead_agents_md_with_reason,
 )
 from .orchestrator_text import (
@@ -3333,11 +3334,26 @@ class SpawnEngineMixin:
                 project_ns, spec.name, resume_uuid, spawn_cwd, base_role
             ):
                 return False, f"resume_uuid does not match cwd for {role_name}"
+        # #961: text for spec.instruction_channel, delivered once env exists
+        # (below) instead of an AGENTS.md in the project.
+        _channel_text: str | None = None
+        _channel_lead_brief: str | None = None
         if _is_lead:
             # Lead-specific AGENTS.md content (cockpit CLAUDE.md +
             # BLOCKED_DIRS + session brief) — NOT the teammate cheatsheet
             # ensure_agents_md() plants for every other role (#101).
-            if spawn_cwd != str(DATA_HOME):
+            if spawn_cwd != str(DATA_HOME) and spec.instruction_channel:
+                try:
+                    _channel_lead_brief = self._build_post_compact_brief(project_ns)
+                    _channel_text = build_lead_agents_text(
+                        project_ns, spawn_cwd, post_compact_brief=_channel_lead_brief
+                    )
+                except Exception:
+                    _log.exception(
+                        "could not render %s Lead context; spawning without it",
+                        spec.name,
+                    )
+            elif spawn_cwd != str(DATA_HOME):
                 try:
                     post_compact_brief = self._build_post_compact_brief(project_ns)
                     _lead_md_path, _lead_md_reason, _lead_md_text = (
@@ -3481,7 +3497,13 @@ class SpawnEngineMixin:
                     _skill_extra += memory_prompt.project_memory_block(_mem_path)
                 if _role_mem is not None:
                     _skill_extra += memory_prompt.shared_role_memory_block(_role_mem.parent)
-                _planted, _agents_md_reason = ensure_agents_md(spawn_cwd, extra=_skill_extra)
+                if spec.instruction_channel:
+                    from .codex_agents_md import TEAMMATE_INSTRUCTIONS
+
+                    _channel_text = TEAMMATE_INSTRUCTIONS + _skill_extra
+                    _planted, _agents_md_reason = True, "channel"
+                else:
+                    _planted, _agents_md_reason = ensure_agents_md(spawn_cwd, extra=_skill_extra)
                 if not _planted:
                     _ps_fallback = self._ps(_exit_key(project_ns, role_name))
                     _ps_fallback.pending_task_execution_context = _TASK_EXECUTION_CONTEXT
@@ -3590,6 +3612,44 @@ class SpawnEngineMixin:
             _prov_tok = None
         else:
             _prov_tok = self._mint_pane_token(env, project_ns, role_name)
+        instruction_argv: list[str] = []
+        if _channel_text and spec.instruction_channel:
+            from . import pane_instructions
+
+            try:
+                instruction_argv, _instr_path, _instr_mode = pane_instructions.deliver(
+                    spec.instruction_channel, _channel_text, project_ns, role_name, env
+                )
+                _log_event(
+                    "lead_policy_delivered" if _is_lead else "pane_instructions_delivered",
+                    role=role_name,
+                    project=project_ns,
+                    provider=spec.name,
+                    delivery=spec.instruction_channel,
+                    mode=_instr_mode,
+                    path=_instr_path,
+                    is_resume=bool(resume_uuid),
+                )
+            except (OSError, ValueError) as _instr_err:
+                # Never spawn a pane blind: fall back to the pre-#961 cwd file.
+                _log_event(
+                    "provider_capability_fallback",
+                    role=role_name,
+                    project=project_ns,
+                    provider=spec.name,
+                    capability="instruction_channel",
+                    state="partial",
+                    fallback="agents_md_file",
+                    reason=str(_instr_err)[:200],
+                )
+                if _is_lead:
+                    _p, _r, _t = render_lead_agents_md_with_reason(
+                        project_ns, spawn_cwd, post_compact_brief=_channel_lead_brief
+                    )
+                    if not _p and _t:
+                        self._ps(_exit_key(project_ns, role_name)).pending_lead_context = _t
+                else:
+                    ensure_agents_md(spawn_cwd, extra=_skill_extra)
         autonomy_argv = list(
             spec.autonomy_flags.get(sys.platform, spec.autonomy_flags.get("default", []))
         )
@@ -3868,6 +3928,7 @@ class SpawnEngineMixin:
             model_argv=model_argv,
             effort_argv=effort_argv,
             mcp_argv=mcp_argv,
+            instruction_argv=instruction_argv,
             project_scope_argv=project_scope_argv,
             resume_argv=resume_argv,
             autocompact_argv=autocompact_argv,
