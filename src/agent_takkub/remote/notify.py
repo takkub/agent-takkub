@@ -520,19 +520,54 @@ def _resolve_claude_jsonl_path(project_ns: str, session_uuid: str | None) -> Pat
         return hit
     try:
         named = base / f"takkub-project-{project_ns}" / f"{session_uuid}.jsonl"
+        legacy = _claude_cwd_dir_jsonl(base, project_ns, session_uuid)
         if named.is_file():
             found: Path | None = named
+        elif legacy is not None and legacy.is_file():
+            found = legacy
         else:
+            # #965: a miss used to re-glob the whole store every poll (a fresh
+            # Lead has no transcript until its first turn) — 15 stalls of
+            # 0.8-1.7 s in prod's first two minutes. The cheap named-dir
+            # check above still runs every poll; the full glob at most once
+            # per _JSONL_GLOB_RETRY_S per session.
+            now = time.monotonic()
+            if now - _jsonl_glob_miss_at.get(cache_key, -1e9) < _JSONL_GLOB_RETRY_S:
+                return None
             matches = list(base.glob(f"*/{session_uuid}.jsonl"))
             found = matches[0] if matches else None
+            if found is None:
+                _jsonl_glob_miss_at[cache_key] = now
     except OSError:
         return None
     if found is not None:
         _jsonl_path_cache[cache_key] = found
+        _jsonl_glob_miss_at.pop(cache_key, None)
     return found
 
 
 _jsonl_path_cache: dict[tuple[str, str], Path] = {}
+_jsonl_glob_miss_at: dict[tuple[str, str], float] = {}
+_JSONL_GLOB_RETRY_S = 30.0
+
+
+def _claude_cwd_dir_jsonl(base: Path, project_ns: str, session_uuid: str) -> Path | None:
+    """`<base>/<encoded Lead cwd>/<uuid>.jsonl` — Claude's default layout for
+    a CLI without CLAUDE_CODE_PROJECT_DIR_NAME. Same encoding as
+    `token_meter.encode_path_for_claude` (every non-alphanumeric → '-'),
+    inlined because remote/ must not import the token meter."""
+    import re
+
+    from .. import config as _config
+
+    cwd = _config.lead_cwd(project_ns)
+    if not cwd:
+        return None
+    try:
+        resolved = str(Path(cwd).resolve())
+    except OSError:
+        return None
+    return base / re.sub(r"[^A-Za-z0-9]", "-", resolved) / f"{session_uuid}.jsonl"
 
 
 # Backward-compatible low-level name for callers/tests that explicitly scan
@@ -548,7 +583,65 @@ def _lead_session_uuid(orch, project_ns: str) -> str | None:
     if "lead" not in panes_by_project.get(project_ns, ()):
         return None
     ps = pane_state.get(_exit_key(project_ns, "lead"))
-    return getattr(ps, "session_uuid", None) if ps is not None else None
+    if ps is None:
+        return None
+    model = getattr(panes_by_project[project_ns].get("lead"), "model", None)
+    _bind_codex_session_by_marker(ps, project_ns, float(getattr(model, "spawn_ts", 0.0) or 0.0))
+    return getattr(ps, "session_uuid", None)
+
+
+_CODEX_MARKER_SCAN_INTERVAL_S = 3.0
+_CODEX_MARKER_SCAN_FILES = 60
+_CODEX_MARKER_SCAN_LINES = 40
+
+
+def _bind_codex_session_by_marker(ps, project_ns: str, spawn_ts: float) -> None:
+    """#964: give a codex Lead its real thread id. The pane's developer
+    message carries a unique marker (spawn_engine → pane_instructions), so
+    the rollout containing it is this pane's session — never a teammate's
+    or a `codex exec` that shares the cwd. Binds `ps.session_uuid` once;
+    cheap no-op afterwards, throttled while the rollout doesn't exist yet."""
+    marker = getattr(ps, "codex_session_marker", "") or ""
+    if not marker or getattr(ps, "session_uuid", None):
+        return
+    now = time.time()
+    if now - float(getattr(ps, "codex_marker_scan_ts", 0.0) or 0.0) < _CODEX_MARKER_SCAN_INTERVAL_S:
+        return
+    ps.codex_marker_scan_ts = now
+    from .. import config as _config
+
+    wanted_cwd = _norm_cwd(_config.lead_cwd(project_ns))
+    root = _safe_codex_sessions_root(project_ns)
+    if not wanted_cwd or not root.is_dir():
+        return
+    earliest = max(0.0, spawn_ts - 15.0) if spawn_ts else 0.0
+    for n, path in enumerate(_codex_rollout_candidates(root, not_before=spawn_ts)):
+        if n >= _CODEX_MARKER_SCAN_FILES:
+            return
+        if earliest and _safe_mtime(path) < earliest:
+            continue
+        meta = _codex_session_meta(path)
+        if _norm_cwd(meta.get("cwd")) != wanted_cwd:
+            continue
+        session_id = str(meta.get("id") or meta.get("session_id") or "").strip()
+        if session_id and _file_head_contains(path, marker, _CODEX_MARKER_SCAN_LINES):
+            ps.session_uuid = session_id
+            ps.session_uuid_cwd = str(meta.get("cwd") or "")
+            ps.session_provider = "codex"
+            return
+
+
+def _file_head_contains(path: Path, needle: str, max_lines: int) -> bool:
+    try:
+        with path.open("r", encoding="utf-8", errors="replace") as fh:
+            for i, line in enumerate(fh):
+                if i >= max_lines:
+                    return False
+                if needle in line:
+                    return True
+    except OSError:
+        return False
+    return False
 
 
 def pane_provider_name(orch, project_ns: str | None, role: str, pane=None) -> str:
@@ -2343,10 +2436,12 @@ class LeadNotifier(QObject):
             if scanner is None:
                 continue
             ps = pane_state.get(_exit_key(project_ns, "lead"))
+            model = getattr(panes.get("lead"), "model", None)
+            spawn_ts = float(getattr(model, "spawn_ts", 0.0) or 0.0)
+            if ps is not None:
+                _bind_codex_session_by_marker(ps, project_ns, spawn_ts)
             uuid = getattr(ps, "session_uuid", None) if ps is not None else None
             if uuid or not scanner.requires_session_uuid:
-                model = getattr(panes.get("lead"), "model", None)
-                spawn_ts = float(getattr(model, "spawn_ts", 0.0) or 0.0)
                 found[project_ns] = (provider, str(uuid or ""), spawn_ts)
         return found
 

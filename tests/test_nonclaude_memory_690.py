@@ -103,6 +103,15 @@ def _run(
     events: list[tuple[str, dict]] = []
     pty_calls: list[dict] = []
     spec = _spec(provider)
+    if agents_md[1] == "user-owned":
+        # #961: every shipped provider now has an instruction channel; the
+        # user-owned AGENTS.md fallback only applies to one without.
+        import dataclasses
+
+        from agent_takkub.provider_spec import PROVIDER_REGISTRY
+
+        spec = dataclasses.replace(spec, instruction_channel=None)
+        monkeypatch.setitem(PROVIDER_REGISTRY, spec.name, spec)
     with (
         patch.object(orch, "_is_spawn_blocked", return_value=False),
         patch.object(orch, "_final_gate_clear", return_value=True),
@@ -244,3 +253,30 @@ def test_paste_note_is_empty_when_there_is_nothing_to_point_at():
     assert memory_prompt.paste_memory_note(None, None) == ""
     note = memory_prompt.paste_memory_note(None, "C:/r/qa.md")
     assert "C:/r/qa.md" in note and "project memory" not in note
+
+
+def test_cursor_gets_the_cheatsheet_in_the_first_paste_not_a_repo_file(qapp, monkeypatch, tmp_path):
+    """#961: cursor has no verified instruction flag — the full teammate
+    cheatsheet rides the first task paste and no AGENTS.md is planted."""
+    import dataclasses
+
+    from agent_takkub.provider_spec import PROVIDER_REGISTRY
+
+    monkeypatch.setitem(
+        PROVIDER_REGISTRY,
+        "cursor",
+        dataclasses.replace(PROVIDER_REGISTRY["cursor"], custom_discovery_fn=lambda: "agent"),
+    )
+    planted: list = []
+    monkeypatch.setattr(
+        "agent_takkub.codex_agents_md.ensure_agents_md",
+        lambda *a, **kw: planted.append(a) or (True, "written"),
+    )
+    _extra, _env, paste, *_ = _run(qapp, monkeypatch, tmp_path, provider="cursor", via_assign=True)
+    assert paste is not None
+    paste = expand_handoff(paste)
+    assert "# agent-takkub Teammate" in paste
+    assert "Task execution and report contract" in paste
+    assert paste.index("# agent-takkub Teammate") < paste.index("do it")
+    assert not planted
+    assert not (tmp_path / "AGENTS.md").exists()

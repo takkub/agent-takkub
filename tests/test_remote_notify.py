@@ -1689,6 +1689,7 @@ class TestLeadOutputTail:
         import agent_takkub.remote.notify as notify_mod
 
         monkeypatch.setattr(notify_mod, "_UNRESOLVED_RETRY_S", 0.0)
+        monkeypatch.setattr(notify_mod, "_JSONL_GLOB_RETRY_S", 0.0)  # #965 glob throttle
         orch = _FakeOrch()
         broadcaster = _FakeBroadcaster()
 

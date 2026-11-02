@@ -2252,6 +2252,16 @@ class Orchestrator(
         """Remove the takkub-managed context files from *cwd* once no live
         pane needs them (see `codex_agents_md.remove_managed_context_files`
         for why). Best-effort: never raises into close()/exit paths."""
+        if exclude is not None:
+            # #961: the closing pane's own agy custom agent (per pane, not
+            # per cwd) goes whatever other panes share the cwd.
+            try:
+                from .pane_instructions import remove_agy_agent
+
+                if remove_agy_agent(*exclude):
+                    _log_event("pane_agent_removed", project=exclude[0], role=exclude[1])
+            except Exception:
+                pass
         if not cwd or self._planted_context_cwd_in_use(cwd, exclude):
             return []
         try:
@@ -2269,8 +2279,17 @@ class Orchestrator(
         Lead included — was spawned into gets its planted context files
         removed, since no pane will outlive the process to need them."""
         cwds: list[str] = []
-        for panes in getattr(self, "_panes_by_project", {}).values():
-            for pane in panes.values():
+        try:
+            from .pane_instructions import remove_agy_agent
+        except Exception:
+            remove_agy_agent = None
+        for project_ns, panes in getattr(self, "_panes_by_project", {}).items():
+            for role, pane in panes.items():
+                if remove_agy_agent is not None:
+                    try:
+                        remove_agy_agent(project_ns, role)
+                    except Exception:
+                        pass
                 cwd = getattr(pane, "_session_cwd", None)
                 if cwd and cwd not in cwds:
                     cwds.append(cwd)

@@ -12,6 +12,7 @@ from PyQt6.QtCore import QCoreApplication
 
 from agent_takkub import provider_models, role_models
 from agent_takkub.orchestrator import Orchestrator
+from agent_takkub.pane_instructions import agy_agent_name
 
 TEST_PROJECT = "providermodeltest"
 
@@ -290,6 +291,9 @@ class TestGenericProviderSpawnEffort:
             "gemini-3.1-pro-high",
             "--effort",
             "high",
+            # #961: the pane cheatsheet rides a per-pane agy custom agent
+            "--agent",
+            agy_agent_name(TEST_PROJECT, "backend"),
             *expected_scope_tail,
         ]
 
@@ -313,6 +317,9 @@ class TestGenericProviderSpawnEffort:
             "--dangerously-skip-permissions",
             "--effort",
             "high",
+            # #961: the pane cheatsheet rides a per-pane agy custom agent
+            "--agent",
+            agy_agent_name(TEST_PROJECT, "backend"),
             *expected_scope_tail,
         ]
 

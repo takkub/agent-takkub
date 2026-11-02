@@ -122,7 +122,9 @@ def test_assemble_generic_argv_reproduces_live_branch_argv(qapp, monkeypatch, tm
     # #961: the teammate cheatsheet rides in argv, not in an AGENTS.md.
     instr = [a for a in real_argv if a.startswith("developer_instructions=")]
     assert len(instr) == 1, real_argv
-    assert instr[0].startswith("developer_instructions='''# agent-takkub Teammate")
+    # #964: first line is this pane's session marker, then the cheatsheet.
+    assert instr[0].startswith("developer_instructions='''<!-- takkub-pane-session: ")
+    assert "-->\n# agent-takkub Teammate" in instr[0]
 
     reassembled = assemble_generic_argv(
         "codex",

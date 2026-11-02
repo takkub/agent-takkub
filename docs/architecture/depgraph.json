@@ -630,6 +630,7 @@
       "module": "agent_takkub.cli_server",
       "imports": [
         "agent_takkub.browser_chrome",
+        "agent_takkub.codex_helper",
         "agent_takkub.config",
         "agent_takkub.impact_contract",
         "agent_takkub.lead_enforcement",
@@ -656,7 +657,7 @@
         "agent_takkub.main_window"
       ],
       "fan_in": 2,
-      "fan_out": 21
+      "fan_out": 22
     },
     {
       "module": "agent_takkub.cli_shim",
@@ -748,6 +749,7 @@
       "imported_by": [
         "agent_takkub.accounts_adapter",
         "agent_takkub.cli",
+        "agent_takkub.cli_server",
         "agent_takkub.core.conversation.ingest.codex_adapter",
         "agent_takkub.core.secrets.manager",
         "agent_takkub.core.versioning.probe",
@@ -762,7 +764,7 @@
         "agent_takkub.usage_ledger",
         "agent_takkub.user_profile"
       ],
-      "fan_in": 15,
+      "fan_in": 16,
       "fan_out": 3
     },
     {
@@ -3459,6 +3461,7 @@
         "agent_takkub.pane_env",
         "agent_takkub.pane_guard",
         "agent_takkub.pane_health",
+        "agent_takkub.pane_instructions",
         "agent_takkub.performance_settings",
         "agent_takkub.pipeline_config",
         "agent_takkub.pipeline_executor",
@@ -3502,7 +3505,7 @@
         "agent_takkub.user_actions"
       ],
       "fan_in": 6,
-      "fan_out": 70
+      "fan_out": 71
     },
     {
       "module": "agent_takkub.orchestrator_text",
@@ -3607,9 +3610,10 @@
         "agent_takkub.config"
       ],
       "imported_by": [
+        "agent_takkub.orchestrator",
         "agent_takkub.spawn_engine"
       ],
-      "fan_in": 1,
+      "fan_in": 2,
       "fan_out": 1
     },
     {

@@ -3386,14 +3386,17 @@ def check_remote_mirror_live(resp: dict | None) -> list[Finding]:
             Finding("remote-mirror", "session-uuid", Status.OK, f"session_uuid={session_uuid[:8]}…")
         )
 
-    if provider == "claude" and session_uuid is not None:
+    if provider in ("claude", "codex") and session_uuid is not None:
         if transcript_exists:
+            origin = resp.get("transcript_originator")
             findings.append(
                 Finding(
                     "remote-mirror",
                     "transcript-file",
                     Status.OK,
-                    "transcript file for this exact session_uuid exists on disk",
+                    "transcript file for this exact session_uuid exists on disk: "
+                    f"{resp.get('transcript_path') or '?'}"
+                    + (f" (originator={origin})" if origin else ""),
                 )
             )
         else:

@@ -615,22 +615,74 @@ def inject_claude_project_dir_name_env(
     non-Lead teammate pane gets its own transcript dir instead of piggy-
     backing on Lead's, which is what native ``/memory`` keys off.
     """
-    try:
-        completed = subprocess.run(
-            [claude_executable, "--version"],
-            capture_output=True,
-            check=False,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=3,
-            creationflags=SUBPROCESS_NO_WINDOW,
-        )
-        version = completed.stdout if completed.returncode == 0 else None
-    except (OSError, subprocess.SubprocessError):
-        version = None
-    if supports_claude_project_dir_name(version):
+    if supports_claude_project_dir_name(_claude_version(claude_executable)):
         env["CLAUDE_CODE_PROJECT_DIR_NAME"] = claude_project_dir_name(project_ns, base_role)
+
+
+# #965: (path, mtime_ns, size) -> version. The probe ran on the Qt main
+# thread for every claude spawn and froze prod's UI for 11.4 s at boot.
+_CLAUDE_VERSION_CACHE: dict[tuple[str, int, int], str | None] = {}
+
+
+def _claude_package_version(executable: str) -> str | None:
+    """Version from the npm package that ships *executable* — no process."""
+    import json
+
+    try:
+        base = Path(executable).resolve()
+    except OSError:
+        return None
+    for parent in list(base.parents)[:6]:
+        manifest = parent / "package.json"
+        try:
+            if not manifest.is_file():
+                continue
+            data = json.loads(manifest.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if isinstance(data, dict) and data.get("name") == "@anthropic-ai/claude-code":
+            version = data.get("version")
+            return version if isinstance(version, str) else None
+    return None
+
+
+def _claude_version_probe(executable: str) -> str | None:
+    """`<executable> --version`, output to a temp file rather than a pipe: on
+    Windows a pipe held open by a grandchild made `communicate()` outlive the
+    3 s timeout (#965: 11.4 s); a file has nothing to wait on after kill."""
+    try:
+        with tempfile.TemporaryFile() as out:
+            completed = subprocess.run(
+                [executable, "--version"],
+                stdout=out,
+                stderr=subprocess.DEVNULL,
+                stdin=subprocess.DEVNULL,
+                check=False,
+                timeout=3,
+                creationflags=SUBPROCESS_NO_WINDOW,
+            )
+            if completed.returncode != 0:
+                return None
+            if isinstance(completed.stdout, str):  # test doubles return text
+                return completed.stdout
+            out.seek(0)
+            return out.read().decode("utf-8", "replace")
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+
+def _claude_version(executable: str) -> str | None:
+    try:
+        st = os.stat(executable)
+        key: tuple[str, int, int] | None = (executable, st.st_mtime_ns, st.st_size)
+    except OSError:
+        key = None
+    if key is not None and key in _CLAUDE_VERSION_CACHE:
+        return _CLAUDE_VERSION_CACHE[key]
+    version = _claude_package_version(executable) or _claude_version_probe(executable)
+    if key is not None:
+        _CLAUDE_VERSION_CACHE[key] = version
+    return version
 
 
 # Providers whose per-project named account (user_profile registry, added from

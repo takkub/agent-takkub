@@ -810,6 +810,11 @@ class PaneState:
     session_uuid: str | None = None
     session_uuid_cwd: str = ""
     session_provider: str = ""
+    # #964: unique marker carried in this codex pane's developer_instructions.
+    # The rollout that contains it IS this pane's session — binds the real
+    # thread id instead of guessing "newest rollout for the cwd".
+    codex_session_marker: str = ""
+    codex_marker_scan_ts: float = 0.0
     # Stable identity for the current assign intent. Completion notification
     # idempotency derives from this instead of terminal text/timing heuristics.
     task_id: str | None = None
@@ -3614,12 +3619,32 @@ class SpawnEngineMixin:
             _prov_tok = self._mint_pane_token(env, project_ns, role_name)
         instruction_argv: list[str] = []
         if _channel_text and spec.instruction_channel:
+            import uuid as _uuid
+
             from . import pane_instructions
 
+            _marker = ""
+            if spec.instruction_channel == pane_instructions.CODEX_DEVELOPER_INSTRUCTIONS:
+                _marker = pane_instructions.session_marker(_uuid.uuid4().hex)
             try:
                 instruction_argv, _instr_path, _instr_mode = pane_instructions.deliver(
-                    spec.instruction_channel, _channel_text, project_ns, role_name, env
+                    spec.instruction_channel,
+                    _channel_text,
+                    project_ns,
+                    role_name,
+                    env,
+                    marker=_marker,
                 )
+                _ps_marker = self._ps(_exit_key(project_ns, role_name))
+                _ps_marker.codex_session_marker = _marker
+                _ps_marker.codex_marker_scan_ts = 0.0
+                if _instr_mode == "first_task_paste":
+                    # No per-process channel (cursor): the whole text rides
+                    # the first paste, read + cleared by assign()/lead_inbox.
+                    if _is_lead:
+                        _ps_marker.pending_lead_context = _channel_text
+                    else:
+                        _ps_marker.pending_task_execution_context = _channel_text
                 _log_event(
                     "lead_policy_delivered" if _is_lead else "pane_instructions_delivered",
                     role=role_name,

@@ -488,6 +488,10 @@ def _isolate_runtime(monkeypatch: pytest.MonkeyPatch, tmp_path):
     runtime = tmp_path / "_isolated_runtime"
     runtime.mkdir(parents=True, exist_ok=True)
     events = runtime / "events.log"
+    # #961: agy pane agents live in ~/.gemini/config/agents — never the real one.
+    _pi = _maybe_module("agent_takkub.pane_instructions", force=True)
+    if _pi is not None:
+        monkeypatch.setattr(_pi, "agy_agents_root", lambda: tmp_path / "_isolated_agy_agents")
 
     targets = [(n, "RUNTIME_DIR", runtime) for n in _RUNTIME_DIR_MODULES]
     targets += [(n, "EVENTS_LOG", events) for n in _EVENTS_LOG_MODULES]

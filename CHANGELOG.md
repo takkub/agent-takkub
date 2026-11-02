@@ -2,6 +2,14 @@
 
 All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses [SemVer](https://semver.org/).
 
+## [v2.2.40] - 2026-11-02
+
+### Fixed (แก้)
+
+- **agy และ cursor ไม่วาง `AGENTS.md` ลง repo แล้วเหมือนกัน (#961 ส่วนสุดท้าย):** agy ใช้ custom agent ต่อ pane (`--agent`, ไฟล์อยู่ที่ `~/.gemini/config/agents/takkub-<cockpit>-<project>-<role>/`) ซึ่งทำงานเฉพาะ process ที่เลือกมันเท่านั้น และถูกลบตอนปิด pane/ปิด cockpit (ชื่อมี hash ของ cockpit ตัว dev กับ prod เลยไม่ลบของกันและกัน) · ทดสอบกับ agy 1.4.12 TUI ของจริงแล้ว: ทำตาม cheatsheet และยังใช้ tool ได้ปกติ · cursor ส่ง cheatsheet ทั้งก้อนไปกับข้อความงานแรก · ตอนนี้ provider ที่ ship ครบทุกตัวไม่เขียนอะไรลงโฟลเดอร์โปรเจคอีกแล้ว
+- **codex Lead ได้ session id ตัวจริง (#964 ต่อ):** ข้อความ developer ของ pane codex แต่ละตัวมีรหัสเฉพาะของ pane ฝังไว้ ไฟล์ rollout ที่มีรหัสนี้คือ session ของ pane นั้นจริงๆ cockpit จึงผูก `session_uuid` จากรหัสนี้แทนการเดาว่าเป็น "ไฟล์ใหม่สุดใน cwd" ทั้ง resume และ Remote mirror ใช้ id ตัวจริงแล้ว · `takkub doctor --live` แสดงไฟล์ transcript และ originator ที่ resolver เลือกจริง (claude + codex) · ทดสอบ end-to-end บน cockpit แยกบ้าน + Remote PWA (มือถือจำลองด้วย Playwright): คำตอบของ codex Lead ขึ้นบนมือถือ ทั้งตอนที่มี teammate และ `codex exec` ที่ใหม่กว่าอยู่ใน cwd เดียวกัน และรายการ resume มีแค่ session ของ Lead
+- **UI ค้าง 11.4 วิตอน boot (#965):** การ probe `claude --version` บน main thread ค้างเกิน timeout 3 วิ เพราะ pipe ถูก process ลูกของลูกถือไว้ · ตอนนี้อ่านเวอร์ชันจาก `package.json` ของ claude โดยไม่ต้องรัน process, cache ไว้ต่อ binary และถ้าจำเป็นต้องรันจริงจะเขียน output ลงไฟล์ (หยุดตรง 3 วิพอดี) · Remote mirror ไม่ glob ทั้ง store ของ claude ทุก 2 วิระหว่างรอ transcript ของ Lead อีกแล้ว (เช็กโฟลเดอร์ที่คาดไว้ทั้งสองแบบก่อน แล้วค่อย glob ไม่เกินครั้งละ 30 วิ)
+
 ## [v2.2.39] - 2026-11-02
 
 ### Fixed (แก้)

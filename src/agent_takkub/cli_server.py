@@ -2111,6 +2111,7 @@ class CliServer(QObject):
         supports_remote_history = bool(spec is not None and spec.supports_remote_history)
 
         session_uuid = None
+        ps = None
         if isinstance(pane_state, dict):
             from .orchestrator_text import _exit_key
 
@@ -2124,12 +2125,38 @@ class CliServer(QObject):
         # uuid's file exist" isn't a meaningful question for them — None
         # means "not applicable", never a false negative).
         transcript_exists: bool | None = None
+        # c9255cf8 (#964 follow-up): name the file the uuid really resolves
+        # to, so "PWA shows the wrong conversation" is answerable from status.
+        transcript_path: str | None = None
+        transcript_originator: str | None = None
         if provider == "claude" and session_uuid:
             try:
                 from .user_profile import config_dir_for
 
                 base = config_dir_for(project_ns) / "projects"
-                transcript_exists = any(base.glob(f"*/{session_uuid}.jsonl"))
+                hit = next(iter(base.glob(f"*/{session_uuid}.jsonl")), None)
+                transcript_exists = hit is not None
+                transcript_path = str(hit) if hit is not None else None
+            except OSError:
+                transcript_exists = False
+        elif provider == "codex" and session_uuid:
+            # Bound from the pane's own developer-message marker (#964), so
+            # this is an exact id lookup, not the newest-for-cwd guess.
+            try:
+                from .codex_helper import read_codex_session_meta, resolve_codex_jsonl_for_cwd
+                from .config import lead_cwd
+
+                hit = resolve_codex_jsonl_for_cwd(
+                    getattr(ps, "session_uuid_cwd", "") or lead_cwd(project_ns) or "",
+                    session_uuid,
+                    project=project_ns,
+                )
+                transcript_exists = hit is not None
+                if hit is not None:
+                    transcript_path = str(hit)
+                    transcript_originator = (
+                        str(read_codex_session_meta(hit).get("originator") or "") or None
+                    )
             except OSError:
                 transcript_exists = False
 
@@ -2142,6 +2169,8 @@ class CliServer(QObject):
             "lead_pane_open": lead_pane is not None,
             "session_uuid": session_uuid,
             "transcript_exists": transcript_exists,
+            "transcript_path": transcript_path,
+            "transcript_originator": transcript_originator,
         }
 
     def _reply(self, sock: QTcpSocket, *, ok: bool, msg: str, **extra) -> None:

@@ -19,6 +19,7 @@ Mirrors the fixture shape of `test_h1_nonclaude_env.py`.
 from __future__ import annotations
 
 import contextlib
+import re
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -117,12 +118,22 @@ class TestLeadThroughGeminiBranch:
             # #132 project-scope resolution runs during argv build — pin it so
             # this never reads the real ~/.gemini registry.
             patch("agent_takkub.gemini_helper.resolve_agy_project_id", return_value=None),
+            patch(
+                "agent_takkub.spawn_engine.build_lead_agents_text",
+                return_value="LEAD POLICY TEXT",
+            ),
         )
+        from agent_takkub import pane_instructions
+
         assert call["cwd"] == str(tmp_path)
         assert call["env"]["TAKKUB_LEAD_TOKEN"] == "test-lead-token"
         assert "TAKKUB_PANE_TOKEN" not in call["env"]
-        assert agents_md_calls, "render_lead_agents_md was not called for a gemini-backed Lead"
-        assert agents_md_calls[0][0][:2] == (TEST_PROJECT, str(tmp_path))
+        # #961: Lead policy rides a per-pane agy custom agent, no repo AGENTS.md.
+        assert not agents_md_calls
+        name = pane_instructions.agy_agent_name(TEST_PROJECT, "lead")
+        assert call["argv"][call["argv"].index("--agent") + 1] == name
+        agent_md = pane_instructions.agy_agents_root() / name / "agent.md"
+        assert "LEAD POLICY TEXT" in agent_md.read_text(encoding="utf-8")
         mock_ensure.assert_not_called()
 
     def test_resume_uses_conversation_flag_after_provider_store_validation(
@@ -168,7 +179,12 @@ class TestLeadThroughCodexBranch:
         assert "TAKKUB_PANE_TOKEN" not in call["env"]
         # #961: Lead policy rides `-c developer_instructions`, no repo AGENTS.md.
         assert not agents_md_calls
-        assert "developer_instructions='''LEAD POLICY TEXT'''" in call["argv"]
+        (instr,) = [a for a in call["argv"] if a.startswith("developer_instructions=")]
+        # #964: first line is the pane's session marker, then the policy.
+        assert re.match(
+            r"developer_instructions='''<!-- takkub-pane-session: [0-9a-f]{32} -->\nLEAD POLICY TEXT'''$",
+            instr,
+        )
         mock_ensure.assert_not_called()
 
     def test_resume_uses_subcommand_and_exact_session_id(self, qapp, monkeypatch, tmp_path):

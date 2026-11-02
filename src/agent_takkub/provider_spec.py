@@ -215,13 +215,10 @@ class ProviderSpec:
     native_skill_dir: str | None = None
     native_skill_home_var: str | None = None
     cheatsheet_filename: str | None = None
-    # #961: a per-process channel that carries the pane's instructions so
-    # nothing is written into the project (see pane_instructions.py). None =
-    # no verified channel yet: the agents_md_file strategy still plants
-    # AGENTS.md in the cwd while the pane is live (removed on close).
-    # Gap 2026-11-02: gemini/agy (only --agent custom agents, which replace
-    # the default agent and are ignored on resume) and cursor (CLI not
-    # installed on the probe machine).
+    # #961: how the pane's instructions reach it without writing into the
+    # project (see pane_instructions.py for each channel's evidence). None =
+    # the old agents_md_file plant into the cwd; every shipped non-claude
+    # provider has a channel, so None is only for a future provider.
     instruction_channel: str | None = None
     inline_learned_notes: bool = False
     use_file_guards: bool = False
@@ -1297,6 +1294,10 @@ gemini_spec = ProviderSpec(
     ready_wait_ms=90_000,  # lead_inbox.py:431-435 (agy cold-boot allowance)
     context_strategy="agents_md_file",
     cheatsheet_filename="AGENTS.md",
+    # Verified live on agy 1.4.12 TUI (2026-11-02): `--agent <name>` with
+    # ~/.gemini/config/agents/<name>/agent.md is obeyed and keeps the default
+    # tools. Removed when the pane closes (pane_instructions.remove_agy_agent).
+    instruction_channel="agy_custom_agent",
     inline_learned_notes=False,
     use_file_guards=False,
     mcp_adapter_variant="plugin_import",  # issue #100 — `agy plugin import <path>` DOES bridge
@@ -1646,6 +1647,9 @@ cursor_spec = ProviderSpec(
     # them as rules"). Needed so a cursor teammate learns to call `takkub done`.
     context_strategy="agents_md_file",
     cheatsheet_filename="AGENTS.md",
+    # No CLI flag verified (not installed on the probe machine, 2026-11-02):
+    # the whole text rides the first task paste instead of a repo AGENTS.md.
+    instruction_channel="first_task_paste",
     inline_learned_notes=False,
     use_file_guards=False,
     mcp_adapter_variant="none",  # Cursor auto-detects the IDE's mcp.json config.
