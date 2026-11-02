@@ -52,13 +52,15 @@ def assemble_claude_argv(
     resume_argv: Sequence[str] = (),
     autocompact_argv: Sequence[str] = (),
     tools_argv: Sequence[str] = (),
+    add_dir_argv: Sequence[str] = (),
 ) -> list[str]:
     """Pure re-assembly of the claude branch's argv, same order the branch
     builds it in (`spawn_engine.py` ~2639-2947):
 
     1. `claude_bin`, `--dangerously-skip-permissions`, `--setting-sources`,
        `setting_sources`
-    2. `settings_argv` — Stop/Notification hook wiring (`--settings <path>`)
+    2. `settings_argv` — Stop/Notification hook wiring (`--settings <path>`),
+       then `add_dir_argv` — `--add-dir <main .git>` in a linked worktree (#966)
     3. `model_argv` — `--model` (Lead's or a teammate's, whichever branch ran)
     4. `effort_argv` — `--effort`-equivalent flag (provider-gated, may be empty)
     5. `fallback_argv` — `--fallback-model`
@@ -81,6 +83,7 @@ def assemble_claude_argv(
         "--setting-sources",
         setting_sources,
         *settings_argv,
+        *add_dir_argv,
         *model_argv,
         *effort_argv,
         *fallback_argv,

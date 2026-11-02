@@ -2,6 +2,12 @@
 
 All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses [SemVer](https://semver.org/).
 
+## [v2.2.41] - 2026-11-02
+
+### Fixed (แก้)
+
+- **pane แบบ `--isolation worktree` stage/commit บน branch wt/* ไม่ได้ (#966):** ใน linked worktree คำสั่ง `git add/commit` เขียน index ที่ `<main>/.git/worktrees/<id>/` และ objects/refs ที่ `<main>/.git` ซึ่งอยู่นอก workspace พอ sandbox ของ claude เปิดอยู่ (macOS) ก็สร้าง `index.lock` ไม่ได้ · ตอนนี้ claude ได้ `--add-dir <main .git>` แบบเดียวกับที่ codex ได้ตั้งแต่ #947 (เอกสารของ Claude Code ยืนยันว่า path จาก `--add-dir` เขียนได้จาก Bash ที่อยู่ใน sandbox) และ agy ได้ `--add-dir` ด้วย · ทดสอบใน worktree จริงแล้ว: ตรวจหา gitdir ถูกต้อง และ claude ที่ใส่ `--add-dir` commit บน branch wt/ ได้ · opencode ไม่มี sandbox สำหรับการเขียนไฟล์ · cursor ยังทดสอบไม่ได้เพราะเครื่องนี้ไม่ได้ติดตั้ง
+
 ## [v2.2.40] - 2026-11-02
 
 ### Fixed (แก้)

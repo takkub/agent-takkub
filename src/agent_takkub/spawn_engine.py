@@ -3706,6 +3706,12 @@ class SpawnEngineMixin:
             if _ps_lead is not None:
                 _ps_lead.lead_enforcement_mode = _mode
             _log_event("lead_enforcement", project=project_ns, provider=spec.name, mode=_mode)
+        if spec.name == "gemini":
+            # #966: same linked-worktree gitdir as codex below — agy only
+            # treats --add-dir paths as part of the workspace.
+            _agy_common = _linked_worktree_common_dir(spawn_cwd)
+            if _agy_common:
+                autonomy_argv.extend(["--add-dir", _agy_common])
         if spec.name == "codex":
             # #784: central evidence/docs live outside the workspace.
             # Grant only this project's two directories, including resume.
@@ -4979,6 +4985,14 @@ class SpawnEngineMixin:
             resume_argv=resume_argv,
             autocompact_argv=autocompact_argv,
             tools_argv=tools_argv,
+            # #966: in a linked worktree `git add/commit` writes the index
+            # under <main>/.git/worktrees/<name> and objects/refs in <main>/.git,
+            # outside the workspace a sandboxed claude Bash may write to.
+            add_dir_argv=(
+                ["--add-dir", _wt_common]
+                if (_wt_common := _linked_worktree_common_dir(spawn_cwd))
+                else []
+            ),
         )
 
         # #476: generalizes #444's worktree-only pre-trust to any claude cwd —
