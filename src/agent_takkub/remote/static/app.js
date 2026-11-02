@@ -920,6 +920,9 @@
   // ---------------------------------------------------------------
 
   var ES_RETRY_WARNING_THRESHOLD = 5;
+  // #967: how long a fresh SSE stream may stay silent before this browser
+  // concludes a proxy is holding it back and switches to long-poll.
+  var SSE_HELLO_TIMEOUT_MS = 6000;
   var lastMsgKind = null;
 
   var MONTH_ABBR = [
@@ -2182,7 +2185,13 @@
 
   function requestTicketAndConnect(project) {
     var lead = projectLeadState(project);
-    if (!lead || lead.es || lead.ticketPending) return;
+    if (!lead || lead.es || lead.ticketPending || lead.polling) return;
+    if (state.sseBlocked) {
+      // This network already proved SSE is held back (#967) — skip the wait.
+      if (!lead.handlers) connectSse(null, project, true);
+      startLongPoll(project);
+      return;
+    }
     lead.ticketPending = true;
     var generation = lead.transportGeneration;
     apiFetch("api/sse-ticket", {
@@ -2241,13 +2250,39 @@
     }
   }
 
-  function connectSse(ticket, project) {
+  // handlersOnly: build the shared handler table without opening a stream
+  // (this browser already fell back to long-poll, #967).
+  function connectSse(ticket, project, handlersOnly) {
     var lead = projectLeadState(project);
     if (!lead) return;
     lead.transportGeneration += 1;
-    var url = apiUrl("api/lead?ticket=" + encodeURIComponent(ticket));
-    var es = new EventSource(url);
-    lead.es = es;
+    var es = handlersOnly
+      ? { addEventListener: function () {}, close: function () {} }
+      : new EventSource(apiUrl("api/lead?ticket=" + encodeURIComponent(ticket)));
+    if (!handlersOnly) lead.es = es;
+    // #967: one handler table shared by both transports — the long-poll
+    // fallback below replays its events through exactly these functions.
+    var handlers = {};
+    lead.handlers = handlers;
+    function on(type, fn) {
+      handlers[type] = fn;
+      es.addEventListener(type, fn);
+    }
+    // A buffering proxy (Cloudflare quick tunnel) "opens" the stream but holds
+    // every event until it ends. The server's first frame is `hello`; without
+    // it the stream is useless, so switch this browser to long-poll.
+    var helloTimer = handlersOnly ? null : setTimeout(function () {
+      if (lead.es !== es) return;
+      state.sseBlocked = true;
+      es.close();
+      lead.es = null;
+      startLongPoll(project);
+    }, SSE_HELLO_TIMEOUT_MS);
+    lead.helloTimer = helloTimer;
+    es.addEventListener("hello", function () {
+      clearTimeout(helloTimer);
+      lead.helloTimer = null;
+    });
     es.onopen = function () {
       lead.esRetries = 0;
       lead.connected = true;
@@ -2264,15 +2299,15 @@
     // {text: category} where category is one of reading/editing/running/
     // web/delegating/skill/working, mapped to a Thai label so the remote
     // shows *what* the Lead is doing, not just a bare "…".
-    es.addEventListener("working", function (evt) {
+    on("working", function (evt) {
       setProjectWorking(project, true, parseSseData(evt.data, project), true);
     });
     // Lead pane went idle (turn finished) — drop the "…" the instant the
     // desktop spinner stops, so the phone never shows a stale "working" state.
-    es.addEventListener("idle", function () {
+    on("idle", function () {
       setProjectWorking(project, false, null, true);
     });
-    es.addEventListener("lead", function (evt) {
+    on("lead", function (evt) {
       // A very fast turn may produce reply text between notifier polls, with
       // no observable pane-state edge. Reply text is enough to retire only
       // the local optimistic spinner; a confirmed working state stays until
@@ -2283,7 +2318,7 @@
     // Mirror prompts typed in the desktop Lead pane to every connected
     // phone. Messages originating from this same Remote client are already
     // painted optimistically, so suppress that one immediate echo only.
-    es.addEventListener("user", function (evt) {
+    on("user", function (evt) {
       var payload = null;
       try {
         payload = JSON.parse(evt.data);
@@ -2298,14 +2333,14 @@
       if (payload && payload.remote && last && last.kind === "me" && last.text === text) return;
       appendProjectMessage(project, "me", text, parseSseTs(evt.data));
     });
-    es.addEventListener("done", function (evt) {
+    on("done", function (evt) {
       setProjectWorking(project, false, null, true);
       appendProjectMessage(project, "done", parseSseData(evt.data, project), parseSseTs(evt.data));
     });
-    es.addEventListener("notice", function (evt) {
+    on("notice", function (evt) {
       appendProjectMessage(project, "sys", parseSseData(evt.data, project), parseSseTs(evt.data));
     });
-    es.addEventListener("report", function (evt) {
+    on("report", function (evt) {
       try {
         var payload = JSON.parse(evt.data);
         var report = payload.data || payload;
@@ -2321,7 +2356,7 @@
     // remained connected. Invalidate only this project's history request and
     // reload the newly resolved provider transcript; other projects keep
     // streaming untouched.
-    es.addEventListener("session_changed", function (evt) {
+    on("session_changed", function (evt) {
       parseSseData(evt.data, project);
       setProjectWorking(project, false, null, true);
       lead.historyGeneration += 1;
@@ -2338,7 +2373,7 @@
     // hidePickerBanner). Payload is the structured
     // {prompt, options[], multiSelect} shape (server: notify.py), not the
     // generic {text} shape parseSseData understands, so it's parsed directly.
-    es.addEventListener("blocked_on_picker", function (evt) {
+    on("blocked_on_picker", function (evt) {
       var payload = null;
       try {
         payload = JSON.parse(evt.data);
@@ -2349,6 +2384,7 @@
       if (project === visibleProject()) showPickerBanner(payload);
     });
     es.onerror = function () {
+      clearTimeout(helloTimer);
       es.close();
       lead.es = null;
       lead.connected = false;
@@ -2357,6 +2393,57 @@
       }
       scheduleEsRetry(project);
     };
+  }
+
+  // #967 long-poll transport: POST api/lead/poll holds up to ~20 s and
+  // returns the same events SSE would have pushed. Used only when the SSE
+  // `hello` never arrives (proxy buffering), never as the default.
+  function startLongPoll(project) {
+    var lead = projectLeadState(project);
+    if (!lead || lead.polling) return;
+    lead.polling = true;
+    lead.connected = true;
+    lead.esRetries = 0;
+    setOffline(false);
+    var generation = lead.transportGeneration;
+    var since = -1;
+    var failures = 0;
+    function alive() {
+      return state.leadByProject[project] === lead && lead.transportGeneration === generation;
+    }
+    function step() {
+      if (!alive()) { lead.polling = false; return; }
+      apiFetch("api/lead/poll", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ project: project, since: since }),
+      })
+        .then(function (r) { return r.json(); })
+        .then(function (data) {
+          if (!alive()) { lead.polling = false; return; }
+          failures = 0;
+          var first = since < 0;
+          if (data && typeof data.seq === "number") since = data.seq;
+          var events = (data && Array.isArray(data.events)) ? data.events : [];
+          events.forEach(function (ev) {
+            if (!ev || typeof ev.event !== "string") return;
+            if (ev.event === "resync") { loadHistory(project, true, false); return; }
+            var fn = lead.handlers && lead.handlers[ev.event];
+            if (fn) fn({ data: ev.data });
+          });
+          // The cursor starts "now": fill whatever landed between the last
+          // history load and this first poll from history, quietly.
+          if (first) loadHistory(project, true, false);
+          step();
+        })
+        .catch(function () {
+          if (!alive()) { lead.polling = false; return; }
+          failures += 1;
+          lead.connected = failures < 3;
+          setTimeout(step, Math.min(1000 * Math.pow(2, failures), 15000));
+        });
+    }
+    step();
   }
 
   function scheduleEsRetry(project) {
@@ -2391,6 +2478,8 @@
     lead.transportGeneration += 1;
     if (lead.es) { lead.es.close(); lead.es = null; }
     if (lead.esTimer) { clearTimeout(lead.esTimer); lead.esTimer = null; }
+    if (lead.helloTimer) { clearTimeout(lead.helloTimer); lead.helloTimer = null; }
+    lead.polling = false;
     lead.ticketPending = false;
     lead.connected = false;
     lead.esRetries = 0;

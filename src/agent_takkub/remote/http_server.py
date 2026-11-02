@@ -96,6 +96,11 @@ _MAX_SSE_CLIENTS = 6
 _SSE_QUEUE_MAXSIZE = 200
 _SSE_KEEPALIVE_SEC = 15.0
 _SSE_WRITE_TIMEOUT_SEC = 10.0
+# #967 long-poll transport: events kept for catch-up, how long one poll may
+# hold, and how many may hold a server thread at once.
+_POLL_LOG_MAX = 500
+_POLL_HOLD_SEC = 20.0
+_MAX_POLLERS = 8
 
 _CONTENT_TYPES = {
     ".html": "text/html; charset=utf-8",
@@ -428,6 +433,42 @@ class SSEBroadcaster:
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._clients: list[tuple[queue.Queue, str]] = []
+        # #967: the same events, numbered and kept briefly, for the long-poll
+        # transport. A Cloudflare quick tunnel (`*.trycloudflare.com`) holds
+        # an SSE body back until the stream ends, so the phone never saw a
+        # live event through it — measured: SSE "open" yet zero events in
+        # 30 s, while a plain request/response passes straight through.
+        self._seq = 0
+        self._log: list[tuple[int, str, str, str | None]] = []
+        self._log_cond = threading.Condition(self._lock)
+        self._closed = False
+
+    @property
+    def seq(self) -> int:
+        with self._lock:
+            return self._seq
+
+    def wait_events(
+        self, project_ns: str, since: int, timeout: float
+    ) -> tuple[int, list[tuple[str, str]]]:
+        """`(latest_seq, [(event, payload), ...])` for *project_ns* after
+        *since*, waiting up to *timeout* s for the first one. A *since* the
+        log no longer covers (server restart, overflow) returns no backlog —
+        the client reloads history instead of replaying a gap."""
+        deadline = time.monotonic() + timeout
+        with self._log_cond:
+            while True:
+                if since > self._seq or (self._log and since < self._log[0][0] - 1):
+                    return self._seq, [("resync", json.dumps({"ts": time.time()}))]
+                found = [
+                    (event, payload)
+                    for seq, event, payload, ns in self._log
+                    if seq > since and (ns is None or ns == project_ns)
+                ]
+                remaining = deadline - time.monotonic()
+                if found or remaining <= 0 or self._closed:
+                    return self._seq, found
+                self._log_cond.wait(remaining)
 
     def register(self, project_ns: str) -> queue.Queue | None:
         # Never hard-503 at the cap. This is a single-user tool reached through
@@ -471,6 +512,11 @@ class SSEBroadcaster:
         payload = json.dumps(body, ensure_ascii=False)
         with self._lock:
             clients = list(self._clients)
+            self._seq += 1
+            self._log.append((self._seq, event, payload, project_ns))
+            if len(self._log) > _POLL_LOG_MAX:
+                del self._log[: len(self._log) - _POLL_LOG_MAX]
+            self._log_cond.notify_all()
         for q, ns in clients:
             if project_ns is not None and ns != project_ns:
                 continue
@@ -490,6 +536,8 @@ class SSEBroadcaster:
         exits immediately instead of lingering until the next keepalive."""
         with self._lock:
             clients = list(self._clients)
+            self._closed = True
+            self._log_cond.notify_all()  # release held long-polls too
         for q, _ns in clients:
             _force_wake(q)
 
@@ -757,6 +805,15 @@ class _RemoteHandler(http.server.BaseHTTPRequestHandler):
                     payload = {}
                 requested = payload.get("project") if isinstance(payload, dict) else None
                 self._issue_sse_ticket(requested)
+        elif rest == "/api/lead/poll":
+            if self._check_bearer() and self._check_password_gate():
+                try:
+                    payload = json.loads(body.decode("utf-8")) if body else {}
+                except (json.JSONDecodeError, UnicodeDecodeError):
+                    payload = {}
+                if not isinstance(payload, dict):
+                    payload = {}
+                self._handle_poll(payload.get("project"), payload.get("since"))
         elif rest == "/api/lead/say":
             if not self._check_bearer() or not self._check_password_gate():
                 return
@@ -932,6 +989,37 @@ class _RemoteHandler(http.server.BaseHTTPRequestHandler):
         except OSError:
             pass
 
+    def _handle_poll(self, requested_project: object, since: object) -> None:
+        """#967 long-poll twin of `/api/lead` SSE: the same events, delivered
+        as one ordinary response per batch, which every proxy passes
+        through. Project scoping is the SSE ticket's rule (same bridge
+        action). `since` < 0 / missing = "give me a cursor", no backlog."""
+        pending = _PendingRequest(action="sse_ticket", params={"project": requested_project})
+        self.server.bridge.request.emit(pending)
+        try:
+            status, payload = pending.reply.get(timeout=_BRIDGE_TIMEOUT_SEC)
+        except queue.Empty:
+            status, payload = 504, {"ok": False, "msg": "orchestrator did not respond"}
+        if status != 200:
+            self._send_json(status, payload)
+            return
+        project_ns = payload.get("project_ns") or "default"
+        broadcaster = self.server.broadcaster
+        if not isinstance(since, int) or isinstance(since, bool) or since < 0:
+            self._send_json(200, {"seq": broadcaster.seq, "events": []})
+            return
+        self.server.auth.touch()
+        if not self.server.poll_slots.acquire(blocking=False):
+            # Too many held polls (dead tabs behind a tunnel): answer at once
+            # rather than pinning another server thread.
+            self._send_json(200, {"seq": since, "events": []})
+            return
+        try:
+            seq, events = broadcaster.wait_events(project_ns, since, _POLL_HOLD_SEC)
+        finally:
+            self.server.poll_slots.release()
+        self._send_json(200, {"seq": seq, "events": [{"event": e, "data": d} for e, d in events]})
+
     def _issue_sse_ticket(self, requested_project: object = None) -> None:
         """H-A / project picker: stamp the ticket with `requested_project`
         if it names a project the user actually has open right now
@@ -1104,9 +1192,19 @@ class _RemoteHandler(http.server.BaseHTTPRequestHandler):
         try:
             self.send_response(200)
             self.send_header("Content-Type", "text/event-stream")
-            self.send_header("Cache-Control", "no-store")
+            # #967: without no-transform the Cloudflare edge compressed the
+            # stream and held events back ~30 s per message (measured through
+            # a quick tunnel: 30.6-31.2 s vs 4 s on localhost) — users kept
+            # pressing Refresh. X-Accel-Buffering covers nginx-style proxies.
+            self.send_header("Cache-Control", "no-cache, no-store, no-transform")
+            self.send_header("X-Accel-Buffering", "no")
             self.end_headers()
             self.connection.settimeout(_SSE_WRITE_TIMEOUT_SEC)
+            # #967: proof the stream really flows. A client that does not see
+            # this within a few seconds is behind a buffering proxy (quick
+            # tunnel) and switches to /api/lead/poll; `seq` is its cursor.
+            hello = json.dumps({"seq": self.server.broadcaster.seq})
+            self.wfile.write(f"event: hello\ndata: {hello}\n\n".encode())
             while not self.server.stop_event.is_set():
                 try:
                     event, data = q.get(timeout=_SSE_KEEPALIVE_SEC)
@@ -1147,6 +1245,7 @@ class RemoteHttpServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
         self.auth = AuthGate(config)
         self.bridge = _Bridge(orch)
         self.broadcaster = SSEBroadcaster()
+        self.poll_slots = threading.BoundedSemaphore(_MAX_POLLERS)
         self.stop_event = threading.Event()
         self._thread: threading.Thread | None = None
 

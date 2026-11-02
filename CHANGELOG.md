@@ -2,6 +2,13 @@
 
 All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses [SemVer](https://semver.org/).
 
+## [v2.2.42] - 2026-11-02
+
+### Fixed (แก้)
+
+- **Resume บน desktop แล้ว PWA ไม่ตาม (#967):** cockpit จำ session ของ codex Lead ไว้ตั้งแต่ตอน spawn แต่การ `/resume` ใน codex บน desktop สลับไปใช้ไฟล์ rollout อื่นโดยที่ cockpit ไม่รู้ และตอน resume codex ก็ไม่บันทึก developer_instructions (รหัสจาก #964) ลงไฟล์ด้วย · ตอนนี้ cockpit ดูว่า process ของ codex Lead เปิดไฟล์ rollout ไหนอยู่จริง (เช็กบน background thread ทุก 3 วิ) แล้วผูก session ตามนั้น ไม่ว่าจะ resume จากมือถือ, desktop หรือ `/resume` ใน codex ก็เห็นตรงกันทั้งสองฝั่ง รวมถึง session ที่เก่ากว่า 1 วัน · ทดสอบกับ codex TUI จริงแล้ว: หลัง `/resume` cockpit เปลี่ยน session เองและ mirror อ่านข้อความใหม่ได้
+- **ข้อความใหม่ไม่ขึ้นบนมือถือจนกว่าจะกด Refresh (#967):** Cloudflare quick tunnel (`*.trycloudflare.com`) กัก SSE ไว้ทั้ง stream (วัดแล้ว: เปิด stream ได้แต่ไม่ได้ event เลยสักตัว) ข้อความเลยไปขึ้นแค่ตอนครบ 30 วิแล้ว PWA โหลด history ใหม่ · ตอนนี้ server ส่ง `hello` ทันทีที่ต่อ SSE ถ้า PWA ไม่ได้รับภายใน 6 วิจะสลับไปใช้ long-poll (`/api/lead/poll` ซึ่งผ่าน tunnel ได้) โดยใช้ handler เดิมทั้งหมด · ผ่าน quick tunnel จริงข้อความขึ้นเองใน 3.7–6.3 วิ (เดิม 30 วิ) รวมถึงข้อความที่เริ่มจากที่อื่นขณะมือถือเปิดค้างไว้ · localhost/tunnel ที่ส่ง SSE ได้จะยังใช้ SSE เหมือนเดิม · bump `sw.js` CACHE_NAME → v49
+
 ## [v2.2.41] - 2026-11-02
 
 ### Fixed (แก้)

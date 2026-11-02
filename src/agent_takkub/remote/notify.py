@@ -585,9 +585,93 @@ def _lead_session_uuid(orch, project_ns: str) -> str | None:
     ps = pane_state.get(_exit_key(project_ns, "lead"))
     if ps is None:
         return None
-    model = getattr(panes_by_project[project_ns].get("lead"), "model", None)
-    _bind_codex_session_by_marker(ps, project_ns, float(getattr(model, "spawn_ts", 0.0) or 0.0))
+    _sync_codex_lead_session(orch, project_ns, ps, panes_by_project[project_ns].get("lead"))
     return getattr(ps, "session_uuid", None)
+
+
+def _sync_codex_lead_session(orch, project_ns: str, ps, pane) -> None:
+    """Keep a codex Lead's `session_uuid` on the conversation it is REALLY in.
+
+    The live codex process keeps its rollout open from the moment the
+    session exists (verified codex-cli 0.164: fresh after the first turn,
+    a resumed one immediately). Whatever switched the conversation — the
+    phone's Resume, the desktop picker, `/resume` typed in the TUI — the
+    open file is the truth, so the phone always shows what the desktop
+    shows. The developer-message marker (#964) covers the moment before
+    the process has any rollout open; resumed sessions never record it."""
+    if pane_provider_name(orch, project_ns, "lead", pane) != "codex":
+        return
+    session = getattr(pane, "session", None)
+    pid = getattr(session, "pid", None)
+    live = _codex_live_session(pid) if isinstance(pid, int) else None
+    if live is not None:
+        sid, cwd = live
+        if sid and sid != getattr(ps, "session_uuid", None):
+            ps.session_uuid = sid
+            ps.session_uuid_cwd = cwd
+            ps.session_provider = "codex"
+        return
+    model = getattr(pane, "model", None)
+    _bind_codex_session_by_marker(ps, project_ns, float(getattr(model, "spawn_ts", 0.0) or 0.0))
+
+
+# pid -> (checked_at, (session_id, cwd) | None). psutil.open_files() costs
+# ~65 ms per process on Windows, so it runs on a worker thread and the Qt
+# main thread only ever reads this cache.
+_LIVE_ROLLOUT_INTERVAL_S = 3.0
+_live_rollout: dict[int, tuple[float, tuple[str, str] | None]] = {}
+_live_rollout_inflight: set[int] = set()
+_live_rollout_lock = threading.Lock()
+
+
+def _codex_live_session(pid: int) -> tuple[str, str] | None:
+    with _live_rollout_lock:
+        entry = _live_rollout.get(pid)
+        stale = entry is None or time.monotonic() - entry[0] >= _LIVE_ROLLOUT_INTERVAL_S
+        if stale and pid not in _live_rollout_inflight:
+            _live_rollout_inflight.add(pid)
+            threading.Thread(
+                target=_refresh_live_rollout, args=(pid,), name="codex-live-rollout", daemon=True
+            ).start()
+    return entry[1] if entry is not None else None
+
+
+def _refresh_live_rollout(pid: int) -> None:
+    result: tuple[str, str] | None = None
+    try:
+        result = _open_codex_rollout(pid)
+    finally:
+        with _live_rollout_lock:
+            _live_rollout[pid] = (time.monotonic(), result)
+            _live_rollout_inflight.discard(pid)
+
+
+def _open_codex_rollout(pid: int) -> tuple[str, str] | None:
+    """`(session_id, cwd)` of the rollout the codex process tree has open."""
+    try:
+        import psutil
+
+        root = psutil.Process(pid)
+        procs = [root, *root.children(recursive=True)]
+    except Exception:
+        return None
+    open_rollouts: list[Path] = []
+    for proc in procs:
+        try:
+            files = proc.open_files()
+        except Exception:
+            continue
+        for f in files:
+            name = Path(f.path).name
+            if name.startswith("rollout-") and name.endswith(".jsonl"):
+                open_rollouts.append(Path(f.path))
+    # Mid-switch both conversations can be open: the one written last wins.
+    for path in sorted(set(open_rollouts), key=_safe_mtime, reverse=True):
+        meta = _codex_session_meta(path)
+        sid = str(meta.get("id") or meta.get("session_id") or "").strip()
+        if sid:
+            return sid, str(meta.get("cwd") or "")
+    return None
 
 
 _CODEX_MARKER_SCAN_INTERVAL_S = 3.0
@@ -2439,7 +2523,7 @@ class LeadNotifier(QObject):
             model = getattr(panes.get("lead"), "model", None)
             spawn_ts = float(getattr(model, "spawn_ts", 0.0) or 0.0)
             if ps is not None:
-                _bind_codex_session_by_marker(ps, project_ns, spawn_ts)
+                _sync_codex_lead_session(self._orch, project_ns, ps, panes.get("lead"))
             uuid = getattr(ps, "session_uuid", None) if ps is not None else None
             if uuid or not scanner.requires_session_uuid:
                 found[project_ns] = (provider, str(uuid or ""), spawn_ts)

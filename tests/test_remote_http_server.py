@@ -131,13 +131,16 @@ def _read_sse_frame(resp) -> bytes:
     (#517: payloads now carry a server-stamped `ts`, so a fixed-byte-length
     `resp.read(n)` no longer lines up with the wire — read to the frame
     terminator instead)."""
-    buf = b""
-    while not buf.endswith(b"\n\n"):
-        chunk = resp.read(1)
-        if not chunk:
-            break
-        buf += chunk
-    return buf
+    while True:
+        buf = b""
+        while not buf.endswith(b"\n\n"):
+            chunk = resp.read(1)
+            if not chunk:
+                break
+            buf += chunk
+        # #967: every stream opens with a transport `hello` frame — skip it.
+        if not buf.startswith(b"event: hello\n"):
+            return buf
 
 
 def _issue_ticket(server, project: str | None = None) -> str:
@@ -1130,7 +1133,9 @@ class TestSSEClosesOnStop:
 
             sock = socket.create_connection(("127.0.0.1", srv.port), timeout=5)
             sock.sendall(f"GET /sek/api/lead?ticket={ticket} HTTP/1.0\r\n\r\n".encode())
-            sock.recv(4096)  # response headers
+            head = b""
+            while b"event: hello" not in head or not head.endswith(b"\n\n"):
+                head += sock.recv(4096)  # response headers + #967 hello frame
 
             srv.stop()
 

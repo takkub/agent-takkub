@@ -185,6 +185,10 @@ class TestMultiLineSseIntegrityOverRealHttp:
             # so the frame can no longer be compared byte-for-byte against a
             # fixed expected string — read it line-by-line instead and check
             # the JSON body's fields directly.
+            # #967: skip the transport `hello` frame every stream opens with.
+            assert resp.readline().decode() == "event: hello\n"
+            resp.readline()
+            resp.readline()
             event_line = resp.readline().decode()
             data_line = resp.readline().decode()
             blank_line = resp.readline().decode()

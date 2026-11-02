@@ -204,7 +204,7 @@ class TestConcurrentProjectStreams:
 
     def test_reconnect_preserves_in_progress_turn(self):
         js = _read("app.js")
-        chunk = js.split("es.onopen = function ()")[1].split("es.addEventListener")[0]
+        chunk = js.split("es.onopen = function ()")[1].split("    on(")[0]
         assert "lead.working = false" not in chunk
 
     def test_reconnect_loop_never_gives_up_after_fixed_retry_count(self):
@@ -225,13 +225,13 @@ class TestConcurrentProjectStreams:
 
     def test_background_events_are_stamped_to_captured_project(self):
         js = _read("app.js")
-        chunk = js.split("function connectSse(ticket, project)")[1]
-        assert "appendLeadLive(parseSseData(evt.data, project), project," in chunk[:3500]
-        assert 'appendProjectMessage(project, "done"' in chunk[:3500]
+        chunk = js.split("function connectSse(ticket, project, handlersOnly)")[1]
+        assert "appendLeadLive(parseSseData(evt.data, project), project," in chunk[:6000]
+        assert 'appendProjectMessage(project, "done"' in chunk[:6000]
 
     def test_desktop_user_turns_stream_to_mobile_without_refetch(self):
         js = _read("app.js")
-        chunk = js.split('es.addEventListener("user"')[1].split('es.addEventListener("done"')[0]
+        chunk = js.split('on("user"')[1].split('on("done"')[0]
         assert 'appendProjectMessage(project, "me", text, parseSseTs(evt.data))' in chunk
         assert "payload.remote" in chunk
 
@@ -249,9 +249,7 @@ class TestConcurrentProjectStreams:
 
     def test_desktop_session_change_reloads_only_that_project_history(self):
         js = _read("app.js")
-        chunk = js.split('es.addEventListener("session_changed"')[1].split(
-            'es.addEventListener("blocked_on_picker"'
-        )[0]
+        chunk = js.split('on("session_changed"')[1].split('on("blocked_on_picker"')[0]
         assert "lead.historyGeneration += 1" in chunk
         assert "lead.historyLoaded = false" in chunk
         assert "loadHistory(project)" in chunk

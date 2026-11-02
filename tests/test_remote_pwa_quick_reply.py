@@ -38,7 +38,7 @@ class TestIndexHtmlMarkup:
 class TestAppJsWiring:
     def test_listens_for_blocked_on_picker_sse_event(self):
         js = _read("app.js")
-        assert 'addEventListener("blocked_on_picker"' in js
+        assert 'on("blocked_on_picker"' in js  # #967 shared SSE/long-poll handler table
 
     def test_standard_quick_replies_and_numbered_guesses_removed(self):
         js = _read("app.js")
