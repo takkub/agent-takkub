@@ -2227,16 +2227,37 @@ def _explicit_git_target(cmd: str) -> str | None:
     `cd <own worktree> && git merge …; cd .. && ls` was judged by the
     trailing `cd ..` (the shared parent) and denied. Such a `cd` is skipped
     unless the command loops (`for`/`while`/`until`), where a later `cd`
-    does reach the next iteration's git. `-C`/`--git-dir` always count."""
+    does reach the next iteration's git. `-C`/`--git-dir` always count.
+
+    #972: a RELATIVE target is relative to the directory the previous `cd`
+    left the shell in, not to the session cwd — `cd <own worktree> && cd
+    apps/api && git commit` runs inside the worktree, but `apps/api` alone
+    was resolved against the pane's shared-tree cwd and denied. Relative
+    paths are joined onto the last `cd` (outside loops, where the directory
+    at git time isn't knowable from the text; and never for `~`/`-`/`$VAR`
+    shell expansions, which keep the old unchained judgement)."""
     git_starts = [m.start() for m in _GIT_INVOCATION_RE.finditer(cmd)]
-    cd_limit = git_starts[-1] if git_starts and not _SHELL_LOOP_RE.search(cmd) else len(cmd)
+    loops = bool(_SHELL_LOOP_RE.search(cmd))
+    cd_limit = git_starts[-1] if git_starts and not loops else len(cmd)
     last: str | None = None
+    cur_dir: str | None = None  # where the previous `cd` left the shell
     for m in _EXPLICIT_TARGET_RE.finditer(cmd):
         if m.group("cd") and m.start() > cd_limit:
             continue
         path = m.group("c") or m.group("gd") or m.group("cd")
-        if path:
-            last = _strip_matching_quotes(path)
+        if not path:
+            continue
+        path = _strip_matching_quotes(path)
+        if (
+            cur_dir is not None
+            and not loops
+            and not _ABS_PATH_RE.match(path)
+            and not path.startswith(("~", "$", "%", "-"))
+        ):
+            path = os.path.join(cur_dir, path)
+        if m.group("cd"):
+            cur_dir = None if path.startswith(("~", "$", "%", "-")) else path
+        last = path
     return last
 
 

@@ -1085,6 +1085,8 @@ class PaneState:
     # (the escalate-time last-chance probe fires every watchdog tick while
     # real activity persists — log the episode, not every 5s tick).
     idle_defer_log_ts: float = 0.0
+    # #968: throttle for the deep-scope "not auto-killed" Lead notice.
+    deep_defer_notice_ts: float = 0.0
     # _last_spawn_resumed: True when the last spawn used --resume (not --session-id)
     last_spawn_resumed: bool = False
     # respawn_replay_task / respawn_replay_nudge: an auto-respawn (crash or

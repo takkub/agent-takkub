@@ -907,6 +907,9 @@ STUCK_THRESHOLD_S = 10 * 60
 IDLE_NO_PROGRESS_MIN = float(os.environ.get("TAKKUB_IDLE_NO_PROGRESS_MIN", "20"))
 IDLE_NO_PROGRESS_NOTICE_S = IDLE_NO_PROGRESS_MIN * 60
 IDLE_NO_PROGRESS_ESCALATE_S = IDLE_NO_PROGRESS_NOTICE_S * 2
+# #968: a deep-scope pane the watchdog would have recovered is never killed;
+# Lead hears about it at most this often while it stays quiet.
+DEEP_DEFER_NOTICE_S = 30 * 60
 # #520: minimum wall-clock gap between two consecutive 5s watchdog ticks
 # (IDLE_WATCHDOG_INTERVAL_MS) that counts as "the machine was asleep", not
 # normal Qt-timer jitter. A suspended process runs no code at all — the
@@ -16973,24 +16976,47 @@ class Orchestrator(
 
                     # #731: If 40m without progress on a deep-scope task, escalate to Lead
                     # instead of killing and losing all deep context.
-                    if idle_no_progress_escalate and ps_ck.last_assigned_scope == "deep":
+                    # #968: the same holds for a content-static deep pane — a
+                    # prod deploy waiting hours on its own background idle-gate
+                    # poll sits silent at the prompt. Its `takkub progress`
+                    # calls reset the no-progress clock, which used to switch
+                    # this gate OFF and let the content-static path kill the
+                    # poll mid-wait. A deep pane is never auto-killed; Lead
+                    # decides (notice at most every DEEP_DEFER_NOTICE_S).
+                    if ps_ck.last_assigned_scope == "deep":
                         if (now - ps_ck.idle_defer_log_ts) >= 300:
                             _log_event(
                                 "stuck_recover_deferred_deep_scope",
                                 role=role,
                                 project=project_name,
                                 no_progress_for_s=int(idle_no_progress_for),
+                                content_static_s=int(now - last_content_ts),
+                                reason="idle_no_progress"
+                                if idle_no_progress_escalate
+                                else "content_static",
                             )
+                            ps_ck.idle_defer_log_ts = now
+                        if (now - ps_ck.deep_defer_notice_ts) >= DEEP_DEFER_NOTICE_S:
+                            if idle_no_progress_escalate:
+                                why = (
+                                    f"ทำงานเกิน {int(IDLE_NO_PROGRESS_ESCALATE_S // 60)} นาที "
+                                    "โดยไม่มี progress"
+                                )
+                            else:
+                                why = (
+                                    f"จอนิ่งมา {int((now - last_content_ts) // 60)} นาที "
+                                    "(อาจกำลังรอ background job/poll ของตัวเอง)"
+                                )
                             self._notify_lead(
                                 project_name,
-                                f"⏳ [system] {role} งาน deep ทำงานเกิน "
-                                f"{int(IDLE_NO_PROGRESS_ESCALATE_S // 60)} นาที "
-                                "โดยไม่มี progress — แนะนำ Lead ตรวจสอบสถานะ (ระบบไม่ฆ่า pane อัตโนมัติ)",
+                                f"⏳ [system] {role} งาน deep {why} — แนะนำ Lead ตรวจสอบสถานะ "
+                                "(ระบบไม่ฆ่า pane งาน deep อัตโนมัติ — ถ้าค้างจริงสั่ง "
+                                f"`takkub close --role {role}` แล้ว assign ใหม่เอง)",
                                 from_role=role,
                                 note="stuck_recover_deferred_deep_scope",
                                 kind="idle-no-progress-deep",
                             )
-                            ps_ck.idle_defer_log_ts = now
+                            ps_ck.deep_defer_notice_ts = now
                         continue
 
                     self._auto_recover_stuck(

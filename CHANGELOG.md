@@ -2,6 +2,19 @@
 
 All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses [SemVer](https://semver.org/).
 
+## [v2.2.43] - 2026-11-03
+
+### Fixed (แก้)
+
+- **pane ของ agy (gemini) ไม่มี shell เลยรัน `takkub done` ไม่ได้ (#969):** ตั้งแต่ 2.2.40 (#961) cockpit ส่ง instruction ให้ agy ผ่าน `--agent <custom>` ซึ่งใน TUI ของ agy ถ้า custom agent ไม่ประกาศ `tools:` จะได้แค่ tool พื้นฐาน (view_file/manage_task/send_message …) ไม่มี `run_command` ทำให้ pane ทำงานเสร็จแต่ค้าง stalled (ตอนทดสอบใน `agy -p` มี tool ครบ เลยดูเหมือนไม่มีปัญหา) · ตอนนี้ agent.md ประกาศรายชื่อ tool ที่ทดสอบกับ agy 1.4.12 TUI แล้วว่าใช้ได้ทุกตัว (ใส่ชื่อที่ agy ไม่รู้จักแม้แต่ตัวเดียว executor จะพังทั้งตัว) · ทดสอบกับ agy TUI จริงโดยใช้ instruction ของ qa ชุดเดิม: shell รันได้ · ข้อจำกัด: tool กลุ่ม browser_* ใช้กับ custom agent ไม่ได้ (registry ไม่มี)
+- **guard บล็อก commit ใน pane ที่ใช้ `--isolation worktree` (#972):** คำสั่งอย่าง `cd <worktree> && … && cd apps/api && … && git commit` ถูกปฏิเสธ `git_lead_only:commit` เพราะ guard เอา `cd apps/api` (path relative) ไปต่อกับ cwd ของ session ซึ่งเป็น shared tree แทน worktree · ตอนนี้ `cd`/`-C` แบบ relative จะต่อจาก `cd` ก่อนหน้า ถ้าออกไปนอก worktree (`cd ..`, `../<role อื่น>`, `~`, path ของ shared tree) ยังถูกบล็อกเหมือนเดิม และใน loop ก็ยังตัดสินแบบเดิม
+- **`takkub worktree clean` มองไม่เห็น worktree แบบ detached (#974):** worktree สำหรับ verify ที่ pane สร้างด้วย `git worktree add --detach` ไว้ใต้ managed root ไม่ถูกนับ clean จึงตอบว่า "nothing to clean" แต่ guard ก็ห้ามใช้ `git worktree remove` เอง (กิน disk ค้าง 2.4 GB) · ตอนนี้ `list`/`clean` เห็น worktree พวกนี้ด้วย และลบเฉพาะตัวที่ merge แล้ว + tree สะอาด + อายุเกิน 30 นาที ถ้ามี commit ที่ยังไม่ merge จะเก็บไว้เสมอแม้ใส่ `--force` (detached ไม่มี branch ไว้เก็บ commit) และไม่ลบ branch ใดๆ
+- **watchdog ฆ่า pane งาน deep ที่กำลังรอ background poll ของตัวเอง (#968):** devops ที่กำลังรอ idle window ของ prod ส่ง `takkub progress` เป็นระยะ ทำให้ตัวนับ "ไม่มี progress" ถูก reset ไปเรื่อยๆ ซึ่งไปปิด gate งาน deep (#731) พอเลยระยะผ่อนผันของ child process แล้ว เส้นทาง content_static ก็ฆ่า pane พร้อม poll ทิ้ง · ตอนนี้ pane งาน deep จะไม่ถูกฆ่าอัตโนมัติไม่ว่าจะเข้าเส้นทางไหน Lead จะได้แจ้งเตือนไม่เกินทุก 30 นาที พร้อมบอกว่าเป็นกรณีจอนิ่งหรือไม่มี progress · pane ที่ไม่ใช่งาน deep ยังกู้คืนอัตโนมัติเหมือนเดิม
+
+### Changed (เปลี่ยน)
+
+- ruff 0.17.2 → 0.17.3 (dev, #971)
+
 ## [v2.2.42] - 2026-11-02
 
 ### Fixed (แก้)

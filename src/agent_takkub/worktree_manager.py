@@ -358,6 +358,9 @@ _WT_EPOCH_SUFFIX_RE = re.compile(r"-(\d{9,16})$")
 #: artifact, not a creation time — such a value is discarded rather than
 #: rendered as a negative age.
 _FUTURE_TS_SLACK_S = 300
+# #974: a detached verify sibling isn't in the live-pane registry — keep it
+# this long after creation so a pane mid-build in it isn't swept.
+_DETACHED_GRACE_S = 1800
 
 
 def worktree_created_ts(branch: str, worktree_path: Path) -> float | None:
@@ -2168,9 +2171,22 @@ class WorktreeManager:
         rows: list[dict] = []
         for ent in parse_worktree_list(res.stdout):
             branch = ent.get("branch")
-            if not branch or not is_cockpit_worktree(branch, ent.get("path")):
+            # #974: a DETACHED checkout under the managed root (a pane's
+            # `git worktree add --detach` verify sibling) is ours too — it
+            # was invisible here, so `clean` said "nothing to clean" while
+            # the guard forbids a raw `git worktree remove` (2.4 GB stuck).
+            # Its ref is the commit itself; it has no branch to delete.
+            detached = not branch and bool(ent.get("sha"))
+            if detached:
+                if not is_cockpit_worktree(None, ent.get("path")):
+                    continue
+                ref = ent["sha"]
+                branch = f"(detached {ref[:7]})"
+            elif not branch or not is_cockpit_worktree(branch, ent.get("path")):
                 continue
-            ahead_res = self._run(["-C", git_root, "rev-list", "--count", f"HEAD..{branch}"], None)
+            else:
+                ref = branch
+            ahead_res = self._run(["-C", git_root, "rev-list", "--count", f"HEAD..{ref}"], None)
             try:
                 ahead = int(ahead_res.stdout.strip() or "0") if ahead_res.ok else 0
             except ValueError:
@@ -2182,6 +2198,8 @@ class WorktreeManager:
                 {
                     "path": ent["path"],
                     "branch": branch,
+                    "ref": ref,
+                    "detached": detached,
                     "sha": ent.get("sha", ""),
                     "ahead": ahead,
                     "dirty": self.real_dirty_at(ent["path"]),
@@ -2591,7 +2609,8 @@ class WorktreeManager:
             # worktree rather than guessing; a path that is already gone has
             # nothing to protect and continues to the sweep.
             worktree_path = Path(row["path"])
-            created = worktree_created_ts(row["branch"], worktree_path)
+            detached = bool(row.get("detached"))
+            created = worktree_created_ts("" if detached else row["branch"], worktree_path)
             if created is None and worktree_path.exists():
                 out.append(
                     f"KEEP  {row['branch']} — เช็คเวลาสร้าง worktree ไม่ได้ "
@@ -2600,7 +2619,11 @@ class WorktreeManager:
                 )
                 continue
             elapsed = time.time() - created if created is not None else None
-            if elapsed is not None and elapsed < 300:  # 5 minutes
+            # #974: a detached verify sibling is never in the live-pane
+            # registry (that tracks a pane's own cwd) — a pane may still be
+            # running a build in it, so it gets a longer grace than 5 min.
+            grace = _DETACHED_GRACE_S if detached else 300
+            if elapsed is not None and elapsed < grace:
                 out.append(
                     f"KEEP  {row['branch']} — worktree สร้างใหม่ ({int(elapsed)}s ที่แล้ว) "
                     "— pane อาจยังไม่ register ใน live registry ให้รอสักครู่"
@@ -2615,13 +2638,20 @@ class WorktreeManager:
                 )
             elif row["dirty"]:
                 discard_stat = self.dirty_diffstat_at(row["path"])
-            elif not force and row["ahead"]:
+            elif (not force or detached) and row["ahead"]:
                 # #495: raw SHA-based "ahead" still counts commits whose
                 # patch already landed on HEAD via cherry-pick — check
                 # patch-id equivalence before keeping it around forever.
-                cherry_picked = self._all_commits_landed_via_cherry_pick(git_root, row["branch"])
+                # #974: a detached HEAD's commits have no branch to survive
+                # the removal, so `--force` never drops them.
+                cherry_picked = self._all_commits_landed_via_cherry_pick(git_root, row["ref"])
                 if not cherry_picked:
                     keep_reason = f"{row['ahead']} commit ยังไม่ merge"
+                    if detached:
+                        keep_reason += (
+                            " (detached — ไม่มี branch เก็บ commit ไว้ สร้าง branch จาก "
+                            f"{row['sha'][:7]} ก่อนถ้าต้องการเก็บ แล้วค่อย clean)"
+                        )
             if keep_reason:
                 out.append(f"KEEP  {row['branch']} — {keep_reason}")
                 continue
@@ -2673,7 +2703,9 @@ class WorktreeManager:
             )
             repair_note = repair_editable_pth_if_stale(git_root, row["path"])
             note = f"REMOVED {row['branch']}"
-            if not row["branch"].startswith(f"{_BRANCH_PREFIX}/"):
+            if row.get("detached"):
+                note = f"REMOVED worktree {row['path']} {row['branch']} (#974)"
+            elif not row["branch"].startswith(f"{_BRANCH_PREFIX}/"):
                 note = f"REMOVED worktree {row['path']} (branch {row['branch']} เก็บไว้ — #813)"
             if discard_stat:
                 note += f" (⚠ discarded uncommitted: {discard_stat})"

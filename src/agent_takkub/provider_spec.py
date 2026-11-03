@@ -1295,8 +1295,10 @@ gemini_spec = ProviderSpec(
     context_strategy="agents_md_file",
     cheatsheet_filename="AGENTS.md",
     # Verified live on agy 1.4.12 TUI (2026-11-02): `--agent <name>` with
-    # ~/.gemini/config/agents/<name>/agent.md is obeyed and keeps the default
-    # tools. Removed when the pane closes (pane_instructions.remove_agy_agent).
+    # ~/.gemini/config/agents/<name>/agent.md is obeyed. In the TUI it does NOT
+    # keep the default tools — the agent.md must list them (`tools:`, #969,
+    # pane_instructions.AGY_AGENT_TOOLS) or the pane has no shell. Removed
+    # when the pane closes (pane_instructions.remove_agy_agent).
     instruction_channel="agy_custom_agent",
     inline_learned_notes=False,
     use_file_guards=False,

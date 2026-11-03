@@ -1766,3 +1766,51 @@ class TestStreamTokenCounterProgress:
         assert len(deferred) == 1
         deep_notices = [c for c in fake.notify_calls if c[2] == "backend" and "deep" in c[1]]
         assert len(deep_notices) == 1
+
+
+class TestDeepScopeContentStatic968:
+    """#968 (saas_admin_amb prod deploy, 2026-11-02): a deep-scope devops pane
+    waited on its own background idle-gate poll, silent at the prompt, and
+    sent `takkub progress` every so often. Each progress reset the
+    no-progress clock, which switched the #731 deep gate OFF — so once the
+    live-children grace expired the content-static path killed the pane and
+    its poll mid-wait. A deep pane is never auto-killed, whichever path
+    fires; Lead is told at most every DEEP_DEFER_NOTICE_S."""
+
+    def test_content_static_deep_pane_with_recent_progress_is_not_killed(self) -> None:
+        from agent_takkub.orchestrator import DEEP_DEFER_NOTICE_S
+
+        t0 = 1_000_000.0
+        fake = _FakeOrch()
+        pane = _FakePane(state="working", last_out=t0 - STUCK_THRESHOLD_S - 60)
+        fake._panes_by_project["p"] = {"devops": pane}
+        ps = fake._ps("p::devops")
+        ps.last_assigned_scope = "deep"
+        ps.last_content_change_ts = t0 - STUCK_THRESHOLD_S - 60  # screen static
+        ps.last_send_ts = t0 - 60  # fresh `takkub progress` → no-progress clock reset
+
+        _check(fake, t0)
+        _check(fake, t0 + 600)  # still quiet 10 min later: no second notice yet
+
+        assert fake.close_calls == [], "deep pane must not be auto-killed on content_static"
+        deep = [c for c in fake.notify_calls if c[2] == "devops" and "deep" in c[1]]
+        assert len(deep) == 1
+        assert "จอนิ่ง" in deep[0][1]
+
+        _check(fake, t0 + DEEP_DEFER_NOTICE_S + 1)
+        deep = [c for c in fake.notify_calls if c[2] == "devops" and "deep" in c[1]]
+        assert len(deep) == 2 and fake.close_calls == []
+
+    def test_content_static_normal_scope_still_recovers(self) -> None:
+        t0 = 1_000_000.0
+        fake = _FakeOrch()
+        pane = _FakePane(state="working", last_out=t0 - STUCK_THRESHOLD_S - 60)
+        fake._panes_by_project["p"] = {"backend": pane}
+        ps = fake._ps("p::backend")
+        ps.last_assigned_scope = "normal"
+        ps.last_content_change_ts = t0 - STUCK_THRESHOLD_S - 60
+        ps.last_send_ts = t0 - 60
+
+        _check(fake, t0)
+
+        assert fake.close_calls, "non-deep wedged pane keeps the existing recovery"

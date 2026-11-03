@@ -143,3 +143,23 @@ def test_codex_lead_binds_the_rollout_that_carries_its_marker(monkeypatch, tmp_p
     )
     notify._bind_codex_session_by_marker(ps, "p", 0.0)
     assert (ps.session_uuid, ps.session_provider) == ("lead-thread", "codex")
+
+
+def test_agy_agent_lists_its_tools_so_the_tui_pane_has_a_shell():
+    """#969: agy's TUI gives a custom agent without `tools:` no shell — the
+    pane could not run `takkub done`. The list must carry run_command and
+    must never carry a name agy 1.4.12 can't resolve for a custom agent (one
+    unknown name fails the whole executor)."""
+    pane_instructions.deliver(pane_instructions.AGY_CUSTOM_AGENT, "body", "p", "critic", {})
+    name = pane_instructions.agy_agent_name("p", "critic")
+    md = pane_instructions.agy_agents_root() / name / "agent.md"
+    try:
+        front = md.read_text(encoding="utf-8").split("\n---\n", 1)[0]
+        tools_line = next(line for line in front.splitlines() if line.startswith("tools: ["))
+        tools = [t.strip() for t in tools_line[len("tools: [") : -1].split(",")]
+        assert "run_command" in tools and "view_file" in tools and "write_to_file" in tools
+        unresolvable = {"sed_file", "call_mcp_tool", "notebook_execution", "browser_subagent"}
+        assert not unresolvable & set(tools)
+        assert not [t for t in tools if t.startswith("browser_")]
+    finally:
+        pane_instructions.remove_agy_agent("p", "critic")

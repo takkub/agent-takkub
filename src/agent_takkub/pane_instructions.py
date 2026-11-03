@@ -124,11 +124,49 @@ def _merge_opencode_config(raw: str | None, path: Path) -> str:
     return json.dumps(cfg, ensure_ascii=False)
 
 
+# #969: in the agy TUI (what a pane runs) a custom agent WITHOUT a `tools:`
+# list gets only the "fundamental components" (view_file, manage_task,
+# send_message, schedule, search_web, ...) — no `run_command`, so the pane
+# cannot run `takkub done` and sits stalled. (`agy -p` gives the full set,
+# which is why the #961 probe looked fine.) Every name must exist in agy's
+# registry: one unknown name fails the whole executor ("unknown component:
+# tool ... not found in registry") and the pane can do nothing. This list was
+# proven on agy 1.4.12 TUI (shell ran `echo PROBE_42`); browser_* tools,
+# sed_file, call_mcp_tool, notebook_execution are NOT resolvable for a
+# custom agent and must stay out.
+AGY_AGENT_TOOLS = (
+    "run_command",
+    "command_status",
+    "send_command_input",
+    "manage_task",
+    "view_file",
+    "write_to_file",
+    "replace_file_content",
+    "multi_replace_file_content",
+    "find_by_name",
+    "grep_search",
+    "list_dir",
+    "read_url_content",
+    "search_web",
+    "invoke_subagent",
+    "manage_subagents",
+    "define_subagent",
+    "ask_question",
+    "schedule",
+    "wait",
+    "finish",
+    "send_message",
+    "notebook_edit",
+    "generate_image",
+)
+
+
 def _write_agy_agent(name: str, text: str) -> None:
     target = agy_agents_root() / name
     target.mkdir(parents=True, exist_ok=True)
+    tools = ", ".join(AGY_AGENT_TOOLS)
     (target / "agent.md").write_text(
-        f"---\nname: {name}\ndescription: {_AGY_AGENT_TAG}\n---\n\n{text}",
+        f"---\nname: {name}\ndescription: {_AGY_AGENT_TAG}\ntools: [{tools}]\n---\n\n{text}",
         encoding="utf-8",
     )
 
