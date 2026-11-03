@@ -78,3 +78,14 @@ So, whenever you touch a provider adapter:
 * picker: Lead-only filtering, and a preview that is not a machine-generated
   opener
 * privacy: a reasoning/tool record must NOT appear in mirrored output
+
+## Verify a pane's capabilities in the mode the pane actually runs
+
+Print/headless mode is not the TUI. #969: agy `-p --agent <custom>` reported
+the full toolset, but the same custom agent in the **TUI** had no
+`run_command` — the pane could not run `takkub done`. A capability probe for a
+pane (tools, shell, instructions, MCP) must drive the real TUI under a PTY
+(winpty on Windows) and make it *do* the thing (e.g. run `echo PROBE_$((6*7))`
+and look for `PROBE_42`), not ask a print-mode run what it has. For agy, a
+custom agent's `tools:` names must all resolve in agy's registry — one unknown
+name fails the whole executor (`unknown component: tool ... not found`).
