@@ -2,6 +2,12 @@
 
 All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses [SemVer](https://semver.org/).
 
+## [v2.2.44] - 2026-11-04
+
+### Fixed (แก้)
+
+- **ป๊อปอัป "WARNING: Claude Code running in Bypass Permissions mode" เด้งทุก pane ทุกครั้งที่เปิด claude:** Claude Code 2.1.3xx จำการกด "Yes, I accept" ไว้ใน `~/.claude/settings.json` (`skipDangerousModePermissionPrompt`) แต่ cockpit เปิด claude ทุก pane ด้วย `--setting-sources project,local` ซึ่งข้ามไฟล์ settings ระดับ user จึงถามใหม่ทุกครั้ง · ตอนนี้ไฟล์ `--settings` ที่ cockpit ส่งให้ทุก pane (Lead + teammate ทุกแบบ) ใส่ค่านี้ไว้เอง · ทดสอบกับ claude 2.1.316 จริงผ่าน PTY ด้วย flag ชุดเดียวกับ pane: ข้ามป๊อปอัปแล้วถึงหน้าพิมพ์ทันที
+
 ## [v2.2.43] - 2026-11-03
 
 ### Fixed (แก้)

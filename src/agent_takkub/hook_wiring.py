@@ -232,6 +232,13 @@ def _rendered_settings(*, concise: bool = False, remote_control: bool = True) ->
     # `attribution` is current, `includeCoAuthoredBy` covers older CLIs.
     settings["attribution"] = {"commit": "", "pr": ""}
     settings["includeCoAuthoredBy"] = False
+    # Every claude pane runs --dangerously-skip-permissions. Claude Code 2.1.3xx
+    # records "I accept" for its Bypass Permissions disclaimer in the *user*
+    # settings file (~/.claude/settings.json), but panes spawn with
+    # --setting-sources project,local, so that layer is never read and the
+    # disclaimer comes back on every launch of every pane. Stamp the accept
+    # here, in the --settings layer, which is always loaded.
+    settings["skipDangerousModePermissionPrompt"] = True
     return settings
 
 

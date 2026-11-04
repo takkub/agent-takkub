@@ -364,3 +364,16 @@ class TestClaudeSpawnArgvIncludesSettings:
         settings_path = argv[argv.index("--settings") + 1]
         assert settings_path.endswith("hook-settings.json")
         assert not settings_path.endswith("hook-settings-concise.json")
+
+
+@pytest.mark.parametrize("concise", [False, True])
+@pytest.mark.parametrize("remote_control", [False, True])
+def test_hook_settings_skip_bypass_disclaimer(tmp_path, monkeypatch, concise, remote_control):
+    """Panes spawn with --setting-sources project,local, so the "I accept"
+    claude stores in ~/.claude/settings.json never loads and the Bypass
+    Permissions disclaimer blocked every launch. The --settings file every
+    variant hands claude must carry the accept itself."""
+    monkeypatch.setattr(config, "RUNTIME_DIR", tmp_path)
+    path = hook_wiring.ensure_hook_settings_file(concise=concise, remote_control=remote_control)
+    data = json.loads(pathlib.Path(path).read_text(encoding="utf-8"))
+    assert data["skipDangerousModePermissionPrompt"] is True
