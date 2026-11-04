@@ -613,6 +613,7 @@ class MainWindowUpdateMixin:
         for fn in (
             self._save_window_state,
             self._persist_open_tabs,
+            getattr(self.orch, "mark_clean_shutdown", lambda: None),  # #977
             self.orch.write_session_snapshot,
             self.orch.write_resume_briefs,
         ):
@@ -1053,6 +1054,7 @@ class MainWindowUpdateMixin:
         for fn in (
             self._save_window_state,
             self._persist_open_tabs,
+            getattr(self.orch, "mark_clean_shutdown", lambda: None),  # #977
             self.orch.write_session_snapshot,
             self.orch.write_resume_briefs,
         ):
@@ -1140,6 +1142,7 @@ class MainWindowUpdateMixin:
         except Exception:
             pass
         try:
+            getattr(self.orch, "mark_clean_shutdown", lambda: None)()  # #977
             self.orch.write_session_snapshot()
         except Exception:
             pass

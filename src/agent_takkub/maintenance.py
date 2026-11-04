@@ -45,6 +45,8 @@ _NOISE_TOP_N = 10
 # read. Names are taken from what the running cockpit actually writes (verified
 # against a live events.log), not from guessing at the emitter side.
 _SEVERE_EVENTS: dict[str, str] = {
+    "main_thread_wedged": "UI ค้างเกิน 30 วิ (ยังไม่ฟื้นตอนบันทึก — #977)",
+    "native_crash_detected": "cockpit ตายแบบ native crash รอบก่อน (#977)",
     "stuck_pane_recover": "watchdog ฆ่า+respawn pane ที่คิดว่าค้าง",
     "stuck_recover_respawn": "respawn หลัง stuck-recover",
     "no_content_pane_recover": "pane ไม่พ่นอะไรเลยจน watchdog เข้าแทรก",
@@ -64,6 +66,10 @@ _SEVERE_EVENTS: dict[str, str] = {
     ),
 }
 _WARN_EVENTS: dict[str, str] = {
+    "gpu_software_fallback": (
+        "เรนเดอร์แบบ software เพราะรอบก่อน crash ใน GPU module (#977 — "
+        "TAKKUB_FORCE_SOFTWARE_GPU=0 เพื่อกลับไปใช้ GPU)"
+    ),
     "main_thread_stall": "UI ค้าง (main thread ติด I/O)",
     "task_delivery_expired": "ใบงานหมดอายุก่อนถึงมือ",
     "delivery_stale_reaped": "ใบงานค้างถูกเก็บกวาด",

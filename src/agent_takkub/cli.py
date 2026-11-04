@@ -1403,12 +1403,16 @@ def cmd_worktree(args: argparse.Namespace) -> dict:
             return {"ok": False, "msg": "ใช้ --orphans หรือ --orphans-node-modules-only อย่างเดียว"}
 
         live_paths = _live_worktree_paths_best_effort()
+        clean_kwargs: dict = {}
+        if getattr(args, "path", None):
+            clean_kwargs["path"] = args.path  # #976
         lines = mgr.clean_isolated(
             root,
             force=bool(args.force),
             live_paths=live_paths,
             branch=getattr(args, "branch", None) or None,
             discard=bool(getattr(args, "discard", False)),
+            **clean_kwargs,
         )
         # #411 — `.trash-*` staging dirs `remove_worktree_tree` leaves behind
         # after a partial/failed delete are our own already-vetted trash
@@ -1418,7 +1422,7 @@ def cmd_worktree(args: argparse.Namespace) -> dict:
         lines = lines + mgr.sweep_trash(root, live_paths=live_paths)
         # #961: wt/* branches whose checkout is already gone are a trace of the
         # cockpit left in the user's repo — sweep them with the worktrees.
-        if not getattr(args, "branch", None):
+        if not getattr(args, "branch", None) and not getattr(args, "path", None):
             lines = lines + mgr.clean_dangling_branches(root, force=bool(args.force))
         if lines:
             for line in lines:
@@ -2428,7 +2432,9 @@ def cmd_report(args: argparse.Namespace) -> dict:
             Path(os.environ.get("TAKKUB_ARTIFACTS_DIR") or tempfile.gettempdir()) / "report-check"
         )
         try:
-            ok, lines = check_report_file(args.file, out_dir)
+            ok, lines = check_report_file(
+                args.file, out_dir, playwright=getattr(args, "playwright", None)
+            )
         except Exception as e:
             return {"ok": False, "msg": f"check failed: {e}"}
         return {"ok": ok, "msg": "\n".join(lines)}

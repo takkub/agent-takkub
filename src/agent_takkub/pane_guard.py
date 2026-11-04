@@ -2104,7 +2104,8 @@ RAW_WORKTREE_REMOVE_RULE_TEXT = (
     "(.claude/skills → skill store กลาง, node_modules → main tree) ทำ skill ของทุกโปรเจคหาย (#958). "
     "ใช้ `takkub worktree merge --branch <wt/...>` (merge แล้วลบให้) หรือ "
     "`takkub worktree clean [--branch <wt/...>] [--cwd <repo>]` (ลบที่ merge แล้ว · `--force` ทิ้ง "
-    "commit ที่ยังไม่ merge · `--discard` ทิ้งงานที่ยังไม่ commit)"
+    "commit ที่ยังไม่ merge · `--discard` ทิ้งงานที่ยังไม่ commit) · worktree ที่สร้างเอง "
+    "(เช่น `--detach` ใต้ TEMP): `takkub worktree clean --path <dir> --cwd <repo>` (#976)"
 )
 
 # `git merge` (#385): Lead-only on the shared tree, ALLOWED from inside a

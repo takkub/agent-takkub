@@ -2014,6 +2014,10 @@ class MainWindow(
         # sessions below — otherwise everything would look dead by the
         # time the snapshot serialiser runs. The next cockpit launch
         # reads this file to re-spawn teammates with `--continue`.
+        # #977: graceful — the next boot must not treat this as a crash.
+        _mark = getattr(self.orch, "mark_clean_shutdown", None)
+        if callable(_mark):
+            _mark()
         self.orch.write_session_snapshot()
         # Also write a per-project resume brief (~last 20 exchanges)
         # to `<vault>/07-AI-Command-Center/briefs/` so the next session

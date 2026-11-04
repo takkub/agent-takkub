@@ -2,6 +2,19 @@
 
 All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses [SemVer](https://semver.org/).
 
+## [v2.2.46] - 2026-11-04
+
+### Fixed (แก้)
+
+- **cockpit ตายเพราะ GPU driver (`d3d11.dll` access violation) แล้วเปิดกลับมาด้วย GPU แบบเดิม พร้อม Lead ทุกแท็บที่เริ่มใหม่หมด (#977):**
+  - **ถ้ารอบก่อนตายใน GPU module บน Windows จะสลับไปเรนเดอร์แบบ software เอง 7 วัน:** ตอนบูต ถ้ารอบก่อนจบด้วย native crash จะดู Windows Event 1000 ของ process นั้น ถ้า module ที่ crash เป็นของ GPU (d3d11/dxgi/ไดรเวอร์ NVIDIA·Intel·AMD) จะเรนเดอร์แบบ software ต่อเนื่อง 7 วัน ทั้ง Chromium (`--disable-gpu`) และ Qt ฝั่ง main process ที่ crash จริง ฝั่ง Qt ใช้ software OpenGL (`opengl32sw.dll`) ซึ่งวัดแล้วว่าออกจาก `Direct3D11Rhi` และยังเรนเดอร์ได้ถูก (`QT_QUICK_BACKEND=software` ใช้ไม่ได้กับ WebEngine) · ใช้ `TAKKUB_FORCE_SOFTWARE_GPU=1/0` บังคับได้ทั้งสองทาง · `takkub ma` แสดง `native_crash_detected` และ `gpu_software_fallback` · macOS ยังไม่สลับเอง เพราะไม่มี event log ให้ดูว่า module ไหน crash
+  - **Lead ทุกแท็บกลับมาคุยต่อจาก conversation เดิมหลัง crash:** snapshot ที่เขียนทุก 60 วินาทีเก็บ session ของ Lead ไว้ด้วย และทุกทางปิดปกติ (ปิดหน้าต่าง/restart/update) จะประทับ `clean_shutdown` ถ้าบูตครั้งถัดไปไม่เห็นค่านี้ (และ snapshot อายุไม่เกิน 1 ชม.) Lead แต่ละแท็บจะ `--resume` ได้ครั้งเดียว ถ้า resume ไม่ได้ (เช่น transcript หาย หรือเปลี่ยน provider) จะเปิด Lead ใหม่แทน ไม่ปล่อยแท็บว่าง · การปิดปกติยังเปิด Lead ใหม่เหมือนเดิม
+  - **UI ค้างเกิน 30 วินาทีถูกบันทึกลง events.log ตั้งแต่ตอนที่ยังค้าง (`main_thread_wedged`):** เดิมบันทึกเฉพาะตอนฟื้นแล้ว การค้าง 3 นาทีก่อน crash จึงไม่เหลือร่องรอยเลย · ไม่บันทึกกรณีที่ watchdog เองก็หยุดไปด้วย (เครื่อง sleep)
+- **`takkub worktree clean --path <dir>` ลบ worktree ที่สร้างเองนอก `wt/*` ได้แล้ว (#976):** เช่น `git worktree add --detach` ใต้ TEMP · เดิม guard ห้ามใช้ `git worktree remove` แต่ `clean` ก็มองไม่เห็น worktree แบบนี้ จึงลบไม่ได้ทั้งสองทาง · ใช้กฎความปลอดภัยชุดเดิม (pane ที่ยังใช้อยู่, dirty, commit ที่ยังไม่ merge, unlink junction ก่อนลบ) ไม่ลบ main worktree และข้อความ guard บอกทางนี้แล้ว
+- **`takkub report check` ขึ้น SKIPPED ทั้งที่เครื่องมี Node Playwright (#975):** ตอนนี้หาใน global npm root และ npx cache (`%LOCALAPPDATA%/npm-cache/_npx/*` และ `~/.npm/_npx/*`) ก่อนจะ skip และรับ `--playwright <path>` เพิ่ม · ทดสอบกับ npx cache จริงในเครื่อง: ตรวจครบ 360/390/768/1440 และจับเคสล้นจอได้ถูก
+- **UI ค้าง 14.5 วินาทีจาก GIL convoy กับ graft autobuild (#973):** loop ที่ stat ไฟล์ทีละพันใน thread `graft-build-*`/`graft-live-resync-*` ตอนนี้พักสั้นๆ ทุก 48 ไฟล์ · วัดจริง: main thread stat 1000 ไฟล์ข้าง thread pathlib ที่กิน CPU ใช้ 11.3 วินาที ใส่ yield แล้วเหลือ 0.105 วินาที
+- **watchdog respawn pane ซ้ำ 3 รอบทั้งที่ค้างที่จอเดิมทุกรอบ (#970):** ถ้า respawn แล้วกลับไปค้างที่จอเดิมทุกบรรทัด จะส่งให้ Lead ดูแทนการ respawn อีกรอบ (เพราะ respawn เริ่มงานใหม่จากต้น) · `stuck_pane_recover` บันทึก provider, scope, รอบที่, `at_ready_prompt` และ `busy_marker` เพิ่ม เพื่อให้รอบหน้าแยกได้ว่าค้างแบบไหน
+
 ## [v2.2.45] - 2026-11-04
 
 ### Added (เพิ่ม)

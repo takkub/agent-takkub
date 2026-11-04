@@ -318,6 +318,13 @@ def _add_worktree(sub: Any, c: ModuleType) -> None:
         "safety rules unchanged",
     )
     swc.add_argument(
+        "--path",
+        default=None,
+        help="clean only the linked worktree at this path — also one the cockpit did not "
+        "create, e.g. a `git worktree add --detach` under TEMP (#976); same safety rules, "
+        "junctions unlinked before delete",
+    )
+    swc.add_argument(
         "--orphans",
         action="store_true",
         help="also delete on-disk dirs git has completely forgotten (registration already "
@@ -843,6 +850,12 @@ def _add_report(sub: Any, c: ModuleType) -> None:
     sr_check.add_argument("file", help="built report .html")
     sr_check.add_argument(
         "--out", default=None, help="screenshot dir (default: $TAKKUB_ARTIFACTS_DIR/report-check)"
+    )
+    sr_check.add_argument(
+        "--playwright",
+        default=None,
+        help="path to a Node node_modules/playwright (default: Python Playwright, else found "
+        "in global npm root / npx cache — #975)",
     )
     sr_check.set_defaults(func=c.cmd_report)
 

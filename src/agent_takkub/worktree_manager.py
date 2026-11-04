@@ -465,6 +465,18 @@ def worktree_root(project_ns: str) -> Path:
     return (worktrees_managed_root() / sanitize_ref_component(project_ns)).resolve()
 
 
+def _path_key(path: str | Path | None) -> str:
+    """Comparable form of a worktree path (#976): resolved, case/sep-normalized
+    — git prints ``C:/Users/...`` while the caller may type backslashes or another case."""
+    if not path:
+        return ""
+    try:
+        p = str(Path(path).resolve())
+    except OSError:
+        p = str(path)
+    return os.path.normcase(os.path.normpath(p))
+
+
 def is_cockpit_worktree(branch: str | None, path: str | Path | None) -> bool:
     """Whether a registered worktree is one the cockpit created: a ``wt/*``
     branch, OR (#813 ``assign --branch <name>``) a checkout under the managed
@@ -2158,19 +2170,51 @@ class WorktreeManager:
 
     # -- CLI ops (P2.4: takkub worktree list / merge / clean) ----------------
 
-    def list_isolated(self, git_root: str) -> list[dict]:
+    def list_isolated(self, git_root: str, extra_path: str | None = None) -> list[dict]:
         """All ``wt/*`` worktrees of the repo with commits-ahead + dirty flags.
 
         Row shape: {"path", "branch", "sha", "ahead": int, "dirty": bool}.
         Works from git state alone — no PaneState needed (usable after a
         cockpit crash, or with the cockpit closed entirely).
+
+        *extra_path* (#976): also include the linked worktree registered at
+        that path even when the cockpit did not create it (a Lead's own
+        ``git worktree add --detach`` under TEMP) — the caller named it
+        explicitly. The main worktree is never included.
         """
         res = self._run(["-C", git_root, "worktree", "list", "--porcelain"], None)
         if not res.ok:
             return []
+        extra_key = _path_key(extra_path) if extra_path else None
         rows: list[dict] = []
-        for ent in parse_worktree_list(res.stdout):
+        for idx, ent in enumerate(parse_worktree_list(res.stdout)):
             branch = ent.get("branch")
+            explicit = extra_key is not None and idx > 0 and _path_key(ent.get("path")) == extra_key
+            if explicit:
+                detached = not branch and bool(ent.get("sha"))
+                ref = ent["sha"] if detached else branch
+                if detached:
+                    branch = f"(detached {ent['sha'][:7]})"
+                if not ref:
+                    continue
+                ahead_res = self._run(["-C", git_root, "rev-list", "--count", f"HEAD..{ref}"], None)
+                try:
+                    ahead = int(ahead_res.stdout.strip() or "0") if ahead_res.ok else 0
+                except ValueError:
+                    ahead = 0
+                rows.append(
+                    {
+                        "path": ent["path"],
+                        "branch": branch,
+                        "ref": ref,
+                        "detached": detached,
+                        "explicit": True,
+                        "sha": ent.get("sha", ""),
+                        "ahead": ahead,
+                        "dirty": self.real_dirty_at(ent["path"]),
+                    }
+                )
+                continue
             # #974: a DETACHED checkout under the managed root (a pane's
             # `git worktree add --detach` verify sibling) is ours too — it
             # was invisible here, so `clean` said "nothing to clean" while
@@ -2529,8 +2573,15 @@ class WorktreeManager:
         live_paths: frozenset[str] | set[str] = frozenset(),
         branch: str | None = None,
         discard: bool = False,
+        path: str | None = None,
     ) -> list[str]:
         """Sweep leftover ``wt/*`` worktrees (crashed panes, forgotten probes).
+
+        *path* (#976): restrict the sweep to the linked worktree at that path —
+        including one the cockpit did not create (a detached checkout under
+        TEMP), since the guard forbids a raw ``git worktree remove`` there
+        too. Same safety rules (live pane, dirty, unmerged, junction unlink);
+        the creation-age grace is skipped because the caller named the path.
 
         *branch* (#439): restrict the sweep to that one ``wt/*`` branch — the
         way to drop a specific finished worktree when the same role has
@@ -2586,7 +2637,19 @@ class WorktreeManager:
         live = {str(Path(p).resolve()) for p in live_paths}
         out: list[str] = []
         pending: list[tuple[int, dict, bool, str]] = []
-        rows = self.list_isolated(git_root)
+        rows = (
+            self.list_isolated(git_root, extra_path=path)
+            if path is not None
+            else self.list_isolated(git_root)
+        )
+        if path is not None:
+            key = _path_key(path)
+            rows = [r for r in rows if _path_key(r["path"]) == key]
+            if not rows:
+                return [
+                    f"NOT FOUND  {path} — ไม่ใช่ linked worktree ที่ git ของ {git_root} รู้จัก "
+                    "(ดูด้วย `git worktree list`; main worktree ลบไม่ได้)"
+                ]
         if branch is not None:
             rows = [r for r in rows if r["branch"] == branch]
             if not rows:
@@ -2611,7 +2674,7 @@ class WorktreeManager:
             worktree_path = Path(row["path"])
             detached = bool(row.get("detached"))
             created = worktree_created_ts("" if detached else row["branch"], worktree_path)
-            if created is None and worktree_path.exists():
+            if created is None and worktree_path.exists() and not row.get("explicit"):
                 out.append(
                     f"KEEP  {row['branch']} — เช็คเวลาสร้าง worktree ไม่ได้ "
                     "(ไม่มี epoch ในชื่อ branch และหา git admin dir ไม่เจอ) — "
@@ -2623,6 +2686,8 @@ class WorktreeManager:
             # registry (that tracks a pane's own cwd) — a pane may still be
             # running a build in it, so it gets a longer grace than 5 min.
             grace = _DETACHED_GRACE_S if detached else 300
+            if row.get("explicit"):
+                grace = 0  # #976: the caller named this exact path
             if elapsed is not None and elapsed < grace:
                 out.append(
                     f"KEEP  {row['branch']} — worktree สร้างใหม่ ({int(elapsed)}s ที่แล้ว) "

@@ -1005,6 +1005,10 @@ class PaneState:
     stuck_recover_attempts: int = 0
     # _stuck_recover_gave_up: True once STUCK_RECOVER_MAX hit — watchdog stops recovering this pane
     stuck_recover_gave_up: bool = False
+    # #970: screen tail (spinner-filtered) of the previous stuck-recover of
+    # this pane — a respawn that wedges on the SAME screen is deterministic,
+    # so another respawn only repeats the task; hand it to Lead instead.
+    last_stuck_tail: tuple = ()
     # #288: wall-clock of the first tick where the stuck watchdog wanted to
     # recover this pane but found real (non-scaffolding) child processes still
     # running under it — a QA pane running `node playwright.js` prints nothing
@@ -2476,6 +2480,20 @@ class SpawnEngineMixin:
         _shard_total: int = 0,
         resume_uuid: str | None = None,
     ) -> tuple[bool, str]:
+        if role_name == LEAD.name and resume_uuid is None and not _from_auto_respawn:
+            # #977: the first Lead spawn after a crash rejoins its conversation.
+            take = getattr(self, "take_crash_resume_lead", None)
+            if callable(take):
+                try:
+                    resume_uuid = take(self._resolve_project(project))
+                except Exception:
+                    resume_uuid = None
+                if resume_uuid:
+                    _from_orch("_log_event")(
+                        "crash_resume_lead",
+                        project=self._resolve_project(project),
+                        session_uuid=resume_uuid[:12],
+                    )
         ok, msg = self._spawn_once(
             role_name,
             cwd=cwd,
@@ -2484,6 +2502,28 @@ class SpawnEngineMixin:
             _shard_total=_shard_total,
             resume_uuid=resume_uuid,
         )
+        if (
+            not ok
+            and role_name == LEAD.name
+            and resume_uuid
+            and resume_uuid in (getattr(self, "_crash_resume_uuids", None) or ())
+        ):
+            # #977: a crash-resume the provider can't open (transcript gone,
+            # provider switched) must never leave the tab without a Lead.
+            self._crash_resume_uuids.discard(resume_uuid)
+            _from_orch("_log_event")(
+                "crash_resume_lead_fallback",
+                project=self._resolve_project(project),
+                msg=str(msg)[:200],
+            )
+            ok, msg = self._spawn_once(
+                role_name,
+                cwd=cwd,
+                project=project,
+                _from_auto_respawn=_from_auto_respawn,
+                _shard_total=_shard_total,
+                resume_uuid=None,
+            )
         if not ok and role_name == LEAD.name:
             # A refused Lead spawn used to leave only a 30 s status-bar line:
             # 2.2.15 prod had no Lead and nothing in events.log said why.
@@ -2647,6 +2687,7 @@ class SpawnEngineMixin:
                 # recovery and never bite a genuinely-wedged pane.
                 _ps_spawn_clear.stuck_recover_attempts = 0
                 _ps_spawn_clear.stuck_recover_gave_up = False
+                _ps_spawn_clear.last_stuck_tail = ()
                 # #248/#247 round 2: same reasoning — a deliberate fresh
                 # assign gets a clean no-content-watchdog budget too;
                 # NOT cleared on the _from_auto_respawn path (the

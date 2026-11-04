@@ -154,12 +154,24 @@ _install_exception_guard()
 # ON**. If the GPU process ever destabilises on a given machine (white screen),
 # set TAKKUB_FORCE_SOFTWARE_GPU=1 to fall back to the old software path WITHOUT
 # editing code.
-_force_software_gpu = os.environ.get("TAKKUB_FORCE_SOFTWARE_GPU", "").strip().lower() not in (
-    "",
-    "0",
-    "false",
-    "no",
-)
+# #977: the env var still forces either way (=1 software, =0 hardware); without
+# it, a previous run that died natively inside a GPU module (Windows Event 1000,
+# e.g. d3d11.dll after a driver update) switches the next boots to software for
+# a week. See gpu_fallback.py.
+try:
+    from .gpu_fallback import decide as _gpu_decide
+
+    _GPU_DECISION = _gpu_decide(RUNTIME_DIR, _BOOT_LOG)
+    _force_software_gpu = _GPU_DECISION.software
+except Exception:
+    _GPU_DECISION = None
+    _force_software_gpu = os.environ.get("TAKKUB_FORCE_SOFTWARE_GPU", "").strip().lower() not in (
+        "",
+        "0",
+        "false",
+        "no",
+    )
+_boot_log(f"[gpu] software={_force_software_gpu} ({getattr(_GPU_DECISION, 'reason', 'env')})")
 
 _chromium_flags = [
     "--disable-background-timer-throttling",
@@ -679,6 +691,7 @@ def _start_deadman_watchdog(window: MainWindow, _stop: threading.Event | None = 
     def _run() -> None:
         soft_dumped = False
         hard_dumped = False
+        wedge_logged = False
         stall_tracker = _StallTracker(_WATCHDOG_STALL_LOG_S)
         last_hard_stall_rearm = time.monotonic()
         last_tick = time.monotonic()
@@ -753,8 +766,27 @@ def _start_deadman_watchdog(window: MainWindow, _stop: threading.Event | None = 
                     )
                     _dump_main_stack(f"[watchdog] main-thread stack at wedge (age {age:.0f}s):")
                     hard_dumped = True
+                # #977: `main_thread_stall` is only written when the heartbeat
+                # RECOVERS — a wedge that ends in a crash (3 min inside
+                # app.exec, then d3d11 access violation) left nothing in
+                # events.log. Record it while still wedged, once per episode,
+                # and only when this thread itself ran without a gap (a gap
+                # means the machine slept and the "wedge" is the wake-up).
+                if not wedge_logged and loop_gap < 5.0:
+                    wedge_logged = True
+                    try:
+                        from .orchestrator import _log_event
+
+                        _log_event(
+                            "main_thread_wedged",
+                            age_s=int(age),
+                            stack=_format_main_thread_frames(),
+                        )
+                    except Exception:
+                        pass
             else:
                 hard_dumped = False
+                wedge_logged = False
 
     t = threading.Thread(target=_run, daemon=True, name="cockpit-deadman")
     t.start()
@@ -1243,6 +1275,23 @@ def main(argv: list[str] | None = None) -> int:
                     except OSError:
                         pass
 
+    if _force_software_gpu:
+        # #977: Qt's own compositing off D3D11 too (Chromium flags above only
+        # cover the GPU process).
+        try:
+            from .gpu_fallback import apply_qt_software_rendering
+
+            apply_qt_software_rendering()
+        except Exception as e:
+            _boot_log(f"[gpu] software Qt rendering not applied: {e!r}")
+    if _GPU_DECISION is not None and _GPU_DECISION.events:
+        try:
+            from .orchestrator import _log_event
+
+            for _ev_name, _ev_details in _GPU_DECISION.events:
+                _log_event(_ev_name, **_ev_details)
+        except Exception:
+            pass
     app = QApplication(argv or sys.argv)
     app.setApplicationName("agent-takkub")
     _warn_if_data_home_unwritable()

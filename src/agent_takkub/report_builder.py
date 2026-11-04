@@ -602,7 +602,7 @@ def size_warning(html: str, max_bytes: int = REPORT_SIZE_WARN_BYTES) -> str:
 
 MOBILE_CHECK_SKIPPED = (
     "mobile-check: SKIPPED (playwright not installed in this Python) — NOT verified; "
-    "run assets/report/mobile-check.cjs with Node Playwright instead"
+    "pass `--playwright <node_modules/playwright>` or install Node Playwright (npx playwright install chromium)"
 )
 
 
@@ -663,18 +663,24 @@ def check_mobile(html: str, viewports: list[int] | None = None) -> list[str]:
 CHECK_WIDTHS = (360, 390, 768, 1440)
 
 
-def check_report_file(html_path: str, out_dir: str) -> tuple[bool, list[str]]:
+def check_report_file(
+    html_path: str, out_dir: str, playwright: str | None = None
+) -> tuple[bool, list[str]]:
     """(#927) `takkub report check`: open a built report at 360/390/768/1440,
     save a full-page screenshot of each into *out_dir* and report the page's
     scrollWidth — works on any report (no hardcoded section like `#retest`).
 
     Python Playwright first; without it, the shipped Node script
-    `mobile-check.cjs`; with neither, one SKIPPED line (never a pass)."""
+    `mobile-check.cjs`; with neither, one SKIPPED line (never a pass).
+    *playwright* (#975) names a Node ``node_modules/playwright`` explicitly
+    and skips the Python path."""
     src = Path(html_path).resolve()
     if not src.is_file():
         return False, [f"ไม่พบไฟล์ {html_path}"]
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
+    if playwright:
+        return _check_with_node(src, out, playwright)
     try:
         from playwright.sync_api import sync_playwright
     except ImportError:
@@ -702,7 +708,72 @@ def check_report_file(html_path: str, out_dir: str) -> tuple[bool, list[str]]:
     return ok, lines
 
 
-def _check_with_node(src: Path, out: Path) -> tuple[bool, list[str]]:
+def _npm_cache_dirs() -> list[Path]:
+    """Where npm keeps its cache on this machine — npx installs land in
+    ``<cache>/_npx/<hash>/node_modules`` (#975). Env/OS defaults only: no
+    `npm config` subprocess (slow on Windows, and absent npm is fine)."""
+    dirs: list[Path] = []
+    env_cache = os.environ.get("npm_config_cache") or os.environ.get("NPM_CONFIG_CACHE")
+    if env_cache:
+        dirs.append(Path(env_cache))
+    local = os.environ.get("LOCALAPPDATA")
+    if local:
+        dirs.append(Path(local) / "npm-cache")
+    appdata = os.environ.get("APPDATA")
+    if appdata:
+        dirs.append(Path(appdata) / "npm-cache")
+    dirs.append(Path.home() / ".npm")
+    return dirs
+
+
+def _npm_global_roots() -> list[Path]:
+    """Global ``node_modules`` dirs for the usual installs (no subprocess)."""
+    roots: list[Path] = []
+    prefix = os.environ.get("npm_config_prefix") or os.environ.get("NPM_CONFIG_PREFIX")
+    if prefix:
+        roots += [Path(prefix) / "node_modules", Path(prefix) / "lib" / "node_modules"]
+    appdata = os.environ.get("APPDATA")
+    if appdata:
+        roots.append(Path(appdata) / "npm" / "node_modules")
+    roots += [Path("/opt/homebrew/lib/node_modules"), Path("/usr/local/lib/node_modules")]
+    return roots
+
+
+def find_node_playwright() -> Path | None:
+    """A Node ``node_modules/playwright`` on this machine, or None (#975).
+
+    `takkub report check` said SKIPPED while an npx-installed Playwright sat
+    in ``%LOCALAPPDATA%/npm-cache/_npx/*/node_modules/playwright`` and
+    worked when passed by hand. Search order: global npm roots, then npx
+    cache entries newest first. Only a dir that has ``package.json`` counts.
+    """
+    for root in _npm_global_roots():
+        for name in ("playwright", "@playwright/test"):
+            cand = root / name
+            if (cand / "package.json").is_file():
+                return cand
+    hits: list[tuple[float, Path]] = []
+    for cache in _npm_cache_dirs():
+        npx = cache / "_npx"
+        try:
+            entries = list(npx.iterdir())
+        except OSError:
+            continue
+        for ent in entries:
+            for name in ("playwright", "@playwright/test"):
+                cand = ent / "node_modules" / name
+                try:
+                    if (cand / "package.json").is_file():
+                        hits.append((cand.stat().st_mtime, cand))
+                except OSError:
+                    continue
+    if hits:
+        hits.sort(key=lambda h: h[0], reverse=True)
+        return hits[0][1]
+    return None
+
+
+def _check_with_node(src: Path, out: Path, playwright: str | None = None) -> tuple[bool, list[str]]:
     import json
     import shutil
     import subprocess
@@ -713,8 +784,12 @@ def _check_with_node(src: Path, out: Path) -> tuple[bool, list[str]]:
     script = report_asset_root() / "mobile-check.cjs"
     if not node or not script.is_file():
         return False, [MOBILE_CHECK_SKIPPED]
+    cmd = [node, str(script), str(src), "--out", str(out)]
+    pw = playwright or (str(find_node_playwright() or "") or None)
+    if pw:
+        cmd += ["--playwright", str(Path(pw).resolve())]
     res = subprocess.run(
-        [node, str(script), str(src), "--out", str(out)],
+        cmd,
         capture_output=True,
         text=True,
         encoding="utf-8",

@@ -239,6 +239,7 @@ def _dir_stats(root: Path) -> tuple[int, int]:
     count = 0
     for dirpath, _dirnames, filenames in os.walk(root):
         for name in filenames:
+            _yield_gil(count + 1)
             try:
                 total += (Path(dirpath) / name).stat().st_size
             except OSError:
@@ -349,6 +350,23 @@ def _git_nonignored_files(target: Path) -> list[str] | None:
     return rel_paths or None
 
 
+# #973: a background pass here stats thousands of files, re-taking the GIL
+# after every `os.stat`. While it runs, a main-thread burst of stats (spawn on
+# assign) waits a switch interval per call: the 14.5 s stall of 2026-11-03 had
+# the main thread inside pathlib `exists` and `graft-build-*` stat-ing beside
+# it. Sleeping briefly every few dozen files leaves the main thread a window
+# to finish its own I/O without queueing behind ours. Measured on this repo:
+# 1000 main-thread stats beside a CPU-bound pathlib loop took 11.3 s, 0.105 s
+# with this yield. Cost: 2 ms per 48 files, background only.
+_GIL_YIELD_EVERY = 48
+_GIL_YIELD_S = 0.002
+
+
+def _yield_gil(i: int) -> None:
+    if i and i % _GIL_YIELD_EVERY == 0:
+        time.sleep(_GIL_YIELD_S)
+
+
 def _stat_or_none(path: Path) -> os.stat_result | None:
     try:
         return path.stat()
@@ -422,7 +440,8 @@ def _stage_files(target: Path, rel_paths: list[str], staging: Path) -> None:
     inode each time — re-linking is what keeps that case in sync. Never
     raises: a raced/unreadable file is skipped, not fatal — matches the
     fail-soft posture of the rest of this module."""
-    for rel in rel_paths:
+    for i, rel in enumerate(rel_paths):
+        _yield_gil(i)
         src = target / rel
         src_stat = _stat_or_none(src)
         if src_stat is None or not stat.S_ISREG(src_stat.st_mode):
@@ -460,9 +479,12 @@ def _sync_staging(target: Path, rel_paths: list[str], staging: Path) -> None:
     except OSError:
         return
     desired = set(rel_paths)
+    seen = 0
     try:
         for dirpath, _dirnames, filenames in os.walk(staging):
             for name in filenames:
+                seen += 1
+                _yield_gil(seen)
                 full = Path(dirpath) / name
                 try:
                     rel = full.relative_to(staging).as_posix()
@@ -786,6 +808,7 @@ def _staging_relpaths(staging: Path) -> set[str]:
     out: set[str] = set()
     for dirpath, _dirnames, filenames in os.walk(staging):
         for name in filenames:
+            _yield_gil(len(out) + 1)
             full = Path(dirpath) / name
             try:
                 out.add(full.relative_to(staging).as_posix())
@@ -815,11 +838,16 @@ def _new_stageable_rels(
         staged = _staging_relpaths(staging)
     with _lock:
         given_up = _unresolvable_rels.get(str(target), frozenset())
-    return {
-        rel
-        for rel in rel_paths
-        if rel not in staged and rel not in given_up and _stageable(target / rel)
-    }
+    out: set[str] = set()
+    checked = 0
+    for rel in rel_paths:
+        if rel in staged or rel in given_up:
+            continue
+        checked += 1
+        _yield_gil(checked)
+        if _stageable(target / rel):
+            out.add(rel)
+    return out
 
 
 def _has_new_files(target: Path, rel_paths: list[str], staging: Path) -> bool:

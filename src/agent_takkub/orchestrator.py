@@ -1771,6 +1771,12 @@ class Orchestrator(
     def __init__(self, parent: QObject | None = None) -> None:
         super().__init__(parent)
         self._invokeOnMain.connect(self._run_posted_callable)
+        # #977: read the previous run's Lead sessions BEFORE this run's first
+        # snapshot write can overwrite last-session.json.
+        try:
+            self._crash_resume_leads = self._load_crash_resume_leads()
+        except Exception:
+            self._crash_resume_leads = {}
         # Browser MCPs (playwright + chrome-devtools) follow Lead into
         # every project. Merge them into runtime/shared-mcp.json before
         # any pane spawns — the orchestrator will then hand the file to
@@ -14034,6 +14040,26 @@ class Orchestrator(
             if entries:
                 projects[project] = entries
 
+        # #977: the Lead's own session id, so the boot after a CRASH (no
+        # graceful `mark_clean_shutdown`) can `--resume` each Lead instead of
+        # starting every tab fresh. Teammates above still restore fresh.
+        leads: dict[str, dict] = {}
+        for project, panes in self._panes_by_project.items():
+            lead_pane = panes.get(LEAD.name)
+            if lead_pane is None or lead_pane.session is None or not lead_pane.session.is_alive:
+                continue
+            ps_lead = getattr(self, "_pane_state", {}).get(_exit_key(project, LEAD.name))
+            uuid_ = (ps_lead.session_uuid if ps_lead else None) or ""
+            if not uuid_:
+                continue
+            leads[project] = {
+                "session_uuid": uuid_,
+                "cwd": (ps_lead.session_uuid_cwd if ps_lead else "")
+                or lead_pane._session_cwd
+                or "",
+                "provider": (getattr(ps_lead, "session_provider", None) or ""),
+            }
+
         now = time.time()
         working_panes: list[str] = [
             e["role"]
@@ -14046,7 +14072,7 @@ class Orchestrator(
             # otherwise-idle machine on a pane that physically cannot run.
             and not _pane_quota_stalled(self, project, e["role"], now)
         ]
-        return {"projects": projects, "working_panes": working_panes}
+        return {"projects": projects, "working_panes": working_panes, "leads": leads}
 
     def _governor_snapshot_fields(self) -> tuple[float | None, float | None, bool]:
         """``(ram_percent, cpu_percent, overloaded)`` off `_resource_governor`.
@@ -14077,6 +14103,12 @@ class Orchestrator(
             "saved_at": datetime.now().isoformat(timespec="seconds"),
             "projects": data["projects"],
             "working_panes": data["working_panes"],
+            "leads": data.get("leads") or {},
+            # #977: True only once a graceful close/restart/update path called
+            # `mark_clean_shutdown` — a periodic snapshot left False by a run
+            # that then died is how the next boot knows it was a crash.
+            "clean_shutdown": bool(getattr(self, "_clean_shutdown", False)),
+            "pid": os.getpid(),
             "overloaded": overloaded,
             "ram_percent": ram_pct,
             "cpu_percent": cpu_pct,
@@ -14092,6 +14124,64 @@ class Orchestrator(
         `_maybe_write_periodic_snapshot` for the path that does NOT want
         this)."""
         return self._finish_snapshot(self._collect_pane_snapshot_data())
+
+    def mark_clean_shutdown(self) -> None:
+        """#977: called by every graceful exit path (closeEvent, restart,
+        update) right before the final `write_session_snapshot`, so that
+        snapshot — and any periodic one that races in after it — records
+        ``clean_shutdown: true``. A run that dies without passing here leaves
+        ``false`` on disk, which `take_crash_resume_lead` reads next boot."""
+        self._clean_shutdown = True
+
+    def _load_crash_resume_leads(self) -> dict[str, dict]:
+        """#977: the previous run's Lead sessions, ONLY when it ended without a
+        graceful shutdown and its last snapshot is fresh. Read once, before
+        this run writes a snapshot of its own."""
+        try:
+            snap = json.loads(_LAST_SESSION_FILE.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return {}
+        if not isinstance(snap, dict) or snap.get("clean_shutdown", True):
+            # absent key = a snapshot from before #977: never guess a crash
+            return {}
+        if snap.get("pid") == os.getpid():
+            return {}
+        try:
+            age = (
+                datetime.now() - datetime.fromisoformat(snap.get("saved_at") or "")
+            ).total_seconds()
+        except ValueError:
+            return {}
+        if not 0 <= age <= _LAST_SESSION_MAX_AGE_SEC:
+            return {}
+        leads = snap.get("leads") or {}
+        if not isinstance(leads, dict):
+            return {}
+        out = {
+            str(p): e
+            for p, e in leads.items()
+            if isinstance(e, dict) and isinstance(e.get("session_uuid"), str) and e["session_uuid"]
+        }
+        if out:
+            _log_event("crash_resume_leads_loaded", projects=sorted(out), snapshot_age_s=int(age))
+        return out
+
+    def take_crash_resume_lead(self, project_ns: str) -> str | None:
+        """#977: one-shot — the session id to `--resume` for this project's
+        first Lead spawn after a crash, or None. Popped on first use so a
+        later manual Lead restart starts fresh as before."""
+        pending = getattr(self, "_crash_resume_leads", None)
+        if pending is None:
+            pending = self._crash_resume_leads = self._load_crash_resume_leads()
+        entry = pending.pop(project_ns, None)
+        if not entry:
+            return None
+        uuid_ = entry["session_uuid"]
+        tried = getattr(self, "_crash_resume_uuids", None)
+        if tried is None:
+            tried = self._crash_resume_uuids = set()
+        tried.add(uuid_)
+        return uuid_
 
     def write_session_snapshot(self) -> None:
         """Persist the current snapshot to disk. Best-effort: any error
@@ -17420,6 +17510,40 @@ class Orchestrator(
             children=_children,
             spinner_phrases=_spinner_interrupt_phrases(),
         )
+        # #970: the facts the Mac reviewer chain (3 recovers, reason
+        # content_static, idle_rounds 0) could not answer from its events:
+        # which provider, which scope, and whether the pane sat at its ready
+        # prompt or showed a busy marker when it was killed.
+        _at_ready = None
+        _busy = None
+        try:
+            _r = pane.session.is_at_ready_prompt()
+            _at_ready = _r if isinstance(_r, bool) else None
+        except Exception:
+            pass
+        try:
+            _b = pane.session.shows_busy_marker(snap_provider or None)
+            _busy = _b if isinstance(_b, bool) else None
+        except Exception:
+            pass
+        _tail = tuple(snapshot.get("tail") or ())
+        _prev_tail = tuple(getattr(_ps_snap, "last_stuck_tail", ()) or ()) if _ps_snap else ()
+        if snap_recover_attempts >= 1 and _tail and _tail == _prev_tail:
+            # #970: respawned, re-delivered, and wedged on the identical screen
+            # again — deterministic. Another close→respawn only restarts the
+            # task from step 1 (respawn is `resumed: false`); stop and hand
+            # the live pane to Lead, same as reaching STUCK_RECOVER_MAX.
+            _log_event(
+                "stuck_recover_same_screen",
+                role=role,
+                project=project,
+                attempts=snap_recover_attempts,
+                provider=snap_provider,
+                scope=getattr(_ps_snap, "last_assigned_scope", None),
+                tail=list(_tail),
+            )
+            self._give_up_stuck(role, project, pane, now)
+            return
         pane._last_output_ts = now
         _log_event(
             "stuck_pane_recover",
@@ -17433,6 +17557,11 @@ class Orchestrator(
             recovery_id=recovery_id,
             session_uuid=snap_uuid,
             snapshot=snapshot,
+            provider=snap_provider,
+            scope=getattr(_ps_snap, "last_assigned_scope", None),
+            attempt=snap_recover_attempts + 1,
+            at_ready_prompt=_at_ready,
+            busy_marker=_busy,
         )
         # suppress_pipeline + suppress_auto_chain: this close is the first half of a
         # close→respawn recovery, not a real pane death.  Neither the pipeline hop
@@ -17461,6 +17590,7 @@ class Orchestrator(
             # wedged-but-alive pane never crashes, so auto_respawn_attempts —
             # which only counts crashes — never caps it).
             self._ps(key).stuck_recover_attempts = snap_recover_attempts + 1
+            self._ps(key).last_stuck_tail = _tail  # #970
             # Automatic recovery continues the existing assignment, including
             # its explicit routing/model/reasoning choices.
             self._ps(key).provider_override = snap_provider_override
