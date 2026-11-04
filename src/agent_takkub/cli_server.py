@@ -95,6 +95,10 @@ _LEAD_ONLY_CMDS = frozenset(
         # Skill Learning (2c6cb77c): forces a reflection = a model call on
         # the user's quota — Lead decides, not a teammate shell.
         "skill-learn",
+        # PM pane → another project's Lead (`takkub pm send`). Lead token
+        # required here; the dispatch branch also requires the caller's
+        # project to be the PM project.
+        "pm-send",
     }
 )
 
@@ -106,6 +110,11 @@ _LEAD_ONLY_CMDS = frozenset(
 # rather than added to _LEAD_ONLY_CMDS so legitimate peer-to-peer use
 # (e.g. backend → qa) keeps working without the token.
 _LEAD_SPOOF_GUARDED_CMDS = frozenset({"send"})
+
+# What a project Lead sees ahead of a `takkub pm send` task (after the
+# `[PM → lead] ` header). Self-describing on purpose, so no Lead doc has to
+# teach it what a PM message means.
+PM_SEND_PREFIX = "สั่งงาน (เจ้าของสั่งผ่านแท็บ PM ทำเหมือนเจ้าของพิมพ์มาเอง แล้วตอบผลในแท็บนี้): "
 
 
 class CliServer(QObject):
@@ -566,6 +575,51 @@ class CliServer(QObject):
         except Exception:
             return None
 
+    def _pm_send(self, from_project: str | None, req: dict) -> tuple[bool, str]:
+        """`takkub pm send --project X "<msg>"` — the PM pane hands work to
+        project X's Lead. The Lead-token gate already ran (`pm-send` is in
+        `_LEAD_ONLY_CMDS`); this adds the PM-only rule and the target checks.
+        Delivery goes through `Orchestrator.send`, so an unopened project's
+        message waits for its Lead the same way any send to an unspawned role
+        does. Known limit: the Lead token is per-cockpit, not per-project, so
+        the PM check trusts the caller's `from_project` like every other
+        Lead-token command does."""
+        from . import config
+        from .pm_project import is_pm_project
+
+        if not is_pm_project(from_project):
+            return False, "pm send ใช้ได้เฉพาะจาก Lead ของแท็บ PM"
+        target = str(req.get("project") or "").strip()
+        text = str(req.get("msg") or "").strip()
+        if not target or not text:
+            return False, "pm send ต้องมี --project <ชื่อ> และข้อความงาน"
+        if is_pm_project(target):
+            return False, "pm send ส่งเข้าแท็บ PM เองไม่ได้"
+        known = (config.load_projects().get("projects") or {}).keys()
+        if target not in known:
+            return False, f"ไม่รู้จักโปรเจค '{target}' (ดูชื่อได้จาก takkub pm projects)"
+        lead_pane = self._orch._project_panes(target).get("lead")
+        lead_running = bool(
+            lead_pane is not None and lead_pane.session is not None and lead_pane.session.is_alive
+        )
+        ok, msg = self._orch.send(
+            "lead",
+            msg=f"{PM_SEND_PREFIX}{text}",
+            from_role="PM",
+            project=target,
+            kind=req.get("kind", "instruction"),
+        )
+        if ok and not lead_running:
+            # The stock queued reply tells the sender to `takkub assign --role
+            # lead`, which PM can't do. Say what actually happens instead.
+            msg = (
+                f"แท็บ {target} ยังไม่เปิด (ไม่มี Lead รันอยู่) เก็บงานไว้แล้ว "
+                f"จะส่งให้ Lead ของ {target} ทันทีที่เปิดแท็บนั้น"
+            )
+        elif ok:
+            msg = f"ส่งงานถึง Lead ของ {target} แล้ว ({msg})"
+        return ok, msg
+
     def _caller_is_lead(self, req: dict) -> bool:
         """True if the request carries the Lead capability token. Used to gate
         sensitive read-only payloads (M3#16) without timing side-channels."""
@@ -688,6 +742,7 @@ class CliServer(QObject):
             "report-send",
             "skill-learn",
             "subagent-done",
+            "pm-send",
         }:
             state = getattr(self._orch, "_pane_state", {}).get(f"{from_project}::lead")
             readiness_file = getattr(state, "lead_readiness_file", "")
@@ -1354,6 +1409,8 @@ class CliServer(QObject):
                     project=from_project,
                     kind=req.get("kind", "instruction"),
                 )
+            elif cmd == "pm-send":
+                ok, msg = self._pm_send(from_project, req)
             elif cmd == "report-send":
                 # `project` (an explicit `--project` on the CLI) wins over
                 # the auto-stamped `from_project` — mirrors `cmd_report`'s

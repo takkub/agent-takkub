@@ -1834,6 +1834,23 @@ def cmd_pm(args: argparse.Namespace) -> dict:
     from . import backlog, pm_report
 
     action = getattr(args, "pm_action", "summary")
+    if action == "send":
+        # The only PM action that writes: it lands in another project's Lead
+        # pane, so the cockpit checks the Lead token and the PM project.
+        text, err = _resolve_text_or_file(
+            getattr(args, "msg", None),
+            getattr(args, "from_file", None),
+            positional_name="msg",
+            file_flag="--from-file",
+            required=True,
+        )
+        if err:
+            return {"ok": False, "msg": err}
+        return _request(
+            _with_project(
+                {"cmd": "pm-send", "project": args.project, "msg": text, "from": _from_role()}
+            )
+        )
     if action == "projects":
         _utf8_print(pm_report.projects_table())
     elif action == "backlog":

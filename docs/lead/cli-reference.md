@@ -70,6 +70,7 @@ takkub provider model <name>                           # ดู model ที่ 
 takkub provider model <name> <model>                   # ตั้ง model (ว่าง/--clear = ใช้ default ของ CLI) · ต่อ role ตั้งที่ Settings
 takkub ma [--since-hours N] [--no-net] [--json]         # (operator) maintenance sweep: issue ค้าง → PR + สถานะ CI → สิ่งที่ events.log ของ cockpit ที่รันอยู่บอกว่าพังจริง → repo พร้อม ship ไหม → แผนทำต่อ · **อ่านอย่างเดียว ไม่แก้อะไร** (การตัดสินใจว่าจะแก้อะไรเป็นงานของ Lead ไม่ใช่สคริปต์) · --no-net = ดูเฉพาะ log ในเครื่อง
 takkub pm summary [--days N] [--pending] [--project X] # ภาพรวมทุกโปรเจคย้อนหลัง N วัน (done / ยังไม่ส่ง done / FAILED / REMAINING / backlog) · อ่านอย่างเดียว · ใช้ได้ทุก role (PM pane ใช้เป็นหลัก)
+takkub pm send --project X "<งาน>" [--from-file p]   # (PM pane เท่านั้น) ส่งงานถึง Lead ของโปรเจค X — Lead เห็นเป็น `[PM → lead] สั่งงาน (เจ้าของสั่งผ่านแท็บ PM …): <งาน>` · แท็บยังไม่เปิด = รอส่งตอนเปิด
 takkub pm projects | takkub pm backlog --project X     # รายชื่อโปรเจค+folder / backlog ทุกสถานะของโปรเจคหนึ่ง
 takkub restart                                         # restart cockpit ทั้งแอปจาก terminal (persist state → relaunch · panes respawn) — lead/terminal only
 takkub search "<query>"                                # grep บทสนทนา Claude Code เก่าทุกโปรเจค (--days N · --all · --project)

@@ -622,7 +622,7 @@ def can_spawn(role: str, project: str | None = None) -> tuple[bool, str]:
     if base not in ("lead", "shell") and is_pm_project(project):
         # The PM tab oversees every project read-only; it has no team.
         return False, (
-            "แท็บ PM ไม่มีทีม — สั่งงานต้องทำที่ Lead ของโปรเจคนั้น (PM เขียนข้อความสั่งงานให้ copy ไปวางได้)"
+            'แท็บ PM ไม่มีทีม — สั่งงานผ่าน Lead ของโปรเจคนั้น: takkub pm send --project <ชื่อ> "<งาน>"'
         )
     return _can_spawn_from_cfg(role, current(project), project)
 

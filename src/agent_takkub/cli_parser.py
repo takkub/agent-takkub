@@ -557,6 +557,18 @@ def _add_pm(sub: Any, c: ModuleType) -> None:
     pm_sub.add_parser("projects", help="รายชื่อโปรเจคทั้งหมด + อันที่เปิด tab อยู่ + folder")
     pbl = pm_sub.add_parser("backlog", help="backlog ทุกสถานะของโปรเจคหนึ่ง")
     pbl.add_argument("--project", required=True)
+    psend = pm_sub.add_parser(
+        "send",
+        help="(PM pane เท่านั้น) ส่งงานถึง Lead ของโปรเจคนั้น — Lead เห็นเป็น [PM → lead] สั่งงาน (…): <งาน>",
+    )
+    psend.add_argument("--project", required=True, help="โปรเจคปลายทาง (ชื่อจาก takkub pm projects)")
+    psend.add_argument("msg", nargs="?", default=None, help="ข้อความงาน")
+    psend.add_argument(
+        "--from-file",
+        dest="from_file",
+        default=None,
+        help="อ่านข้อความจากไฟล์ (utf-8) แทน positional · `-` = stdin",
+    )
     spm.set_defaults(func=c.cmd_pm)
 
 
