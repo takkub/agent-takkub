@@ -521,6 +521,81 @@ class TestGeminiMcpArgv:
         assert mcp_bridge.mcp_argv_for_provider("gemini", "qa", None, "proj") == []
 
 
+class TestAgyMcpSync978:
+    """#978: a role's allowed user MCPs reach agy panes through agy's
+    machine-wide mcp_config.json — ownership-tracked, never clobbering the
+    user's own entries, never pushing cockpit-managed MCPs."""
+
+    @pytest.fixture
+    def agy(self, isolated_mcp_file, monkeypatch, tmp_path):
+        from agent_takkub import agy_mcp_sync as ams
+        from agent_takkub import shared_dev_tools as sdt
+
+        path = tmp_path / "agy" / "mcp_config.json"
+        monkeypatch.setattr(ams, "agy_mcp_config_path", lambda: path)
+        allow: dict[str, frozenset[str]] = {}
+        monkeypatch.setattr(sdt, "role_mcp_allowlist", lambda role: allow.get(role, frozenset()))
+        return isolated_mcp_file, path, allow
+
+    @staticmethod
+    def _servers(path) -> dict:
+        return json.loads(path.read_text(encoding="utf-8"))["mcpServers"]
+
+    def test_allowed_user_mcps_land_in_agy_config(self, agy):
+        master, path, allow = agy
+        _write_master(
+            master,
+            {
+                "api": {
+                    "type": "http",
+                    "url": "https://x/mcp",
+                    "headers": {"Authorization": "B t"},
+                },
+                "fs": {"command": "npx", "args": ["-y", "fs"], "env": {"K": "v"}},
+                "playwright": {"command": "npx", "args": []},
+                "other": {"command": "x"},
+            },
+        )
+        allow["mobile"] = frozenset({"api", "fs", "playwright"})
+        assert mcp_bridge.mcp_argv_for_provider("gemini", "mobile", None, "proj") == []
+        assert self._servers(path) == {
+            "api": {"serverUrl": "https://x/mcp", "headers": {"Authorization": "B t"}},
+            "fs": {"command": "npx", "args": ["-y", "fs"], "env": {"K": "v"}},
+        }
+
+    def test_user_entries_are_never_touched_and_removed_servers_are_dropped(self, agy):
+        from agent_takkub import agy_mcp_sync as ams
+
+        master, path, allow = agy
+        path.parent.mkdir(parents=True)
+        path.write_text(
+            json.dumps({"mcpServers": {"ccc": {"command": "py"}, "api": {"command": "mine"}}}),
+            encoding="utf-8",
+        )
+        _write_master(master, {"api": {"command": "theirs"}, "fs": {"command": "fs"}})
+        allow["mobile"] = frozenset({"api", "fs"})
+        summary = ams.sync_role_to_agy("mobile")
+        assert summary["skipped_user"] == ["api"] and summary["added"] == ["fs"]
+        assert self._servers(path)["api"] == {"command": "mine"}
+
+        _write_master(master, {"api": {"command": "theirs"}})  # takkub mcp remove fs
+        summary = ams.sync_role_to_agy("mobile")
+        assert summary["removed"] == ["fs"]
+        assert self._servers(path) == {"ccc": {"command": "py"}, "api": {"command": "mine"}}
+
+    def test_unparseable_agy_config_is_left_alone(self, agy):
+        from agent_takkub import agy_mcp_sync as ams
+
+        master, path, allow = agy
+        path.parent.mkdir(parents=True)
+        path.write_text('{"mcpServers": {}, // comment\n}', encoding="utf-8")
+        _write_master(master, {"fs": {"command": "fs"}})
+        allow["mobile"] = frozenset({"fs"})
+        summary = ams.sync_role_to_agy("mobile")
+        assert summary["error"] and "untouched" in summary["error"]
+        assert path.read_text(encoding="utf-8") == '{"mcpServers": {}, // comment\n}'
+
+
 class TestUnknownProvider:
     def test_unknown_provider_name_returns_empty(self, isolated_mcp_file):
         assert mcp_bridge.mcp_argv_for_provider("nope", "qa", None, "proj") == []

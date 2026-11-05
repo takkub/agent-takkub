@@ -1695,8 +1695,33 @@ def _add_mcp(sub: Any, c: ModuleType) -> None:
         "add", help="register a new MCP server in the master config (lead only)"
     )
     sm_add.add_argument("name")
-    sm_add.add_argument("--command", required=True, metavar="CMD")
+    sm_target = sm_add.add_mutually_exclusive_group(required=True)
+    sm_target.add_argument("--command", metavar="CMD", help="stdio server executable")
+    sm_target.add_argument(
+        "--url", metavar="URL", help="HTTP (Streamable HTTP) server URL — no stdio bridge (#979)"
+    )
     sm_add.add_argument("--args", default="", metavar='"..."', help="shell-quoted args string")
+    sm_add.add_argument(
+        "--header",
+        action="append",
+        default=[],
+        metavar='"Key: Value"',
+        help="HTTP header with a literal value (repeatable; a populated header needs --force)",
+    )
+    sm_add.add_argument(
+        "--header-env",
+        action="append",
+        default=[],
+        metavar="Key=ENV_VAR",
+        help="HTTP header whose value is read from ENV_VAR now (keeps secrets off argv)",
+    )
+    sm_add.add_argument(
+        "--header-file",
+        action="append",
+        default=[],
+        metavar="Key=PATH",
+        help="HTTP header whose value is the first line of PATH (keeps secrets off argv)",
+    )
     sm_add.add_argument(
         "--force", action="store_true", help="bypass the credential-looking-value block"
     )

@@ -5766,6 +5766,51 @@ _PANE_TOOLS_PAST_TENSE = {"allow": "allowed", "deny": "denied"}
 _MCP_POLICY_ENFORCED_PROVIDERS = ("claude", "codex")
 
 
+def _mcp_http_cfg(args: argparse.Namespace) -> tuple[dict, bool] | str:
+    """Build an HTTP MCP entry for `takkub mcp add --url` (#979).
+
+    Returns ``(cfg, from_safe_source)`` — the flag is True when any header
+    value came from --header-env/--header-file — or an error string."""
+    url = str(args.url).strip()
+    if not url.lower().startswith(("http://", "https://")):
+        return f"--url must start with http:// or https:// (got {url!r})"
+    if args.args:
+        return "--args is for stdio servers (--command); an HTTP server takes --url only"
+    headers: dict[str, str] = {}
+    for raw in args.header or []:
+        key, sep, value = str(raw).partition(":")
+        if not sep or not key.strip():
+            return f'--header must look like "Key: Value" (got {raw!r})'
+        headers[key.strip()] = value.strip()
+    safe = False
+    for raw in args.header_env or []:
+        key, sep, var = str(raw).partition("=")
+        if not sep or not key.strip() or not var.strip():
+            return f"--header-env must look like Key=ENV_VAR (got {raw!r})"
+        value = os.environ.get(var.strip())
+        if not value:
+            return f"--header-env {key.strip()}: environment variable {var.strip()!r} is not set"
+        headers[key.strip()] = value
+        safe = True
+    for raw in args.header_file or []:
+        key, sep, path = str(raw).partition("=")
+        if not sep or not key.strip() or not path.strip():
+            return f"--header-file must look like Key=PATH (got {raw!r})"
+        try:
+            text = Path(path.strip()).expanduser().read_text(encoding="utf-8")
+        except OSError as e:
+            return f"--header-file {key.strip()}: cannot read {path.strip()!r}: {e}"
+        value = (text.splitlines() or [""])[0].strip()
+        if not value:
+            return f"--header-file {key.strip()}: {path.strip()!r} is empty"
+        headers[key.strip()] = value
+        safe = True
+    cfg: dict = {"type": "http", "url": url}
+    if headers:
+        cfg["headers"] = headers
+    return cfg, safe
+
+
 def _require_lead_for_pane_tools(action: str) -> str | None:
     role = _from_role()
     if role is None:
@@ -5870,8 +5915,24 @@ def cmd_mcp(args: argparse.Namespace) -> dict:
         if sub == "deny" and args.role != "lead":
             msg += (
                 f" — enforced for {'/'.join(_MCP_POLICY_ENFORCED_PROVIDERS)} panes only; "
-                f"gemini/opencode/cursor don't consult this policy (#103/#121)"
+                f"gemini (agy) reads one machine-wide ~/.gemini/config/mcp_config.json, so a "
+                f"server another role synced there stays visible to agy panes; "
+                f"opencode/cursor don't consult this policy (#103/#121/#978)"
             )
+        elif sub == "allow" and args.role != "lead":
+            from .shared_dev_tools import MANAGED_MCP_NAMES
+
+            if args.name in MANAGED_MCP_NAMES:
+                msg += (
+                    " — claude/codex panes only; cockpit-managed MCPs are not pushed into "
+                    "agy's machine-wide config (gemini panes won't get it, #978)"
+                )
+            else:
+                msg += (
+                    " — gemini (agy) panes of this role get it at spawn via the machine-wide "
+                    "~/.gemini/config/mcp_config.json (visible to every agy session, #978); "
+                    "opencode/cursor not covered"
+                )
         return {"ok": True, "msg": msg}
 
     if sub == "reset":
@@ -5888,8 +5949,20 @@ def cmd_mcp(args: argparse.Namespace) -> dict:
         return {"ok": True, "msg": f"reset {', '.join(roles)}"}
 
     if sub == "add":
-        cfg = {"type": "stdio", "command": args.command, "args": shlex.split(args.args or "")}
-        if not sdt.add_mcp_server(args.name, cfg, force=args.force):
+        force = bool(args.force)
+        if getattr(args, "url", None):
+            built = _mcp_http_cfg(args)
+            if isinstance(built, str):
+                return {"ok": False, "msg": built}
+            cfg, from_safe_source = built
+            # Values read from env/file were never on argv: that explicit
+            # channel is the user's consent to store them (#979).
+            force = force or from_safe_source
+        else:
+            if args.header or args.header_env or args.header_file:
+                return {"ok": False, "msg": "--header/--header-env/--header-file need --url"}
+            cfg = {"type": "stdio", "command": args.command, "args": shlex.split(args.args or "")}
+        if not sdt.add_mcp_server(args.name, cfg, force=force):
             return {
                 "ok": False,
                 "msg": (
@@ -5901,7 +5974,14 @@ def cmd_mcp(args: argparse.Namespace) -> dict:
             }
         sdt.regen_role_variants()
         _pane_tools_table("mcps", None)
-        return {"ok": True, "msg": f"added MCP {args.name!r}"}
+        return {
+            "ok": True,
+            "msg": (
+                f"added MCP {args.name!r} — reaches claude/codex panes and (machine-wide) "
+                f"gemini/agy panes of roles you `takkub mcp allow`; opencode/cursor panes "
+                f"don't use the cockpit MCP set (#978/#979)"
+            ),
+        }
 
     if sub == "remove":
         if not sdt.remove_mcp_server(args.name):

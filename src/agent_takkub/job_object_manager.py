@@ -9,6 +9,7 @@ import sys
 _log = logging.getLogger(__name__)
 _JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x2000
 _JOBOBJECTINFOCLASS_EXTENDED_LIMIT = 9
+_JOBOBJECTINFOCLASS_BASIC_PROCESS_ID_LIST = 3
 _PROCESS_SET_QUOTA = 0x0100
 _PROCESS_TERMINATE = 0x0001
 _PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
@@ -105,6 +106,90 @@ class JobObjectManager:
             return assigned
         except Exception:
             return False
+
+    def member_pids(self) -> list[int]:
+        """PIDs currently in the job (every descendant inherits membership,
+        including processes launched detached via `start` / Start-Process
+        whose parent already exited — a tree walk cannot see those, #980)."""
+        if self._handle is None or sys.platform != "win32":
+            return []
+        try:
+            kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
+            capacity = 4096
+
+            class _PID_LIST(ctypes.Structure):
+                _fields_ = [
+                    ("NumberOfAssignedProcesses", ctypes.c_uint32),
+                    ("NumberOfProcessIdsInList", ctypes.c_uint32),
+                    ("ProcessIdList", ctypes.c_size_t * capacity),
+                ]
+
+            info = _PID_LIST()
+            ok = kernel32.QueryInformationJobObject(
+                self._handle,
+                _JOBOBJECTINFOCLASS_BASIC_PROCESS_ID_LIST,
+                ctypes.byref(info),
+                ctypes.sizeof(info),
+                None,
+            )
+            if not ok:
+                return []
+            count = min(int(info.NumberOfProcessIdsInList), capacity)
+            return [int(info.ProcessIdList[i]) for i in range(count)]
+        except Exception as exc:
+            _log.debug("job object pid list failed: %r", exc)
+            return []
+
+    def _disarm(self) -> bool:
+        """Clear KILL_ON_JOB_CLOSE so closing the handle leaves members alive."""
+        if self._handle is None:
+            return False
+        try:
+            kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
+            info = _JOBOBJECT_EXTENDED_LIMIT_INFORMATION()
+            info.BasicLimitInformation.LimitFlags = 0
+            return bool(
+                kernel32.SetInformationJobObject(
+                    self._handle,
+                    _JOBOBJECTINFOCLASS_EXTENDED_LIMIT,
+                    ctypes.byref(info),
+                    ctypes.sizeof(info),
+                )
+            )
+        except Exception as exc:
+            _log.debug("job object disarm failed: %r", exc)
+            return False
+
+    def close_sparing(self, spare: set[int]) -> bool:
+        """Close the job but keep `spare` PIDs alive (#980).
+
+        With no PIDs to spare this is plain `close()`. Otherwise the
+        kill-on-close limit is cleared first, every other member is terminated
+        by PID, and only then is the handle closed — so a machine service the
+        pane launched (Docker Desktop) outlives the pane. If the limit cannot
+        be cleared, falls back to `close()` (old behavior) rather than leaking.
+        """
+        if not spare or self._handle is None:
+            return self.close()
+        members = self.member_pids()
+        if not self._disarm():
+            _log.warning("job object disarm failed; closing kills spared pids %s", sorted(spare))
+            return self.close()
+        try:
+            kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
+            for pid in members:
+                if pid in spare:
+                    continue
+                process = kernel32.OpenProcess(_PROCESS_TERMINATE, False, int(pid))
+                if not process:
+                    continue
+                try:
+                    kernel32.TerminateProcess(process, 1)
+                finally:
+                    kernel32.CloseHandle(process)
+        except Exception as exc:
+            _log.debug("job object sparing kill failed: %r", exc)
+        return self.close()
 
     def close(self) -> bool:
         """Close the job handle; Windows terminates all assigned descendants."""

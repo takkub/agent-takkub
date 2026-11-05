@@ -48,7 +48,11 @@ to that provider's own injection surface:
     see `McpResolutionError`). A role with NO cockpit MCP policy at all
     (`role_mcp_allowlist` returns `None`) stays untouched passthrough, same
     as always.
-  - ``"plugin_import"`` (gemini/agy): documented no-op. `agy` genuinely
+  - ``"plugin_import"`` (gemini/agy): no argv. Since #978 the role's
+    allowed USER MCPs are merged into agy's machine-wide
+    ``~/.gemini/config/mcp_config.json`` at spawn (`agy_mcp_sync.py` —
+    ownership-tracked; cockpit-managed MCPs are never pushed). History of
+    why nothing is session-scoped: `agy` genuinely
     CAN bridge MCP servers from a Claude-style plugin's `.mcp.json` via
     `agy plugin import <path>` (proven empirically against the real
     `agy 1.1.1` binary), but the staged result lands in
@@ -665,8 +669,22 @@ def mcp_argv_for_provider(
             cwd=cwd,
             env=env,
         )
-    # "plugin_import" (gemini/agy) and "none" — documented no-op, see
-    # module docstring for why plugin_import isn't auto-driven per spawn.
+    if variant == "plugin_import":
+        # #978: agy has no session-scoped MCP flag, so the role's allowed
+        # user MCPs are merged into agy's machine-wide mcp_config.json
+        # (ownership-tracked, never touching the user's own entries).
+        from .agy_mcp_sync import sync_role_to_agy
+
+        summary = sync_role_to_agy(base_role)
+        if any(summary.get(k) for k in ("added", "updated", "removed")):
+            _log.info("agy mcp sync for %s: %s", base_role, summary)
+        for key in ("skipped_user", "unconvertible"):
+            if summary.get(key):
+                _log.warning("agy mcp sync for %s: %s %s", base_role, key, summary[key])
+        if summary.get("error"):
+            _log.warning("agy mcp sync for %s: %s", base_role, summary["error"])
+        return []
+    # "none" (opencode/cursor) — documented no-op, see module docstring.
     return []
 
 

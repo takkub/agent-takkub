@@ -78,3 +78,9 @@ If you find an abnormally small file → `mb wait networkidle` (or `mb wait
 1000`) then `mb shot` again before reporting — the cockpit will also flag
 files < 10KB in the evidence for Lead to see, but don't let Lead be the one
 to catch it later — catch it at the source.
+
+**Docker engine gone mid-test (Windows, #980):** if `docker ps` says
+`npipe dockerDesktopLinuxEngine not found` after another pane finished, that
+pane had started Docker Desktop. See `docs/roles/devops/bring-up-and-locks.md`
+for the fix and the workaround on older cockpits. Report it BLOCKED with that
+error; do not restart Docker from your own pane.

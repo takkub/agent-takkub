@@ -11,6 +11,7 @@ The terminal widget consumes the screen state, the orchestrator triggers writes.
 
 from __future__ import annotations
 
+import logging
 import os
 import re
 import subprocess
@@ -46,6 +47,7 @@ from .provider_spec import READY_RULES as _READY_RULES
 
 # CREATE_NO_WINDOW so the helper taskkill doesn't flash a console window.
 _CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+_log = logging.getLogger(__name__)
 
 # Long-lived machine services and their helpers can be launched from an agent
 # pane (for example, Docker Desktop on Windows). They must outlive the pane.
@@ -54,10 +56,54 @@ _PROTECTED_TREE_NAMES = frozenset(
         "docker desktop.exe",
         "com.docker.backend.exe",
         "com.docker.service",
+        "com.docker.service.exe",
         "com.docker.proxy.exe",
+        "com.docker.build.exe",
+        "com.docker.dev-envs.exe",
+        "com.docker.vpnkit.exe",
+        "vpnkit.exe",
         "docker.exe",
     }
 )
+
+
+def _protected_job_pids(job: JobObjectManager) -> set[int]:
+    """Members of the pane's job that must outlive the pane (#980).
+
+    Every process a pane launches inherits the pane's kill-on-close Job Object
+    — including Docker Desktop started detached (`start` / Start-Process) whose
+    launching shell already exited, so the `_tree_kill` walk never sees it.
+    A member is protected when it, or any ancestor, has a protected name.
+    """
+    members = job.member_pids()
+    if not members:
+        return set()
+    try:
+        import psutil
+    except Exception:
+        return set()
+    protected: set[int] = set()
+    for pid in members:
+        try:
+            proc = psutil.Process(pid)
+            chain = [proc, *proc.parents()]
+            if any(p.name().casefold() in _PROTECTED_TREE_NAMES for p in chain):
+                protected.add(pid)
+        except Exception:
+            continue
+    return protected
+
+
+def _close_pane_job(job: JobObjectManager) -> None:
+    """Close the pane job, sparing protected machine services (#980)."""
+    try:
+        spare = _protected_job_pids(job)
+    except Exception:
+        spare = set()
+    if spare:
+        _log.info("pane job close: sparing protected pids %s", sorted(spare))
+    job.close_sparing(spare)
+
 
 # Bound on the native pty-constructor call itself (issue #139): a wedged
 # pywinpty/ptyprocess spawn once blocked the Qt main thread — and the
@@ -2822,13 +2868,15 @@ class PtySession(QObject):
             if kill_process:
                 # Native ownership first. Closing a KILL_ON_JOB_CLOSE job is
                 # deterministic; PID-scoped tree-kill below remains the fallback.
+                # Protected services (Docker Desktop, #980) are spared — the
+                # job is their only link to the pane once their launcher exits.
                 if _job_object is not None:
-                    _job_object.close()
+                    _close_pane_job(_job_object)
                 _tree_kill(_pid)
             elif _job_object is not None:
                 # Root exited naturally; closing the job reaps any descendants
                 # it left behind and releases the native handle.
-                _job_object.close()
+                _close_pane_job(_job_object)
             if kill_process and _proc is not None:
                 try:
                     _proc.terminate(force=True)  # unblocks reader's proc.read()

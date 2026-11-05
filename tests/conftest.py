@@ -492,6 +492,12 @@ def _isolate_runtime(monkeypatch: pytest.MonkeyPatch, tmp_path):
     _pi = _maybe_module("agent_takkub.pane_instructions", force=True)
     if _pi is not None:
         monkeypatch.setattr(_pi, "agy_agents_root", lambda: tmp_path / "_isolated_agy_agents")
+    # #978: agy's machine-wide mcp_config.json — never the real one.
+    _ams = _maybe_module("agent_takkub.agy_mcp_sync", force=True)
+    if _ams is not None:
+        monkeypatch.setattr(
+            _ams, "agy_mcp_config_path", lambda: tmp_path / "_isolated_agy_mcp_config.json"
+        )
 
     targets = [(n, "RUNTIME_DIR", runtime) for n in _RUNTIME_DIR_MODULES]
     targets += [(n, "EVENTS_LOG", events) for n in _EVENTS_LOG_MODULES]

@@ -59,3 +59,36 @@ def test_non_windows_job_manager_is_safe_noop(monkeypatch) -> None:
     assert not manager.create()
     assert not manager.assign(1)
     assert not manager.close()
+
+
+def test_protected_job_pids_spares_service_and_its_descendants_980(monkeypatch) -> None:
+    """#980: members named like Docker, or descended from one, are spared;
+    the pane's own processes are not."""
+    import psutil
+
+    from agent_takkub import pty_session
+
+    names = {1: "claude.exe", 2: "cmd.exe", 3: "Docker Desktop.exe", 4: "wsl.exe", 5: "node.exe"}
+    parents = {1: [], 2: [1], 3: [], 4: [3], 5: [1]}  # 3's launcher (2) already exited
+
+    class _P:
+        def __init__(self, pid: int) -> None:
+            self.pid = pid
+
+        def name(self) -> str:
+            return names[self.pid]
+
+        def parents(self) -> list[_P]:
+            return [_P(p) for p in parents[self.pid]]
+
+    monkeypatch.setattr(psutil, "Process", _P)
+    job = type("J", (), {"member_pids": lambda self: [1, 2, 3, 4, 5]})()
+    assert pty_session._protected_job_pids(job) == {3, 4}
+
+
+def test_close_sparing_without_spare_is_plain_close(monkeypatch) -> None:
+    manager = module.JobObjectManager()
+    calls: list[str] = []
+    monkeypatch.setattr(manager, "close", lambda: calls.append("close") or True)
+    assert manager.close_sparing(set())
+    assert calls == ["close"]

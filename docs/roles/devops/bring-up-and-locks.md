@@ -64,3 +64,10 @@ DEV done → devops brings the stack up → QA tests last), follow this:
 
 After QA is done, Lead may tell you to `docker compose -p <project>-qa
 down` to free up RAM/ports — only do this when instructed.
+
+**Docker Desktop started from a pane (Windows, #980):** every process a pane
+starts joins the pane's Job Object. From 2.2.47 on, cockpit spares Docker
+Desktop and its helpers when the pane closes or sends done. On older cockpits,
+or if `docker ps` reports `npipe dockerDesktopLinuxEngine not found` right
+after a pane finished, start Docker outside the pane tree instead:
+`explorer.exe "C:\Program Files\Docker\Docker\Docker Desktop.exe"`.

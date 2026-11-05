@@ -10,6 +10,9 @@ successful mutation.
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
 import pytest
 
 from agent_takkub import cli, pane_tools_policy, shared_dev_tools
@@ -398,6 +401,87 @@ class TestMcpAddRemove:
 
         assert code == 0
         assert seen["force"] is True
+
+    def _capture_add(self, monkeypatch: pytest.MonkeyPatch) -> dict:
+        _clear_role_env(monkeypatch)
+        monkeypatch.setenv("TAKKUB_ROLE", "lead")
+        seen: dict = {}
+        monkeypatch.setattr(
+            shared_dev_tools,
+            "add_mcp_server",
+            lambda name, cfg, force=False: seen.update(name=name, cfg=cfg, force=force) or True,
+        )
+        monkeypatch.setattr(pane_tools_policy, "load_policy", lambda: {})
+        monkeypatch.setattr(
+            pane_tools_policy, "effective_mcps", lambda role, default=None: default or frozenset()
+        )
+        monkeypatch.setattr(shared_dev_tools, "regen_role_variants", lambda: 0)
+        return seen
+
+    def test_add_http_url_with_header_from_env_979(self, monkeypatch, tmp_path) -> None:
+        seen = self._capture_add(monkeypatch)
+        monkeypatch.setenv("MY_API_TOKEN_979", "Bearer s3cret")
+        token_file = tmp_path / "org.txt"
+        token_file.write_text("acme\n", encoding="utf-8")
+
+        code = cli.main(
+            [
+                "mcp",
+                "add",
+                "api",
+                "--url",
+                "https://example.com/mcp",
+                "--header-env",
+                "Authorization=MY_API_TOKEN_979",
+                "--header-file",
+                f"X-Org={token_file}",
+            ]
+        )
+
+        assert code == 0
+        assert seen["cfg"] == {
+            "type": "http",
+            "url": "https://example.com/mcp",
+            "headers": {"Authorization": "Bearer s3cret", "X-Org": "acme"},
+        }
+        # value came from env/file, never argv — that is the consent to store it
+        assert seen["force"] is True
+
+    def test_add_http_literal_header_still_needs_force_979(self, monkeypatch) -> None:
+        seen = self._capture_add(monkeypatch)
+        code = cli.main(["mcp", "add", "api", "--url", "https://x/mcp", "--header", "X-A: b"])
+        assert code == 0
+        assert seen["cfg"]["headers"] == {"X-A": "b"}
+        assert seen["force"] is False
+
+    @pytest.mark.parametrize(
+        "argv",
+        [
+            ["--command", "npx", "--header", "X: y"],
+            ["--url", "ftp://x"],
+            ["--url", "https://x", "--header-env", "Authorization=UNSET_VAR_979_XYZ"],
+            ["--url", "https://x", "--header", "no-colon"],
+        ],
+    )
+    def test_add_http_rejects_bad_input_979(self, monkeypatch, argv) -> None:
+        seen = self._capture_add(monkeypatch)
+        monkeypatch.delenv("UNSET_VAR_979_XYZ", raising=False)
+        assert cli.main(["mcp", "add", "api", *argv]) == 1
+        assert seen == {}
+
+    def test_http_server_reaches_claude_role_variant_979(self, monkeypatch, tmp_path) -> None:
+        """End to end on the real writers: the HTTP entry lands verbatim in
+        the role's --mcp-config variant — no mcp-remote bridge."""
+        monkeypatch.setattr(shared_dev_tools, "SHARED_MCP_FILE", tmp_path / "shared-mcp.json")
+        cfg = {"type": "http", "url": "https://x/mcp", "headers": {"Authorization": "B t"}}
+        assert shared_dev_tools.add_mcp_server("api", cfg, force=True)
+        monkeypatch.setattr(shared_dev_tools, "role_mcp_allowlist", lambda role: frozenset({"api"}))
+        monkeypatch.setattr(shared_dev_tools, "_ROLE_MCP_POLICY", {"mobile": frozenset({"api"})})
+        shared_dev_tools.regen_role_variants()
+        path = shared_dev_tools.shared_mcp_config_path_for_role("mobile")
+        assert path is not None
+        data = json.loads(Path(path).read_text(encoding="utf-8"))
+        assert data["mcpServers"]["api"] == cfg
 
     def test_add_blocked_by_secret_check_hints_force(
         self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture

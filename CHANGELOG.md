@@ -2,6 +2,17 @@
 
 All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses [SemVer](https://semver.org/).
 
+## [v2.2.47] - 2026-11-05
+
+### Fixed (แก้)
+
+- **Docker Desktop ที่ pane เปิดตายตอน pane ปิดหรือส่ง done (Windows, #980 regression ของ #720):** สาเหตุจริงคือ Job Object ของ pane ตั้ง `KILL_ON_JOB_CLOSE` ไว้ และ process ทุกตัวที่ pane เปิดจะอยู่ใน job นี้ด้วย รวมถึงตัวที่เปิดแบบ detached ด้วย `start`/`Start-Process` ซึ่ง shell ที่สั่งเปิดปิดไปแล้ว ตอน teardown โค้ดปิด job ก่อน `_tree_kill` แล้ว Windows ก็ฆ่าทุกตัวในนั้นไปด้วย list ที่ปกป้อง Docker ไว้ (#720) อยู่ใน `_tree_kill` ซึ่งรันทีหลัง จึงไม่เคยได้ทำงาน · ตอนนี้ก่อนปิดจะไล่ดูสมาชิกใน job ถ้าเจอ process ของ Docker หรือลูกหลานของมัน จะปิด kill-on-close แล้วฆ่าเฉพาะตัวอื่นทีละ pid แล้วค่อยปิด handle · เพิ่ม helper ของ Docker 4.x (`com.docker.build`, `vpnkit`, `dev-envs`) เข้า list · ทดสอบกับ process จริงทั้งสองทาง: ปิด job แบบเดิม process ที่ detach ไว้ตาย ส่วนแบบใหม่รอด และตัวอื่นใน job ยังถูกเก็บครบ · ถ้า cockpit crash ไปเลยโดยไม่ได้ teardown handle จะถูกปิดโดย OS และ Docker ยังตายตาม (gap ที่เหลือ)
+- **`takkub mcp add/allow` ไปไม่ถึง pane ของ gemini (agy) (#978):** agy อ่าน MCP จาก `~/.gemini/config/mcp_config.json` ไฟล์เดียวของทั้งเครื่อง และไม่มี flag ราย session (probe agy 1.5.0 แล้ว: ใส่ `plugins:` ใน agent.md ก็ไม่ start MCP ของ plugin) · ตอนนี้ตอน spawn pane agy จะ merge MCP ที่ผู้ใช้เพิ่มเองและ role นั้นได้ allow ลงไฟล์ของ agy (HTTP แปลงเป็น `serverUrl`/`headers`) · ไม่แตะ entry ที่ผู้ใช้เขียนเอง เพราะจดไว้ว่าเขียนอะไรลงไปบ้าง · ลบตัวที่เคยเขียนออกเมื่อ `takkub mcp remove` · ไม่ push MCP ที่ cockpit จัดการเอง (browser/graft/ccc) · ไฟล์ที่ parse แบบ JSON ล้วนไม่ได้จะไม่ถูกเขียนทับ · ข้อจำกัดที่บอกไว้ใน `takkub mcp allow/deny`: ไฟล์นี้ใช้ร่วมทั้งเครื่อง จึง deny ราย role สำหรับ agy ไม่ได้
+
+### Added (เพิ่ม)
+
+- **`takkub mcp add <name> --url <URL>` ลงทะเบียน HTTP MCP server ได้โดยไม่ต้องผ่าน stdio bridge (#979):** ใส่ header ได้ด้วย `--header "K: V"` (ถ้ามีค่าต้องใส่ `--force`), `--header-env K=ENV_VAR` หรือ `--header-file K=PATH` สองแบบหลังทำให้ secret ไม่ไปอยู่บน argv · ส่งถึง claude (`--mcp-config`), codex (`url`/`http_headers`) และ agy (ข้อด้านบน) ส่วน opencode/cursor ไม่ใช้ชุด MCP ของ cockpit ซึ่งข้อความตอน add บอกไว้
+
 ## [v2.2.46] - 2026-11-04
 
 ### Fixed (แก้)
