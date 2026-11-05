@@ -28,6 +28,8 @@ _ALLOWLIST: dict[str, str] = {
     "custom_roles.py": "default color assigned to a brand-new custom role (identity data, "
     "not chrome)",
     "issues.py": "GitHub label colors — external data rendered as-is, not cockpit chrome",
+    "project_template.py": "SWATCH — the brand colors a user picks for THEIR new project "
+    "(written into that project's AGENTS.md), project data, not cockpit chrome",
     "design_review_html.py": "generates a standalone HTML artifact viewed in a browser, "
     "not a Qt surface; its palette is self-contained",
     "report_builder.py": "generates standalone customer/dev/boss HTML reports viewed in a "

@@ -117,6 +117,12 @@ def _swatch_icon(color: str) -> QIcon:
     return QIcon(pm)
 
 
+def _accent_wash() -> str:
+    """Picked-chip fill: the theme accent at ~18% (follows the light/dark variant)."""
+    c = QColor(ct.ACCENT_GOLD)
+    return f"rgba({c.red()}, {c.green()}, {c.blue()}, 46)"
+
+
 def _extra_qss() -> str:
     accent, chip_text = ct.ACCENT_GOLD, ct.GOLD_CHIP_TEXT
     return f"""
@@ -137,7 +143,7 @@ def _extra_qss() -> str:
     QPushButton#tplChip {{ background: {ct.GROUND_INSET}; border: 1px solid {ct.BORDER_CONTROL};
         border-radius: 13px; padding: 4px 11px; color: {ct.TEXT_PRIMARY}; font-size: 12px; }}
     QPushButton#tplChip:hover {{ border-color: {ct.TEXT_MUTED}; }}
-    QPushButton#tplChip:checked {{ background: rgba(99, 102, 241, 46); border-color: {accent}; color: #FFFFFF; }}
+    QPushButton#tplChip:checked {{ background: {_accent_wash()}; border-color: {accent}; color: {ct.GOLD_TEXT_ON}; }}
     QPushButton#tplChipNone {{ background: {ct.GROUND_INSET}; border: 1px dashed {ct.BORDER_CONTROL};
         border-radius: 13px; padding: 4px 11px; color: {ct.TEXT_MUTED}; font-size: 12px; }}
     QPushButton#tplChipNone:checked {{ border-color: {ct.TEXT_MUTED}; color: {ct.TEXT_SECONDARY}; }}
@@ -293,7 +299,7 @@ class NewProjectDialog(ct.CockpitDialog):
         lbl, text, tag = self._tag_labels[b]
         color = ct.GOLD_CHIP_TEXT if on else ct.TEXT_MUTED
         lbl.setText(
-            f'<span style="color:{"#FFFFFF" if on else ct.TEXT_PRIMARY}">{text}</span>'
+            f'<span style="color:{ct.GOLD_TEXT_ON if on else ct.TEXT_PRIMARY}">{text}</span>'
             f'&nbsp;<span style="color:{color};font-size:11px">{tag}</span>'
         )
         hint = lbl.sizeHint()
