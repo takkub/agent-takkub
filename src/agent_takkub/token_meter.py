@@ -527,6 +527,7 @@ def provider_session_id_for_cwd(
     not_before: float = 0.0,
     exclude_ids: frozenset[str] = frozenset(),
     created_after: float = 0.0,
+    codex_marker: str | None = None,
 ) -> str | None:
     """Resolve the provider-NATIVE session id for `cwd`'s session, for
     close-time resume preservation (#723).
@@ -537,7 +538,16 @@ def provider_session_id_for_cwd(
     returned for any provider; codex also searches past them, bounded to
     rollouts started after ``created_after`` (this pane's spawn). Ambiguity
     resolves to None → cold respawn, never a foreign resume.
+
+    #983: a sibling codex pane's id is usually unknown to the cockpit (fresh
+    codex panes never report one), so ``exclude_ids`` cannot name it. A codex
+    newest-in-cwd guess therefore needs ``codex_marker`` — this pane's own
+    #964 developer-instructions marker — and only a rollout carrying it
+    resolves. ``codex_marker=""`` (the pane has none) resolves nothing;
+    ``None`` keeps the legacy unbound behaviour for non-close callers.
     """
+    if provider == "codex" and codex_marker is not None and not session_uuid and not codex_marker:
+        return None
     found = _provider_session_id_for_cwd(
         provider,
         cwd,
@@ -545,6 +555,7 @@ def provider_session_id_for_cwd(
         not_before=not_before,
         exclude_ids=exclude_ids,
         created_after=created_after,
+        codex_marker=codex_marker or "",
     )
     if found and found in exclude_ids:
         return None
@@ -559,6 +570,7 @@ def _provider_session_id_for_cwd(
     not_before: float,
     exclude_ids: frozenset[str],
     created_after: float,
+    codex_marker: str = "",
 ) -> str | None:
     """Unfiltered resolve behind `provider_session_id_for_cwd`.
 
@@ -598,6 +610,7 @@ def _provider_session_id_for_cwd(
                 exclude_ids=exclude_ids,
                 created_after=created_after,
                 parent_only=True,
+                required_marker=codex_marker,
             )
             if cand is None:
                 return None

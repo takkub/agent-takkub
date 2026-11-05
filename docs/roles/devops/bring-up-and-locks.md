@@ -65,6 +65,24 @@ DEV done → devops brings the stack up → QA tests last), follow this:
 After QA is done, Lead may tell you to `docker compose -p <project>-qa
 down` to free up RAM/ports — only do this when instructed.
 
+**Auto-down (#984, 2.2.49+):** the cockpit itself runs `docker compose -p
+<stack> down` (never `-v`; volumes and images stay) for every compose stack
+whose `com.docker.compose.project.working_dir` lies inside the project's paths
+or its managed worktrees when:
+
+- Lead runs `takkub end-session` with no teammate pane left,
+- the project tab closes, or
+- a devops done states a healthy **prod** deploy (`deploy prod … health ผ่าน`)
+  while no other teammate pane of the project is still working.
+
+A stack that another open tab's path claims just as specifically is skipped,
+and Lead gets the result (stacks and containers taken down, approximate RAM
+freed, or the failure). To keep a stack running, set
+`"services": {"auto_down": false}` on the project in projects.json. So in a
+deploy done, say plainly whether prod is healthy. A vague note never triggers
+auto-down. A note that mentions a failure, rollback or unhealthy state never
+counts as a successful deploy.
+
 **Docker Desktop started from a pane (Windows, #980):** every process a pane
 starts joins the pane's Job Object. From 2.2.47 on, cockpit spares Docker
 Desktop and its helpers when the pane closes or sends done. On older cockpits,

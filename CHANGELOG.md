@@ -2,6 +2,29 @@
 
 All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses [SemVer](https://semver.org/).
 
+## [v2.2.49] - 2026-11-05
+
+### Fixed (แก้)
+
+- **pane codex ที่ assign ใหม่ไปโผล่ในห้องแชทของ pane อื่นใน cwd เดียวกัน (#983):** devops ที่ spawn ใหม่ได้ใบงานพร้อมประวัติของ backend แล้วหยุดทำงานเพราะสับสนว่าตัวเองเป็นใคร · ต้นเหตุมีสามต่อ:
+  1. ตอน done ระบบเดา session codex ของ pane จาก "rollout ล่าสุดใน cwd" แต่ codex pane ที่เปิดใหม่ไม่เคยรายงาน id ของตัวเอง list กันชน (#824) จึงไม่รู้จัก id ของ backend และ rollout ที่ backend เพิ่งเริ่มก็ผ่านเงื่อนไขเวลา
+  2. รอบถัดไป devops จึงสั่ง `codex resume <id ของ backend>` แล้วค้างที่ modal "open in another app"
+  3. พอปิด pane เอง ระบบเก็บ PaneState ไว้เพราะ task ยังส่งไม่ถึง (#484) แต่เก็บ id นั้นไว้ด้วย assign ใหม่จึงเข้าห้องของ backend อีกรอบ
+
+  ที่แก้:
+  - ตอน done ผูก session codex เฉพาะ rollout ที่มี marker ของ pane ตัวเอง (#964) ถ้าหาไม่เจอ pane ใหม่จะเริ่ม session ใหม่แทนการเดา
+  - ปิด pane เองที่ไม่ได้มาจาก done จะล้าง session id ที่เก็บไว้
+  - ตอน spawn จะไม่ resume session ที่ pane อื่นถืออยู่
+
+### Added (เพิ่ม)
+
+- **cockpit ปิด docker compose stack ของโปรเจคบน local เองเมื่องานจบ (#984):** container ที่ pane เปิดไว้ (stack staging, DB, e2e) เคยรันค้างเป็นวันๆ และกิน RAM ใน VM ของ Docker ไปเรื่อยๆ · ตอนนี้ cockpit สั่ง `docker compose -p <stack> down` ให้ทุก stack ที่ label `working_dir` อยู่ใน path หรือ worktree ของโปรเจค เมื่อ:
+  - `takkub end-session` และไม่มี teammate pane เหลืออยู่
+  - ปิดแท็บโปรเจค
+  - devops ส่ง done ที่ระบุว่า deploy prod แล้ว health ผ่าน และไม่มี pane อื่นของโปรเจคกำลังทำงาน
+
+  container ที่ Exited ถูกลบไปด้วย ส่วน volume กับ image เก็บไว้ (ไม่ใช้ `-v`) · ข้าม stack ที่แท็บอื่นที่เปิดอยู่อ้าง path เดียวกัน · Lead ได้รายงานว่าปิด container ไหน คืน RAM ประมาณเท่าไร หรือ down ไม่สำเร็จเพราะอะไร · ปิดฟีเจอร์รายโปรเจคได้ด้วย `"services": {"auto_down": false}` ใน projects.json · ทดสอบกับ docker จริงแล้ว: stack ทดลอง A (container รันอยู่หนึ่งตัวกับ Exited หนึ่งตัว) ถูก down, volume ยังอยู่, stack B และ container อื่นบนเครื่องไม่ถูกแตะ, และกรณีที่แท็บอื่นแชร์ path ถูกข้าม
+
 ## [v2.2.48] - 2026-11-05
 
 ### Fixed (แก้)

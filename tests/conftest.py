@@ -498,6 +498,14 @@ def _isolate_runtime(monkeypatch: pytest.MonkeyPatch, tmp_path):
         monkeypatch.setattr(
             _ams, "agy_mcp_config_path", lambda: tmp_path / "_isolated_agy_mcp_config.json"
         )
+    # #984: end-session / tab-close tests must never `docker compose down` the
+    # developer's real stacks — the docker CLI reads as absent unless a test
+    # installs its own fake.
+    _cad = _maybe_module("agent_takkub.compose_autodown", force=True)
+    if _cad is not None:
+        monkeypatch.setattr(
+            _cad, "_docker", lambda args, timeout: (127, "docker isolated in tests")
+        )
 
     targets = [(n, "RUNTIME_DIR", runtime) for n in _RUNTIME_DIR_MODULES]
     targets += [(n, "EVENTS_LOG", events) for n in _EVENTS_LOG_MODULES]

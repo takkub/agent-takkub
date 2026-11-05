@@ -1,6 +1,6 @@
 {
   "generated_by": "grimp 3.14",
-  "module_count": 372,
+  "module_count": 373,
   "modules": [
     {
       "module": "agent_takkub",
@@ -71,6 +71,7 @@
         "agent_takkub.browser_chrome",
         "agent_takkub.claude_update",
         "agent_takkub.cli",
+        "agent_takkub.compose_autodown",
         "agent_takkub.core.secrets.backends.keychain_backend",
         "agent_takkub.doctor",
         "agent_takkub.editor_widget",
@@ -118,7 +119,7 @@
         "agent_takkub.verify",
         "agent_takkub.worktree_manager"
       ],
-      "fan_in": 52,
+      "fan_in": 53,
       "fan_out": 0
     },
     {
@@ -779,6 +780,17 @@
       ],
       "fan_in": 16,
       "fan_out": 3
+    },
+    {
+      "module": "agent_takkub.compose_autodown",
+      "imports": [
+        "agent_takkub._win_console"
+      ],
+      "imported_by": [
+        "agent_takkub.orchestrator"
+      ],
+      "fan_in": 1,
+      "fan_out": 1
     },
     {
       "module": "agent_takkub.config",
@@ -3455,6 +3467,7 @@
         "agent_takkub.claude_auth_config",
         "agent_takkub.cockpit_theme",
         "agent_takkub.codex_agents_md",
+        "agent_takkub.compose_autodown",
         "agent_takkub.config",
         "agent_takkub.core.brain.escalation",
         "agent_takkub.core.brain.facade",
@@ -3528,7 +3541,7 @@
         "agent_takkub.user_actions"
       ],
       "fan_in": 6,
-      "fan_out": 71
+      "fan_out": 72
     },
     {
       "module": "agent_takkub.orchestrator_text",

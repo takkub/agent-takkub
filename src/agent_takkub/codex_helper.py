@@ -184,9 +184,15 @@ def resolve_newest_codex_session_for_cwd(
     created_after: float = 0.0,
     project: str = "",
     parent_only: bool = True,
+    required_marker: str = "",
 ) -> Path | None:
     """Newest codex rollout file recorded against *cwd*, with no known session
     id yet — the token meter's per-pane resolution path.
+
+    ``required_marker`` (#983): only a rollout whose head carries this pane's
+    own #964 developer-instructions marker counts. A sibling pane in the same
+    cwd whose id the cockpit never learned (fresh codex panes have none) is
+    otherwise indistinguishable from this pane's conversation by time alone.
 
     ``exclude_ids`` / ``created_after`` (#824): close-time resume must never
     pick a SIBLING pane's conversation in a shared cwd. Rollouts claimed by
@@ -271,8 +277,27 @@ def resolve_newest_codex_session_for_cwd(
                         or bool(meta.get("parent_thread_id"))
                     ):
                         continue
+                    if required_marker and not _rollout_head_contains(f, required_marker):
+                        continue
                     return f
     return None
+
+
+_MARKER_HEAD_LINES = 40
+
+
+def _rollout_head_contains(path: Path, needle: str, max_lines: int = _MARKER_HEAD_LINES) -> bool:
+    """True when *needle* appears in the first *max_lines* lines of *path*."""
+    try:
+        with path.open("r", encoding="utf-8", errors="replace") as fh:
+            for i, line in enumerate(fh):
+                if i >= max_lines:
+                    return False
+                if needle in line:
+                    return True
+    except OSError:
+        return False
+    return False
 
 
 def _codex_meta_started_at(meta: dict) -> float:

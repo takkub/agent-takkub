@@ -1793,6 +1793,15 @@ class MainWindow(
             pass
         tab.deleteLater()
         self._persist_open_tabs()
+        # #984: the project's work is over with its tab — local compose stacks
+        # it owns go down (volumes kept; skipped when another open tab shares
+        # the stack or `services.auto_down: false`).
+        _auto_down = getattr(self.orch, "compose_auto_down", None)
+        if callable(_auto_down):
+            try:
+                _auto_down(tab.project_name, "tab-close")
+            except Exception:
+                _log_event("compose_auto_down_error", project=tab.project_name, trigger="tab-close")
         self._status.showMessage(f"closed tab · {tab.project_name}", 4_000)
         return True, f"closed tab · {tab.project_name}"
 

@@ -7558,6 +7558,22 @@ class Orchestrator(
             and not _task_undelivered_close
         ):
             _dropped_queue_close = getattr(self, "_pending_assignments", {}).pop(key, None)
+        if (_task_undelivered_close or _dropped_queue_close) and not preserve_resume:
+            # #983: this PaneState survives the close only to keep the task
+            # text. A close that is not done-driven wants a fresh conversation
+            # (see the preserve_resume note below) — keeping the session id
+            # made the replacement pane `codex resume` the same thread again,
+            # which here was a sibling's (devops reopened backend's session).
+            _kept_ps = getattr(self, "_pane_state", {}).get(key)
+            if _kept_ps is not None and getattr(_kept_ps, "session_uuid", None):
+                _log_event(
+                    "close_dropped_kept_session",
+                    role=role_name,
+                    project=project_ns,
+                    session_uuid=str(_kept_ps.session_uuid)[:12],
+                )
+                _kept_ps.session_uuid = None
+                _kept_ps.session_uuid_cwd = ""
         if _task_undelivered_close:
             _log_event("close_kept_undelivered_task", role=role_name, project=project_ns)
             if not recovery_close:
@@ -7714,6 +7730,12 @@ class Orchestrator(
                             float(_spawn_ts_close)
                             if isinstance(_spawn_ts_close, (int, float))
                             else 0.0
+                        ),
+                        # #983: bind codex to THIS pane's own marker — a
+                        # sibling whose id the cockpit never learned is not in
+                        # `_sibling_ids`, and devops resumed backend's thread.
+                        codex_marker=str(
+                            getattr(_popped_ps_close, "codex_session_marker", "") or ""
                         ),
                     )
                     if _resolved_close_uuid:
@@ -10033,6 +10055,7 @@ class Orchestrator(
         # Refresh hot.md immediately so Obsidian shows the done event
         # without waiting up to a minute for the periodic tick.
         self._write_hot_md()
+        self._maybe_auto_down_after_prod_deploy(project_ns, from_role, note, failed)
         self.agentDone.emit(project_ns, from_role, note)
         _msg = f"{from_role} reported done"
         _msg += self._language_nudge_suffix(project_ns, from_role, note, _lang_task_id)
@@ -11369,7 +11392,112 @@ class Orchestrator(
             )
 
         _log_event("end_session", project=project_ns, note=note[:200])
-        return True, f"lead session summary written: {rel_path}"
+        tail = ""
+        if not active_teammates:
+            # #984: work is over and no pane still uses the stack — take the
+            # project's local compose stacks down (volumes kept).
+            if self.compose_auto_down(project_ns, "end-session"):
+                tail = " · compose auto-down กำลังเช็ค stack ของโปรเจค (ผลจะแจ้งตามมา)"
+        return True, f"lead session summary written: {rel_path}{tail}"
+
+    def _maybe_auto_down_after_prod_deploy(
+        self, project_ns: str, from_role: str, note: str, failed: bool
+    ) -> bool:
+        """#984 trigger 2: a devops done that states a healthy prod deploy
+        takes the local stacks down — unless another teammate of the project
+        is still working (it may be running e2e/qa against that stack)."""
+        from .compose_autodown import is_prod_deploy_success
+
+        if failed or _split_shard(from_role)[0] != "devops" or not is_prod_deploy_success(note):
+            return False
+        busy = [
+            name
+            for name, p in self._project_panes(project_ns).items()
+            if name not in (LEAD.name, from_role)
+            and str(getattr(p, "state", "") or "") in ("working", "busy", "starting")
+        ]
+        if busy:
+            _log_event("compose_auto_down_skipped_busy", project=project_ns, busy=busy)
+            self._notify_lead(
+                project_ns,
+                "[compose auto-down · prod-deploy] ข้าม — ยังมี pane ทำงานอยู่ "
+                f"({', '.join(busy)}) อาจใช้ stack local อยู่ · stack จะถูก down ตอน "
+                "end-session/ปิดแท็บ",
+                note="compose_auto_down",
+                kind="compose-auto-down",
+            )
+            return False
+        return self.compose_auto_down(project_ns, "prod-deploy")
+
+    def _project_compose_roots(self, project_ns: str) -> list[str]:
+        """#984: configured paths + managed worktree root of *project_ns*."""
+        roots: list[str] = []
+        try:
+            from . import config as _cfg
+
+            proj = ((_cfg.load_projects().get("projects") or {}).get(project_ns)) or {}
+            roots.extend(str(p) for p in (proj.get("paths") or {}).values() if p)
+        except Exception:
+            pass
+        try:
+            from .worktree_manager import worktree_root
+
+            roots.append(str(worktree_root(project_ns)))
+        except Exception:
+            pass
+        return roots
+
+    def compose_auto_down(self, project_ns: str, trigger: str) -> bool:
+        """#984: `docker compose down` every local stack *project_ns* owns, on
+        a worker thread; the result reaches Lead as a notice. Returns False
+        when it did not start (opted out via ``services.auto_down: false``, or
+        the project has no paths)."""
+        from . import compose_autodown as _cad
+        from . import config as _cfg
+
+        try:
+            data = _cfg.load_projects()
+            proj = (data.get("projects") or {}).get(project_ns) or {}
+            open_tabs = [t for t in _cfg.get_open_tabs() if t != project_ns]
+        except Exception:
+            return False
+        if not _cad.auto_down_enabled(proj):
+            _log_event("compose_auto_down_opted_out", project=project_ns, trigger=trigger)
+            return False
+        own_roots = self._project_compose_roots(project_ns)
+        if not own_roots:
+            return False
+        other_open = {t: self._project_compose_roots(t) for t in open_tabs}
+
+        def _work() -> None:
+            try:
+                report = _cad.run_auto_down(project_ns, trigger, own_roots, other_open)
+            except Exception:
+                _log_event("compose_auto_down_error", project=project_ns, trigger=trigger)
+                return
+            _log_event(
+                "compose_auto_down",
+                project=project_ns,
+                trigger=trigger,
+                downed=[s for s, _ in report.downed],
+                failed=[s for s, _ in report.failed],
+                skipped=[s for s, _ in report.skipped],
+                freed_mib=round(report.freed_mib),
+                docker_unavailable=report.docker_unavailable,
+            )
+            text = report.summary()
+            if text:
+                self._invokeOnMain.emit(
+                    lambda: self._notify_lead(
+                        project_ns,
+                        text,
+                        note="compose_auto_down",
+                        kind="compose-auto-down",
+                    )
+                )
+
+        threading.Thread(target=_work, name="compose-auto-down", daemon=True).start()
+        return True
 
     # Issue #163: a `done()` report is queued for Lead but the reporting
     # pane's own auto-close timer fires a fixed 2.5s later regardless — the

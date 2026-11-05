@@ -2033,6 +2033,19 @@ class SpawnEngineMixin:
             ),
         )
 
+    def _session_held_by_other_slot(self, key: str, session_id: str) -> bool:
+        """#983: True when another pane slot (any project) has *session_id* as
+        its own conversation. Auto-resuming it would put this pane inside a
+        sibling's thread — codex shows "open in another app" while the sibling
+        lives, and once it closes the pane silently inherits its history."""
+        if not session_id:
+            return False
+        for other_key, ps in getattr(self, "_pane_state", {}).items():
+            if other_key != key and getattr(ps, "session_uuid", None) == session_id:
+                _log_event("auto_resume_skipped_foreign_session", key=key, held_by=other_key)
+                return True
+        return False
+
     # ──────────────────────────────────────────────────────────────
     # high-level operations
     # ──────────────────────────────────────────────────────────────
@@ -3944,6 +3957,7 @@ class SpawnEngineMixin:
                 and _prior_exit is not None
                 and (time.time() - _prior_exit.get("ts", 0)) < RESUME_WINDOW_SEC
                 and _prior_provider == spec.name
+                and not self._session_held_by_other_slot(_ekey_spawn, str(_prior_uuid))
             ):
                 # #817: the remembered uuid can belong to ANOTHER provider
                 # (a role that ran claude, then codex: done() paired the

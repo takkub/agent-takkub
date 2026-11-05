@@ -184,6 +184,14 @@ class HeadlessWindow(QObject):
             else:
                 clear_active_project()
         self._persist_open_tabs()
+        # #984: same as MainWindow._close_project_tab — down the project's
+        # local compose stacks (volumes kept).
+        _auto_down = getattr(self.orch, "compose_auto_down", None)
+        if callable(_auto_down):
+            try:
+                _auto_down(project, "tab-close")
+            except Exception:
+                _log_event("compose_auto_down_error", project=project, trigger="tab-close")
         return True, f"closed tab · {project}"
 
     def _persist_open_tabs(self) -> None:
