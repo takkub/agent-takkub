@@ -1795,7 +1795,7 @@ class MainWindow(
         self._persist_open_tabs()
         # #984: the project's work is over with its tab — local compose stacks
         # it owns go down (volumes kept; skipped when another open tab shares
-        # the stack or `services.auto_down: false`).
+        # the stack). Fully automatic, no user setting.
         _auto_down = getattr(self.orch, "compose_auto_down", None)
         if callable(_auto_down):
             try:

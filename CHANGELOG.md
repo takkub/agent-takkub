@@ -2,6 +2,12 @@
 
 All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses [SemVer](https://semver.org/).
 
+## [v2.2.50] - 2026-11-05
+
+### Changed (เปลี่ยน)
+
+- **compose auto-down (#984) ทำงานอัตโนมัติล้วน ไม่มีค่าให้ตั้ง:** เอา `services.auto_down` ใน projects.json ออก ผู้ใช้ไม่ต้องเข้าไปแก้ไฟล์ config เอง ระบบตัดสินเองจากกฎความปลอดภัยเดิม คือ ต้องไม่มี pane ของโปรเจคทำงานอยู่, ข้าม stack ที่แท็บอื่นที่เปิดอยู่ใช้ร่วม, และเก็บ volume กับ image ไว้เสมอ · ถ้าอยากให้ stack ของโปรเจคไหนรันต่อ ให้บอก Lead แล้ว Lead จะสั่ง `takkub compose-keep` (ยกเลิกด้วย `--off`) ค่านี้อยู่ในหน่วยความจำของ cockpit จนกว่าจะ `--off` หรือ restart ไม่เขียนลงไฟล์
+
 ## [v2.2.49] - 2026-11-05
 
 ### Fixed (แก้)
@@ -23,7 +29,7 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
   - ปิดแท็บโปรเจค
   - devops ส่ง done ที่ระบุว่า deploy prod แล้ว health ผ่าน และไม่มี pane อื่นของโปรเจคกำลังทำงาน
 
-  container ที่ Exited ถูกลบไปด้วย ส่วน volume กับ image เก็บไว้ (ไม่ใช้ `-v`) · ข้าม stack ที่แท็บอื่นที่เปิดอยู่อ้าง path เดียวกัน · Lead ได้รายงานว่าปิด container ไหน คืน RAM ประมาณเท่าไร หรือ down ไม่สำเร็จเพราะอะไร · ปิดฟีเจอร์รายโปรเจคได้ด้วย `"services": {"auto_down": false}` ใน projects.json · ทดสอบกับ docker จริงแล้ว: stack ทดลอง A (container รันอยู่หนึ่งตัวกับ Exited หนึ่งตัว) ถูก down, volume ยังอยู่, stack B และ container อื่นบนเครื่องไม่ถูกแตะ, และกรณีที่แท็บอื่นแชร์ path ถูกข้าม
+  container ที่ Exited ถูกลบไปด้วย ส่วน volume กับ image เก็บไว้ (ไม่ใช้ `-v`) · ข้าม stack ที่แท็บอื่นที่เปิดอยู่อ้าง path เดียวกัน · Lead ได้รายงานว่าปิด container ไหน คืน RAM ประมาณเท่าไร หรือ down ไม่สำเร็จเพราะอะไร · ทดสอบกับ docker จริงแล้ว: stack ทดลอง A (container รันอยู่หนึ่งตัวกับ Exited หนึ่งตัว) ถูก down, volume ยังอยู่, stack B และ container อื่นบนเครื่องไม่ถูกแตะ, และกรณีที่แท็บอื่นแชร์ path ถูกข้าม
 
 ## [v2.2.48] - 2026-11-05
 

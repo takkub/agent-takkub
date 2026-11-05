@@ -77,9 +77,11 @@ or its managed worktrees when:
 
 A stack that another open tab's path claims just as specifically is skipped,
 and Lead gets the result (stacks and containers taken down, approximate RAM
-freed, or the failure). To keep a stack running, set
-`"services": {"auto_down": false}` on the project in projects.json. So in a
-deploy done, say plainly whether prod is healthy. A vague note never triggers
+freed, or the failure). It is fully automatic: there is no per-project
+switch and nobody edits projects.json for it. When the user wants a stack to
+stay up, they tell Lead, and Lead runs `takkub compose-keep` (`--off` to undo).
+The hold lives in the cockpit's memory until `--off` or a cockpit restart. So in a deploy done, say plainly
+whether prod is healthy. A vague note never triggers
 auto-down. A note that mentions a failure, rollback or unhealthy state never
 counts as a successful deploy.
 

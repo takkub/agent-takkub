@@ -99,12 +99,6 @@ def test_docker_missing_means_nothing_to_do(tmp_path) -> None:
     assert report.docker_unavailable and report.summary() == ""
 
 
-def test_opt_out_flag() -> None:
-    assert cad.auto_down_enabled({}) is True
-    assert cad.auto_down_enabled({"services": {"auto_down": True}}) is True
-    assert cad.auto_down_enabled({"services": {"auto_down": False}}) is False
-
-
 @pytest.mark.parametrize(
     ("note", "expected"),
     [
@@ -153,3 +147,18 @@ def test_non_devops_or_failed_done_never_triggers() -> None:
     assert fn("p", "backend", "deploy prod เสร็จ health ผ่าน", False) is False
     assert fn("p", "devops", "deploy prod เสร็จ health ผ่าน", True) is False
     assert started == []
+
+
+def test_compose_keep_holds_auto_down_until_off() -> None:
+    """The user tells Lead "keep evc running" → `takkub compose-keep`; no
+    projects.json edit, and `--off` restores the automatic down."""
+    from agent_takkub.orchestrator import Orchestrator
+
+    host = SimpleNamespace(_resolve_project=lambda p: p or "evc")
+    keep = Orchestrator.compose_keep.__get__(host)
+    auto_down = Orchestrator.compose_auto_down.__get__(host)
+
+    ok, _ = keep("evc")
+    assert ok and auto_down("evc", "end-session") is False
+    ok, _ = keep("evc", off=True)
+    assert ok and "evc" not in host._compose_keep

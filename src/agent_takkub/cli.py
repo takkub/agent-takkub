@@ -2037,6 +2037,15 @@ def cmd_end_session(args: argparse.Namespace) -> dict:
     )
 
 
+def cmd_compose_keep(args: argparse.Namespace) -> dict:
+    """#984: the user tells Lead to keep a project's stack up; Lead runs this."""
+    return _request(
+        _with_project(
+            {"cmd": "compose-keep", "from": _from_role(), "off": bool(getattr(args, "off", False))}
+        )
+    )
+
+
 def cmd_goal(args: argparse.Namespace) -> dict:
     """Set / show / clear the session objective (issue #50).
 

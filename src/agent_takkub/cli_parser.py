@@ -598,6 +598,17 @@ def _add_end_session(sub: Any, c: ModuleType) -> None:
     ses.add_argument("--note", default="", help="summary note (default: 'session ended')")
     ses.set_defaults(func=c.cmd_end_session)
 
+    ck = sub.add_parser(
+        "compose-keep",
+        help=(
+            "(lead) keep this project's local docker compose stacks running — "
+            "skip the automatic down at end-session / tab close / prod deploy "
+            "until --off or cockpit restart (#984)"
+        ),
+    )
+    ck.add_argument("--off", action="store_true", help="resume automatic down")
+    ck.set_defaults(func=c.cmd_compose_keep)
+
 
 def _add_goal(sub: Any, c: ModuleType) -> None:
 

@@ -1566,6 +1566,8 @@ class CliServer(QObject):
                     source=req.get("source", ""),
                     cwd=req.get("cwd", ""),
                 )
+            elif cmd == "compose-keep":
+                ok, msg = self._orch.compose_keep(project=from_project, off=bool(req.get("off")))
             elif cmd == "end-session":
                 ok, msg = self._orch.end_session(project=from_project, note=req.get("note", ""))
             elif cmd == "goal":

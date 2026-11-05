@@ -11400,6 +11400,23 @@ class Orchestrator(
                 tail = " · compose auto-down กำลังเช็ค stack ของโปรเจค (ผลจะแจ้งตามมา)"
         return True, f"lead session summary written: {rel_path}{tail}"
 
+    def compose_keep(self, project: str | None = None, off: bool = False) -> tuple[bool, str]:
+        """#984: `takkub compose-keep [--off]` — the user told Lead to keep this
+        project's local stacks running. Held in memory only (until `--off` or
+        a cockpit restart); never written to projects.json."""
+        project_ns = self._resolve_project(project)
+        keep: set[str] = self.__dict__.setdefault("_compose_keep", set())
+        if off:
+            keep.discard(project_ns)
+            _log_event("compose_keep", project=project_ns, on=False)
+            return True, f"{project_ns}: compose auto-down กลับมาทำงานตามปกติ"
+        keep.add(project_ns)
+        _log_event("compose_keep", project=project_ns, on=True)
+        return True, (
+            f"{project_ns}: เก็บ docker compose stack ไว้ ไม่ down อัตโนมัติ "
+            "(จนกว่าจะ `takkub compose-keep --off` หรือ restart cockpit)"
+        )
+
     def _maybe_auto_down_after_prod_deploy(
         self, project_ns: str, from_role: str, note: str, failed: bool
     ) -> bool:
@@ -11449,20 +11466,18 @@ class Orchestrator(
 
     def compose_auto_down(self, project_ns: str, trigger: str) -> bool:
         """#984: `docker compose down` every local stack *project_ns* owns, on
-        a worker thread; the result reaches Lead as a notice. Returns False
-        when it did not start (opted out via ``services.auto_down: false``, or
-        the project has no paths)."""
+        a worker thread; the result reaches Lead as a notice. Fully automatic —
+        no user setting (the user never edits projects.json). Returns False
+        when it did not start (the project has no paths)."""
         from . import compose_autodown as _cad
         from . import config as _cfg
 
+        if project_ns in getattr(self, "_compose_keep", set()):
+            _log_event("compose_auto_down_kept", project=project_ns, trigger=trigger)
+            return False
         try:
-            data = _cfg.load_projects()
-            proj = (data.get("projects") or {}).get(project_ns) or {}
             open_tabs = [t for t in _cfg.get_open_tabs() if t != project_ns]
         except Exception:
-            return False
-        if not _cad.auto_down_enabled(proj):
-            _log_event("compose_auto_down_opted_out", project=project_ns, trigger=trigger)
             return False
         own_roots = self._project_compose_roots(project_ns)
         if not own_roots:

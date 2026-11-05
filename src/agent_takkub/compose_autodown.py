@@ -15,8 +15,8 @@ Ownership is decided by the compose label
 whose configured path (or managed worktree root) contains that directory most
 specifically. A stack whose working dir is equally claimed by another OPEN
 tab is skipped as shared. Containers not created by compose carry no label
-and are never looked at. Opt out per project with ``services.auto_down:
-false`` in projects.json.
+and are never looked at. There is deliberately no per-project switch: the
+user does not edit projects.json — the safety rules above decide on their own.
 
 Every docker call has a timeout and never raises — Docker not installed or not
 running reads as "nothing to do".
@@ -233,14 +233,6 @@ def run_auto_down(
         else:
             report.failed.append((stack, out or f"exit {rc}"))
     return report
-
-
-def auto_down_enabled(project_cfg: Mapping | None) -> bool:
-    """``services.auto_down`` (default True) from a projects.json entry."""
-    services = (project_cfg or {}).get("services") if isinstance(project_cfg, Mapping) else None
-    if isinstance(services, Mapping) and services.get("auto_down") is False:
-        return False
-    return True
 
 
 _PROD_RE = re.compile(r"\bprod(?:uction)?\b|โปรดักชัน|โปรดักชั่น", re.IGNORECASE)
