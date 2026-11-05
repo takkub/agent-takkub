@@ -1,0 +1,211 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Mockup · โปรเจคใหม่ เลือก template</title>
+<style>
+  :root{
+    --body:#08090D; --win:#111318; --title:#0B0C10; --panel:#181B22; --panel2:#1C2029;
+    --inset:#14171E; --input:#0F172A; --border:#262B36; --row:#1F232C; --ctrl:#3A4150;
+    --accent:#6366F1; --accentTop:#7B7FF4; --chip:#A5A6F5;
+    --t1:#F3F4F6; --t2:#9CA3AF; --t3:#6B7280; --t4:#4B5563; --ok:#34D399;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--body);color:var(--t1);font:13px/1.45 "Segoe UI","Noto Sans Thai",system-ui,sans-serif;padding:24px}
+  .note{max-width:1180px;margin:0 auto 14px;color:var(--t2);font-size:12px}
+  .dlg{max-width:1180px;margin:0 auto;background:var(--win);border:1px solid var(--border);border-radius:10px;overflow:hidden;box-shadow:0 20px 60px rgba(0,0,0,.5)}
+  .tb{background:var(--title);padding:10px 16px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:8px}
+  .tb b{font-size:14px} .tb span{color:var(--t3)}
+  .top{display:grid;grid-template-columns:1fr 1.6fr;gap:12px;padding:14px 16px 6px}
+  label.f{display:block;color:var(--t2);font-size:12px;margin-bottom:4px}
+  input[type=text]{width:100%;background:var(--input);border:1px solid var(--ctrl);color:var(--t1);border-radius:6px;padding:7px 9px;font:inherit}
+  .row{display:flex;gap:6px}
+  .btn{background:var(--panel2);border:1px solid var(--ctrl);color:var(--t1);border-radius:6px;padding:7px 12px;font:inherit;cursor:pointer;white-space:nowrap}
+  .btn:hover{border-color:var(--t3)}
+  .btn.primary{background:linear-gradient(var(--accentTop),var(--accent));border-color:var(--accent);color:#fff;font-weight:600}
+  .presets{padding:6px 16px 10px;display:flex;flex-wrap:wrap;gap:6px;align-items:center}
+  .presets .lbl{color:var(--t2);font-size:12px;margin-right:4px}
+  .main{display:grid;grid-template-columns:1fr 340px;gap:12px;padding:0 16px 14px}
+  .layers{display:flex;flex-direction:column;gap:8px;max-height:620px;overflow:auto;padding-right:4px}
+  .card{background:var(--panel);border:1px solid var(--border);border-radius:8px;padding:10px 12px}
+  .card.off{opacity:.62}
+  .ch{display:flex;align-items:baseline;gap:8px;margin-bottom:7px}
+  .ch b{font-size:13px} .ch code{color:var(--chip);font-size:12px} .ch .hint{color:var(--t3);font-size:11.5px;margin-left:auto}
+  .chips{display:flex;flex-wrap:wrap;gap:6px}
+  .chip{border:1px solid var(--ctrl);background:var(--inset);color:var(--t1);border-radius:999px;padding:4px 11px;cursor:pointer;user-select:none;font-size:12.5px}
+  .chip:hover{border-color:var(--t3)}
+  .chip.on{background:rgba(99,102,241,.18);border-color:var(--accent);color:#fff}
+  .chip.none{color:var(--t3);border-style:dashed}
+  .chip.none.on{background:var(--inset);color:var(--t2);border-color:var(--t3)}
+  .chip .sub{color:var(--t3);font-size:11px;margin-left:4px}
+  .chip.on .sub{color:var(--chip)}
+  .sublabel{color:var(--t3);font-size:11.5px;margin:8px 0 5px}
+  .side{display:flex;flex-direction:column;gap:8px}
+  .box{background:var(--inset);border:1px solid var(--border);border-radius:8px;padding:10px 12px}
+  .box h4{margin:0 0 6px;font-size:12px;color:var(--t2);font-weight:600}
+  pre{margin:0;font:12px/1.55 "Cascadia Code",Consolas,monospace;color:var(--t1);white-space:pre;overflow:auto;max-height:300px}
+  pre .d{color:var(--chip)} pre .c{color:var(--t3)}
+  .svc{display:flex;flex-wrap:wrap;gap:5px}
+  .svc span{background:var(--panel2);border:1px solid var(--row);border-radius:4px;padding:2px 7px;font-size:11.5px;color:var(--t2)}
+  .rules{color:var(--t2);font-size:12px;margin:0;padding-left:16px}
+  .foot{display:flex;align-items:center;gap:8px;padding:12px 16px;border-top:1px solid var(--border);background:var(--title)}
+  .foot .s{color:var(--t3);font-size:12px;margin-right:auto}
+</style>
+</head>
+<body>
+<p class="note">Mockup สำหรับอนุมัติ: หน้า "โปรเจคใหม่" ตัวใหม่ที่มาแทนปุ่ม "✨ โปรเจคใหม่ (AI rules)" · ลองกดเลือกได้จริง ฝั่งขวาจะเปลี่ยนตามที่เลือก · ระบบสร้างแค่โครง folder, docker-compose, .env.example, CLAUDE.md และ README ของแต่ละส่วน ส่วนโค้ดจริงของแต่ละ framework ให้ pane สร้างตอนเริ่มงาน</p>
+<div class="dlg">
+  <div class="tb"><b>โปรเจคใหม่</b><span>· เลือกว่าจะมีระบบอะไรบ้าง</span></div>
+  <div class="top">
+    <div><label class="f">ชื่อโปรเจค</label><input type="text" id="pname" value="evc-charging"></div>
+    <div><label class="f">สร้างใน</label><div class="row"><input type="text" value="C:\Users\monch\WebstormProjects"><button class="btn">เลือก…</button></div></div>
+  </div>
+  <div class="presets" id="presets"><span class="lbl">เริ่มจาก preset:</span></div>
+  <div class="main">
+    <div class="layers" id="layers"></div>
+    <div class="side">
+      <div class="box"><h4>โครง folder ที่จะสร้าง</h4><pre id="tree"></pre></div>
+      <div class="box"><h4>docker-compose.yml จะมี service</h4><div class="svc" id="svc"></div></div>
+      <div class="box"><h4>CLAUDE.md จะเขียนให้ว่า</h4><ul class="rules" id="rules"></ul></div>
+    </div>
+  </div>
+  <div class="foot"><span class="s" id="count"></span><button class="btn">ยกเลิก</button><button class="btn primary">สร้างโปรเจค</button></div>
+</div>
+<script>
+const STYLE_OPTS = ["Tailwind CSS","CSS Modules","Sass / SCSS","styled-components","Emotion","UnoCSS","Vanilla Extract","Bootstrap","CSS ล้วน"];
+const KIT_OPTS = ["shadcn/ui","MUI","Ant Design","Chakra UI","Mantine","DaisyUI","HeroUI","Radix UI","Vuetify (Vue)","Element Plus (Vue)","PrimeVue (Vue)","ไม่ใช้"];
+const SWATCH = {Indigo:"#6366F1",Blue:"#3B82F6",Emerald:"#10B981",Teal:"#14B8A6",Orange:"#F97316",Rose:"#F43F5E",Violet:"#8B5CF6",Slate:"#64748B",Amber:"#F59E0B"};
+const THEME_DEFAULT = {theme:"Modern SaaS",mode:"มืด + สว่าง (สลับได้)",color:"Indigo",font:"IBM Plex Sans Thai",radius:"โค้งนิด"};
+const ICON_OPTS = ["Lucide","Heroicons","Font Awesome","Material Icons","Tabler Icons","Iconify"];
+const LAYERS = [
+  {id:"web", title:"หน้าเว็บ", dir:"web/", hint:"เลือก 1", opts:["Next.js","React + Vite","Nuxt (Vue)","SvelteKit","Angular","Astro","Remix","HTML ล้วน"],
+   sub:[{id:"webstyle",label:"สไตล์ (CSS)",opts:STYLE_OPTS},
+        {id:"webui",label:"ชุด component (UI kit)",opts:KIT_OPTS},
+        {id:"webicon",label:"ไอคอน",opts:ICON_OPTS},
+        {id:"webstate",label:"จัดการ state / ดึงข้อมูล",opts:["TanStack Query","Zustand","Redux Toolkit","Pinia (Vue)","SWR","Jotai","ไม่ใช้"]}]},
+  {id:"admin", title:"หลังบ้าน (admin)", dir:"admin/", hint:"เลือก 1", opts:["Next.js","React + Vite","Refine","React-Admin","Nuxt (Vue)"],
+   sub:[{id:"adminstyle",label:"สไตล์ (CSS)",opts:STYLE_OPTS},
+        {id:"adminui",label:"ชุด component (UI kit)",opts:KIT_OPTS}]},
+  {id:"api", title:"API", dir:"api/", hint:"เลือก 1", opts:[
+     ["NestJS","Node"],["ElysiaJS","Bun"],["Hono","Bun/Node"],["Express","Node"],["Fastify","Node"],
+     ["FastAPI","Python"],["Django","Python"],["Laravel","PHP"],["Go Fiber","Go"],["Go Gin","Go"],[".NET","C#"],["Spring Boot","Java"]],
+   sub:[{id:"orm",label:"ORM / ตัวต่อ DB",opts:["Prisma","Drizzle","TypeORM","Sequelize","Mongoose","SQLAlchemy","Django ORM","Eloquent","GORM","EF Core","JPA","ไม่ใช้"]},
+        {id:"apistyle",label:"รูปแบบ API",opts:["REST","GraphQL","tRPC","gRPC"]}]},
+  {id:"db", title:"ฐานข้อมูล", dir:"db/", hint:"เลือก 1", opts:["PostgreSQL","MySQL","MariaDB","MongoDB","SQLite","SQL Server"]},
+  {id:"mobile", title:"มือถือ", dir:"mobile/", hint:"เลือก 1", opts:["Expo (React Native)","Flutter","LINE LIFF","Ionic","Kotlin (Android)","Swift (iOS)"],
+   sub:[{id:"mobilestyle",label:"สไตล์ / UI",opts:["NativeWind (Tailwind)","Tamagui","React Native Paper","Gluestack UI","Material 3 (Flutter)","Cupertino (Flutter)","Tailwind (LIFF)","ไม่ใช้"]}]},
+  {id:"worker", title:"งานเบื้องหลัง (queue / cron)", dir:"worker/", hint:"เลือก 1", opts:["BullMQ","Celery","Temporal","ใช้ cron อย่างเดียว"]},
+  {id:"theme", title:"ธีม / หน้าตา", dir:"", hint:"ใช้กับทุกส่วนที่มีหน้าจอ (web / admin / mobile)", noNone:true,
+   opts:["Minimal สะอาด","Corporate องค์กร","Modern SaaS","Glassmorphism","Neo-brutalism","Material Design","iOS / Apple","Dashboard มืด","สดใส ขี้เล่น"],
+   sub:[{id:"mode",label:"โหมด",opts:["มืด + สว่าง (สลับได้)","สว่างอย่างเดียว","มืดอย่างเดียว"]},
+        {id:"color",label:"สีหลัก",opts:["Indigo","Blue","Emerald","Teal","Orange","Rose","Violet","Slate","Amber"],swatch:true},
+        {id:"font",label:"ฟอนต์ (รองรับไทย)",opts:["Noto Sans Thai","IBM Plex Sans Thai","Prompt","Kanit","Sarabun","Anuphan","Inter + Noto Sans Thai"]},
+        {id:"radius",label:"ความโค้งมุม",opts:["เหลี่ยม","โค้งนิด","โค้งมาก"]}]},
+  {id:"lang", title:"ภาษาฝั่ง JS/TS", dir:"", hint:"ใช้กับ web / admin / api ที่เป็น JS", opts:["TypeScript","JavaScript"], noNone:true},
+  {id:"pm", title:"ตัวจัดการแพ็กเกจ", dir:"", hint:"", opts:["pnpm","npm","bun","yarn"], noNone:true},
+  {id:"extras", title:"บริการเสริม", dir:"", hint:"ติ๊กได้หลายอัน", multi:true, opts:[
+     "Redis","MinIO (S3)","Meilisearch","Elasticsearch","RabbitMQ","Kafka","Keycloak (login)","Mailpit (ทดสอบอีเมล)","nginx","Adminer / pgAdmin"]},
+  {id:"tools", title:"อื่นๆ ในโปรเจค", dir:"", hint:"ติ๊กได้หลายอัน", multi:true, opts:[
+     "docker-compose","Playwright e2e","GitHub Actions CI","packages/shared","docs/","scripts/","Terraform","Storybook"]},
+];
+const PRESETS = {
+  "Web + API + DB": {web:"Next.js",webstyle:"Tailwind CSS",webui:"shadcn/ui",webicon:"Lucide",webstate:"TanStack Query",api:"NestJS",orm:"Prisma",apistyle:"REST",db:"PostgreSQL",lang:"TypeScript",pm:"pnpm",extras:[],tools:["docker-compose","Playwright e2e"]},
+  "SaaS เต็มชุด": {web:"Next.js",webstyle:"Tailwind CSS",webui:"shadcn/ui",webicon:"Lucide",webstate:"TanStack Query",admin:"Refine",adminstyle:"Tailwind CSS",adminui:"Ant Design",api:"NestJS",orm:"Prisma",apistyle:"REST",db:"PostgreSQL",worker:"BullMQ",lang:"TypeScript",pm:"pnpm",extras:["Redis","MinIO (S3)","Keycloak (login)","Mailpit (ทดสอบอีเมล)"],tools:["docker-compose","Playwright e2e","GitHub Actions CI","packages/shared","docs/"]},
+  "LINE LIFF": {mobile:"LINE LIFF",mobilestyle:"Tailwind (LIFF)",admin:"Next.js",adminstyle:"Tailwind CSS",adminui:"shadcn/ui",api:"ElysiaJS",orm:"Drizzle",apistyle:"REST",db:"PostgreSQL",lang:"TypeScript",pm:"bun",extras:["Redis"],tools:["docker-compose","Playwright e2e"]},
+  "Mobile app": {mobile:"Expo (React Native)",mobilestyle:"NativeWind (Tailwind)",api:"NestJS",orm:"Prisma",apistyle:"REST",db:"PostgreSQL",lang:"TypeScript",pm:"pnpm",extras:["MinIO (S3)"],tools:["docker-compose","packages/shared"]},
+  "API อย่างเดียว": {api:"FastAPI",orm:"SQLAlchemy",apistyle:"REST",db:"PostgreSQL",lang:"TypeScript",pm:"pnpm",extras:["Redis"],tools:["docker-compose","GitHub Actions CI"]},
+  "Landing page": {web:"Astro",webstyle:"Tailwind CSS",webui:"shadcn/ui",webicon:"Lucide",webstate:"TanStack Query",lang:"TypeScript",pm:"pnpm",extras:[],tools:["GitHub Actions CI"]},
+  "ว่างเปล่า": {lang:"TypeScript",pm:"pnpm",extras:[],tools:[]},
+};
+let S = {};
+const optName = o => Array.isArray(o) ? o[0] : o;
+
+function chip(text, on, cls, sub, onClick){
+  const c=document.createElement("span"); c.className="chip"+(on?" on":"")+(cls?" "+cls:"");
+  c.textContent=text; if(sub){const s=document.createElement("span");s.className="sub";s.textContent=sub;c.appendChild(s);}
+  c.onclick=onClick; return c;
+}
+function renderPresets(){
+  const p=document.getElementById("presets");
+  Object.keys(PRESETS).forEach(k=>p.appendChild(chip(k,false,"",null,()=>{S=Object.assign({},THEME_DEFAULT,JSON.parse(JSON.stringify(PRESETS[k])));render();})));
+}
+function renderLayers(){
+  const L=document.getElementById("layers"); L.innerHTML="";
+  LAYERS.forEach(l=>{
+    const card=document.createElement("div"); card.className="card";
+    const used = l.multi ? true : !!S[l.id];
+    if(!used) card.classList.add("off");
+    card.innerHTML=`<div class="ch"><b>${l.title}</b>${l.dir?`<code>${l.dir}</code>`:""}<span class="hint">${l.hint}</span></div>`;
+    const chips=document.createElement("div"); chips.className="chips";
+    if(!l.multi && !l.noNone) chips.appendChild(chip("ไม่ใช้",!S[l.id],"none",null,()=>{delete S[l.id];render();}));
+    l.opts.forEach(o=>{
+      const n=optName(o), sub=Array.isArray(o)?o[1]:null;
+      if(l.multi){ const arr=S[l.id]||[]; chips.appendChild(chip(n,arr.includes(n),"",sub,()=>{S[l.id]=arr.includes(n)?arr.filter(x=>x!==n):[...arr,n];render();})); }
+      else chips.appendChild(chip(n,S[l.id]===n,"",sub,()=>{S[l.id]=n;render();}));
+    });
+    card.appendChild(chips);
+    if(used && l.sub) l.sub.forEach(sb=>{
+      const t=document.createElement("div"); t.className="sublabel"; t.textContent=sb.label; card.appendChild(t);
+      const cs=document.createElement("div"); cs.className="chips";
+      sb.opts.forEach(o=>{
+        const c=chip(o,S[sb.id]===o,"",null,()=>{S[sb.id]=o;render();});
+        if(sb.swatch){const d=document.createElement("i");d.style.cssText=`display:inline-block;width:10px;height:10px;border-radius:50%;margin-right:6px;vertical-align:-1px;background:${SWATCH[o]}`;c.prepend(d);}
+        cs.appendChild(c);
+      });
+      card.appendChild(cs);
+    });
+    L.appendChild(card);
+  });
+}
+function renderSide(){
+  const name=document.getElementById("pname").value||"project";
+  const has=k=>!!S[k], tools=S.tools||[], extras=S.extras||[];
+  const lines=[`<span class="d">${name}/</span>`];
+  const add=(d,c)=>lines.push(`├─ <span class="d">${d}</span>${c?`  <span class="c"># ${c}</span>`:""}`);
+  if(has("web")) add("web/",S.web);
+  if(has("admin")) add("admin/",S.admin);
+  if(has("mobile")) add("mobile/",S.mobile);
+  if(has("api")) add("api/",S.api+(S.orm&&S.orm!=="ไม่ใช้"?" + "+S.orm:""));
+  if(has("worker")) add("worker/",S.worker);
+  if(has("db")){ add("db/",S.db); lines.push(`│  ├─ <span class="d">migrations/</span>`); lines.push(`│  └─ <span class="d">seed/</span>`); }
+  if(tools.includes("packages/shared")) add("packages/shared/","types ใช้ร่วม");
+  if(tools.includes("Playwright e2e")) add("e2e/","Playwright");
+  if(tools.includes("Terraform")) add("infra/","Terraform");
+  if(tools.includes("docs/")) add("docs/");
+  if(tools.includes("scripts/")) add("scripts/");
+  if(tools.includes("GitHub Actions CI")) add(".github/workflows/","ci.yml");
+  if(tools.includes("docker-compose")) lines.push("├─ docker-compose.yml");
+  lines.push("├─ .env.example"); lines.push("├─ README.md"); lines.push("└─ CLAUDE.md");
+  document.getElementById("tree").innerHTML=lines.join("\n");
+
+  const svc=[]; if(tools.includes("docker-compose")){
+    if(has("db")) svc.push(S.db.toLowerCase().replace(/ /g,""));
+    if(has("api")) svc.push("api"); if(has("web")) svc.push("web"); if(has("admin")) svc.push("admin"); if(has("worker")) svc.push("worker");
+    extras.forEach(e=>svc.push(e.split(" ")[0].toLowerCase()));
+  }
+  document.getElementById("svc").innerHTML = svc.length? svc.map(s=>`<span>${s}</span>`).join("") : `<span>— ไม่ได้ติ๊ก docker-compose —</span>`;
+
+  const r=[];
+  const j=(...xs)=>xs.filter(x=>x&&x!=="ไม่ใช้").join(" + ");
+  if(has("web")) r.push(`web = ${j(S.web,S.webstyle,S.webui)} อยู่ที่ web/${S.webicon?" · ไอคอน "+S.webicon:""}${S.webstate&&S.webstate!=="ไม่ใช้"?" · "+S.webstate:""}`);
+  if(has("admin")) r.push(`admin = ${j(S.admin,S.adminstyle,S.adminui)} อยู่ที่ admin/`);
+  if(has("mobile")) r.push(`mobile = ${j(S.mobile,S.mobilestyle)} อยู่ที่ mobile/`);
+  if(has("web")||has("admin")||has("mobile")) r.push(`ธีม ${S.theme} · ${S.mode} · สีหลัก ${S.color} · ฟอนต์ ${S.font} · มุม${S.radius}`);
+  if(has("api")) r.push(`api = ${S.api}${S.apistyle?" ("+S.apistyle+")":""}${S.orm&&S.orm!=="ไม่ใช้"?" · "+S.orm:""} อยู่ที่ api/`);
+  if(has("db")) r.push(`db = ${S.db} · migration อยู่ที่ db/migrations`);
+  if(has("worker")) r.push(`worker = ${S.worker} อยู่ที่ worker/`);
+  r.push(`ภาษา ${S.lang||"TypeScript"} · ใช้ ${S.pm||"pnpm"}`);
+  if(tools.includes("docker-compose")) r.push("รัน local ด้วย docker compose up -d (cockpit down ให้เองตอนจบงาน)");
+  document.getElementById("rules").innerHTML=r.map(x=>`<li>${x}</li>`).join("");
+  const n=LAYERS.filter(l=>!l.multi&&!l.noNone&&S[l.id]).length;
+  document.getElementById("count").textContent=`เลือกไว้ ${n} ส่วน · บริการเสริม ${extras.length} · อื่นๆ ${tools.length}`;
+}
+function render(){renderLayers();renderSide();}
+document.getElementById("pname").addEventListener("input",renderSide);
+renderPresets();
+S=Object.assign({},THEME_DEFAULT,JSON.parse(JSON.stringify(PRESETS["Web + API + DB"])));
+render();
+</script>
+</body>
+</html>

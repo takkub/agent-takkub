@@ -11472,7 +11472,9 @@ class Orchestrator(
         from . import compose_autodown as _cad
         from . import config as _cfg
 
-        if project_ns in getattr(self, "_compose_keep", set()):
+        # __dict__ read: getattr on a QObject whose Qt __init__ never ran
+        # (test doubles built with __new__) raises instead of defaulting.
+        if project_ns in self.__dict__.get("_compose_keep", ()):
             _log_event("compose_auto_down_kept", project=project_ns, trigger=trigger)
             return False
         try:
