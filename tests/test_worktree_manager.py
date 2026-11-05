@@ -1228,6 +1228,11 @@ class TestSafeRemove:
             [
                 (["status", "--porcelain"], _ok("")),
                 (["worktree", "remove"], _fail("locked worktree", 1)),
+                # still registered after prune → a real failure (#982)
+                (
+                    ["worktree", "list", "--porcelain"],
+                    _ok(f"worktree {self._info().path}\nHEAD abc\nbranch refs/heads/wt/x-1\n"),
+                ),
             ]
         )
         removed, reason = WorktreeManager(r).safe_remove(self._info())

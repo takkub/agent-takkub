@@ -2126,6 +2126,32 @@ class WorktreeManager:
             f"รัน `git -C {git_root} push origin --delete {branch}` เอง"
         )
 
+    def _drop_worktree_metadata(self, git_root: str, path: str) -> tuple[bool, str]:
+        """``git worktree remove --force`` + ``prune`` for a checkout whose
+        directory is already gone. Returns ``(ok, detail)``.
+
+        #982: ``clean`` deletes every checkout first (in parallel) and only
+        then drops metadata one by one — the first row's ``prune`` already
+        clears the metadata of every OTHER deleted checkout, so their own
+        ``remove`` then fails with ``is not a working tree``. That is the
+        goal state, not a failure: success is "git no longer lists *path*".
+        """
+        rm = self._run(["-C", git_root, "worktree", "remove", "--force", path], None)
+        self._run(["-C", git_root, "worktree", "prune"], None)
+        if rm.ok:
+            return True, ""
+        try:
+            target = Path(path).resolve()
+        except OSError:
+            target = Path(path)
+        listed = self._run(["-C", git_root, "worktree", "list", "--porcelain"], None)
+        if listed.ok and target not in {
+            Path(ent["path"]).resolve() for ent in parse_worktree_list(listed.stdout)
+        }:
+            return True, ""
+        tail = (rm.stderr or rm.stdout).strip().splitlines()
+        return False, tail[-1] if tail else f"worktree remove exit {rm.returncode}"
+
     def safe_remove(self, info: WorktreeInfo) -> tuple[bool, str]:
         """Remove the worktree WITHOUT ``--force``, refusing to drop
         uncommitted work.
@@ -2149,11 +2175,8 @@ class WorktreeManager:
             return False, disk_msg
         # Directory is gone — this only touches the small admin refs now, so
         # it can't repeat the partial-delete failure mode.
-        rm = self._run(["-C", info.git_root, "worktree", "remove", "--force", info.path], None)
-        self._run(["-C", info.git_root, "worktree", "prune"], None)
-        if not rm.ok:
-            tail = (rm.stderr or rm.stdout).strip().splitlines()
-            detail = tail[-1] if tail else f"worktree remove exit {rm.returncode}"
+        rm_ok, detail = self._drop_worktree_metadata(info.git_root, info.path)
+        if not rm_ok:
             return False, (
                 f"ลบไฟล์ออกจาก {info.path} แล้ว แต่ git ยังลบ metadata ไม่ได้ ({detail}) "
                 f"— รัน `git -C {info.git_root} worktree prune` เอง"
@@ -2516,11 +2539,8 @@ class WorktreeManager:
                 f"merged {branch} แต่ลบ worktree ไม่ได้ ({disk_msg}) — เก็บที่ {row['path']} "
                 "(merge ไปแล้ว ลอง `takkub worktree clean` อีกครั้งได้ทันที ถ้า handle ที่ล็อกอยู่ปล่อยแล้วจะลบสำเร็จ)"
             )
-        remove = self._run(["-C", git_root, "worktree", "remove", "--force", row["path"]], None)
-        self._run(["-C", git_root, "worktree", "prune"], None)
-        if not remove.ok:
-            lines = (remove.stderr or remove.stdout).strip().splitlines()
-            detail = lines[-1] if lines else f"exit {remove.returncode}"
+        rm_ok, detail = self._drop_worktree_metadata(git_root, row["path"])
+        if not rm_ok:
             return True, (
                 f"merged {branch} — ลบไฟล์ออกจาก {row['path']} แล้ว แต่ git ยังลบ metadata ไม่ได้ "
                 f"({detail}) — รัน `git -C {git_root} worktree prune` เอง"
@@ -2744,13 +2764,11 @@ class WorktreeManager:
                     "(ไม่ได้ลบอะไร — worktree และ branch ยังอยู่ครบ)"
                 )
                 continue
-            rm = self._run(["-C", git_root, "worktree", "remove", "--force", row["path"]], None)
-            self._run(["-C", git_root, "worktree", "prune"], None)
-            if not rm.ok:
-                detail = (rm.stderr or rm.stdout).strip()[:120]
+            rm_ok, detail = self._drop_worktree_metadata(git_root, row["path"])
+            if not rm_ok:
                 out[slot] = (
                     f"FAILED  {row['branch']} — ลบไฟล์ออกจาก {row['path']} แล้ว "
-                    f"แต่ git ยังลบ metadata ไม่ได้ ({detail or f'exit {rm.returncode}'}) "
+                    f"แต่ git ยังลบ metadata ไม่ได้ ({detail[:120]}) "
                     "— รัน `worktree prune` เอง (branch ยังอยู่)"
                 )
                 continue
@@ -2848,14 +2866,11 @@ class WorktreeManager:
         # Long-path-safe delete ourselves first (#226/#227) — see the
         # module-level comment above `remove_worktree_tree`.
         removed, disk_msg, leftover = remove_worktree_tree(Path(info.path))
-        rm = self._run(["-C", info.git_root, "worktree", "remove", "--force", info.path], None)
-        self._run(["-C", info.git_root, "worktree", "prune"], None)
+        rm_ok, detail = self._drop_worktree_metadata(info.git_root, info.path)
         self._delete_branch(info.git_root, info.branch)
         if not removed:
             return False, disk_msg
-        if not rm.ok:
-            tail = (rm.stderr or rm.stdout).strip().splitlines()
-            detail = tail[-1] if tail else f"worktree remove --force exit {rm.returncode}"
+        if not rm_ok:
             return False, f"ลบไฟล์ออกจาก {info.path} แล้ว แต่ git ยังลบ metadata ไม่ได้ ({detail})"
         repair_note = repair_editable_pth_if_stale(info.git_root, info.path)
         if leftover:

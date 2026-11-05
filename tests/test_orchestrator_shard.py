@@ -276,6 +276,14 @@ class TestShardAggregate:
         assert "shard 1" in injected
         assert "shard 2" in injected
 
+    def test_handoff_label_names_the_real_role_981(self, orch: Orchestrator) -> None:
+        group = ShardGroup(base_role="frontend", total=1)
+        group.done["frontend#1"] = "ok"
+        sent: list[str] = []
+        with patch.object(orch, "_notify_lead", lambda _p, msg, kind="": sent.append(msg)):
+            orch._inject_shard_fanout_handoff(TEST_PROJECT, group)
+        assert sent and sent[0].startswith("[frontend fan-out complete: 1/1")
+
     def test_no_handoff_until_all_done(self, orch: Orchestrator) -> None:
         """With 3 shards, handoff fires only after the 3rd done."""
         _shards, lead = self._setup(orch, total=3)
@@ -505,6 +513,21 @@ class TestWrapShardTask:
         assert "base task" in wrapped
         assert "SHARD 2/3" in wrapped
         assert ".shard2" in wrapped
+
+    def test_enumerated_parts_give_each_shard_only_its_own_981(self, orch: Orchestrator) -> None:
+        task = "ทำหน้า withdrawals: (A) super (B) tenant admin (C) member"
+        w = [orch._wrap_shard_task(task, i, 3) for i in (1, 2, 3)]
+        assert "ทำเฉพาะส่วน (A)" in w[0] and "ทำเฉพาะส่วน (C)" not in w[0]
+        assert "ทำเฉพาะส่วน (B)" in w[1]
+        assert "ทำเฉพาะส่วน (C)" in w[2] and "(A), (B) เป็นของ shard อื่น" in w[2]
+
+    def test_unsplittable_task_still_forbids_doing_everything_981(self, orch: Orchestrator) -> None:
+        w = orch._wrap_shard_task("refactor the settings page", 2, 3)
+        assert "ส่วนที่ 2 จาก 3 เท่านั้น" in w and "ห้ามทำทั้งหมด" in w
+
+    def test_line_numbered_parts_match_shard_count_981(self, orch: Orchestrator) -> None:
+        task = "งาน:\n1. login page\n2. signup page\n"
+        assert "ทำเฉพาะส่วน (2)" in orch._wrap_shard_task(task, 2, 2)
 
     def test_different_shards_get_different_suffix(self, orch: Orchestrator) -> None:
         w1 = orch._wrap_shard_task("t", 1, 4)

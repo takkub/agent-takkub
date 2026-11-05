@@ -32,6 +32,48 @@ from PyQt6.QtCore import QTimer
 # #160 safety net: file-path-looking tokens in shard done-notes. Heuristic,
 # not a parser — good enough to flag "2+ shards mention the exact same
 # path" so Lead can check for an overwrite before trusting the report.
+_PAREN_PART_RE = re.compile(r"\(([A-Z]|\d{1,2})\)")
+_LINE_PART_RE = re.compile(r"(?m)^\s*(?:[-*]\s*)?([A-Z]|\d{1,2})[.)]\s+\S")
+_PLANNER_SCOPE_MARK = "SCOPE (จาก qa-planner"
+
+
+def _task_part_labels(task: str, shard_total: int) -> list[str]:
+    """Labels of the parts a task enumerates — ``(A) (B) (C)`` inline or
+    ``1.``/``A)`` at line starts — when their count matches *shard_total*
+    (#981). Empty list when the task does not split that way."""
+    for rx in (_PAREN_PART_RE, _LINE_PART_RE):
+        labels: list[str] = []
+        for m in rx.finditer(task or ""):
+            if m.group(1) not in labels:
+                labels.append(m.group(1))
+        if len(labels) == shard_total:
+            return labels
+    return []
+
+
+def _shard_scope_line(task: str, shard_idx: int, shard_total: int) -> str:
+    """Which part of a shared task this shard owns (#981). A shard that read
+    the shared text as "do everything" redid its siblings' parts (3 branches
+    colliding, ~2x the tokens)."""
+    if _PLANNER_SCOPE_MARK in (task or ""):
+        return "ขอบเขตของ shard นี้คือ SCOPE จาก qa-planner ข้างบนเท่านั้น"
+    labels = _task_part_labels(task, shard_total)
+    if labels and 1 <= shard_idx <= len(labels):
+        mine = labels[shard_idx - 1]
+        others = ", ".join(f"({lb})" for lb in labels if lb != mine)
+        return (
+            f"**ขอบเขตของคุณ: ทำเฉพาะส่วน ({mine}) เท่านั้น** — {others} เป็นของ shard อื่น "
+            "ห้ามทำซ้ำ ห้ามแก้ไฟล์ที่เป็นของส่วนอื่น ถ้าต้องใช้ของร่วม (types/dictionary) "
+            "เพิ่มเฉพาะที่ส่วนของคุณต้องใช้ แล้วบอกไว้ใน done"
+        )
+    return (
+        f"**ขอบเขตของคุณ: ส่วนที่ {shard_idx} จาก {shard_total} เท่านั้น** — แบ่งงานข้างบนเป็น "
+        f"{shard_total} ส่วนตามลำดับที่เขียน (ถ้าเป็นรายการ ใช้ข้อที่ i โดย "
+        f"i mod {shard_total} = {shard_idx % shard_total}; env TAKKUB_SHARD บอกเลข shard) "
+        "แล้วทำเฉพาะส่วนของคุณ ห้ามทำทั้งหมด — shard อื่นทำส่วนที่เหลือพร้อมกัน"
+    )
+
+
 _SHARD_PATH_RE = re.compile(r"[\w][\w./\\-]*\.(?:md|markdown|json|txt|csv|html?|log|ya?ml)\b")
 
 # Pipeline-hop spawn staggering (#44). A multi-role hop spawns its roles via
@@ -691,13 +733,13 @@ class PipelineMixin:
 
         if timed_out:
             status = (
-                f"[qa fan-out timeout: {done_count}/{total} shards done"
+                f"[{group.base_role} fan-out timeout: {done_count}/{total} shards done"
                 + (f", {fail_count} failed" if fail_count else "")
                 + "]"
             )
         else:
             status = (
-                f"[qa fan-out complete: {done_count}/{total} shards done"
+                f"[{group.base_role} fan-out complete: {done_count}/{total} shards done"
                 + (f", {fail_count} failed" if fail_count else "")
                 + "]"
             )
@@ -826,6 +868,7 @@ class PipelineMixin:
             f"━━ SHARD {shard_idx}/{shard_total} — กันไฟล์รายงานทับกัน (#160) ━━\n"
             f"คุณคือ shard {shard_idx} จาก {shard_total} shards ที่รัน task ข้างบน "
             "พร้อมกัน (เนื้อหา task เหมือนกันทุก shard)\n"
+            f"{_shard_scope_line(base_task, shard_idx, shard_total)}\n"
             "ถ้า task นี้สั่งให้เขียนไฟล์ผลลัพธ์/รายงานไปที่ path คงที่ (เช่น "
             "docs/audit/xxx.md) **ห้ามเขียนทับ path นั้นตรงๆ** — shard อื่นเขียน "
             "path เดียวกันพร้อมกัน จะทับกันจนรายงานของ shard อื่นหาย ให้เติม suffix "
