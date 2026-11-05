@@ -54,7 +54,7 @@
 </style>
 </head>
 <body>
-<p class="note">Mockup สำหรับอนุมัติ: หน้า "โปรเจคใหม่" ตัวใหม่ที่มาแทนปุ่ม "✨ โปรเจคใหม่ (AI rules)" · ลองกดเลือกได้จริง ฝั่งขวาจะเปลี่ยนตามที่เลือก · ระบบสร้างแค่โครง folder, docker-compose, .env.example, CLAUDE.md และ README ของแต่ละส่วน ส่วนโค้ดจริงของแต่ละ framework ให้ pane สร้างตอนเริ่มงาน</p>
+<p class="note">Mockup สำหรับอนุมัติ: หน้า "โปรเจคใหม่" ตัวใหม่ที่มาแทนปุ่ม "✨ โปรเจคใหม่ (AI rules)" · ลองกดเลือกได้จริง ฝั่งขวาจะเปลี่ยนตามที่เลือก · ระบบสร้างแค่โครง folder, docker-compose, .env.example, AGENTS.md (rules กลางของทุก provider) และ README ของแต่ละส่วน ไม่มีขั้นตอน AI จึงไม่ผูกกับ provider ไหน ส่วนโค้ดจริงของแต่ละ framework ให้ pane สร้างตอนเริ่มงาน</p>
 <div class="dlg">
   <div class="tb"><b>โปรเจคใหม่</b><span>· เลือกว่าจะมีระบบอะไรบ้าง</span></div>
   <div class="top">
@@ -67,7 +67,7 @@
     <div class="side">
       <div class="box"><h4>โครง folder ที่จะสร้าง</h4><pre id="tree"></pre></div>
       <div class="box"><h4>docker-compose.yml จะมี service</h4><div class="svc" id="svc"></div></div>
-      <div class="box"><h4>CLAUDE.md จะเขียนให้ว่า</h4><ul class="rules" id="rules"></ul></div>
+      <div class="box"><h4>AGENTS.md จะเขียนให้ว่า <span style="font-weight:400;color:var(--t3)">· claude, codex, agy, opencode, cursor อ่านไฟล์นี้ทุกตัว</span></h4><ul class="rules" id="rules"></ul></div>
     </div>
   </div>
   <div class="foot"><span class="s" id="count"></span><button class="btn">ยกเลิก</button><button class="btn primary">สร้างโปรเจค</button></div>
@@ -176,7 +176,7 @@ function renderSide(){
   if(tools.includes("scripts/")) add("scripts/");
   if(tools.includes("GitHub Actions CI")) add(".github/workflows/","ci.yml");
   if(tools.includes("docker-compose")) lines.push("├─ docker-compose.yml");
-  lines.push("├─ .env.example"); lines.push("├─ README.md"); lines.push("└─ CLAUDE.md");
+  lines.push("├─ .env.example"); lines.push("├─ .gitignore"); lines.push("├─ README.md"); lines.push(`├─ AGENTS.md  <span class="c"># rules กลาง ทุก provider อ่าน</span>`); lines.push(`└─ CLAUDE.md  <span class="c"># มีแค่ @AGENTS.md</span>`);
   document.getElementById("tree").innerHTML=lines.join("\n");
 
   const svc=[]; if(tools.includes("docker-compose")){

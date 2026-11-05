@@ -371,6 +371,7 @@ def _build_lead_context_text(
     project: str | None = None,
     post_compact_brief: str | None = None,
     claude_cwd: str | None = None,
+    lead_is_claude: bool = True,
 ) -> str | None:
     """Build Lead's spawn-time system-prompt TEXT: cockpit CLAUDE.md + an
     auto-injected `BLOCKED_DIRS` paragraph listing the active project's paths
@@ -596,7 +597,7 @@ Lead ทำเองได้เฉพาะงานเล็กเมื่อ
 
 {_lang_line}"""
 
-    # Inject project-specific CLAUDE.md so Lead knows the project's deploy
+    # Inject the project's rules (AGENTS.md or legacy CLAUDE.md) so Lead knows the project's deploy
     # rules, stack constraints, and conventions at planning time — previously
     # Lead only saw the cockpit CLAUDE.md and had to infer project rules from
     # the task description alone.
@@ -605,6 +606,7 @@ Lead ทำเองได้เฉพาะงานเล็กเมื่อ
     # its project_root/CLAUDE.md == the cockpit CLAUDE.md already in `base`,
     # so we skip to avoid double-injecting the same content.
     _project_rules_text: str | None = None
+    _project_rules_file = "CLAUDE.md"
     if proj and paths:
         # Resolve project_root: prefer path keyed "main", else first path.
         _proj_paths: dict = proj.get("paths") or {}
@@ -619,24 +621,39 @@ Lead ทำเองได้เฉพาะงานเล็กเมื่อ
                 # lead_cwd(project)). Injecting it too would double the project rules
                 # in context. Only inject when the file lives somewhere claude won't
                 # auto-load (e.g. a project subdir while Lead sits at the parent).
-                _lead_dir_str = claude_cwd or lead_cwd(project=name)
-                _auto = bool(_lead_dir_str) and _claude_autoloads(
-                    pathlib.Path(_lead_dir_str), _proj_root
+                from .project_rules import AGENTS_FILE, CLAUDE_FILE, rules_path
+
+                # Provider-neutral: rules live in AGENTS.md (CLAUDE.md
+                # imports it) or a legacy CLAUDE.md. Skip only when THIS
+                # Lead's CLI auto-reads that file from its cwd — claude reads
+                # CLAUDE.md (+ its @AGENTS.md import), the other providers
+                # read AGENTS.md.
+                _candidate = rules_path(_proj_root)
+                _self_read = (
+                    (_proj_root / CLAUDE_FILE).is_file()
+                    if lead_is_claude
+                    else _candidate.name == AGENTS_FILE
                 )
-                _candidate = _proj_root / "CLAUDE.md"
+                _lead_dir_str = claude_cwd or lead_cwd(project=name)
+                _auto = (
+                    _self_read
+                    and bool(_lead_dir_str)
+                    and _claude_autoloads(pathlib.Path(_lead_dir_str), _proj_root)
+                )
                 if _candidate.exists() and not _auto:
                     _raw = _candidate.read_text(encoding="utf-8")
                     _cap = 3000
                     if len(_raw) > _cap:
                         _raw = _raw[:_cap] + "\n…(truncated)\n"
                     _project_rules_text = _raw
+                    _project_rules_file = _candidate.name
 
     if _project_rules_text:
         suffix += f"""
 
 ---
 
-## 📋 Project rules (auto-injected from {name}/CLAUDE.md)
+## 📋 Project rules (auto-injected from {name}/{_project_rules_file})
 
 {_project_rules_text}"""
 
@@ -956,7 +973,7 @@ def build_lead_agents_text(
     Written to AGENTS.md by `render_lead_agents_md_with_reason`, or handed
     over a provider channel by `pane_instructions` (#961)."""
     text = _build_lead_context_text(
-        project, post_compact_brief=post_compact_brief, claude_cwd=spawn_cwd
+        project, post_compact_brief=post_compact_brief, claude_cwd=spawn_cwd, lead_is_claude=False
     )
     if text is None:
         return None

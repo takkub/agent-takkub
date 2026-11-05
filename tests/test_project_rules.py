@@ -2,25 +2,13 @@
 
 from __future__ import annotations
 
-import subprocess
 from pathlib import Path
-from unittest.mock import MagicMock, patch
 
 import pytest
 
 from agent_takkub import config as config_mod
-from agent_takkub.project_rules import (
-    collect_result,
-    generate_project_rules_proc,
-    read_project_rules,
-    write_project_rules,
-)
-
-
-def generate_project_rules(prompt: str, project_name: str) -> str:
-    """The blocking proc → result path the QThread caller runs."""
-    return collect_result(generate_project_rules_proc(prompt, project_name), project_name)
-
+from agent_takkub.codex_agents_md import TAKKUB_MARKER
+from agent_takkub.project_rules import read_project_rules, rules_path, write_project_rules
 
 # ─────────────────────────────────────────────────────────────────────
 # Fixtures
@@ -36,7 +24,7 @@ def tmp_project(tmp_path: Path) -> Path:
 
 
 # ─────────────────────────────────────────────────────────────────────
-# read_project_rules
+# read_project_rules / rules_path — provider-neutral (AGENTS.md first)
 # ─────────────────────────────────────────────────────────────────────
 
 
@@ -44,9 +32,21 @@ class TestReadProjectRules:
     def test_returns_none_when_missing(self, tmp_project: Path) -> None:
         assert read_project_rules(tmp_project) is None
 
-    def test_returns_content_when_present(self, tmp_project: Path) -> None:
+    def test_legacy_claude_md_still_read(self, tmp_project: Path) -> None:
         (tmp_project / "CLAUDE.md").write_text("# Rules\n- no foo", encoding="utf-8")
         assert read_project_rules(tmp_project) == "# Rules\n- no foo"
+
+    def test_agents_md_wins_and_import_only_claude_md_is_skipped(self, tmp_project: Path) -> None:
+        (tmp_project / "AGENTS.md").write_text("# Shared rules", encoding="utf-8")
+        (tmp_project / "CLAUDE.md").write_text("@AGENTS.md\n", encoding="utf-8")
+        assert rules_path(tmp_project).name == "AGENTS.md"
+        assert read_project_rules(tmp_project) == "# Shared rules"
+
+    def test_cockpit_managed_agents_md_is_not_project_rules(self, tmp_project: Path) -> None:
+        (tmp_project / "AGENTS.md").write_text(f"{TAKKUB_MARKER}\n# teammate sheet", "utf-8")
+        assert read_project_rules(tmp_project) is None
+        (tmp_project / "CLAUDE.md").write_text("# real rules", encoding="utf-8")
+        assert read_project_rules(tmp_project) == "# real rules"
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -55,100 +55,22 @@ class TestReadProjectRules:
 
 
 class TestWriteProjectRules:
-    def test_writes_file(self, tmp_project: Path) -> None:
+    def test_new_project_writes_agents_md_and_claude_import(self, tmp_project: Path) -> None:
         path = write_project_rules(tmp_project, "# Generated\n- deploy via Vercel\n")
-        assert path == tmp_project / "CLAUDE.md"
+        assert path == tmp_project / "AGENTS.md"
         assert path.read_text(encoding="utf-8") == "# Generated\n- deploy via Vercel\n"
+        assert (tmp_project / "CLAUDE.md").read_text(encoding="utf-8") == "@AGENTS.md\n"
 
-    def test_overwrites_existing(self, tmp_project: Path) -> None:
+    def test_legacy_claude_md_is_edited_in_place(self, tmp_project: Path) -> None:
         (tmp_project / "CLAUDE.md").write_text("old content", encoding="utf-8")
         write_project_rules(tmp_project, "new content")
         assert (tmp_project / "CLAUDE.md").read_text(encoding="utf-8") == "new content"
+        assert not (tmp_project / "AGENTS.md").exists()
 
-    def test_atomic_via_tmp(self, tmp_project: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_atomic_via_tmp(self, tmp_project: Path) -> None:
         """Verify the tmp file is cleaned up (replaced) after write."""
         write_project_rules(tmp_project, "content")
-        tmp = tmp_project / "CLAUDE.md.tmp"
-        assert not tmp.exists(), "tmp file should be gone after atomic replace"
-
-
-# ─────────────────────────────────────────────────────────────────────
-# generate_project_rules (mocked subprocess)
-# ─────────────────────────────────────────────────────────────────────
-
-
-class TestGenerateProjectRules:
-    def _make_proc(self, stdout: str = "", stderr: str = "", returncode: int = 0):
-        proc = MagicMock()
-        proc.communicate.return_value = (stdout, stderr)
-        proc.returncode = returncode
-        return proc
-
-    def test_returns_markdown_on_success(self) -> None:
-        proc = self._make_proc(stdout="# Rules\n- deploy to Fly.io\n")
-        with (
-            patch("agent_takkub.project_rules.find_claude_executable", return_value="claude"),
-            patch("agent_takkub.project_rules.subprocess.Popen", return_value=proc),
-        ):
-            result = generate_project_rules("Next.js + FastAPI", "myapp")
-        assert "# Rules" in result
-
-    def test_raises_on_nonzero_exit(self) -> None:
-        proc = self._make_proc(stdout="", stderr="auth error", returncode=1)
-        with (
-            patch("agent_takkub.project_rules.find_claude_executable", return_value="claude"),
-            patch("agent_takkub.project_rules.subprocess.Popen", return_value=proc),
-        ):
-            with pytest.raises(RuntimeError, match="exited 1"):
-                generate_project_rules("desc", "proj")
-
-    def test_raises_on_empty_output(self) -> None:
-        proc = self._make_proc(stdout="   ", returncode=0)
-        with (
-            patch("agent_takkub.project_rules.find_claude_executable", return_value="claude"),
-            patch("agent_takkub.project_rules.subprocess.Popen", return_value=proc),
-        ):
-            with pytest.raises(RuntimeError, match="empty output"):
-                generate_project_rules("desc", "proj")
-
-    def test_uses_append_system_prompt_flag(self) -> None:
-        """Regression: must use --append-system-prompt, not the invalid --system flag."""
-        proc = self._make_proc(stdout="# Rules\n- deploy\n")
-        captured: list = []
-        with (
-            patch("agent_takkub.project_rules.find_claude_executable", return_value="claude"),
-            patch(
-                "agent_takkub.project_rules.subprocess.Popen",
-                side_effect=lambda args, **kw: captured.append(args) or proc,
-            ),
-        ):
-            generate_project_rules("desc", "proj")
-        assert len(captured) == 1
-        args = captured[0]
-        assert "--append-system-prompt" in args
-        assert "--system" not in [a for a in args if a == "--system"]
-
-    def test_raises_when_claude_not_found(self) -> None:
-        """m4: find_claude_executable returns None → RuntimeError, not TypeError."""
-        with patch("agent_takkub.project_rules.find_claude_executable", return_value=None):
-            with pytest.raises(RuntimeError, match="claude binary not found"):
-                generate_project_rules("desc", "proj")
-
-    def test_raises_on_timeout(self) -> None:
-        proc = MagicMock()
-        proc.communicate.side_effect = subprocess.TimeoutExpired(cmd="claude", timeout=150)
-        proc.kill = MagicMock()
-        # After kill, communicate should succeed (drain)
-        proc.communicate.side_effect = [
-            subprocess.TimeoutExpired(cmd="claude", timeout=150),
-            ("", ""),
-        ]
-        with (
-            patch("agent_takkub.project_rules.find_claude_executable", return_value="claude"),
-            patch("agent_takkub.project_rules.subprocess.Popen", return_value=proc),
-        ):
-            with pytest.raises(RuntimeError, match="timed out"):
-                generate_project_rules("desc", "proj")
+        assert not (tmp_project / "AGENTS.md.tmp").exists()
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -294,6 +216,44 @@ class TestLeadContextProjectRulesInjection:
         content = Path(out_path).read_text(encoding="utf-8")
         assert "📋 Project rules" not in content
         assert "deploy to Fly.io" not in content
+
+    def test_template_project_agents_md_reaches_every_lead_provider(
+        self, lead_context_env: Path, tmp_path: Path, seed_projects
+    ) -> None:
+        """Template projects keep rules in AGENTS.md + `@AGENTS.md` CLAUDE.md:
+        both a claude Lead and a non-claude Lead at the root auto-read them,
+        so neither gets a duplicate injection; from elsewhere both get it."""
+        proj_root = tmp_path / "ext" / "tplapp"
+        proj_root.mkdir(parents=True)
+        (proj_root / "AGENTS.md").write_text("# tplapp\n- stack NestJS\n", "utf-8")
+        (proj_root / "CLAUDE.md").write_text("@AGENTS.md\n", "utf-8")
+        _write_projects(seed_projects, tmp_path, proj_root, name="tplapp")
+
+        from agent_takkub.lead_context import _render_lead_context, build_lead_agents_text
+
+        at_root_claude = Path(_render_lead_context(project="tplapp", claude_cwd=str(proj_root)))
+        assert "stack NestJS" not in at_root_claude.read_text(encoding="utf-8")
+        assert "stack NestJS" not in (build_lead_agents_text("tplapp", str(proj_root)) or "")
+
+        elsewhere = tmp_path / "elsewhere"
+        elsewhere.mkdir()
+        other = build_lead_agents_text("tplapp", str(elsewhere)) or ""
+        assert "stack NestJS" in other and "tplapp/AGENTS.md" in other
+
+    def test_non_claude_lead_gets_legacy_claude_md_rules(
+        self, lead_context_env: Path, tmp_path: Path, seed_projects
+    ) -> None:
+        """A codex/agy/opencode/cursor Lead never auto-reads CLAUDE.md — a
+        legacy CLAUDE.md-only project used to leave it with no project rules."""
+        proj_root = tmp_path / "ext" / "legacyapp"
+        proj_root.mkdir(parents=True)
+        (proj_root / "CLAUDE.md").write_text("# legacy\n- deploy to Fly.io\n", "utf-8")
+        _write_projects(seed_projects, tmp_path, proj_root, name="legacyapp")
+
+        from agent_takkub.lead_context import build_lead_agents_text
+
+        text = build_lead_agents_text("legacyapp", str(proj_root)) or ""
+        assert "deploy to Fly.io" in text
 
 
 class TestProviderNeutralLeadDelegationPolicy:

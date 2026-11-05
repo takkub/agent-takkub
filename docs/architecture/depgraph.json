@@ -1,6 +1,6 @@
 {
   "generated_by": "grimp 3.14",
-  "module_count": 373,
+  "module_count": 375,
   "modules": [
     {
       "module": "agent_takkub",
@@ -90,7 +90,6 @@
         "agent_takkub.prisma_gate",
         "agent_takkub.project_explorer",
         "agent_takkub.project_file_index",
-        "agent_takkub.project_rules",
         "agent_takkub.project_wizard",
         "agent_takkub.provider_cli_common",
         "agent_takkub.provider_install",
@@ -119,7 +118,7 @@
         "agent_takkub.verify",
         "agent_takkub.worktree_manager"
       ],
-      "fan_in": 53,
+      "fan_in": 52,
       "fan_out": 0
     },
     {
@@ -697,6 +696,7 @@
         "agent_takkub.lead_composer",
         "agent_takkub.logs_panel",
         "agent_takkub.main_window",
+        "agent_takkub.new_project_dialog",
         "agent_takkub.orchestrator",
         "agent_takkub.project_explorer",
         "agent_takkub.project_nav",
@@ -727,7 +727,7 @@
         "agent_takkub.usage_meter",
         "agent_takkub.user_actions"
       ],
-      "fan_in": 37,
+      "fan_in": 38,
       "fan_out": 0
     },
     {
@@ -748,9 +748,10 @@
         "agent_takkub.cli",
         "agent_takkub.lead_context",
         "agent_takkub.orchestrator",
+        "agent_takkub.project_rules",
         "agent_takkub.spawn_engine"
       ],
-      "fan_in": 4,
+      "fan_in": 5,
       "fan_out": 0
     },
     {
@@ -875,7 +876,6 @@
         "agent_takkub.project_identity",
         "agent_takkub.project_memory",
         "agent_takkub.project_nav",
-        "agent_takkub.project_rules",
         "agent_takkub.project_wizard",
         "agent_takkub.provider_bootstrap",
         "agent_takkub.provider_config",
@@ -930,7 +930,7 @@
         "agent_takkub.worktree_manager",
         "agent_takkub.worktree_reuse"
       ],
-      "fan_in": 130,
+      "fan_in": 129,
       "fan_out": 2
     },
     {
@@ -3079,6 +3079,7 @@
         "agent_takkub.plugin_installer",
         "agent_takkub.pm_project",
         "agent_takkub.project_memory",
+        "agent_takkub.project_rules",
         "agent_takkub.provider_config",
         "agent_takkub.provider_state",
         "agent_takkub.response_language",
@@ -3105,7 +3106,7 @@
         "agent_takkub.user_profile"
       ],
       "fan_in": 15,
-      "fan_out": 16
+      "fan_out": 17
     },
     {
       "module": "agent_takkub.lead_draft_state",
@@ -3370,6 +3371,18 @@
       ],
       "fan_in": 3,
       "fan_out": 4
+    },
+    {
+      "module": "agent_takkub.new_project_dialog",
+      "imports": [
+        "agent_takkub.cockpit_theme",
+        "agent_takkub.project_template"
+      ],
+      "imported_by": [
+        "agent_takkub.project_wizard"
+      ],
+      "fan_in": 1,
+      "fan_out": 2
     },
     {
       "module": "agent_takkub.notice_facts",
@@ -3978,14 +3991,14 @@
     {
       "module": "agent_takkub.project_rules",
       "imports": [
-        "agent_takkub._win_console",
-        "agent_takkub.config"
+        "agent_takkub.codex_agents_md"
       ],
       "imported_by": [
+        "agent_takkub.lead_context",
         "agent_takkub.project_wizard"
       ],
-      "fan_in": 1,
-      "fan_out": 2
+      "fan_in": 2,
+      "fan_out": 1
     },
     {
       "module": "agent_takkub.project_tab",
@@ -4005,19 +4018,31 @@
       "fan_out": 4
     },
     {
+      "module": "agent_takkub.project_template",
+      "imports": [],
+      "imported_by": [
+        "agent_takkub.new_project_dialog",
+        "agent_takkub.project_wizard"
+      ],
+      "fan_in": 2,
+      "fan_out": 0
+    },
+    {
       "module": "agent_takkub.project_wizard",
       "imports": [
         "agent_takkub._win_console",
         "agent_takkub.cockpit_theme",
         "agent_takkub.config",
+        "agent_takkub.new_project_dialog",
         "agent_takkub.project_rules",
-        "agent_takkub.project_tab"
+        "agent_takkub.project_tab",
+        "agent_takkub.project_template"
       ],
       "imported_by": [
         "agent_takkub.main_window"
       ],
       "fan_in": 1,
-      "fan_out": 5
+      "fan_out": 7
     },
     {
       "module": "agent_takkub.provider_bootstrap",

@@ -159,8 +159,8 @@ UI god-object เดินสายทุก subsystem. ส่วนใหญ่
   `_on_install_rtk_clicked` (a dead no-op stub, central rtk toggle UI already
   removed) was deleted 2026-09-07 (B-L1, round2 review).
 
-**`mw_project_creation_wizard`** → `project_wizard.py` — new/import project + AI rules gen (`_RulesGeneratorThread`)
-- `_RulesGeneratorThread`, `_on_add_project_clicked`, `_import_existing_project`, `_new_project_with_rules`, `_ask_project_description`, `_generate_rules_with_ui`, `_run_map_paths_dialog`, `_save_and_open_project`, `_on_edit_project_rules_clicked`, `_show_rules_editor_dialog`, `_on_edit_project_clicked`
+**`mw_project_creation_wizard`** → `project_wizard.py` — new project from template (`new_project_dialog.py` + `project_template.py`, replaced the AI rules gen 2026-11-05) / import / clone
+- `_on_add_project_clicked`, `_import_existing_project`, `_new_project_from_template`, `_clone_project_from_url`, `_run_map_paths_dialog`, `_save_and_open_project`, `_on_edit_project_rules_clicked`, `_show_rules_editor_dialog`, `_on_edit_project_clicked`
 - No drift — matches the original doc exactly.
 
 **`mw_status_bar_builder`** → `StatusHeader` QWidget (`status_header.py`)

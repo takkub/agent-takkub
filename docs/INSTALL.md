@@ -251,22 +251,24 @@ notepad projects.json
   - qa / reviewer / critic → first path
 - `presets` — รายชื่อ role ที่จะ auto-spawn 15 วินาทีหลัง Lead boot (เว้น 3s ต่อ role)
 
-### Step 4b: AI-generated project rules (optional)
-
-cockpit สามารถสร้าง `CLAUDE.md` สำหรับแต่ละ project โดยใช้ AI — ไม่ต้องเขียนเอง
+### Step 4b: สร้างโปรเจคใหม่จาก template
 
 **New project flow (เพิ่ม project ใหม่):**
-1. กดปุ่ม **＋ Add Project** ใน status bar
-2. เลือก **"New project (AI rules)"** → ใส่คำอธิบาย project สั้นๆ
-3. cockpit รัน Claude Code headless สร้าง `CLAUDE.md` ให้ (ใช้เวลา ~15–60 วินาที)
-4. preview + แก้ไขใน editor dialog ก่อน save หรือกด **🔄 Regenerate** ถ้าไม่พอใจ
-5. `<project-root>/CLAUDE.md` ถูกสร้างและ inject เข้า Lead pane ทุก session อัตโนมัติ
+1. กด **＋** (แท็บใหม่) → **"✨ โปรเจคใหม่ (เลือก template)"**
+2. ตั้งชื่อโปรเจคและโฟลเดอร์ที่จะสร้าง แล้วเลือกทีละชั้นว่าจะมีอะไรบ้าง
+   - web, admin, API, ฐานข้อมูล, มือถือ, งานเบื้องหลัง: แต่ละชั้นเลือก framework ได้หนึ่งตัว หรือ "ไม่ใช้"
+   - style ของ web และ admin: CSS, UI kit, ไอคอน, state
+   - ธีม: แนวดีไซน์, โหมดมืดหรือสว่าง, สีหลัก, ฟอนต์ไทย, ความโค้งมุม
+   - ภาษา, ตัวจัดการแพ็กเกจ, บริการเสริม (Redis, MinIO, Keycloak, …) และเครื่องมือ (docker-compose, Playwright, CI, …)
+   - ด้านบนมี preset ให้กดครั้งเดียวแล้วติ๊กให้ครบ จากนั้นปรับเองต่อได้
+3. กด **สร้างโปรเจค** ระบบจะเขียนโครงให้ ได้แก่ folder ของแต่ละส่วนพร้อม README บอกคำสั่งสร้างโค้ดเริ่มต้น, `docker-compose.yml`, `.env.example`, `.gitignore`, `AGENTS.md` และ `CLAUDE.md` แล้วลงทะเบียน path ให้เองโดยไม่ต้อง map ทีละ folder · ไฟล์ที่มีอยู่แล้วจะไม่ถูกทับ
+4. ระบบไม่สร้างโค้ดจริงของแต่ละ framework (create-next-app, nest new, …) ให้ pane รันคำสั่งใน README ตอนเริ่มงาน
 
-**Edit rules ภายหลัง:**
-- กดปุ่ม **✏ Rules** ใน status bar ขณะที่ project นั้น active
-- แก้ไขใน editor dialog → Save หรือ Regenerate จาก prompt ใหม่
+**rules ใช้ได้กับทุก provider:** rules ของโปรเจคอยู่ใน `AGENTS.md` ซึ่ง codex, agy, opencode และ cursor อ่านเอง ส่วน `CLAUDE.md` มีแค่บรรทัด `@AGENTS.md` ให้ claude อ่านไฟล์เดียวกัน · ไม่มีขั้นตอน AI จึงไม่ต้องพึ่ง provider ใด
 
-**Auto-injection:** Lead spawn ทุกครั้งจะโหลด `CLAUDE.md` ของ project (cap 3000 chars) เข้า context อัตโนมัติ — Lead รู้ codebase conventions โดยไม่ต้องพิมพ์ซ้ำ
+**Edit rules ภายหลัง:** กดปุ่ม **✏ Rules** ใน status bar ขณะที่ project นั้น active แล้วแก้ใน editor (แก้ `AGENTS.md` หรือ `CLAUDE.md` เดิมของโปรเจครุ่นเก่า)
+
+**Auto-injection:** Lead spawn ทุกครั้งได้ rules ของโปรเจค (cap 3000 chars) ทุก provider · ถ้า CLI ของ Lead อ่านไฟล์นั้นเองจาก cwd อยู่แล้ว ระบบจะไม่ใส่ซ้ำ
 
 ### Step 5: เปิด cockpit
 

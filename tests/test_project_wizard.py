@@ -143,8 +143,8 @@ class _NewTabHost(QWidget):
     def _open_project_tab(self, name):
         self.calls.append(("open_tab", name))
 
-    def _new_project_with_rules(self):
-        self.calls.append(("new_with_rules",))
+    def _new_project_from_template(self):
+        self.calls.append(("new_from_template",))
 
     def _import_existing_project(self):
         self.calls.append(("import_existing",))
@@ -184,9 +184,10 @@ def test_new_tab_dialog_has_exactly_four_action_buttons(monkeypatch):
     MainWindow._on_new_tab_clicked(host)
 
     labels = [b.text() for b in picked["box"].buttons()]
-    assert len(labels) == 5  # existing / new-with-rules / import / clone / cancel
+    assert len(labels) == 5  # existing / new-from-template / import / clone / cancel
     assert any("เปิดโปรเจคที่ตั้งไว้" in t for t in labels)
-    assert any("AI rules" in t for t in labels)
+    assert any("template" in t for t in labels)
+    assert not any("AI rules" in t for t in labels)
     assert any("Import" in t for t in labels)
     assert any("Clone" in t for t in labels)
     assert host.calls == []  # cancelled → no downstream action fired
@@ -331,14 +332,14 @@ def test_clone_flow_reports_failure_and_cleans_partial_dir(tmp_path, monkeypatch
     assert "never-cloned" not in config.load_projects()["projects"]
 
 
-def test_new_tab_dialog_routes_new_to_rules_wizard(monkeypatch):
+def test_new_tab_dialog_routes_new_to_template_picker(monkeypatch):
     monkeypatch.setattr("agent_takkub.main_window.list_project_names", lambda: [])
     host = _NewTabHost()
-    _stub_dialog(monkeypatch, "AI rules")
+    _stub_dialog(monkeypatch, "template")
 
     MainWindow._on_new_tab_clicked(host)
 
-    assert host.calls == [("new_with_rules",)]
+    assert host.calls == [("new_from_template",)]
 
 
 def test_new_tab_dialog_routes_import_to_import_flow(monkeypatch):
@@ -389,68 +390,3 @@ def test_new_tab_dialog_routes_existing_to_project_picker(monkeypatch):
     MainWindow._on_new_tab_clicked(host)
 
     assert host.calls == [("open_tab", "beta")]
-
-
-def test_generate_rules_cancels_and_joins_before_deleting_thread(monkeypatch):
-    """Dismissing the busy dialog (Esc / window close) returns from
-    busy.exec() WITHOUT going through on_cancel. The generator thread may
-    still be running; it must be cancelled and joined BEFORE deleteLater(),
-    because deleting a running QThread aborts the whole process. Regression
-    guard for the 2026-07 full-system review (project_wizard HIGH)."""
-    from PyQt6.QtWidgets import QWidget
-
-    import agent_takkub.project_wizard as pw
-
-    calls: list = []
-
-    class _FakeSignal:
-        def connect(self, *a, **k):
-            pass
-
-    class _FakeThread:
-        def __init__(self, *a, **k):
-            self.rulesReady = _FakeSignal()
-            self.failed = _FakeSignal()
-            self._running = False
-
-        def start(self):
-            self._running = True
-            calls.append("start")
-
-        def isRunning(self):
-            return self._running
-
-        def cancel(self):
-            calls.append("cancel")
-            self._running = False  # proc.kill() -> run() exits
-
-        def wait(self, timeout=None):
-            calls.append("wait")
-            return True  # joined
-
-        def terminate(self):
-            calls.append("terminate")
-
-        def deleteLater(self):
-            calls.append("deleteLater")
-
-    monkeypatch.setattr(pw, "_RulesGeneratorThread", _FakeThread)
-    # busy.exec() returns immediately as if the user pressed Esc (no signal fired)
-    monkeypatch.setattr("PyQt6.QtWidgets.QDialog.exec", lambda self: 0)
-
-    class _Host(QWidget, pw.ProjectWizardMixin):
-        pass
-
-    host = _Host()
-    try:
-        result = host._generate_rules_with_ui("prompt", "proj")
-    finally:
-        host.deleteLater()
-
-    assert result is None
-    assert "cancel" in calls, "a still-running thread must be cancelled on dismiss"
-    assert "deleteLater" in calls
-    # cancel + wait must both precede deleteLater; never delete a live thread
-    assert calls.index("cancel") < calls.index("deleteLater")
-    assert calls.index("wait") < calls.index("deleteLater")
-    assert "terminate" not in calls  # cancel()+wait() succeeded, no force-kill needed

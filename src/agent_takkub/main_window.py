@@ -1488,7 +1488,8 @@ class MainWindow(
 
           1. **เปิดโปรเจคที่ตั้งไว้** — open a project already configured in
              projects.json (excludes already-open ones).
-          2. **โปรเจคใหม่ (AI rules)** — `_new_project_with_rules()`.
+          2. **โปรเจคใหม่** — `_new_project_from_template()`: pick web / api /
+             db / theme … from the template picker (replaced the AI-rules flow).
           3. **Import โฟลเดอร์** — `_import_existing_project()`.
           4. **Clone จาก repo** — `_clone_project_from_url()` (2026-10-16):
              paste a git URL → clone → same map-paths/open as Import.
@@ -1510,10 +1511,10 @@ class MainWindow(
         box.setText("เปิดโปรเจคที่ตั้งไว้ หรือเพิ่มโปรเจคใหม่?")
         box.setInformativeText(
             "เลือกจากที่เคยตั้งไว้ในระบบ — หรือเพิ่มโปรเจคใหม่ "
-            "(สร้างใหม่ด้วย AI rules / import โฟลเดอร์ที่มีอยู่ / clone จาก repo URL)"
+            "(สร้างใหม่จาก template / import โฟลเดอร์ที่มีอยู่ / clone จาก repo URL)"
         )
         btn_existing = box.addButton("📂 เปิดโปรเจคที่ตั้งไว้", QMessageBox.ButtonRole.AcceptRole)
-        btn_new = box.addButton("✨ โปรเจคใหม่ (AI rules)", QMessageBox.ButtonRole.AcceptRole)
+        btn_new = box.addButton("✨ โปรเจคใหม่ (เลือก template)", QMessageBox.ButtonRole.AcceptRole)
         btn_import = box.addButton("📁 Import โฟลเดอร์", QMessageBox.ButtonRole.AcceptRole)
         btn_clone = box.addButton("🔗 Clone จาก repo", QMessageBox.ButtonRole.AcceptRole)
         box.addButton("ยกเลิก", QMessageBox.ButtonRole.RejectRole)
@@ -1535,7 +1536,7 @@ class MainWindow(
         clicked = box.clickedButton()
 
         if clicked is btn_new:
-            self._new_project_with_rules()
+            self._new_project_from_template()
             return
         if clicked is btn_import:
             self._import_existing_project()

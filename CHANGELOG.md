@@ -2,6 +2,36 @@
 
 All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses [SemVer](https://semver.org/).
 
+## [v2.2.51] - 2026-11-05
+
+### Changed (เปลี่ยน)
+
+- **โปรเจคใหม่: เลือก template แทนการให้ AI เขียน rules:** ปุ่ม "✨ โปรเจคใหม่ (AI rules)" เดิมรัน `claude -p` headless นานสูงสุด 2 นาทีเพื่อเขียน `CLAUDE.md` จากข้อความที่พิมพ์อธิบาย ซึ่งผูกการสร้างโปรเจคไว้กับ claude ตัวเดียว · ปุ่มนี้กลายเป็น **"✨ โปรเจคใหม่ (เลือก template)"** หน้าตาตามที่อนุมัติใน `docs/mockups/2026-11-05-new-project-template.html`
+  - **เลือกทีละชั้น:** แต่ละชั้นเลือก framework ได้หนึ่งตัวหรือ "ไม่ใช้"
+    - web: Next.js, React+Vite, Nuxt, SvelteKit, Angular, Astro, Remix, HTML
+    - admin: Next.js, React+Vite, Refine, React-Admin, Nuxt
+    - API: NestJS, ElysiaJS, Hono, Express, Fastify, FastAPI, Django, Laravel, Go Fiber/Gin, .NET, Spring Boot พร้อม ORM และรูปแบบ API
+    - ฐานข้อมูล: PostgreSQL, MySQL, MariaDB, MongoDB, SQLite, SQL Server
+    - มือถือ: Expo, Flutter, LINE LIFF, Ionic, Kotlin, Swift
+    - งานเบื้องหลัง: BullMQ, Celery, Temporal, cron
+  - **style ของ web/admin/มือถือ:** CSS (Tailwind, CSS Modules, Sass, styled-components, …), UI kit (shadcn/ui, MUI, Ant Design, Mantine, …), ไอคอน, state
+  - **ธีม:** แนวดีไซน์ 9 แบบ, โหมดมืด/สว่าง, สีหลัก 9 สี, ฟอนต์ไทย 7 แบบ, ความโค้งมุม
+  - **อื่นๆ:** ภาษา, ตัวจัดการแพ็กเกจ, บริการเสริม 10 ตัว, เครื่องมือ 8 ตัว และ preset 7 แบบให้กดครั้งเดียวแล้วติ๊กให้ครบ
+  - ฝั่งขวาแสดงโครง folder, service ใน compose และสรุป rules ตามที่เลือกทันที
+- **สิ่งที่ระบบสร้างให้:**
+  - folder ของแต่ละส่วนพร้อม README บอกคำสั่งสร้างโค้ดเริ่มต้นของ framework นั้น
+  - `docker-compose.yml` ที่มีฐานข้อมูลและบริการเสริมที่เลือก ส่วน service ของแอปอยู่ใน profile `app` จนกว่าจะมี Dockerfile
+  - `.env.example`, `.gitignore`, `AGENTS.md`, `CLAUDE.md`
+  - ลงทะเบียน path ให้เองโดยไม่ต้องผ่าน dialog map paths และไม่ทับไฟล์ที่มีอยู่แล้ว
+  - ทดสอบจริงแล้ว: `docker compose config` ผ่านทุก preset, ลอง `up` stack ที่สร้างให้แล้ว Postgres รับ connection และ Redis ขึ้น, service ของแอปไม่ถูกเปิด
+- **rules ใช้กับทุก provider:** rules อยู่ใน `AGENTS.md` ซึ่ง codex, agy, opencode และ cursor อ่านเอง ส่วน `CLAUDE.md` มีแค่ `@AGENTS.md`
+  - ปุ่ม ✏ Rules แก้ `AGENTS.md` (หรือ `CLAUDE.md` เดิมของโปรเจครุ่นเก่า) และไม่มีปุ่ม Regenerate ด้วย AI แล้ว
+  - Lead ทุก provider ได้ rules ของโปรเจค เดิมระบบอ่านแค่ `CLAUDE.md` ทำให้ Lead ที่ใช้ codex/agy/opencode/cursor ไม่เห็น rules ของโปรเจครุ่นเก่า
+  - ระบบไม่ใส่ rules ซ้ำเมื่อ CLI ของ Lead อ่านไฟล์นั้นเองจาก cwd อยู่แล้ว
+  - `AGENTS.md` ที่ cockpit วางให้ pane เอง (มี marker) ไม่ถูกนับเป็น rules ของโปรเจค
+  - ไล่เช็คแล้วว่าโปรเจคที่มี `AGENTS.md` ของตัวเองไม่ทำให้ pane ที่ไม่ใช่ claude พลาดคำสั่งของ cockpit เพราะทั้ง 4 provider รับคำสั่งผ่านช่องของตัวเองอยู่แล้ว
+- ลบโค้ดของระบบเดิมทิ้งหมด ได้แก่ `_RulesGeneratorThread`, `generate_project_rules_proc`, dialog อธิบายโปรเจค และ dialog รอ generate
+
 ## [v2.2.50] - 2026-11-05
 
 ### Changed (เปลี่ยน)

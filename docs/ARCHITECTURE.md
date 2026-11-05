@@ -75,7 +75,8 @@ src/agent_takkub/
 │ ── spawn-time context & env ──
 ├── lead_context.py    builds runtime/lead-context.md (CLAUDE.md + BLOCKED_DIRS + brief),
 │                      write-guard json, _SAFE_PLUGINS discovery
-├── project_rules.py   injects Lead's constraint registry (MEMORY.md) pointers into teammates
+├── project_rules.py   project rules file I/O — AGENTS.md (every provider) or a legacy CLAUDE.md
+├── project_template.py new-project template catalog + scaffold (folders, compose, AGENTS.md)
 ├── pane_env.py        per-pane env allowlist (drop secrets), ECC mute, MCP_TOOL_TIMEOUT inject
 ├── shared_dev_tools.py shared MCP config management + role-aware tool filtering
 ├── codex_agents_md.py auto-plant AGENTS.md into non-claude panes (codex · gemini/agy · opencode · cursor — all auto-discover AGENTS.md)
