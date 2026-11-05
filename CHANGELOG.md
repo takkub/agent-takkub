@@ -32,6 +32,11 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
   - ไล่เช็คแล้วว่าโปรเจคที่มี `AGENTS.md` ของตัวเองไม่ทำให้ pane ที่ไม่ใช่ claude พลาดคำสั่งของ cockpit เพราะทั้ง 4 provider รับคำสั่งผ่านช่องของตัวเองอยู่แล้ว
 - ลบโค้ดของระบบเดิมทิ้งหมด ได้แก่ `_RulesGeneratorThread`, `generate_project_rules_proc`, dialog อธิบายโปรเจค และ dialog รอ generate
 
+### Fixed (แก้)
+
+- **`takkub ma` หัวข้อ Lead noise เตือนรายงาน `done` ผิด:** วันที่งานเยอะ ระบบขึ้น `done ×50 (8.3/ชม.) ⚠ บ่อย` ทั้งที่มีงาน assign 68 ใบ ซึ่งคือรายงานหนึ่งใบต่องานตามปกติ ไม่ใช่ noise · ตอนนี้ `done`/`failed` นับเทียบกับจำนวนงานที่ assign ในช่วงเดียวกัน และเตือนเฉพาะเมื่อรายงานเยอะกว่างาน (รายงานซ้ำ) · kind อื่นยังใช้เกณฑ์ครั้งต่อชั่วโมงเหมือนเดิม
+- **Code scanning #66 (high): ชื่อโปรเจคถูกแปลงเป็น HTML ใน mockup:** `docs/mockups/2026-11-05-new-project-template.html` ใส่ชื่อที่พิมพ์ลง `innerHTML` ตรงๆ ตอนนี้ escape ก่อนแล้ว · ทดสอบด้วย browser จริงโดยพิมพ์ `<img src=x onerror=…>` ข้อความแสดงเป็นตัวอักษร ไม่มี element `<img>` เกิดขึ้น และ handler ไม่ทำงาน · dialog จริงใน cockpit ก็ escape ชื่อในโครง folder ด้วย (Qt ไม่รัน script แต่ถ้าไม่ escape ชื่อที่มี `<b>` จะถูกแสดงเป็นตัวหนา)
+
 ## [v2.2.50] - 2026-11-05
 
 ### Changed (เปลี่ยน)

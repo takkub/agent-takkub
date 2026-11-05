@@ -793,6 +793,16 @@ def _other_cockpit_events_log(this_log: Path) -> Path | None:
     return None if other == this_log else other
 
 
+# lead_notice kinds that exist once per assigned task (a pane reporting back).
+_PER_TASK_KINDS = frozenset({"done", "failed"})
+
+
+def _per_task_allowance(assigned: int) -> int:
+    """How many per-task reports *assigned* tasks may produce before it looks
+    like duplicates — slack covers tasks assigned just before the window."""
+    return int(assigned * 1.2) + 2
+
+
 def check_lead_noise(
     log_path: Path,
     since_hours: float = 24.0,
@@ -816,6 +826,7 @@ def check_lead_noise(
     emitters: dict[str, Counter[str]] = {}
     previews: dict[str, str] = {}
     total = 0
+    assigned = 0
     for path in logs:
         try:
             with path.open(encoding="utf-8", errors="replace") as fh:
@@ -827,10 +838,14 @@ def check_lead_noise(
                         rec = json.loads(line)
                     except json.JSONDecodeError:
                         continue
-                    if rec.get("event") != "lead_notice":
+                    event = rec.get("event")
+                    if event not in ("lead_notice", "scope_assigned"):
                         continue
                     ts = _parse_ts(rec.get("ts"))
                     if ts is None or ts < cutoff:
+                        continue
+                    if event == "scope_assigned":
+                        assigned += 1
                         continue
                     kind = str(rec.get("kind") or "unknown")
                     counts[kind] += 1
@@ -860,7 +875,13 @@ def check_lead_noise(
         emitter = top_emitters.most_common(1)[0][0] if top_emitters else "?"
         preview = previews.get(kind, "")
         preview_note = f' — "{preview}"' if preview else ""
-        is_loud = rate > threshold
+        if kind in _PER_TASK_KINDS:
+            # One report per assigned task is the job, not noise — a busy
+            # day of 60 tasks is 60 dones. Only more reports than tasks
+            # (duplicates / replays) is worth a look.
+            is_loud = count > _per_task_allowance(assigned)
+        else:
+            is_loud = rate > threshold
         if is_loud:
             loud.append((kind, emitter, count))
         flag = " ⚠ บ่อย" if is_loud else ""

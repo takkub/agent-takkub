@@ -683,6 +683,40 @@ class TestCheckLeadNoise:
         assert check.status == "ok"
         assert not check.data["loud_kinds"]
 
+    def test_done_reports_scale_with_assigned_tasks_not_the_hourly_rate(
+        self, tmp_path: Path
+    ) -> None:
+        """ma 2026-11-05 flagged `done ×50 (8.3/ชม.) ⚠ บ่อย` on a day with 68
+        assigned tasks — one report per task is the job, not noise. Only
+        more reports than tasks (duplicates) is worth a look."""
+        now = datetime(2026, 9, 1, 12, 0, 0)
+
+        def recs(n_assign: int, n_done: int) -> list[dict]:
+            out = [
+                {"ts": (now - timedelta(minutes=i)).isoformat(), "event": "scope_assigned"}
+                for i in range(n_assign)
+            ]
+            out += [
+                {
+                    "ts": (now - timedelta(minutes=i)).isoformat(),
+                    "event": "lead_notice",
+                    "kind": "done",
+                    "emitter": "orchestrator.py:10730",
+                }
+                for i in range(n_done)
+            ]
+            return out
+
+        busy = maintenance.check_lead_noise(
+            _write_events(tmp_path / "a.log", recs(12, 10)), since_hours=1, now=now
+        )
+        assert busy.status == "ok" and not busy.data["loud_kinds"]
+
+        replays = maintenance.check_lead_noise(
+            _write_events(tmp_path / "b.log", recs(3, 12)), since_hours=1, now=now
+        )
+        assert replays.data["loud_kinds"] == ["done"]
+
     def test_explicit_threshold_overrides_default(self, tmp_path: Path) -> None:
         now = datetime(2026, 9, 1, 12, 0, 0)
         records = [

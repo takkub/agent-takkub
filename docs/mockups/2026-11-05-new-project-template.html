@@ -159,7 +159,9 @@ function renderLayers(){
   });
 }
 function renderSide(){
-  const name=document.getElementById("pname").value||"project";
+  // CodeQL #66: the typed name lands in innerHTML below — escape it
+  const esc=t=>String(t).replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"})[c]);
+  const name=esc(document.getElementById("pname").value||"project");
   const has=k=>!!S[k], tools=S.tools||[], extras=S.extras||[];
   const lines=[`<span class="d">${name}/</span>`];
   const add=(d,c)=>lines.push(`├─ <span class="d">${d}</span>${c?`  <span class="c"># ${c}</span>`:""}`);

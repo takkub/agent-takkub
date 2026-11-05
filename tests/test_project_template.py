@@ -132,6 +132,20 @@ def test_dialog_picks_and_returns_selection(qapp, tmp_path: Path) -> None:
         dlg.deleteLater()
 
 
+def test_typed_project_name_is_escaped_in_the_tree_preview(qapp, tmp_path: Path) -> None:
+    """Same class as CodeQL #66 in the mockup: the typed name goes into a
+    rich-text label and must render as text, not markup."""
+    from agent_takkub.new_project_dialog import NewProjectDialog
+
+    dlg = NewProjectDialog(None, default_parent=tmp_path)
+    try:
+        dlg.name_edit.setText("<b>x</b>")
+        assert "&lt;b&gt;x&lt;/b&gt;/" in dlg.tree_label.text()
+        assert "<b>x</b>" not in dlg.tree_label.text()
+    finally:
+        dlg.deleteLater()
+
+
 def test_wizard_template_flow_scaffolds_and_registers(qapp, tmp_path: Path, monkeypatch) -> None:
     import agent_takkub.new_project_dialog as npd
     from agent_takkub.project_wizard import ProjectWizardMixin

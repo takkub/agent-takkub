@@ -9,6 +9,7 @@ live right-hand panel (folder tree, compose services, AGENTS.md summary).
 
 from __future__ import annotations
 
+from html import escape as html_escape
 from pathlib import Path
 
 from PyQt6.QtCore import QPoint, QRect, QSize, Qt
@@ -437,7 +438,7 @@ class NewProjectDialog(ct.CockpitDialog):
         html = []
         for i, (label, comment, is_dir) in enumerate(rows):
             indent = label.startswith("  ")
-            text = label.strip()
+            text = html_escape(label.strip())  # the project name is typed by the user
             color = accent if is_dir else ct.TEXT_PRIMARY
             if i == 0:
                 prefix = ""
