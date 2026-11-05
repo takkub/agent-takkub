@@ -301,3 +301,31 @@ def test_descendant_walk_recognises_our_own_process() -> None:
         pytest.skip("no parent process to test against")
     assert _win_console._is_descendant_of(os.getpid(), parent.pid)
     assert not _win_console._is_descendant_of(os.getpid(), os.getpid())
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="real Win32 window list")
+def test_snapshot_matches_enumwindows_without_per_window_callback() -> None:
+    """ma 2026-11-05: the snapshot used EnumWindows with a Python callback —
+    one GIL re-acquire per top-level window every 250 ms, which under load
+    stretched a sweep to ~2 s and froze the UI. The FindWindowExW version
+    must find exactly the same console windows."""
+    import ctypes
+    import ctypes.wintypes as wt
+
+    user32 = ctypes.WinDLL("user32", use_last_error=True)
+    proc = ctypes.WINFUNCTYPE(ctypes.c_bool, wt.HWND, wt.LPARAM)
+    ref: set[int] = set()
+
+    def _cb(hwnd, _lp):
+        buf = ctypes.create_unicode_buffer(64)
+        user32.GetClassNameW(hwnd, buf, 64)
+        if buf.value in _win_console.CONSOLE_WINDOW_CLASSES:
+            ref.add(int(hwnd))
+        return True
+
+    for _ in range(3):  # windows come and go; retry a racy mismatch
+        ref.clear()
+        user32.EnumWindows(proc(_cb), 0)
+        if _win_console.snapshot_console_hwnds() == ref:
+            return
+    assert _win_console.snapshot_console_hwnds() == ref

@@ -2,6 +2,12 @@
 
 All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses [SemVer](https://semver.org/).
 
+## [v2.2.48] - 2026-11-05
+
+### Fixed (แก้)
+
+- **UI ค้าง 2 วินาทีเป็นระยะ (Windows) จาก thread `console-sweeper`:** `takkub ma` จับได้ว่าตอน UI ค้าง (สูงสุด 2.3 วินาที) thread ที่ค้างอยู่คือ `_win_console.py:_cb` · คำสั่ง snapshot หา console window ใช้ `EnumWindows` ที่ส่ง callback ภาษา Python ทุก top-level window (เครื่องปกติมีประมาณ 376 ตัว) และรันทุก 250 ms ทุก callback ต้องจับ GIL ใหม่ พอเครื่องยุ่ง แต่ละครั้งต้องรอนานจนเป็น GIL convoy · ตอนนี้ใช้ `FindWindowExW` ตามชื่อ class ให้ user32 กรองเอง Python จึงทำงานเฉพาะ window ที่ตรง · วัดจริงตอนมี thread อื่นกิน CPU: sweep หนึ่งครั้งจากเฉลี่ย 1834 ms (สูงสุด 2059 ms) เหลือ 96 ms ได้ window ชุดเดิมทุกตัว
+
 ## [v2.2.47] - 2026-11-05
 
 ### Fixed (แก้)

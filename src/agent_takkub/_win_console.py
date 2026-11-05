@@ -96,19 +96,26 @@ def snapshot_console_hwnds() -> set[int]:
     import ctypes
     import ctypes.wintypes as wt
 
+    # ma 2026-11-05: this used EnumWindows with a Python callback — one GIL
+    # re-acquire per top-level window (376 on a normal desktop) every 250 ms
+    # on the console-sweeper thread. Under load each re-acquire waits out the
+    # switch interval, so the sweep stretched to seconds and the main thread
+    # froze behind the convoy (UI freeze 2.3 s attributed to `_cb`). The
+    # class match now happens inside user32: FindWindowExW per class only
+    # crosses into Python for the handful of matching windows.
     user32 = ctypes.WinDLL("user32", use_last_error=True)
-    EnumWindowsProc = ctypes.WINFUNCTYPE(ctypes.c_bool, wt.HWND, wt.LPARAM)
+    find = user32.FindWindowExW
+    find.argtypes = [wt.HWND, wt.HWND, wt.LPCWSTR, wt.LPCWSTR]
+    find.restype = wt.HWND
 
     out: set[int] = set()
-
-    def _cb(hwnd: int, _lp: int) -> bool:
-        buf = ctypes.create_unicode_buffer(64)
-        user32.GetClassNameW(hwnd, buf, 64)
-        if buf.value in CONSOLE_WINDOW_CLASSES:
+    for cls in CONSOLE_WINDOW_CLASSES:
+        hwnd = None
+        for _ in range(4096):  # bound: never spin on a racy window list
+            hwnd = find(None, hwnd, cls, None)
+            if not hwnd:
+                break
             out.add(int(hwnd))
-        return True
-
-    user32.EnumWindows(EnumWindowsProc(_cb), 0)
     return out
 
 
