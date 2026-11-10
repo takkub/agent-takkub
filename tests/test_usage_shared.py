@@ -197,10 +197,21 @@ class TestSwitchOff:
         assert emitted and emitted[-1] is not None
 
     def test_off_blocks_provider_probes_and_reports_no_cache(self, switch_off) -> None:
-        with patch.object(provider_usage, "_dispatch_fetch") as m:
+        import threading
+
+        me = threading.get_ident()
+        mine: list = []
+        # Count only probes made by THIS call chain: a provider poller thread
+        # another test left running on the same xdist worker can hit the
+        # patched function inside this window (macOS CI, 2026-11-10).
+        with patch.object(
+            provider_usage,
+            "_dispatch_fetch",
+            side_effect=lambda *a, **k: mine.append(a) if threading.get_ident() == me else None,
+        ):
             out = provider_usage.fetch_provider_usage("codex", Path("nowhere"))
             gem = provider_usage.fetch_provider_usage("gemini")
-        assert m.call_count == 0
+        assert mine == []
         assert out.status == "error" and gem.status == "error"
 
     def test_turning_on_wakes_registered_pollers(self) -> None:
