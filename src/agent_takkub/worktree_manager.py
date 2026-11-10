@@ -1899,6 +1899,12 @@ class WorktreeManager:
             if status_cwd != pane_cwd:
                 out["branch"] = self.current_branch(status_cwd)
             out["commits_ahead"] = self.commits_since(status_cwd, assign_base_sha)
+            # #995: a Lead-made linked worktree (`git worktree add --detach`)
+            # assigned via --cwd is not the shared tree — name it and its HEAD.
+            main = self.main_root(status_cwd)
+            if main and _path_key(main) != _path_key(assign_git_root):
+                out["linked_worktree"] = assign_git_root
+                out["linked_head"] = (self.head_sha(status_cwd) or "")[:8]
             out["porcelain"] = self.shared_tree_status_porcelain(status_cwd)
             if out["porcelain"] is not None:
                 out["diffstat"] = self.diffstat_since(status_cwd, assign_base_sha)

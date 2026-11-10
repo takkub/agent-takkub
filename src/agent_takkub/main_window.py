@@ -1891,6 +1891,17 @@ class MainWindow(
         #    orchestrator would short-circuit with "already running".
         QTimer.singleShot(1_500, self._respawn_lead_post_restart)
 
+    def _restart_only_lead_for_active_project(self) -> None:
+        """#987: a Lead provider/account switch restarts the Lead pane ONLY.
+
+        It used to reuse `_restart_lead_for_active_project` (built for a
+        project change), which closes every teammate first — a busy frontend
+        and a worktree backend vanished mid-task with no done/FAILED and their
+        ledger rows gone. Teammates keep their own provider and report to
+        whichever Lead session is live when they finish."""
+        self.orch.close(LEAD.name, force=True, reason="lead_provider_switch")
+        QTimer.singleShot(1_500, self._respawn_lead_post_restart)
+
     def _respawn_lead_post_restart(self) -> None:
         ok, msg = self.orch.spawn(LEAD.name)
         if not ok:

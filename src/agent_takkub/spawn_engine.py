@@ -1085,6 +1085,10 @@ class PaneState:
     # that died mid-response ("API Error: Connection lost" → empty `>`)
     # "working" just because Claude Code keeps redrawing its hint bar.
     ready_since_ts: float = 0.0
+    # #994: continuous "at the ready prompt, only a background job running,
+    # screen unchanged" clock + whether this episode's Lead notice went out.
+    bg_wait_since_ts: float = 0.0
+    bg_wait_notified: bool = False
     # #655: throttle for the `stuck_recover_deferred_real_activity` log line
     # (the escalate-time last-chance probe fires every watchdog tick while
     # real activity persists — log the episode, not every 5s tick).
@@ -5207,6 +5211,49 @@ class SpawnEngineMixin:
         except Exception:
             pass  # crash dump must never crash the orchestrator
 
+    def _maybe_reroute_bootstrap_failure(
+        self, project: str, role_name: str, ps, provider: str, session
+    ) -> bool:
+        """#991: the provider CLI died in its own bootstrap (codex
+        "account/read failed during TUI bootstrap") — respawning the same CLI
+        fails the same way until the respawn cap, and the task never starts.
+        Move the pane's outstanding task to the next usable provider instead
+        (same path as a quota reroute). True when a reroute was started."""
+        from .provider_spec import bootstrap_failure_marker
+
+        if not (getattr(ps, "last_assigned_task", None) or ""):
+            return False
+        try:
+            lines = session.display_lines() if session is not None else []
+        except Exception:
+            return False
+        marker = bootstrap_failure_marker(provider, lines)
+        if marker is None:
+            return False
+        picker = getattr(self, "_pick_reroute_provider", None)
+        reroute = getattr(self, "_reroute_pane_to_provider", None)
+        new_provider = picker(project, role_name, ps, provider) if callable(picker) else None
+        _log_event(
+            "bootstrap_failure_exit",
+            role=role_name,
+            project=project,
+            provider=provider,
+            marker=marker,
+            reroute_to=new_provider,
+        )
+        if not new_provider or not callable(reroute):
+            return False  # nothing usable — the ordinary respawn path decides
+        reroute(
+            project,
+            role_name,
+            ps,
+            new_provider,
+            provider,
+            0.0,
+            cause=f"{provider} เปิดไม่ขึ้นตอน bootstrap ({marker})",
+        )
+        return True
+
     def _write_pane_exit_snapshot(
         self, role_name: str, project: str, session: PtySession | None
     ) -> None:
@@ -5340,6 +5387,10 @@ class SpawnEngineMixin:
 
         key = f"{project}::{role_name}"
         ps = self._ps(key)
+        if role_name != LEAD.name and self._maybe_reroute_bootstrap_failure(
+            project, role_name, ps, _prov, session
+        ):
+            return
         attempts = ps.auto_respawn_attempts
         if attempts >= AUTO_RESPAWN_MAX:
             _log_event(

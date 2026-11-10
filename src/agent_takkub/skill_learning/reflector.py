@@ -221,6 +221,39 @@ def candidates(s: LearningSettings, *, prefer: str = "", project_ns: str = "") -
     return [p for p in ready if not _cooling(p)] + [p for p in ready if _cooling(p)]
 
 
+def no_provider_reason(s: LearningSettings, *, prefer: str = "", project_ns: str = "") -> str:
+    """#993: WHY `candidates()` came back empty — one short Thai clause per
+    provider considered (pinned / park policy / excluded / toggle / quota /
+    not installed), so the brief says more than "no provider"."""
+    from .. import provider_state
+
+    if s.provider != "auto":
+        considered = [s.provider]
+        head = f"ตั้งไว้ใช้ {s.provider} อย่างเดียว"
+    else:
+        park, excluded = _switch_policy(project_ns)
+        considered = [p for p in REFLECTOR_PROVIDERS if p not in excluded]
+        head = f"ยกเว้น {', '.join(sorted(excluded))}" if excluded else ""
+        if park:
+            home = prefer if prefer in REFLECTOR_PROVIDERS else REFLECTOR_PROVIDERS[0]
+            considered = [p for p in considered if p == home]
+            head = f"นโยบาย quota=park ใช้ได้แค่ {home}"
+    parts: list[str] = []
+    for p in considered:
+        try:
+            if provider_state.is_disabled(p):
+                parts.append(f"{p}: ปิดอยู่")
+                continue
+            if not provider_state.is_quota_ready(p):
+                parts.append(f"{p}: ติดโควตา")
+                continue
+        except Exception:
+            pass
+        if _binary(p) is None:
+            parts.append(f"{p}: ไม่ได้ติดตั้ง")
+    return " · ".join(x for x in (head, *parts) if x) or "ไม่มี provider ให้เลือก"
+
+
 def choose_provider(s: LearningSettings, *, prefer: str = "", project_ns: str = "") -> str | None:
     found = candidates(s, prefer=prefer, project_ns=project_ns)
     return found[0] if found else None

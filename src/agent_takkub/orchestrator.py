@@ -635,6 +635,11 @@ IDLE_REMIND_COOLDOWN_S = 90
 # an empty `>`, and `takkub status` said "working · last progress 3s ago"
 # for 7+ minutes because the footer repaint kept the content hash moving.
 IDLE_AT_PROMPT_S = max(0.0, float(os.environ.get("TAKKUB_IDLE_AT_PROMPT_S", "120")))
+# #994: a pane that ended its turn "waiting for the background notification"
+# while that background shell hangs (ssh never returns) never reads as idle —
+# it HAS background work — so nothing told Lead for 30 min. After this long at
+# the prompt with only background work and a frozen screen, one notice.
+BG_WAIT_NOTICE_S = max(0.0, float(os.environ.get("TAKKUB_BG_WAIT_NOTICE_S", "600")))
 # (#683, owner requirement) a finished pane must NOT be held open — the
 # 2.1.17 keep-alive bought nothing the prompt cache didn't already provide
 # (the cache lives API-side, not in the process) while costing ~360MB per
@@ -5040,6 +5045,17 @@ class Orchestrator(
 
             _snap_pane = self._project_panes(project_ns).get(role_name)
             _snap_cwd = getattr(_snap_pane, "_session_cwd", None)
+            # #995: a re-assign with another --cwd on a live pane only pastes
+            # the task (the pane cd's there), so the session cwd is still the
+            # old tree — the baseline (and done's git reads, via
+            # `shared_status_cwd`) must follow the task's cwd, or a pane
+            # working in a Lead-made linked worktree was reported as
+            # "branch:master · shared tree" with the main tree's dirt.
+            if cwd and _snap_cwd and os.path.isdir(cwd):
+                if os.path.normcase(os.path.abspath(cwd)) != os.path.normcase(
+                    os.path.abspath(_snap_cwd)
+                ):
+                    _snap_cwd = cwd
             if _snap_cwd:
 
                 def _compute_baseline(cwd=_snap_cwd):
@@ -9105,6 +9121,15 @@ class Orchestrator(
         from .worktree_manager import shared_status_cwd
 
         status_cwd = shared_status_cwd(pane_cwd, assign_git_root)
+        _shared_merge_note = "N/A (shared tree — commit อยู่บน branch ที่ Lead เห็นอยู่แล้ว ไม่ต้อง merge)"
+        if shared_gf is not None and shared_gf.get("linked_worktree"):
+            # #995: a Lead-made linked worktree passed as --cwd — not the shared tree.
+            _shared_merge_note = (
+                f"linked worktree {shared_gf['linked_worktree']} @ "
+                f"{shared_gf.get('linked_head') or '?'} (ไม่ใช่ shared tree — "
+                "Lead merge/cherry-pick เองจาก worktree นี้)"
+            )
+            branch = branch or f"(detached {shared_gf.get('linked_head') or '?'})"
         if shared_gf is not None:
             commits_ahead = int(shared_gf.get("commits_ahead", 0))
             porcelain = shared_gf.get("porcelain")
@@ -9119,9 +9144,7 @@ class Orchestrator(
                     branch=branch,
                     commits_ahead=commits_ahead,
                     merge_conflicts=None,
-                    merge_note=(
-                        "N/A (shared tree — commit อยู่บน branch ที่ Lead เห็นอยู่แล้ว ไม่ต้อง merge)"
-                    ),
+                    merge_note=_shared_merge_note,
                     report_path=report_path,
                     headline=headline,
                     files_note="ตรวจไม่ได้ (อ่าน git status ตอน done ไม่สำเร็จ)",
@@ -9183,7 +9206,7 @@ class Orchestrator(
             commits_ahead=commits_ahead,
             uncommitted=uncommitted,
             merge_conflicts=None,
-            merge_note=("N/A (shared tree — commit อยู่บน branch ที่ Lead เห็นอยู่แล้ว ไม่ต้อง merge)"),
+            merge_note=_shared_merge_note,
             files_touched=files_touched,
             files_dirs=tuple(dirs),
             files_note=(
@@ -13133,6 +13156,41 @@ class Orchestrator(
                 paths.add(str(path))
         return paths
 
+    def _track_background_wait(self, project_ns: str, role: str, pane, ps, now: float) -> None:
+        """#994: one Lead notice when *pane* has sat at its ready prompt with
+        nothing but background work and an unchanged screen for
+        BG_WAIT_NOTICE_S. A notice only — never a restart (#968): a long
+        build legitimately runs in the background."""
+        try:
+            session = pane.session
+            waiting = (
+                bool(session.is_at_ready_prompt_cached())
+                and bool(session.has_background_work())
+                and getattr(pane, "state", "") == "working"
+            )
+        except Exception:
+            waiting = False
+        changed = float(getattr(ps, "last_content_change_ts", 0.0) or 0.0)
+        if not waiting:
+            ps.bg_wait_since_ts = 0.0
+            ps.bg_wait_notified = False
+            return
+        ps.bg_wait_since_ts = ps.bg_wait_since_ts or now
+        quiet_since = max(ps.bg_wait_since_ts, changed)
+        if ps.bg_wait_notified or BG_WAIT_NOTICE_S <= 0 or now - quiet_since < BG_WAIT_NOTICE_S:
+            return
+        ps.bg_wait_notified = True
+        mins = int((now - quiet_since) // 60)
+        _log_event("background_wait_stalled", role=role, project=project_ns, minutes=mins)
+        self._notify_lead(
+            project_ns,
+            f"⚠️ [bg-wait] {role} รอ background job อยู่ ~{mins} นาที จอไม่ขยับเลย — job อาจค้าง "
+            f"(เช่น ssh ไม่คืน) · ดูจอ pane หรือ `takkub send --to {role}` ให้เช็ค/kill job ของตัวเอง",
+            from_role=role,
+            note="",
+            kind="bg-wait",
+        )
+
     def live_worktree_paths(self, project: str | None = None) -> set[str]:
         """Absolute worktree checkout paths currently held by a LIVE pane.
 
@@ -16928,6 +16986,7 @@ class Orchestrator(
                             ps_ck.ready_since_ts = ps_ck.ready_since_ts or now
                         else:
                             ps_ck.ready_since_ts = 0.0
+                        self._track_background_wait(project_name, role, pane, ps_ck, now)
                         # #664: a queue behind a pane that is really idle at
                         # its prompt would otherwise wait for a done() that
                         # never comes — dispatch it (the busy-guard lets an

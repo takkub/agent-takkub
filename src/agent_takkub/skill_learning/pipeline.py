@@ -50,7 +50,7 @@ class RunRecord:
     kind: str  # "reflect" | "curate"
     mode: str
     started_at: float
-    status: str = "skipped"  # skipped | landed | proposed | empty | failed
+    status: str = "skipped"  # skipped | landed | proposed | empty | failed | parked
     skip_reason: str = ""
     provider: str = ""
     worth: int = 0
@@ -143,8 +143,11 @@ def on_done(
     settings: LearningSettings | None = None,
 ) -> RunRecord | None:
     try:
+        s = settings or load()
         with _lock:
-            rec = _on_done(event, notify, runner, force, settings or load())
+            rec = _on_done(event, notify, runner, force, s)
+            if rec.status != "parked":
+                _retry_parked(event.project_ns, notify, runner, s)
         # An explicit `reflect` request always answers — even "nothing to learn".
         if force and notify and rec.status not in ("landed", "proposed"):
             notify(event.project_ns, f"🧠 Skill Learning ({event.role}): {rec.summary}")
@@ -192,6 +195,16 @@ def _on_done(event, notify, runner, force, s: LearningSettings) -> RunRecord:
         project_ns=ns,
     )
     rec.provider = provider or ""
+    if intents is None and provider is None:
+        # #993: no provider was usable at all (quota/toggle/park policy) — a
+        # transient state. The lesson (worth 10, 17 corrections) used to be
+        # lost for good; park the episode and retry it once one is usable.
+        why = reflector.no_provider_reason(s, prefer=event.provider, project_ns=ns)
+        _park(rec, event)
+        rec.status, rec.error = "parked", (raw or "")[-500:]
+        rec.summary = f"reflector รอ provider ({why}) — เก็บไว้ retry เมื่อมี provider ใช้ได้"
+        _save(rec)
+        return rec
     if intents is None:
         rec.status, rec.error = "failed", (raw or "")[-500:]
         rec.summary = f"reflector failed ({provider or 'no provider'})"
@@ -219,6 +232,48 @@ def _on_done(event, notify, runner, force, s: LearningSettings) -> RunRecord:
     if report.landed and _bump_changes(ns, len(report.landed)) >= s.curate_every:
         curate(ns, notify=notify, runner=runner, settings=s)
     return rec
+
+
+_PARK_MAX_AGE_S = 3 * 24 * 3600.0
+
+
+def _parked_dir(project_ns: str) -> Path:
+    return store.state_dir(project_ns) / "parked"
+
+
+def _park(rec: RunRecord, event: episode_mod.DoneEvent) -> None:
+    store.write_json(_parked_dir(rec.project_ns) / f"{rec.run_id}.json", asdict(event))
+
+
+def _retry_parked(
+    project_ns: str, notify: Notify | None, runner, s: LearningSettings
+) -> RunRecord | None:
+    """#993: re-run the oldest parked episode once a reflector provider is
+    usable again (checked on each later done of the project). One per call;
+    parked files older than `_PARK_MAX_AGE_S` are dropped."""
+    d = _parked_dir(project_ns)
+    try:
+        files = sorted(d.glob("*.json"))
+    except OSError:
+        return None
+    for path in files:
+        data = store.read_json(path, {})
+        ts = float(data.get("ts") or 0.0) if isinstance(data, dict) else 0.0
+        if not data or time.time() - ts > _PARK_MAX_AGE_S:
+            path.unlink(missing_ok=True)
+            continue
+        if not reflector.candidates(
+            s, prefer=str(data.get("provider") or ""), project_ns=project_ns
+        ):
+            return None  # still nothing usable — keep it parked
+        path.unlink(missing_ok=True)
+        try:
+            event = episode_mod.DoneEvent(**data)
+        except TypeError:
+            continue
+        # force: it already passed the worth/cadence gates when it was parked
+        return _on_done(event, notify, runner, True, s)
+    return None
 
 
 def _finish(

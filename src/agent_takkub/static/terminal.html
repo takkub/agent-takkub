@@ -44,7 +44,9 @@
     // xterm.js terminal setup
     // ------------------------------------------------------------------
     const term = new Terminal({
-      fontFamily: '"Cascadia Mono", "Consolas", "Courier New", "Leelawadee UI", "Tahoma", monospace',
+      // #1002: macOS has none of the Windows faces — without SF Mono/Menlo and
+      // a Thai face (Thonburi/Sukhumvit Set) CoreText fell back per glyph.
+      fontFamily: '"Cascadia Mono", "Consolas", "SF Mono", "Menlo", "Courier New", "Leelawadee UI", "Thonburi", "Sukhumvit Set", "Tahoma", monospace',
       fontSize: 13,
       lineHeight: 1.2,
       cursorBlink: true,
@@ -166,6 +168,30 @@
     let lastEmittedText = '';
     let lastEmittedTime = 0;
     let pendingCharText = '';
+    // #1002: what xterm.js itself emitted recently, as consumable text. The
+    // old dedup compared the helper textarea against ONLY the last onData
+    // chunk inside 50 ms — "ก" then "า" (or "ก"+"่" composing into the one
+    // cluster "ก่") failed that compare and was re-sent: "กากา", "ก่ก่".
+    // A flush now sends only what xterm has NOT already sent.
+    const EMIT_LOG_MS = 1500;
+    let emitLog = [];  // [{text, t}]
+    const recordEmitted = (text) => {
+      const now = Date.now();
+      emitLog.push({ text, t: now });
+      emitLog = emitLog.filter((e) => now - e.t <= EMIT_LOG_MS);
+    };
+    // Remove `val` from the recent-emission log if xterm already sent it;
+    // returns true when it did (so the flush must not send it again).
+    const consumeEmitted = (val) => {
+      const now = Date.now();
+      emitLog = emitLog.filter((e) => now - e.t <= EMIT_LOG_MS);
+      const joined = emitLog.map((e) => e.text).join('');
+      const at = joined.indexOf(val);
+      if (at < 0) return false;
+      const rest = joined.slice(0, at) + joined.slice(at + val.length);
+      emitLog = rest ? [{ text: rest, t: now }] : [];
+      return true;
+    };
     let isComposing = false;
     let pendingKeystrokes = [];
     // Python-set ESC+CR escape (ProviderSpec.multiline_newline_seq, #149) this
@@ -194,6 +220,7 @@
     term.onData((data) => {
       lastEmittedText = data;
       lastEmittedTime = Date.now();
+      recordEmitted(data);
       pendingCharText = '';
       if (bridge) {
         // #728: in alternate buffer without mouse tracking, xterm.js converts
@@ -271,9 +298,8 @@
         const capturedVal = val;
         pendingCharText = '';
 
-        // If xterm.js did NOT emit this character within 50ms:
-        const emittedByXterm = (lastEmittedText === capturedVal) && (Date.now() - lastEmittedTime <= 50);
-        if (!emittedByXterm) {
+        // Send only what xterm.js has not already sent (#1002 — see emitLog).
+        if (!consumeEmitted(capturedVal)) {
           if (bridge && bridge.sendInput) {
             bridge.sendInput(capturedVal);
             lastEmittedText = capturedVal;
@@ -440,7 +466,15 @@
     // #659: forced repaint for the Python heartbeat (TerminalWidget
     // _heartbeat_poke). Only rows that actually changed get redrawn by
     // xterm.js, so this is cheap when nothing moved.
+    // #1002: the 250 ms heartbeat used to force a full-viewport redraw even
+    // with nothing new — the renderer process burned 92 CPU-minutes doing it.
+    // #659's guarantee (parsed PTY output always gets a paint Chromium can't
+    // elide) only needs a redraw after a write.
+    let writtenSincePoke = true;
+    try { term.onWriteParsed(() => { writtenSincePoke = true; }); } catch (e) {}
     window.termPoke = function () {
+      if (!writtenSincePoke) return;
+      writtenSincePoke = false;
       try { term.refresh(0, term.rows - 1); } catch (e) {}
     };
 

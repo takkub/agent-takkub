@@ -1791,6 +1791,27 @@ def _send_done(note: str, args: argparse.Namespace) -> dict:
     )
 
 
+def _probe_keep_reason(usage) -> str:
+    """Why a provider probe did NOT clear a quota-hit (#986), one clause."""
+    from . import auto_resume
+    from .provider_usage import STATUS_ACTIVE
+
+    if usage is None or getattr(usage, "status", None) != STATUS_ACTIVE:
+        return f"probe status={getattr(usage, 'status', None)} — ไม่ยืนยันว่าใช้ได้"
+    threshold = auto_resume.QUOTA_REPROBE_EXHAUSTED_PERCENT
+    parts: list[str] = []
+    for w in getattr(usage, "windows", None) or ():
+        if not isinstance(w, dict):
+            continue
+        util = w.get("utilization")
+        label = str(w.get("name") or "?")
+        if not isinstance(util, (int, float)):
+            parts.append(f"window {label} ไม่มีตัวเลข")
+        elif util >= threshold:
+            parts.append(f"window {label} ใช้ไป {util:.0f}%")
+    return " · ".join(parts)
+
+
 def cmd_done(args: argparse.Namespace) -> dict:
     base_note, error = _done_note_from_args(args)
     if error:
@@ -4984,7 +5005,11 @@ def cmd_provider(args: argparse.Namespace) -> dict:
         if verdict == "extend":
             provider_state.set_quota_reset_at(name, new_reset_at)
         left = _human_duration(max(0.0, provider_state.quota_reset_at(name) - time.time()))
-        msg = f"{name} ยังติดโควตา — reset อีก ~{left}"
+        # #986: "used=0%" is the headline (codex: 5h primary) window only — a
+        # weekly window still full, or one listed with no figure, keeps the
+        # hit. Name the window that kept it instead of a bare "still limited".
+        why = _probe_keep_reason(usage)
+        msg = f"{name} ยังติดโควตา — reset อีก ~{left}" + (f" ({why})" if why else "")
         _utf8_print(f"⏳ {msg}")
         return {"ok": True, "msg": msg}
 

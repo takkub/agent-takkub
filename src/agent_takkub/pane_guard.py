@@ -3070,6 +3070,72 @@ _IMAGE_KILL_PATTERNS = (
     re.compile(r"\bkillall\s+(?:-[A-Za-z0-9]+\s+)*([^\s;&|]+)", re.I),
 )
 
+# #996: a frontend pane clearing a busy port killed Docker Desktop (Docker's
+# port proxy is what holds a published container port) and every other
+# project's containers restarted with it. Infrastructure the pane never
+# started — Docker Desktop / its backend / the WSL VM — is never a pane's to
+# kill, by PID, by image name, or as "whoever owns port N".
+_DOCKER_INFRA_NAME_RE = re.compile(
+    r"^(?:com\.docker\.[\w.-]+|docker desktop(?:\.exe)?|docker-desktop|dockerd(?:\.exe)?"
+    r"|docker-proxy|vpnkit(?:-bridge)?(?:\.exe)?|vmmem(?:wsl)?|wslservice(?:\.exe)?"
+    r"|wslhost(?:\.exe)?|wsl(?:\.exe)?|vmcompute(?:\.exe)?)$",
+    re.I,
+)
+_PORT_LOOKUP_RE = re.compile(
+    r"(?:-LocalPort\s+|lsof\b[^|;&]*?-\w*i\s*(?:tcp)?:|fuser\s+(?:-\w+\s+)*|kill-port\s+"
+    r"|netstat\b[^|;&]*\|\s*(?:findstr|grep)\s+[\"']?:)(\d{2,5})",
+    re.I,
+)
+
+
+_DOCKER_IMAGE_KILL_RE = re.compile(
+    r"(?:/im|-im|--im|-Name|-ProcessName|\bkillall|\bpkill)\s+(?:-\w+\s+)*"
+    r"(?:\"([^\"]+)\"|'([^']+)'|([^\s;&|]+))",
+    re.I,
+)
+
+
+def _is_docker_infra(name: str | None) -> bool:
+    return bool(name) and bool(_DOCKER_INFRA_NAME_RE.match(name.strip().strip("\"'")))
+
+
+def _docker_infra_port_owner(seg: str) -> tuple[int, str] | None:
+    """`(port, process name)` when *seg* looks up a port Docker/WSL holds."""
+    ports = {int(p) for p in _PORT_LOOKUP_RE.findall(seg)}
+    if not ports:
+        return None
+    try:
+        import psutil
+
+        for conn in psutil.net_connections(kind="inet"):
+            laddr = getattr(conn, "laddr", None)
+            if not laddr or laddr.port not in ports or not conn.pid:
+                continue
+            try:
+                pname = psutil.Process(conn.pid).name()
+            except Exception:
+                continue
+            if _is_docker_infra(pname):
+                return laddr.port, pname
+    except Exception:
+        return None
+    return None
+
+
+def _docker_infra_kill_verdict(role: str | None, detail: str) -> Verdict:
+    role_desc = f"role `{role}`" if role else "Pane"
+    return Verdict(
+        False,
+        rule="instance_guard:kill_docker_infra",
+        reason=(
+            f"{role_desc} kill {detail} ไม่ได้ — เป็น Docker Desktop/WSL ที่ pane ไม่ได้เปิดเอง "
+            "ฆ่าแล้ว container ของทุกโปรเจคบนเครื่อง restart ตาม (#996). ถ้า port ถูก container "
+            "จับอยู่ ใช้ `docker compose -p <stack> down`/`docker stop <container>` ของ stack ตัวเอง "
+            "หรือแจ้ง Lead"
+        ),
+    )
+
+
 _REDIRECTION_TARGET_RE = re.compile(r"""(?:>>|>|1>|2>|\*>)\s*["']?([^\s"'&|;<>\r\n]+)["']?""")
 _POWERSHELL_OUT_FILE_RE = re.compile(
     r"""\|\s*(?:Out-File|Set-Content|sc|Add-Content|ac|tee)\s+(?:(?:-FilePath|-Path)\s+)?["']?([^\s"'&|;\r\n]+)["']?""",
@@ -3645,10 +3711,29 @@ def evaluate_instance_guard(
                 )
 
         # 2. Check Process Termination
+        if has_kill and role != "shell":
+            for m in _DOCKER_IMAGE_KILL_RE.finditer(seg):
+                image = next(g for g in m.groups() if g)
+                if _is_docker_infra(image):
+                    return _docker_infra_kill_verdict(role, f"'{image}'")
+            port_owner = _docker_infra_port_owner(seg)
+            if port_owner is not None:
+                return _docker_infra_kill_verdict(
+                    role, f"เจ้าของ port {port_owner[0]} ({port_owner[1]})"
+                )
         if has_kill:
             for pat in _PID_KILL_PATTERNS:
                 for m in pat.finditer(seg):
                     target_pid = int(m.group(1))
+                    if role != "shell":
+                        try:
+                            import psutil
+
+                            _pname = psutil.Process(target_pid).name()
+                        except Exception:
+                            _pname = ""
+                        if _is_docker_infra(_pname):
+                            return _docker_infra_kill_verdict(role, f"PID {target_pid} ({_pname})")
                     foreign_pids_set = _get_for_pids()
                     if target_pid in foreign_pids_set:
                         return Verdict(

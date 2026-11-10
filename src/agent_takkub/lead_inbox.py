@@ -141,6 +141,11 @@ def _timing_or_none(value: object) -> float | int | None:
     return value if isinstance(value, (int, float)) else None
 
 
+# #992: longest a debounced digest waits for Lead's ready prompt before it is
+# handed to the live queue anyway (which retries/parks on its own terms).
+DIGEST_MAX_HOLD_S = max(0.0, float(os.environ.get("TAKKUB_DIGEST_MAX_HOLD_S", "120")))
+
+
 @dataclass
 class SubmitSettleOutcome:
     """Outcome of a `_delayed_enter_verified` submit chain, passed to its
@@ -4495,13 +4500,22 @@ class LeadInboxMixin:
         if generation is not None and timers.get(project_ns) != generation:
             return False
         lead = self._project_panes(project_ns).get(LEAD.name)
+        hold_since = self.__dict__.setdefault("_digest_hold_since", {})
+        held_s = time.time() - hold_since.get(project_ns, time.time())
         if (
             not trailing_body
             and lead
             and lead.session
             and lead.session.is_alive
             and not lead.session.is_at_ready_prompt()
+            and held_s < DIGEST_MAX_HOLD_S
         ):
+            # #992: this re-armed itself every second with no ceiling and no
+            # log — a Lead the screen check misread as busy (idle, no turn)
+            # held a frontend done for 12 min while `takkub list` said
+            # "queued". Past DIGEST_MAX_HOLD_S the burst goes to the live
+            # queue, whose pump has its own busy/draft handling.
+            hold_since.setdefault(project_ns, time.time())
             flushing = getattr(self, "_digest_flushing", set())
             if not hasattr(self, "_digest_flushing"):
                 self._digest_flushing = flushing
@@ -4525,6 +4539,9 @@ class LeadInboxMixin:
         # burst must receive a strictly newer token so that old callback cannot
         # accidentally flush the new mail.
 
+        if held_s >= DIGEST_MAX_HOLD_S:
+            _log_event("lead_inbox_digest_hold_ceiling", project=project_ns, held_s=int(held_s))
+        hold_since.pop(project_ns, None)
         pending = getattr(self, "_lead_digest_queue", {}).pop(project_ns, None)
         if not pending:
             return False
@@ -5106,6 +5123,9 @@ class LeadInboxMixin:
         entirely."""
         getattr(self, "_lead_notify_retry", {}).pop(project_ns, None)
         getattr(self, "_lead_notify_busy_since", {}).pop(project_ns, None)
+        hold = self.__dict__.get("_lead_notify_auto_hold_since", {})
+        hold.pop(project_ns, None)
+        hold.pop(f"{project_ns}::logged", None)
 
     def _pump_lead_notify(self, project_ns: str) -> None:
         """Deliver one notice to Lead when it is at the ready prompt, then re-arm.
@@ -5183,7 +5203,20 @@ class LeadInboxMixin:
 
         if not lead.session.is_at_ready_prompt():
             waiting_body = _unwrap_notice_item(queue[0])[0]
-            if not _human_notice(queue[0]) and _automatic_notice(waiting_body):
+            auto_hold = self.__dict__.setdefault("_lead_notify_auto_hold_since", {})
+            auto_held_s = time.time() - auto_hold.setdefault(project_ns, time.time())
+            if auto_held_s >= DIGEST_MAX_HOLD_S and not auto_hold.get(f"{project_ns}::logged"):
+                # #992: a frontend done waited 12 min here for a Lead that
+                # was idle but never read as "ready" — no ceiling, no log.
+                auto_hold[f"{project_ns}::logged"] = True
+                _log_event(
+                    "lead_notify_auto_hold_ceiling", project=project_ns, held_s=int(auto_held_s)
+                )
+            if (
+                not _human_notice(queue[0])
+                and _automatic_notice(waiting_body)
+                and auto_held_s < DIGEST_MAX_HOLD_S
+            ):
                 pumping = getattr(self, "_lead_notify_active", set())
                 if not hasattr(self, "_lead_notify_active"):
                     self._lead_notify_active = pumping

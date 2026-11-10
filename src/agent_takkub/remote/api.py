@@ -837,7 +837,7 @@ def lead_history(orch, project_ns: str, limit: object = None) -> dict:
 _SESSIONS_MAX_LIMIT = 20
 
 
-def lead_sessions(orch, project_ns: str, limit: object = None) -> dict:
+def lead_sessions(orch, project_ns: str, limit: object = None, provider: str | None = None) -> dict:
     """View-mode safe (read-only) — W3 resume/session picker. Lists recent
     Lead sessions for `project_ns`'s cwd so the phone can resume a closed or
     crashed Lead without the desktop cockpit's help. Data-min per
@@ -847,7 +847,12 @@ def lead_sessions(orch, project_ns: str, limit: object = None) -> dict:
     except (TypeError, ValueError):
         limit = notify._SESSION_LIST_DEFAULT_LIMIT
     limit = max(1, min(limit, _SESSIONS_MAX_LIMIT))
-    provider, sessions = notify.lead_sessions_snapshot(orch, project_ns, limit)
+    if provider is None:
+        provider, sessions = notify.lead_sessions_snapshot(orch, project_ns, limit)
+    else:
+        # #999: provider resolved by the caller on the Qt thread — this half
+        # is pure transcript-store reads and runs off it.
+        sessions = notify.list_recent_lead_sessions(project_ns, limit, provider=provider)
     return {
         "project": project_ns,
         "provider": provider,

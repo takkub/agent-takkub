@@ -1054,7 +1054,7 @@ class UserActionsMixin:
             self.orch.close(role, project=project, reason="account_switch")
 
     def _on_user_changed(self, name: str, provider: str = "claude") -> None:
-        """Switch Lead's provider/account and restart this project's panes."""
+        """Switch Lead's provider/account and restart the Lead pane only (#987)."""
         if not name:
             return
         project = active_project()[0] or ""
@@ -1080,8 +1080,8 @@ class UserActionsMixin:
             self,
             "Switch provider account",
             f"Switch '{project}' Lead to {provider.capitalize()} profile '{name}'?\n\n"
-            "Lead + every teammate pane for this project will be restarted "
-            "so the new provider/account takes effect.",
+            "Only the Lead pane restarts on the new provider/account — "
+            "teammate panes keep working and report to the new Lead.",
             QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel,
             QMessageBox.StandardButton.Ok,
         )
@@ -1106,9 +1106,9 @@ class UserActionsMixin:
             self._refresh_limit_label(self._limit_store.get(new_cd))
 
         self._status.showMessage(
-            f"switching {project} → {provider}/{name} · restarting panes…", 6_000
+            f"switching {project} → {provider}/{name} · restarting Lead…", 6_000
         )
-        self._restart_lead_for_active_project()
+        self._restart_only_lead_for_active_project()
 
     def _on_add_user_clicked(self) -> None:
         """ "Add / Remove user…" right-click menu entry: jump straight to the

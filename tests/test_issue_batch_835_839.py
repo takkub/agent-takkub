@@ -126,3 +126,43 @@ def test_stale_send_stuck_never_reopens_finished_pane(monkeypatch) -> None:
     orch, _ = _inbox(monkeypatch)
     with patch.object(orch, "list_status", return_value={"frontend": "done"}):
         assert orch._revalidate_system_notice("p", "⚠️ [send-stuck] ข้อความไปยัง frontend ค้าง") == ""
+
+
+def test_notices_for_a_lead_never_read_as_ready_are_not_held_forever_992(monkeypatch) -> None:
+    """#992: a frontend done sat "queued — not yet delivered" for 12 min: the
+    Lead was idle but never read as at its ready prompt, and automatic
+    notices re-armed every second with no ceiling and no log. Past
+    DIGEST_MAX_HOLD_S both the digest and the pump fall through to the
+    ordinary busy-deliver path."""
+    from agent_takkub import lead_inbox
+
+    monkeypatch.setenv("TAKKUB_INBOX_DIGEST_MS", "15000")
+    monkeypatch.setattr(lead_inbox, "DIGEST_MAX_HOLD_S", 120.0)
+    orch, _lead = _inbox(monkeypatch)
+    real_time = time.time
+    clock = [real_time()]
+    monkeypatch.setattr(lead_inbox.time, "time", lambda: clock[0])
+    with (
+        patch("agent_takkub.lead_inbox.QTimer.singleShot"),
+        patch("agent_takkub.orchestrator._delayed_enter_verified") as submit,
+    ):
+        # progress → digest: held while "busy", released after the ceiling
+        orch._notify_lead("p", "[frontend progress] step 1", queued_ts=clock[0])
+        assert orch._flush_lead_digest("p", arm_pump=False) is False
+        clock[0] += 121
+        assert orch._flush_lead_digest("p", arm_pump=False) is True
+
+        # done → live queue → pump: held, then delivered after the ceiling
+        orch._lead_notify_queue["p"].clear()
+        orch._reset_lead_notify_backoff("p")
+        orch._enqueue_live_lead_notice("p", "[frontend done] PASS", queued_ts=clock[0])
+        orch._pump_lead_notify("p")
+        clock[0] += 60
+        orch._pump_lead_notify("p")
+        submit.assert_not_called()
+        clock[0] += 61
+        orch._pump_lead_notify("p")  # ceiling reached → busy-deliver clock starts
+        clock[0] += 6
+        orch._pump_lead_notify("p")
+    assert submit.called
+    assert "[frontend done] PASS" in submit.call_args.kwargs["content_fragment"]

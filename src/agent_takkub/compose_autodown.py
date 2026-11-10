@@ -156,6 +156,22 @@ def _match_len(working_dir: str, roots: Iterable[str | Path]) -> int:
     return best
 
 
+# #985: a stack named for a long-running environment (`evcstg`, `app-staging`,
+# `shop_prod`, `uat2`) is one devops brought up ON PURPOSE to stay up — a
+# staging copy the user reached through a tunnel went down right after the
+# devops done that deployed it. Word-bounded, or a trailing suffix glued onto
+# the project slug (compose names are often `<slug><env>`).
+_LONG_RUNNING_STACK_RE = re.compile(
+    r"(?:^|[-_.])(?:stg|stage|staging|prod|production|preprod|uat)(?:\d*)(?:$|[-_.])"
+    r"|(?:stg|staging|prod|uat)\d*$",
+    re.IGNORECASE,
+)
+
+
+def is_long_running_stack(stack: str) -> bool:
+    return bool(_LONG_RUNNING_STACK_RE.search(stack or ""))
+
+
 def plan_stacks(
     containers: Iterable[Container],
     own_roots: Iterable[str | Path],
@@ -183,6 +199,9 @@ def plan_stacks(
         )
         if sharer:
             skipped.append((stack, f"แท็บ {sharer} ที่เปิดอยู่ใช้ stack นี้ด้วย"))
+            continue
+        if is_long_running_stack(stack):
+            skipped.append((stack, "ชื่อ stack เป็น staging/prod — ตั้งใจให้รันค้าง ไม่ down อัตโนมัติ"))
             continue
         ours[stack] = members
     return ours, skipped

@@ -2042,6 +2042,33 @@ GENERIC_QUOTA_MARKERS: tuple[str, ...] = (
 )
 
 
+# #991: a provider CLI that dies during its own bootstrap for a reason on ITS
+# side (account/routing service down) will die the same way on every respawn —
+# the crash-respawn loop just burns the budget ("respawn-capped", task never
+# started). Seen on screen right before such an exit, the pane is rerouted to
+# another provider like a quota hit. Captured wording only, per provider:
+# claude/gemini(agy)/opencode/cursor have no confirmed bootstrap-failure text
+# yet (gap — they keep the ordinary crash-respawn path).
+BOOTSTRAP_FAILURE_MARKERS: dict[str, tuple[str, ...]] = {
+    # codex 0.167.0, 2026-11-06 (#991): "Error: account/read failed during TUI
+    # bootstrap: account/read failed: workspace routing discovery timed out
+    # (code -32603)" — exit 1 three times in 40 s.
+    "codex": ("account/read failed during tui bootstrap",),
+}
+
+
+def bootstrap_failure_marker(provider: str, lines) -> str | None:
+    """The #991 bootstrap-failure marker found in *lines*, or None."""
+    markers = BOOTSTRAP_FAILURE_MARKERS.get(provider or "", ())
+    if not markers:
+        return None
+    try:
+        text = "\n".join(str(line) for line in lines).casefold()
+    except Exception:
+        return None
+    return next((m for m in markers if m in text), None)
+
+
 def quota_markers_for(provider: str) -> tuple[str, ...]:
     """Quota markers for this provider only.
 

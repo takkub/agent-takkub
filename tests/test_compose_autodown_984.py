@@ -50,8 +50,8 @@ def test_downs_only_own_stacks_keeps_volumes_and_removes_exited(tmp_path) -> Non
     other = _p(tmp_path, "saas")
     fake = FakeDocker(
         [
-            ("evcstg-db-1", "running", "evcstg", os.path.join(evc, "deploy", "staging")),
-            ("evcstg-api-1", "running", "evcstg", os.path.join(evc, "deploy", "staging")),
+            ("evce2e-db-1", "running", "evce2e", os.path.join(evc, "e2e")),
+            ("evce2e-api-1", "running", "evce2e", os.path.join(evc, "e2e")),
             ("evc-db-1", "exited", "evc", evc),
             ("saas-pg-1", "running", "saas", other),
         ]
@@ -59,12 +59,32 @@ def test_downs_only_own_stacks_keeps_volumes_and_removes_exited(tmp_path) -> Non
     with patch.object(cad, "_docker", fake):
         report = cad.run_auto_down("evc", "end-session", [evc], {})
 
-    assert sorted(fake.downs()) == ["evc", "evcstg"]
+    assert sorted(fake.downs()) == ["evc", "evce2e"]
     assert all("-v" not in c and "--volumes" not in c and "--rmi" not in c for c in fake.calls)
     assert [r[0] for r in fake.rows] == ["saas-pg-1"]  # project B untouched
     # only running containers count toward the RAM figure (2 × 70.5)
     assert report.freed_mib == pytest.approx(141.0)
-    assert "evcstg-db-1" in report.summary() and "141 MiB" in report.summary()
+    assert "evce2e-db-1" in report.summary() and "141 MiB" in report.summary()
+
+
+def test_staging_or_prod_named_stack_is_never_downed_985(tmp_path) -> None:
+    """#985: `evcstg` was the staging copy devops had just deployed for the
+    user (reached through a tunnel); auto-down took it down with the scratch
+    stack. A long-running-environment name is skipped and reported."""
+    evc = _p(tmp_path, "evc")
+    staging = os.path.join(evc, "deploy", "staging")
+    fake = FakeDocker(
+        [
+            ("evcstg-web-1", "running", "evcstg", staging),
+            ("evc-prod-api-1", "running", "evc-prod", staging),
+            ("evc-db-1", "running", "evc", evc),
+        ]
+    )
+    with patch.object(cad, "_docker", fake):
+        report = cad.run_auto_down("evc", "prod-deploy", [evc], {})
+    assert fake.downs() == ["evc"]
+    assert sorted(s for s, _ in report.skipped) == ["evc-prod", "evcstg"]
+    assert not cad.is_long_running_stack("evc-e2e") and not cad.is_long_running_stack("product")
 
 
 def test_stack_shared_with_another_open_tab_is_skipped(tmp_path) -> None:

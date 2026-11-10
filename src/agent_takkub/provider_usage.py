@@ -1389,12 +1389,38 @@ def _claude_creds_expiry(config_dir: Path) -> float:
         return 0.0
 
 
+# #1002: `.claude.json` is 80-95 KB and this label is read from the Qt-thread
+# status/limit refresh every 2 s — a full read+parse each time showed up as
+# 1.5-1.8 s soft stalls. Keyed on (mtime_ns, size): one stat per call.
+_OAUTH_ACCOUNT_CACHE: dict[str, tuple[tuple[int, int], dict]] = {}
+
+
+def _read_oauth_account(path: Path) -> dict | None:
+    """`oauthAccount` of a `.claude.json`, None when unreadable."""
+    try:
+        st = path.stat()
+    except OSError:
+        return None
+    sig = (st.st_mtime_ns, st.st_size)
+    key = str(path)
+    hit = _OAUTH_ACCOUNT_CACHE.get(key)
+    if hit is not None and hit[0] == sig:
+        return hit[1]
+    try:
+        acct = json.loads(path.read_text(encoding="utf-8")).get("oauthAccount") or {}
+    except (OSError, ValueError, AttributeError):
+        return None
+    if not isinstance(acct, dict):
+        acct = {}
+    _OAUTH_ACCOUNT_CACHE[key] = (sig, acct)
+    return acct
+
+
 def _claude_account_label(config_dir: Path) -> str | None:
     """Instance-independent label: the account's email from `.claude.json`."""
     for path in (config_dir / ".claude.json", Path.home() / ".claude.json"):
-        try:
-            acct = json.loads(path.read_text(encoding="utf-8")).get("oauthAccount") or {}
-        except (OSError, ValueError, AttributeError):
+        acct = _read_oauth_account(path)
+        if acct is None:
             continue
         for field in ("emailAddress", "displayName"):
             val = acct.get(field)

@@ -32,7 +32,7 @@ from pathlib import Path
 from PyQt6.QtCore import QObject, pyqtSignal
 
 from .. import config as _config
-from . import api, reports
+from . import api, notify, reports
 from .auth import AuthGate
 from .config import RemoteConfig
 
@@ -273,10 +273,21 @@ class _Bridge(QObject):
                     (200, api.lead_history(self._orch, project_ns, pending.params.get("limit")))
                 )
             elif pending.action == "lead_sessions":
+                # #999: the session list opens every recent provider transcript
+                # (one codex `open()` blocked the Qt thread 11.2 s). Project +
+                # Lead provider are read here (pane state is Qt-owned); the
+                # scan itself runs on a worker thread.
                 project_ns = self._resolve_scoped_project(pending.params.get("project"))
-                pending.reply.put(
-                    (200, api.lead_sessions(self._orch, project_ns, pending.params.get("limit")))
-                )
+                provider = notify.lead_provider_name(self._orch, project_ns)
+                limit = pending.params.get("limit")
+
+                def _sessions(p=pending, ns=project_ns, prov=provider, lim=limit) -> None:
+                    try:
+                        p.reply.put((200, api.lead_sessions(None, ns, lim, provider=prov)))
+                    except Exception as exc:
+                        p.reply.put((500, {"ok": False, "msg": f"internal error: {exc}"}))
+
+                threading.Thread(target=_sessions, name="remote-lead-sessions", daemon=True).start()
             elif pending.action == "lead_resume":
                 try:
                     pending.reply.put(

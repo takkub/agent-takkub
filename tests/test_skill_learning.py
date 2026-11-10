@@ -730,3 +730,31 @@ def test_hook_carries_pane_claude_dirs(monkeypatch):
         "claude_config_dir": "",
         "claude_project_dir_name": "",
     }
+
+
+def test_no_provider_parks_the_episode_then_retries_when_one_is_back_993(_ready, monkeypatch):
+    """#993: a worth-10 qa reflection failed "no provider" during a transient
+    quota hit and was lost for good (later runs were worth<3 skips), and the
+    brief said only "reflector failed (no provider)". It is parked with the
+    sub-cause, then re-run on the next done once a provider is usable."""
+    from agent_takkub import provider_state
+
+    s = settings.LearningSettings(min_worth=0, min_interval_s=0)
+    calls: list = []
+    runner = _fake_runner({"intents": [_create_intent()]}, calls)
+    monkeypatch.setattr(reflector, "provider_ready", lambda p: False)
+    monkeypatch.setattr(provider_state, "is_quota_ready", lambda p: p != "claude")
+    parked = pipeline.on_done(_event(), runner=runner, settings=s)
+    assert parked.status == "parked" and not calls
+    assert "claude: ติดโควตา" in parked.summary
+    assert len(list(pipeline._parked_dir(NS).glob("*.json"))) == 1
+
+    # still no provider on the next done: nothing runs, the episode stays parked
+    pipeline.on_done(_event(note="later"), runner=runner, settings=s)
+    assert not calls and len(list(pipeline._parked_dir(NS).glob("*.json"))) >= 1
+
+    monkeypatch.setattr(reflector, "provider_ready", lambda p: p == "claude")
+    picky = settings.LearningSettings(min_worth=99, min_interval_s=0)  # new done itself skips
+    pipeline.on_done(_event(note="trivial"), runner=runner, settings=picky)
+    assert calls, "the parked episode was retried"
+    assert store.find_managed(NS, "uv-editable-reinstall") is not None

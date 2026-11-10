@@ -14,6 +14,21 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 - **#997/#1000 `takkub done` รายงาน timeout 15 วิ ทั้งที่ done ถึง Lead แล้ว:** done รอคำตอบได้ 90 วิ (cockpit คำนวณ git facts + hash impact revision ก่อนตอบ) — กัน pane retry ซ้ำไปชน session ที่ retire แล้ว
 - **#988 opencode "Free usage limit reached" ไม่ถูกจับเป็น quota-hit:** เพิ่ม marker ที่ capture จากจอจริง + รองรับรูปแบบ `⚠ Retrying in 310s · attempt 4 · Free usage limit reached.`
 - **#990 codex รับ Enter ของ task ไปกด "Update now" แล้วปิดตัว:** spawn codex ด้วย `-c check_for_update_on_startup=false` (session-scoped, ไม่แตะ config.toml ของ user)
+- **#992 done ค้าง "queued — not yet delivered" 12 นาทีทั้งที่ Lead ว่าง:** notice อัตโนมัติ (`[role done]`, digest) รอ Lead "ready prompt" แบบไม่มีเพดาน ไม่มี log — ถ้าจออ่าน Lead ว่างผิดเป็นไม่ว่าง ก็ค้างตลอด · ตอนนี้รอได้ไม่เกิน 120 วิ (`TAKKUB_DIGEST_MAX_HOLD_S`) แล้วเข้าเส้นทาง busy-deliver เดิม (ยังไม่วางทับ permission prompt หรือ draft) + log `lead_notify_auto_hold_ceiling`
+- **#987 เปลี่ยน provider ของ Lead จากเมนูแล้ว teammate ถูกปิดหมด:** เมนูเรียก restart ที่ออกแบบไว้สำหรับเปลี่ยนโปรเจค (ปิดทุก pane) → เปลี่ยน provider/account ของ Lead restart เฉพาะ Lead แล้ว teammate ทำงานต่อและส่ง done ถึง Lead ตัวใหม่
+- **#995 digest บอก "branch:master · shared tree" กับงานที่ `--cwd` เป็น linked worktree:** baseline ตอน assign ใช้ cwd ของ session (main tree) แทน `--cwd` ของงาน → ใช้ `--cwd` และ digest บอก `linked worktree <path> @ <HEAD>` แทนคำว่า shared tree
+- **#991 codex crash-loop ตอน bootstrap (`account/read failed during TUI bootstrap`) จน respawn-capped:** exit แบบนี้ย้ายงานไป provider ถัดไปเหมือน quota-hit (marker เฉพาะ codex ที่ capture จริง — provider อื่นยังเป็น gap ใช้ crash-respawn เดิม)
+- **#994 pane รอ background shell ที่ค้าง (ssh ไม่คืน) เงียบ 30 นาที:** pane ที่อยู่ที่ prompt + มีแค่ background job + จอไม่ขยับ 10 นาที (`TAKKUB_BG_WAIT_NOTICE_S`) → แจ้ง Lead ครั้งเดียว `[bg-wait]` (แจ้งเท่านั้น ไม่ restart — #968)
+- **#996 pane kill Docker Desktop ได้:** guard ปฏิเสธการ kill Docker Desktop / `com.docker.*` / dockerd / vpnkit / vmmem / wsl ทั้งด้วยชื่อ, PID, และ "เจ้าของ port N" (`Get-NetTCPConnection -LocalPort` / `lsof -ti:` / `kill-port`) — ใช้กับทุก role รวม Lead (ยกเว้น shell ของ user)
+- **#985 compose auto-down ปิด staging (`evcstg`):** stack ที่ชื่อเป็น staging/prod/uat ไม่ถูก down อัตโนมัติ (แจ้งว่าข้าม)
+- **#986 `provider probe` บอก "ยังติดโควตา" ทั้งที่ used=0%:** 0% คือ window 5 ชม. ของ codex — window รายสัปดาห์ยังเต็ม จึงถูกต้องที่ไม่ปลด · ตอนนี้บอกด้วยว่า window ไหนกันไว้
+- **#993 skill-learning: reflect ที่ล้มเพราะไม่มี provider ทำให้บทเรียนหายถาวร:** เก็บ episode ไว้ (`parked`) พร้อมเหตุผลย่อย (quota/toggle/park policy/ไม่ได้ติดตั้ง) แล้ว retry ใน done ถัดไปของโปรเจคเมื่อมี provider ใช้ได้ (เก็บสูงสุด 3 วัน)
+- **#999 UI ค้าง 11 วิ ตอนมือถือขอรายการ Lead session:** สแกน transcript ย้ายออกจาก Qt thread (resolve project/provider บน Qt thread แล้วสแกนใน worker)
+- **#1002 พิมพ์ไทยเบิ้ล/กระตุกบน macOS:** dedup ของ helper textarea เทียบกับ onData ก้อนสุดท้ายใน 50ms เท่านั้น ("ก"+"า", "ก่") → ใช้ log ที่ xterm ส่งจริงแบบหักออก · เพิ่ม SF Mono/Menlo/Thonburi/Sukhumvit Set ใน font stack · heartbeat 250ms redraw เฉพาะหลังมี output · `.claude.json` (80–95 KB) ไม่ parse ใหม่ทุก 2 วิ (cache ตาม mtime/size)
+
+### Changed (เปลี่ยน)
+
+- deps: ruff 0.17.3 → 0.17.4 (#1004), github/codeql-action 4.39.1 → 4.39.3 (#1003) — รวมใน push นี้แทนการ merge PR แยก
 
 ## [v2.2.51] - 2026-11-05
 

@@ -1093,7 +1093,7 @@ class TestLeadSessionsRoute:
         monkeypatch.setattr(
             api,
             "lead_sessions",
-            lambda orch, project_ns, limit: {"project": project_ns, "sessions": []},
+            lambda orch, project_ns, limit, provider=None: {"project": project_ns, "sessions": []},
         )
         config = RemoteConfig(bind_port=0, secret_path="sek", token="tok", mode="view")
         srv = http_server.start_server(config, _FakeOrch())
@@ -1109,9 +1109,12 @@ class TestLeadSessionsRoute:
     def test_forwards_project_and_limit(self, monkeypatch: pytest.MonkeyPatch) -> None:
         seen: dict = {}
 
-        def _fake(orch, project_ns, limit):
+        def _fake(orch, project_ns, limit, provider=None):
             seen["project_ns"] = project_ns
             seen["limit"] = limit
+            # #999: runs off the Qt thread — no orch, provider pre-resolved
+            seen["orch"] = orch
+            seen["provider"] = provider
             return {"project": project_ns, "sessions": []}
 
         monkeypatch.setattr(api, "lead_sessions", _fake)
@@ -1127,6 +1130,7 @@ class TestLeadSessionsRoute:
             srv.stop()
         assert seen["project_ns"] == "default"
         assert seen["limit"] == "5"
+        assert seen["orch"] is None and isinstance(seen["provider"], str)
 
 
 class TestLeadResumeRoute:

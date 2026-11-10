@@ -41,7 +41,8 @@ def test_switching_default_gemini_profile_updates_lead_and_restarts(
     assert provider_config.provider_for("lead", "proj") == "gemini"
     assert user_profile.default_provider("proj") == "gemini"
     assert user_profile.profile_for("proj", provider="gemini") == "default"
-    window._restart_lead_for_active_project.assert_called_once_with()
+    window._restart_only_lead_for_active_project.assert_called_once_with()
+    window._restart_lead_for_active_project.assert_not_called()  # #987: teammates stay
 
 
 def test_switching_back_to_claude_wins_over_role_models_pin(
@@ -64,7 +65,8 @@ def test_switching_back_to_claude_wins_over_role_models_pin(
     assert provider_config.provider_for("lead", "proj") == "claude"
     assert provider_config.effective_provider_for("lead", "proj") == "claude"
     assert user_profile.default_provider("proj") == "claude"
-    window._restart_lead_for_active_project.assert_called_once_with()
+    window._restart_only_lead_for_active_project.assert_called_once_with()
+    window._restart_lead_for_active_project.assert_not_called()  # #987: teammates stay
 
 
 def test_cancel_keeps_existing_provider(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -77,7 +79,7 @@ def test_cancel_keeps_existing_provider(monkeypatch: pytest.MonkeyPatch) -> None
 
     assert provider_config.provider_for("lead", "proj") == "claude"
     assert user_profile.default_provider("proj") == "claude"
-    window._restart_lead_for_active_project.assert_not_called()
+    window._restart_only_lead_for_active_project.assert_not_called()
 
 
 def test_selecting_configured_provider_restores_live_fallback(
@@ -92,7 +94,8 @@ def test_selecting_configured_provider_restores_live_fallback(
 
     UserActionsMixin._on_user_changed(window, "default", "codex")
 
-    window._restart_lead_for_active_project.assert_called_once_with()
+    window._restart_only_lead_for_active_project.assert_called_once_with()
+    window._restart_lead_for_active_project.assert_not_called()  # #987: teammates stay
     assert provider_config.provider_for("lead", "proj") == "codex"
 
 
@@ -138,3 +141,15 @@ def test_codex_pane_env_uses_selected_account(tmp_path: Path) -> None:
     env = {}
     pane_env.inject_provider_home_env(env, "codex", "other-proj")
     assert env.get("CODEX_HOME") != str(home)
+
+
+def test_lead_only_restart_never_closes_teammates_987(monkeypatch: pytest.MonkeyPatch) -> None:
+    """#987: switching Lead's provider closed a busy frontend and a worktree
+    backend mid-task (no done/FAILED, ledger rows gone)."""
+    from agent_takkub import main_window
+
+    monkeypatch.setattr(main_window.QTimer, "singleShot", lambda *_a, **_kw: None)
+    window = MagicMock()
+    main_window.MainWindow._restart_only_lead_for_active_project(window)
+    window.orch.close_all_teammates.assert_not_called()
+    window.orch.close.assert_called_once_with("lead", force=True, reason="lead_provider_switch")
