@@ -358,9 +358,74 @@ def graft_cli_path() -> str | None:
     now = time.monotonic()
     if _GRAFT_CLI_CACHE is not None and now - _GRAFT_CLI_CACHE[1] < _GRAFT_CLI_TTL_S:
         return _GRAFT_CLI_CACHE[0]
-    res = shutil.which("graft.cmd") or shutil.which("graft")
+    res = shutil.which("graft.cmd") or shutil.which("graft") or local_graft_cli()
     _GRAFT_CLI_CACHE = (res, now)
     return res
+
+
+def local_cli_dir() -> Path:
+    """Cockpit-owned home of the graft CLI: `graft-graphs/_cli/`. A sibling
+    of the per-instance store dirs, never inside one — `takkub disk` treats
+    every dir inside an instance root as a project's graph store."""
+    return _graft_store_base() / "graft-graphs" / "_cli"
+
+
+def local_graft_cli() -> str | None:
+    """The CLI the cockpit installed for itself, if it is there."""
+    bin_dir = local_cli_dir() / "node_modules" / ".bin"
+    for name in ("graft.cmd", "graft") if sys.platform == "win32" else ("graft",):
+        if (bin_dir / name).is_file():
+            return str(bin_dir / name)
+    return None
+
+
+def cli_install_marker_path() -> Path:
+    """Where the boot auto-install records its last attempt (see
+    `graft_autobuild._install_cli_then_build`)."""
+    return local_cli_dir() / "install-attempt.json"
+
+
+#: package.json + package-lock.json shipped with the cockpit. The lock pins
+#: graft and all 28 packages under it by version AND integrity hash.
+SHIPPED_CLI_MANIFEST = Path(__file__).resolve().parent / "static" / "graft-cli"
+
+
+def install_graft_cli(npm: str, timeout: float = 300.0) -> tuple[bool, str]:
+    """Install the graft CLI into `local_cli_dir()` with `npm ci` against the
+    lockfile the cockpit ships — the ONE installer, shared by `takkub doctor
+    --fix` and the boot auto-install. Frozen on purpose: `npm install -g
+    @nanonets/graft@x` pins only graft itself and lets every package under it
+    float to whatever the registry serves that day; `npm ci` installs exactly
+    the locked tree and refuses a tarball whose hash differs. Nothing global
+    is touched. Blocking — call it off the Qt thread."""
+    import os
+    import subprocess
+
+    from ._win_console import SUBPROCESS_NO_WINDOW
+
+    dest = local_cli_dir()
+    try:
+        dest.mkdir(parents=True, exist_ok=True)
+        for name in ("package.json", "package-lock.json"):
+            shutil.copyfile(SHIPPED_CLI_MANIFEST / name, dest / name)
+        result = subprocess.run(
+            [npm, "ci", "--no-audit", "--no-fund"],
+            cwd=str(dest),
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=timeout,
+            creationflags=SUBPROCESS_NO_WINDOW,
+            env={**os.environ, "npm_config_yes": "true"},
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return False, str(exc)
+    output = ((result.stdout or "") + "\n" + (result.stderr or "")).strip()
+    invalidate_graft_cli_cache()
+    if result.returncode == 0 and local_graft_cli():
+        return True, output[-300:] or "graft installed"
+    return False, output[-300:] or f"npm exited {result.returncode}"
 
 
 _BUILD_MARKER_NAME = "built.json"

@@ -627,7 +627,9 @@ def check_graft() -> list[Finding]:
                     )
                 )
 
-    graft = shutil.which("graft.cmd") or shutil.which("graft")
+    from .graft_store import local_graft_cli
+
+    graft = shutil.which("graft.cmd") or shutil.which("graft") or local_graft_cli()
     if graft:
         rc, out = _run([graft, "--version"])
         version = out.strip() if rc == 0 else ""
@@ -671,25 +673,9 @@ def check_graft() -> list[Finding]:
         return findings
 
     def _install() -> tuple[bool, str]:
-        from ._win_console import SUBPROCESS_NO_WINDOW
+        from .graft_store import install_graft_cli
 
-        try:
-            result = subprocess.run(
-                [npm, "install", "-g", f"@nanonets/graft@{_GRAFT_MCP_VERSION}"],
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                timeout=300,
-                creationflags=SUBPROCESS_NO_WINDOW,
-                env={**os.environ, "npm_config_yes": "true"},
-            )
-        except (OSError, subprocess.TimeoutExpired) as exc:
-            return False, str(exc)
-        output = ((result.stdout or "") + "\n" + (result.stderr or "")).strip()
-        if result.returncode == 0:
-            return True, output[-300:] or "graft installed"
-        return False, output[-300:] or f"npm exited {result.returncode}"
+        return install_graft_cli(npm)
 
     findings.append(
         Finding(

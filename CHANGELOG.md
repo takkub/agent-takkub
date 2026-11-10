@@ -2,6 +2,14 @@
 
 All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses [SemVer](https://semver.org/).
 
+## [v2.2.54] - 2026-11-10
+
+### Added (เพิ่ม)
+
+- **cockpit ลง graft CLI ให้เองตอน boot:** เครื่องที่ยังไม่มี `graft` เดิมจะไม่ได้ code graph เลยจนกว่าจะรัน `takkub doctor --fix` เอง — ตอนนี้ boot ลงให้ใน background แล้ว build graph ต่อทันที (วัดจริงบน Windows: 5 วินาที, 87 MB)
+  - **ลงแบบล็อกทั้งต้นไม้:** `npm ci` กับ `package-lock.json` ที่มากับ cockpit (graft 0.8.2 + 28 package ใต้มัน ล็อกทั้งเวอร์ชันและ integrity hash) ลงในโฟลเดอร์ของ cockpit เอง (`graft-graphs/_cli/`) ไม่แตะ global npm — `takkub doctor --fix` เปลี่ยนมาใช้ตัวติดตั้งเดียวกัน (เดิม `npm install -g` ซึ่งล็อกแค่ตัว graft ส่วน package ใต้มันลอยตาม registry)
+  - **เงื่อนไข:** ต้องมี npm และ Node >= 20 · ถ้าลงไม่สำเร็จจะลองใหม่ไม่เกินวันละครั้ง · ผลลัพธ์อยู่ใน `events.log` (`graft_cli_auto_install`) · ปิดได้ด้วย `TAKKUB_SKIP_GRAFT_BUILD=1` · เครื่องที่มี `graft` ใน PATH อยู่แล้วใช้ตัวนั้นต่อ ไม่ลงซ้ำ
+
 ## [v2.2.53] - 2026-11-10
 
 รอบเก็บกวาดจาก audit การใช้งานจริง 90 วัน (prod): ถอดของที่ไม่มีใครใช้ ทำให้ของที่ควรใช้ถูกใช้ได้จริง

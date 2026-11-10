@@ -9,6 +9,7 @@ import re
 import subprocess
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -221,6 +222,12 @@ class TestCheckMiniBrowser:
 
 
 class TestCheckGraft:
+    @pytest.fixture(autouse=True)
+    def _no_cockpit_owned_cli(self):
+        # the machine running the tests may have the cockpit-installed CLI
+        with patch("agent_takkub.graft_store.local_graft_cli", return_value=None):
+            yield
+
     def _f(self, findings: list[Finding], name: str) -> Finding:
         return next(f for f in findings if f.name == name)
 
@@ -305,7 +312,9 @@ class TestCheckGraft:
         assert "Node >= 20" in node_finding.detail
         assert self._f(findings, "cli").status is Status.OK
 
-    def test_missing_graft_offers_global_npm_auto_fix(self) -> None:
+    def test_missing_graft_offers_frozen_install_auto_fix(self, tmp_path) -> None:
+        """--fix installs with `npm ci` against the shipped lockfile into the
+        cockpit's own folder — never a floating `npm install -g`."""
         with patch(
             "agent_takkub.doctor.shutil.which",
             side_effect=self._which(None, None, npm="C:/node/npm.cmd"),
@@ -316,20 +325,26 @@ class TestCheckGraft:
         assert cli.status is Status.WARN
         assert cli.auto_fix is not None
 
-        with patch("agent_takkub.doctor.subprocess.run") as run:
-            run.return_value.returncode = 0
-            run.return_value.stdout = "added 1 package"
-            run.return_value.stderr = ""
+        dest = tmp_path / "_cli"
+
+        def fake_run(argv, **kw):
+            bin_dir = dest / "node_modules" / ".bin"
+            bin_dir.mkdir(parents=True)
+            (bin_dir / "graft.cmd").write_text("")
+            (bin_dir / "graft").write_text("")
+            return SimpleNamespace(returncode=0, stdout="added 29 packages", stderr="")
+
+        with (
+            patch("agent_takkub.graft_store.local_cli_dir", return_value=dest),
+            patch("agent_takkub.graft_store.local_graft_cli", return_value="installed"),
+            patch("agent_takkub.doctor.subprocess.run", side_effect=fake_run) as run,
+        ):
             ok, msg = cli.auto_fix()
 
-        assert ok
-        assert "added 1 package" in msg
-        assert run.call_args.args[0] == [
-            "C:/node/npm.cmd",
-            "install",
-            "-g",
-            f"@nanonets/graft@{self._pinned()}",
-        ]
+        assert ok and "added 29 packages" in msg
+        assert run.call_args.args[0] == ["C:/node/npm.cmd", "ci", "--no-audit", "--no-fund"]
+        assert run.call_args.kwargs["cwd"] == str(dest)
+        assert (dest / "package-lock.json").is_file()
 
     def test_missing_graft_and_npm_has_manual_hint_only(self) -> None:
         with patch("agent_takkub.doctor.shutil.which", return_value=None):

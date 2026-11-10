@@ -116,6 +116,7 @@ every test run so the suite never spawns real `graft build` subprocesses.
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import shutil
@@ -129,6 +130,7 @@ from pathlib import Path
 from ._win_console import SUBPROCESS_NO_WINDOW
 from .config import load_projects
 from .graft_store import (
+    cli_install_marker_path,
     graft_cli_path,
     graph_key,
     graph_store_dir,
@@ -746,16 +748,116 @@ def _spawn_build(target: Path) -> None:
     ).start()
 
 
+# ── boot auto-install of the graft CLI ────────────────────────────────────
+# One attempt per day at most: a machine that cannot install (offline, global
+# npm prefix not writable, no compiler for tree-sitter) must not re-run npm on
+# every boot. Kill switch: TAKKUB_SKIP_GRAFT_BUILD, same as the build itself.
+_INSTALL_RETRY_S = 24 * 3600.0
+_install_lock = threading.Lock()
+_install_running = False
+
+
+def _log_install_event(**fields) -> None:
+    orch = sys.modules.get("agent_takkub.orchestrator")  # lazy: no import cycle
+    try:
+        if orch is not None:
+            orch._log_event("graft_cli_auto_install", **fields)
+    except Exception:
+        _log.debug("graft_cli_auto_install %s", fields)
+
+
+def _node_major() -> int:
+    node = shutil.which("node")
+    if not node:
+        return 0
+    try:
+        out = subprocess.run(
+            [node, "--version"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=15,
+            creationflags=SUBPROCESS_NO_WINDOW,
+        ).stdout
+        return int(out.strip().lstrip("v").split(".")[0])
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        return 0
+
+
+def _recent_install_attempt(marker: Path) -> bool:
+    try:
+        at = float(json.loads(marker.read_text(encoding="utf-8")).get("at", 0))
+    except (OSError, ValueError, TypeError, AttributeError):
+        return False
+    return 0 <= time.time() - at < _INSTALL_RETRY_S
+
+
+def _install_cli_then_build() -> None:
+    global _install_running
+    try:
+        from .graft_store import install_graft_cli
+
+        marker = cli_install_marker_path()
+        if _recent_install_attempt(marker):
+            return
+        npm = shutil.which("npm.cmd") or shutil.which("npm")
+        major = _node_major()
+        if not npm or major < 20:  # graft's own engines.node floor
+            _log_install_event(ok=False, reason="needs npm + Node >= 20", node_major=major)
+            return
+        t0 = time.monotonic()
+        ok, detail = install_graft_cli(npm)
+        ok = ok and _graft_cli() is not None
+        try:
+            marker.parent.mkdir(parents=True, exist_ok=True)
+            marker.write_text(
+                json.dumps({"at": time.time(), "ok": ok}),
+                encoding="utf-8",
+            )
+        except OSError:
+            pass
+        _log_install_event(
+            ok=ok,
+            seconds=round(time.monotonic() - t0, 1),
+            detail="" if ok else detail[-200:],
+        )
+        if ok:
+            build_all_projects_async()
+    except Exception as exc:  # never let a boot helper thread die loudly
+        _log.debug("graft cli auto-install failed: %r", exc)
+    finally:
+        with _install_lock:
+            _install_running = False
+
+
+def install_cli_then_build_async() -> None:
+    """Install the graft CLI (frozen `npm ci`, cockpit-owned folder — see
+    `graft_store.install_graft_cli`) when it is missing, then build every
+    project's graph. Background thread, single-flight, never raises."""
+    global _install_running
+    if _skip_env():
+        return
+    with _install_lock:
+        if _install_running:
+            return
+        _install_running = True
+    threading.Thread(target=_install_cli_then_build, name="graft-cli-install", daemon=True).start()
+
+
 def build_all_projects_async() -> None:
     """Boot trigger: kick a background build for every distinct path across
     every project in projects.json. Best-effort — never raises, never blocks
-    the caller. No-op if the kill switch is set or the graft CLI isn't
-    installed (doctor handles nudging the user to install it)."""
+    the caller. No-op if the kill switch is set. When the graft CLI isn't
+    installed it is installed in the background first, then this runs again."""
     if _skip_env():
         _log.debug("graft_autobuild: skipped (TAKKUB_SKIP_GRAFT_BUILD set)")
         return
     if _graft_cli() is None:
-        _log.debug("graft_autobuild: graft CLI not found on PATH; skipping")
+        # Nothing to build with yet: install the CLI in the background, then
+        # come back here (2.2.54 — a fresh machine used to get no graft at
+        # all until someone ran `takkub doctor --fix`).
+        install_cli_then_build_async()
         return
     try:
         projects = load_projects().get("projects") or {}

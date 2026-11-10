@@ -1,6 +1,6 @@
 [project]
 name = "agent-takkub"
-version = "2.2.53"
+version = "2.2.54"
 description = "Desktop cockpit for orchestrating Claude Code dev teammates on Windows"
 requires-python = ">=3.11"
 license = { text = "MIT" }
@@ -62,6 +62,10 @@ agent_takkub = [
     "static/fonts/LICENSE.txt",
     "static/fonts/LICENSE-NotoSansThai.txt",
     "static/icons/*.svg",
+    # Frozen manifest for the graft CLI the cockpit installs for itself
+    # (`npm ci` — graft_store.install_graft_cli).
+    "static/graft-cli/package.json",
+    "static/graft-cli/package-lock.json",
     # Editor page (#365 phase 2) + its vendored Monaco AMD bundle — see
     # static/editor/vendor/README.md for what's trimmed out of the stock
     # npm package and why. No CDN dependency; this IS the runtime asset.

@@ -90,14 +90,82 @@ def test_build_all_projects_noop_when_env_set(tmp_path, monkeypatch):
     assert calls == []
 
 
-def test_build_all_projects_noop_when_graft_cli_missing(tmp_path, monkeypatch, _isolated_projects):
+def test_missing_cli_builds_nothing_and_hands_off_to_the_installer(
+    tmp_path, monkeypatch, _isolated_projects
+):
     monkeypatch.delenv("TAKKUB_SKIP_GRAFT_BUILD", raising=False)
     monkeypatch.setattr(gab, "_graft_cli", lambda: None)
     _write_projects(_isolated_projects, {"p": {"paths": {"main": str(tmp_path)}}})
-    calls = []
+    calls, installs = [], []
     monkeypatch.setattr(gab, "_spawn_build", lambda d: calls.append(d))
+    monkeypatch.setattr(gab, "install_cli_then_build_async", lambda: installs.append(1))
 
     _real_build_all_projects_async()
+
+    assert calls == [] and installs == [1]
+
+
+# ── boot auto-install of the CLI (2.2.54) ────────────────────────────────
+
+
+def _install_env(monkeypatch, tmp_path, *, node_major=22, npm="npm", result=(True, "ok")):
+    """Wire the installer to fakes; returns the list of install calls."""
+    from agent_takkub import graft_store
+
+    monkeypatch.delenv("TAKKUB_SKIP_GRAFT_BUILD", raising=False)
+    monkeypatch.setattr(gab.threading, "Thread", _SyncThread)
+    monkeypatch.setattr(gab, "cli_install_marker_path", lambda: tmp_path / "s" / "cli-install.json")
+    monkeypatch.setattr(gab, "_node_major", lambda: node_major)
+    monkeypatch.setattr(gab.shutil, "which", lambda name: npm if name.startswith("npm") else None)
+    calls: list[tuple] = []
+
+    def fake_install(npm_bin, timeout=300.0):
+        calls.append(npm_bin)
+        return result
+
+    monkeypatch.setattr(graft_store, "install_graft_cli", fake_install)
+    return calls
+
+
+def test_auto_install_then_builds(tmp_path, monkeypatch):
+    calls = _install_env(monkeypatch, tmp_path)
+    monkeypatch.setattr(gab, "_graft_cli", lambda: r"C:\fake\graft.cmd" if calls else None)
+    built = []
+    monkeypatch.setattr(gab, "build_all_projects_async", lambda: built.append(1))
+
+    gab.install_cli_then_build_async()
+
+    assert calls == ["npm"] and built == [1]
+    assert json.loads((tmp_path / "s" / "cli-install.json").read_text())["ok"] is True
+
+
+def test_auto_install_failure_is_not_retried_for_a_day(tmp_path, monkeypatch):
+    calls = _install_env(monkeypatch, tmp_path, result=(False, "EACCES"))
+    monkeypatch.setattr(gab, "_graft_cli", lambda: None)
+    built = []
+    monkeypatch.setattr(gab, "build_all_projects_async", lambda: built.append(1))
+
+    gab.install_cli_then_build_async()
+    gab.install_cli_then_build_async()  # next boot, same day
+
+    assert len(calls) == 1 and built == []
+
+
+@pytest.mark.parametrize("node_major,npm", [(18, "npm"), (22, None), (0, "npm")])
+def test_auto_install_skipped_without_npm_or_node_20(tmp_path, monkeypatch, node_major, npm):
+    calls = _install_env(monkeypatch, tmp_path, node_major=node_major, npm=npm)
+    monkeypatch.setattr(gab, "_graft_cli", lambda: None)
+
+    gab.install_cli_then_build_async()
+
+    assert calls == [] and not (tmp_path / "s" / "cli-install.json").exists()
+
+
+def test_auto_install_respects_the_kill_switch(tmp_path, monkeypatch):
+    calls = _install_env(monkeypatch, tmp_path)
+    monkeypatch.setenv("TAKKUB_SKIP_GRAFT_BUILD", "1")
+
+    gab.install_cli_then_build_async()
 
     assert calls == []
 
@@ -1455,3 +1523,42 @@ def test_tree_fingerprint_tracks_head_and_untracked(tmp_path):
     assert fp0 and fp1 and fp0 != fp1  # an untracked file changes it
     assert gab._tree_fingerprint(repo) == fp1  # stable when nothing moves
     assert gab._tree_fingerprint(tmp_path / "not-a-repo") is None
+
+
+# ── the frozen manifest the installer uses ───────────────────────────────
+
+
+def test_shipped_lockfile_pins_the_mcp_version_with_integrity_everywhere():
+    """The CLI that builds the graph and the MCP that reads it must be the
+    same version, and every locked package must carry an integrity hash —
+    that hash is what makes the unattended boot install safe."""
+    from agent_takkub import graft_store
+    from agent_takkub.shared_dev_tools import _GRAFT_MCP_VERSION
+
+    lock = json.loads(
+        (graft_store.SHIPPED_CLI_MANIFEST / "package-lock.json").read_text(encoding="utf-8")
+    )
+    pkgs = {k: v for k, v in lock["packages"].items() if k}
+    assert pkgs["node_modules/@nanonets/graft"]["version"] == _GRAFT_MCP_VERSION
+    assert [k for k, v in pkgs.items() if not v.get("integrity")] == []
+    manifest = json.loads(
+        (graft_store.SHIPPED_CLI_MANIFEST / "package.json").read_text(encoding="utf-8")
+    )
+    assert manifest["dependencies"] == {"@nanonets/graft": _GRAFT_MCP_VERSION}
+
+
+def test_cli_lookup_falls_back_to_the_cockpit_owned_install(tmp_path, monkeypatch):
+    from agent_takkub import graft_store
+
+    monkeypatch.setattr(graft_store, "local_cli_dir", lambda: tmp_path / "_cli")
+    monkeypatch.setattr(graft_store.shutil, "which", lambda name: None)
+    graft_store.invalidate_graft_cli_cache()
+    assert graft_store.graft_cli_path() is None
+
+    bin_dir = tmp_path / "_cli" / "node_modules" / ".bin"
+    bin_dir.mkdir(parents=True)
+    for name in ("graft", "graft.cmd"):
+        (bin_dir / name).write_text("")
+    graft_store.invalidate_graft_cli_cache()
+    assert Path(graft_store.graft_cli_path()).parent == bin_dir
+    graft_store.invalidate_graft_cli_cache()

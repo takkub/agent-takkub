@@ -1,0 +1,9 @@
+{
+  "name": "takkub-graft-cli",
+  "version": "0.8.2",
+  "private": true,
+  "description": "Frozen install of the graft CLI used by the cockpit (npm ci against package-lock.json).",
+  "dependencies": {
+    "@nanonets/graft": "0.8.2"
+  }
+}
