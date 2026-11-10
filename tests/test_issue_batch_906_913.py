@@ -57,6 +57,23 @@ def test_done_timeout_keeps_note_in_outbox(tmp_path, monkeypatch) -> None:
     assert len(sent) == 1  # never blindly resent: the first may still land
 
 
+def test_done_waits_longer_than_the_generic_ceiling_997(monkeypatch) -> None:
+    """#997: the cockpit hashes the changed tree (impact revision) and reads
+    git facts before answering `done`; the generic 15 s ceiling reported a
+    timeout for a done that had already reached Lead, and the retry hit a
+    retired session (#1000). Only the done request gets the longer deadline."""
+    seen: list[float | None] = []
+    monkeypatch.setattr(
+        cli,
+        "_request",
+        lambda payload: seen.append(cli._response_timeout_override) or {"ok": True, "msg": ""},
+    )
+    cli.cmd_done(_done_args(note="PASS"))
+    assert seen == [cli._DONE_RESPONSE_TIMEOUT_S]
+    assert cli._DONE_RESPONSE_TIMEOUT_S > cli._RESPONSE_TIMEOUT_S
+    assert cli._response_timeout_override is None  # restored for later requests
+
+
 def test_done_note_file_and_screenshot_fold_into_note(tmp_path, monkeypatch) -> None:
     note_file = tmp_path / "note.md"
     note_file.write_text("PASS from file", encoding="utf-8")

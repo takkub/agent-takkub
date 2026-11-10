@@ -194,6 +194,9 @@ def validate_evidence(
         )
     # #912: an absent field is "missing", not "a different task/revision" —
     # and every one is named at once, instead of one per rejected round.
+    no_git = revision == NO_GIT_REVISION
+    if no_git and evidence.get("revision") in (None, ""):
+        evidence = {**evidence, "revision": NO_GIT_REVISION}  # #1001: nothing to pin
     missing = [
         name
         for name in ("task_id", "plan_digest", "revision", "checks")
@@ -242,22 +245,42 @@ def validate_evidence(
     return ""
 
 
+# #1001: the task cwd is not inside any git work tree (a multi-repo parent
+# folder). There is no tree to pin, so the revision is this explicit marker —
+# never a faked hash — and evidence for it may carry it or null.
+NO_GIT_REVISION = "no-git"
+
+
+def _outside_any_git_tree(cwd: str | Path) -> bool:
+    """An existing dir with no ``.git`` entry on it or any ancestor — checked
+    on disk, not by git's (localized) error text."""
+    try:
+        here = Path(cwd).resolve()
+    except OSError:
+        return False
+    if not here.is_dir():
+        return False
+    return not any((d / ".git").exists() for d in (here, *here.parents))
+
+
 def git_revision(cwd: str | Path | None) -> str | None:
-    """Hash HEAD plus the content of changed and untracked files, including deletions."""
+    """Hash HEAD plus the content of changed and untracked files, including deletions.
+
+    ``NO_GIT_REVISION`` when *cwd* is an existing directory git says is not a
+    repository; ``None`` when the revision could not be read (git missing,
+    timeout, bad cwd) — that stays a hard reject."""
     if not cwd:
         return None
     try:
-        root = (
-            subprocess.run(
-                ["git", "-C", str(cwd), "rev-parse", "--show-toplevel"],
-                capture_output=True,
-                check=True,
-                timeout=5,
-                creationflags=SUBPROCESS_NO_WINDOW,
-            )
-            .stdout.decode("utf-8", errors="replace")
-            .strip()
+        top = subprocess.run(
+            ["git", "-C", str(cwd), "rev-parse", "--show-toplevel"],
+            capture_output=True,
+            timeout=5,
+            creationflags=SUBPROCESS_NO_WINDOW,
         )
+        if top.returncode != 0:
+            return NO_GIT_REVISION if _outside_any_git_tree(cwd) else None
+        root = top.stdout.decode("utf-8", errors="replace").strip()
         head = subprocess.run(
             ["git", "-C", root, "rev-parse", "HEAD"],
             capture_output=True,

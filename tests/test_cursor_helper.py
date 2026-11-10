@@ -309,6 +309,8 @@ class TestCursorLeadNotifierIntegration:
 
         monkeypatch.setenv("CURSOR_HOME", str(tmp_path))
         monkeypatch.setattr("agent_takkub.config.lead_cwd", lambda p: cwd)
+        # #1005: one tick must deliver even on a loaded CI runner
+        monkeypatch.setattr("agent_takkub.remote.notify._TAIL_IO_WAIT_S", 5.0)
 
         orch = _FakeOrch()
         orch.set_lead("project-live", uuid, provider="cursor")
@@ -367,6 +369,8 @@ class TestCursorMirrorDiagnosis:
         (sdir / f"{uuid}.jsonl").write_text(raw, encoding="utf-8")
         monkeypatch.setenv("CURSOR_HOME", str(tmp_path))
         monkeypatch.setattr("agent_takkub.config.lead_cwd", lambda p: cwd)
+        # #1005: one tick must deliver even on a loaded CI runner
+        monkeypatch.setattr("agent_takkub.remote.notify._TAIL_IO_WAIT_S", 5.0)
 
     def test_whole_file_schema_drift_is_flagged_unreadable(self, tmp_path, monkeypatch):
         drifted = "\n".join(

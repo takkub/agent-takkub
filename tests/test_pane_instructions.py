@@ -142,6 +142,12 @@ def test_codex_lead_binds_the_rollout_that_carries_its_marker(monkeypatch, tmp_p
         codex_marker_scan_ts=0.0,
     )
     notify._bind_codex_session_by_marker(ps, "p", 0.0)
+    # #1005: the scan runs off the Qt main thread — the tick never blocks on it
+    with notify._marker_scan_lock:
+        thread = notify._marker_scan_threads.get(marker)
+    if thread is not None:
+        thread.join(5)
+    notify._bind_codex_session_by_marker(ps, "p", 0.0)
     assert (ps.session_uuid, ps.session_provider) == ("lead-thread", "codex")
 
 

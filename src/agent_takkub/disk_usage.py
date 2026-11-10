@@ -23,6 +23,7 @@ import shutil
 import stat
 import sys
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -219,7 +220,12 @@ def _pane_active_paths(runtime_dir: Path | None = None) -> set[str]:
 
 
 def classify_worktree(
-    wt_dir: Path, mgr: WorktreeManager, *, runtime_dir: Path | None = None
+    wt_dir: Path,
+    mgr: WorktreeManager,
+    *,
+    runtime_dir: Path | None = None,
+    registry: dict | None = None,
+    registered_status: bool = True,
 ) -> dict:
     """Describe one on-disk worktree checkout dir.
 
@@ -237,6 +243,12 @@ def classify_worktree(
     leftover from one whose branch still carries unmerged commits. Those two
     stay ``None``/unset when git can't be read at all (no ``.git`` pointer,
     or its source repo can't be resolved).
+
+    *registry* (#1006): a caller classifying many dirs passes one dict and
+    ``git worktree list`` runs ONCE per repo instead of once per dir — and
+    only THIS dir's ``rev-list``/``status`` run, not every sibling's. The old
+    per-dir ``list_isolated(root)`` re-scanned all N siblings each time
+    (O(N²) git calls: 11-25 min per boot sweep that removed nothing).
     """
     row: dict = {"path": str(wt_dir)}
     git_file = wt_dir / ".git"
@@ -247,22 +259,33 @@ def classify_worktree(
     if root is None:
         row.update(orphan=True, registered=False, dirty=None, branch=None, ahead=None)
         return row
-    match = next(
-        (r for r in mgr.list_isolated(root) if Path(r["path"]).resolve() == wt_dir.resolve()),
-        None,
-    )
+    if registry is None:
+        registry = {}
+    me = wt_dir.resolve()
+    # `git_root` inside a linked worktree is that worktree itself, so roots
+    # never repeat — but every sibling's `worktree list` is the same repo-wide
+    # listing: a dir already seen in one is answered without another call.
+    match = next((rows[me] for rows in registry.values() if me in rows), None)
+    if match is None and root not in registry:
+        registry[root] = {
+            Path(r["path"]).resolve(): r for r in mgr.list_isolated(root, with_status=False)
+        }
+        match = registry[root].get(me)
     if match is None:
         branch = mgr.current_branch(str(wt_dir))
         dirty = mgr.real_dirty_at(str(wt_dir))  # #496: ignore CRLF-only phantom dirt
         ahead = mgr.commits_ahead(root, branch) if branch else 0
         row.update(orphan=True, registered=False, dirty=dirty, branch=branch, ahead=ahead)
         return row
+    if not registered_status:  # #1006: caller skips registered rows anyway
+        row.update(orphan=False, registered=True, branch=match["branch"], dirty=None, ahead=None)
+        return row
     row.update(
         orphan=False,
         registered=True,
         branch=match["branch"],
-        dirty=match["dirty"],
-        ahead=match["ahead"],
+        dirty=mgr.real_dirty_at(match["path"]),
+        ahead=mgr.commits_ahead(root, match["ref"]),
         pane_active=str(wt_dir.resolve()) in _pane_active_paths(runtime_dir),
     )
     return row
@@ -340,8 +363,9 @@ def scan_node_modules(data_home: Path, mgr: WorktreeManager | None = None) -> di
     entries: list[dict] = []
     orphan_bytes = orphan_count = 0
     live_bytes = live_count = 0
+    registry: dict = {}  # #1006: one `git worktree list` per repo
     for wt_dir in find_worktree_dirs(data_home):
-        info = classify_worktree(wt_dir, mgr, runtime_dir=data_home / "runtime")
+        info = classify_worktree(wt_dir, mgr, runtime_dir=data_home / "runtime", registry=registry)
         for nm in find_node_modules(wt_dir):
             size, count = _dir_stats(nm)
             entry = {
@@ -650,8 +674,9 @@ def _worktree_categories(data_home: Path, mgr: WorktreeManager) -> dict:
     """
     orphan_rows: list[dict] = []
     registered_rows: list[dict] = []
+    registry: dict = {}  # #1006: one `git worktree list` per repo
     for wt_dir in find_worktree_dirs(data_home):
-        info = classify_worktree(wt_dir, mgr, runtime_dir=data_home / "runtime")
+        info = classify_worktree(wt_dir, mgr, runtime_dir=data_home / "runtime", registry=registry)
         size, count = _dir_stats(wt_dir)
         info["size_bytes"] = size
         info["file_count"] = count
@@ -1148,8 +1173,11 @@ def _prune_orphan_worktrees(home: Path, dry_run: bool, mgr: WorktreeManager) -> 
     ``_prune_orphan_worktrees_review`` instead, which requires an explicit
     ``--level review --yes``."""
     outcome = PruneOutcome("orphan-worktrees", SAFE, dry_run)
+    registry: dict = {}  # #1006: one `git worktree list` per repo
     for wt_dir in find_worktree_dirs(home):
-        info = classify_worktree(wt_dir, mgr, runtime_dir=home / "runtime")
+        info = classify_worktree(
+            wt_dir, mgr, runtime_dir=home / "runtime", registry=registry, registered_status=False
+        )
         if not info["orphan"] or _orphan_prune_bucket(wt_dir, info) != SAFE:
             continue
         size, _c = _dir_stats(wt_dir)
@@ -1167,8 +1195,11 @@ def _prune_orphan_worktrees_review(home: Path, dry_run: bool, mgr: WorktreeManag
     explicit ``takkub prune --level review --category orphan-worktrees-review
     --yes``, and the CLI prints every target path before deleting."""
     outcome = PruneOutcome("orphan-worktrees-review", REVIEW, dry_run)
+    registry: dict = {}  # #1006: one `git worktree list` per repo
     for wt_dir in find_worktree_dirs(home):
-        info = classify_worktree(wt_dir, mgr, runtime_dir=home / "runtime")
+        info = classify_worktree(
+            wt_dir, mgr, runtime_dir=home / "runtime", registry=registry, registered_status=False
+        )
         if not info["orphan"] or _orphan_prune_bucket(wt_dir, info) != REVIEW:
             continue
         size, _c = _dir_stats(wt_dir)
@@ -1371,3 +1402,45 @@ def prune_orphan_worktrees_boot(data_home: Path | None = None) -> int:
     except Exception:
         return 0
     return result.removed_count
+
+
+def clean_merged_worktrees_boot(
+    protected: Callable[[], set[str]] | None = None, data_home: Path | None = None
+) -> int:
+    """#998: boot sweep for REGISTERED ``wt/*`` worktrees nothing can lose —
+    clean tree and no commits the repo's HEAD lacks (merged by any route:
+    `takkub worktree merge`, a merge in the main checkout, a PR, a
+    cherry-pick). Before this only an explicit `takkub worktree clean`
+    removed them, so 44 of 47 merged checkouts (1.5-2 GB node_modules each)
+    piled up to 190 GB. Same SAFE rules as that command's default
+    (`WorktreeManager.clean_isolated`: dirty or unmerged = KEEP, 5-min
+    creation grace, branch dropped only after the remove succeeded).
+
+    *protected* is re-read per repo, right before its clean: every worktree a
+    pane holds (live or about to be restored) plus the last-session snapshot,
+    so a pane resumed into its checkout during boot is never yanked. Returns
+    the number removed; best-effort, never raises. Same kill switch as
+    :func:`prune_orphan_worktrees_boot`.
+    """
+    if os.environ.get("TAKKUB_SKIP_ORPHAN_WORKTREE_PRUNE", "").strip() not in ("", "0"):
+        return 0
+    try:
+        home = (data_home or DATA_HOME).resolve()
+        mgr = WorktreeManager()
+        roots: dict[str, None] = {}
+        for wt_dir in find_worktree_dirs(home):
+            if (wt_dir / ".git").exists():
+                root = mgr.main_root(str(wt_dir))
+                if root and Path(root).resolve() != wt_dir.resolve():
+                    roots.setdefault(str(Path(root).resolve()), None)
+        snapshot = _pane_active_paths(home / "runtime")
+        removed = 0
+        for root in roots:
+            keep = set(snapshot)
+            if protected is not None:
+                keep |= {str(Path(p).resolve()) for p in protected()}
+            lines = mgr.clean_isolated(root, live_paths=keep)
+            removed += sum(1 for line in lines if line.startswith("REMOVED"))
+        return removed
+    except Exception:
+        return 0

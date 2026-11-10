@@ -937,10 +937,17 @@ codex_spec = ProviderSpec(
     # touched, matching the same rule `mcp_adapter_variant="session_override"`
     # already follows for MCP config.
     autonomy_flags={
+        # #990: `check_for_update_on_startup=false` — codex's "Update
+        # available → 1. Update now" menu took the task-delivery Enter, ran
+        # `npm install -g`, printed "restart Codex" and exited before reading
+        # the task. Session-scoped; the user's config.toml is untouched. Key
+        # confirmed present in the codex-cli 0.166.0 binary.
         "win32": [
             "--dangerously-bypass-approvals-and-sandbox",
             "--disable",
             "apps",
+            "-c",
+            "check_for_update_on_startup=false",
         ],  # spawn_engine.py:1140-1143
         "default": [
             "--ask-for-approval",
@@ -951,6 +958,8 @@ codex_spec = ProviderSpec(
             "sandbox_workspace_write.network_access=true",
             "--disable",
             "apps",
+            "-c",
+            "check_for_update_on_startup=false",
         ],  # spawn_engine.py:1144-1153
     },
     # GAP (CLI 0.145.0 --help, checked 2026-07-24): only positional [PROMPT];
@@ -1563,11 +1572,11 @@ opencode_spec = ProviderSpec(
     # ⚠ NOT yet verified — no authenticated opencode session was available
     # for calibration (#103/#248/#247). GENERIC_AUTH_ERROR_MARKERS only.
     auth_error_markers=(),
-    # TODO(#103/#301): opencode's quota/rate-limit wording is unconfirmed —
-    # no authenticated session hit a limit during calibration. Leave empty
-    # (GENERIC_QUOTA_MARKERS only) rather than guess; fill in once a real
-    # banner is captured.
-    quota_markers=(),
+    # #988: captured 2026-11-06 on three free-model panes at once —
+    # "⚠ Retrying in 310s · attempt 4 · Free usage limit reached. Free models
+    # work in OpenCode…" — the panes retried for 40+ min with no reroute.
+    # REACHED-STATE wording only (#301/#743).
+    quota_markers=("free usage limit reached",),
     # opencode-ai is npm-installed (same shim shape as claude/codex), so a
     # `node` child is expected scaffolding, not evidence of unfinished work
     # (#272).

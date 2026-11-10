@@ -1810,6 +1810,7 @@ _QUOTA_BANNER_STARTS = (
     "you have reached your usage limit",
     "your limit will reset",
     "out of usage",
+    "free usage limit reached",
 )
 
 
@@ -1827,6 +1828,10 @@ def _quota_banner_text(lines) -> str:
         # claude-shaped checks matched, so a codex limit was never detected
         # and the task never moved off the spent account.
         candidate = line.replace("’", "'").strip().lstrip("⚠! └⎿■●").strip()
+        if candidate.startswith("retrying in ") and "·" in candidate:
+            # #988 opencode: "⚠ Retrying in 310s · attempt 4 · Free usage
+            # limit reached. …" — the error is the last "·" segment.
+            candidate = candidate.rsplit("·", 1)[-1].strip()
         if candidate.startswith(_QUOTA_BANNER_STARTS):
             banner.append(candidate)
         elif banner and candidate.startswith(

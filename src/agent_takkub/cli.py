@@ -425,6 +425,9 @@ def _instance_banner() -> str:
 # `takkub assign`/every other command always returns within a fixed ceiling
 # instead of hanging silently.
 _RESPONSE_TIMEOUT_S = 15.0
+# A command whose server side is known to run longer (`done`, #997) raises
+# the ceiling for its one request without changing `_request`'s call shape.
+_response_timeout_override: float | None = None
 
 
 def _timeout_response(total_timeout: float) -> dict:
@@ -437,7 +440,7 @@ def _timeout_response(total_timeout: float) -> dict:
     }
 
 
-def _request(payload: dict, *, response_timeout: float = _RESPONSE_TIMEOUT_S) -> dict:
+def _request(payload: dict, *, response_timeout: float | None = None) -> dict:
     # Stamp the capability token so the server can verify the caller's identity.
     # Lead panes carry TAKKUB_LEAD_TOKEN (authorises Lead-only commands).
     # Teammate panes carry TAKKUB_PANE_TOKEN (authorises send/done).
@@ -446,6 +449,8 @@ def _request(payload: dict, *, response_timeout: float = _RESPONSE_TIMEOUT_S) ->
     token = os.environ.get("TAKKUB_LEAD_TOKEN") or os.environ.get("TAKKUB_PANE_TOKEN")
     if token:
         payload["auth"] = token
+    if response_timeout is None:
+        response_timeout = _response_timeout_override or _RESPONSE_TIMEOUT_S
     s = _connect()
     deadline = time.monotonic() + response_timeout
     try:
@@ -1759,15 +1764,16 @@ def _save_done_outbox(note: str) -> Path | None:
     return path
 
 
-def cmd_done(args: argparse.Namespace) -> dict:
-    base_note, error = _done_note_from_args(args)
-    if error:
-        return {"ok": False, "msg": error}
-    args.note = base_note
-    note, error = _note_with_impact_evidence(args)
-    if error:
-        return {"ok": False, "msg": error}
-    resp = _request(
+# #997/#1000: before it answers, the cockpit computes the done digest's git
+# facts and — for an impact-gated task — hashes every changed/untracked file
+# for the revision check. On a big repo that passed the generic 15 s ceiling:
+# the pane was told "timed out", retried, and the duplicate landed on a retired
+# session (done-auth-rejected) while the FIRST done had already reached Lead.
+_DONE_RESPONSE_TIMEOUT_S = 90.0
+
+
+def _send_done(note: str, args: argparse.Namespace) -> dict:
+    return _request(
         _with_project(
             {
                 "cmd": "done",
@@ -1781,8 +1787,24 @@ def cmd_done(args: argparse.Namespace) -> dict:
                 "blocked": bool(getattr(args, "blocked", False)),
                 "force": bool(getattr(args, "force", False)),
             }
-        )
+        ),
     )
+
+
+def cmd_done(args: argparse.Namespace) -> dict:
+    base_note, error = _done_note_from_args(args)
+    if error:
+        return {"ok": False, "msg": error}
+    args.note = base_note
+    note, error = _note_with_impact_evidence(args)
+    if error:
+        return {"ok": False, "msg": error}
+    global _response_timeout_override
+    _response_timeout_override = _DONE_RESPONSE_TIMEOUT_S
+    try:
+        resp = _send_done(note, args)
+    finally:
+        _response_timeout_override = None
     if not resp.get("ok") and "timed out waiting for orchestrator response" in str(
         resp.get("msg") or ""
     ):

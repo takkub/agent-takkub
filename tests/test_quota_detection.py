@@ -51,7 +51,7 @@ class TestQuotaMarkersFor:
     def test_unconfirmed_providers_do_not_accept_another_providers_banner(self) -> None:
         for provider in ("opencode", "cursor"):
             markers = quota_markers_for(provider)
-            assert markers == ()
+            assert markers == (() if provider == "cursor" else ("free usage limit reached",))
             assert (
                 _parse_rate_limit_reset("you've hit your usage limit", 1_700_000_000.0, markers)
                 is None
@@ -134,6 +134,17 @@ class TestPtySessionQuotaWrappers:
         s = PtySession(cols=80, rows=24)
         s._feed_and_log(b"Individual quota reached. Resets in 1h53m57s.")
         assert s.quota_stall_marker("gemini") == "individual quota reached"
+
+    def test_opencode_free_usage_banner_is_a_quota_hit_988(self) -> None:
+        """#988: three opencode panes retried this banner for 40+ min with no
+        quota-hit / reroute — opencode had no confirmed marker yet."""
+        s = PtySession(cols=120, rows=24)
+        s._feed_and_log(
+            "⚠ Retrying in 310s · attempt 4 · Free usage limit reached. "
+            "Free models work in OpenCode".encode()
+        )
+        assert s.quota_stall_marker("opencode") == "free usage limit reached"
+        assert s.quota_stall_marker("cursor") is None
 
     def test_quota_stall_marker_none_when_not_hit(self) -> None:
         s = PtySession(cols=80, rows=24)

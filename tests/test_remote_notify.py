@@ -25,6 +25,14 @@ from agent_takkub.remote.notify import LeadNotifier, _lead_text_blocks
 from ._qt_timer_leak_guard import stop_timers_after
 
 
+@pytest.fixture(autouse=True)
+def _patient_tail_io(monkeypatch):
+    """#1005: a tick waits only `_TAIL_IO_WAIT_S` for its transcript read; a
+    loaded CI runner can exceed 50 ms on a tmp file, and these tests assert
+    one `_poll_all()` delivers. The slow-read test lowers it back."""
+    monkeypatch.setattr(notify_mod, "_TAIL_IO_WAIT_S", 5.0)
+
+
 class _PaneState:
     def __init__(self, session_uuid: str | None) -> None:
         self.session_uuid = session_uuid
@@ -1298,6 +1306,43 @@ class TestLeadOutputTailAskQuestion:
             }
             assert broadcaster.events == [("blocked_on_picker", expected, "proj")]
         finally:
+            notifier.stop()
+
+    def test_slow_transcript_read_never_blocks_the_poll_tick(
+        self, qapp, tmp_path, config_dir, monkeypatch
+    ):
+        """#1005: `tail.path.open("rb")` blocked the Qt main thread 7.9 s (46
+        stalls/day). The read runs on the notifier's I/O pool; the tick waits
+        at most `_TAIL_IO_WAIT_S` and a later tick delivers the delta."""
+        orch = _FakeOrch()
+        broadcaster = _FakeBroadcaster()
+        _write_jsonl(tmp_path, "C--proj", "uuid-1", [])
+        path = config_dir / "projects" / "C--proj" / "uuid-1.jsonl"
+        blocker = threading.Event()
+        real_read = notify_mod._read_tail_delta
+
+        def slow_read(p, offset):
+            blocker.wait(5)
+            return real_read(p, offset)
+
+        monkeypatch.setattr(notify_mod, "_TAIL_IO_WAIT_S", 0.05)
+        notifier = LeadNotifier(orch, broadcaster)
+        try:
+            orch.set_lead("proj", "uuid-1")
+            orch.statusChanged.emit()
+            monkeypatch.setattr(notify_mod, "_read_tail_delta", slow_read)
+            with path.open("a", encoding="utf-8") as fh:
+                fh.write(_assistant_line("ตอบแล้ว") + "\n")
+            start = time.monotonic()
+            notifier._poll_all()
+            assert time.monotonic() - start < 1.0
+            assert broadcaster.events == []
+            blocker.set()
+            notifier._tail_reads["proj"][1].result(5)
+            notifier._poll_all()
+            assert ("lead", "ตอบแล้ว", "proj") in broadcaster.events
+        finally:
+            blocker.set()
             notifier.stop()
 
     def test_picker_after_reply_text_in_the_same_batch_is_still_pushed(

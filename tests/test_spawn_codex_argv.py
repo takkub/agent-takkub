@@ -130,6 +130,9 @@ def _assert_windows_codex_trust_and_policy(argv):
     config_values = [argv[i + 1] for i, arg in enumerate(argv[:-1]) if arg == "-c"]
     # #961: the pane cheatsheet (developer_instructions) is checked on its own.
     config_values = [v for v in config_values if not v.startswith("developer_instructions=")]
+    # #990: the update-check opt-out rides with the autonomy flags, first.
+    assert config_values[0] == "check_for_update_on_startup=false"
+    config_values = config_values[1:]
     trust_values = [value for value in config_values if value.startswith("projects.'")]
     assert 1 <= len(trust_values) <= 2
     assert all(value.endswith('\'.trust_level="trusted"') for value in trust_values)
@@ -147,6 +150,8 @@ def test_windows_codex_trust_assertion_accepts_lowercase_host_path():
             "--dangerously-bypass-approvals-and-sandbox",
             "--disable",
             "apps",
+            "-c",
+            "check_for_update_on_startup=false",
             "-c",
             "projects.'/tmp/project'.trust_level=\"trusted\"",
             "-c",

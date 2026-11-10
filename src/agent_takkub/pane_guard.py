@@ -2218,6 +2218,16 @@ _EXPLICIT_TARGET_RE = re.compile(
 
 _GIT_INVOCATION_RE = re.compile(rf"{_CMD_START}{_GIT_BIN}(?![\w-])", re.I | re.M)
 _SHELL_LOOP_RE = re.compile(r"(?:^|[\s;&|(])(?:for|while|until)\s", re.M)
+# #989: a commit message is prose — "audit for business rejections" read as a
+# `for` loop, which switched off #972's cd chaining and denied a worktree
+# pane's own commit. Message bodies are blanked before the loop check.
+_COMMIT_MESSAGE_RE = re.compile(
+    r"""(?<![\w-])(?:-m|--message)(?:=|\s*)("(?:[^"\\]|\\.)*"|'[^']*')""", re.S
+)
+
+
+def _has_shell_loop(cmd: str) -> bool:
+    return bool(_SHELL_LOOP_RE.search(_COMMIT_MESSAGE_RE.sub("-m ''", cmd)))
 
 
 def _explicit_git_target(cmd: str) -> str | None:
@@ -2238,7 +2248,7 @@ def _explicit_git_target(cmd: str) -> str | None:
     at git time isn't knowable from the text; and never for `~`/`-`/`$VAR`
     shell expansions, which keep the old unchained judgement)."""
     git_starts = [m.start() for m in _GIT_INVOCATION_RE.finditer(cmd)]
-    loops = bool(_SHELL_LOOP_RE.search(cmd))
+    loops = _has_shell_loop(cmd)
     cd_limit = git_starts[-1] if git_starts and not loops else len(cmd)
     last: str | None = None
     cur_dir: str | None = None  # where the previous `cd` left the shell

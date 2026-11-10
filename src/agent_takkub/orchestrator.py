@@ -1911,6 +1911,21 @@ class Orchestrator(
                     )
             except Exception as e:
                 _log_event("orphan_worktree_prune_error", error=repr(e))
+            # #998: merged + clean REGISTERED worktrees piled up (190 GB) —
+            # only an explicit `takkub worktree clean` ever removed them.
+            try:
+                from .disk_usage import clean_merged_worktrees_boot
+
+                started = time.monotonic()
+                cleaned = clean_merged_worktrees_boot(self._held_worktree_paths)
+                if cleaned:
+                    _log_event(
+                        "merged_worktree_clean",
+                        removed=cleaned,
+                        ms=int((time.monotonic() - started) * 1000),
+                    )
+            except Exception as e:
+                _log_event("merged_worktree_clean_error", error=repr(e))
 
         if os.environ.get("TAKKUB_BOOT_SWEEP_SYNC", "").strip() == "1":
             _orphan_worktree_sweep()
@@ -13098,6 +13113,25 @@ class Orchestrator(
         self._resource_governor.dispatch_waiting()
         self.statusChanged.emit()
         return self.performance_status()
+
+    def _held_worktree_paths(self) -> set[str]:
+        """Every worktree path any pane state records, live or not, across
+        all projects (#998 boot sweep: a pane restored into its checkout
+        mid-sweep must keep it). Called off the Qt thread — copies first."""
+        paths: set[str] = set()
+        for attempt in range(3):
+            try:
+                states = list(self._pane_state.values())
+                break
+            except RuntimeError:  # resized mid-copy by the Qt thread
+                if attempt == 2:
+                    raise  # the sweep then removes nothing rather than guess
+        for ps in states:
+            wt = getattr(ps, "worktree", None)
+            path = wt.get("path") if isinstance(wt, dict) else None
+            if path:
+                paths.add(str(path))
+        return paths
 
     def live_worktree_paths(self, project: str | None = None) -> set[str]:
         """Absolute worktree checkout paths currently held by a LIVE pane.

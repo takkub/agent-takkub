@@ -2,6 +2,19 @@
 
 All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses [SemVer](https://semver.org/).
 
+## [v2.2.52] - 2026-11-10
+
+### Fixed (แก้)
+
+- **#1006 boot sweep ของ orphan worktree ใช้ 11–25 นาทีแต่ลบ 0:** `classify_worktree` เรียก `list_isolated(root)` ทุก dir ซึ่งรัน `rev-list` + `git status` ให้ worktree ทุกตัวของ repo ซ้ำทุกรอบ (O(N²)) · ตอนนี้ `git worktree list` ครั้งเดียวต่อ repo (`list_isolated(..., with_status=False)` + registry cache) และ prune ไม่อ่านสถานะ worktree ที่ยัง registered (ข้ามอยู่แล้ว) · วัดบนเครื่องจริง 225 dir: 10.8 วิ / 382 git call
+- **#998 worktree ที่ merge แล้วไม่ถูกลบ (สะสม 190 GB):** boot sweep ลบ `wt/*` worktree ที่ registered แต่ **สะอาด + ไม่มี commit ที่ main checkout ยังไม่มี** (merge ทางไหนก็ได้) ด้วยกติกาเดียวกับ `takkub worktree clean` (grace 5 นาที, ลบ branch หลัง remove สำเร็จเท่านั้น) · เทียบกับ HEAD ของ **main checkout** (`WorktreeManager.main_root` — `--show-toplevel` ใน linked worktree คืนตัว worktree เอง) · ไม่แตะ worktree ที่ pane state ใดถืออยู่หรืออยู่ใน last-session snapshot · บนเครื่อง dev: 113/177 ตัวเข้าเกณฑ์
+- **#1005 UI ค้าง 80 ครั้ง/วัน (นานสุด 8 วิ):** remote notify อ่าน transcript (`open("rb")`) บน Qt main thread → ย้ายไป I/O pool รอได้ไม่เกิน 50ms/tick ที่เหลือรับ tick ถัดไป · `_bind_codex_session_by_marker` (glob rollout + `lead_cwd().resolve()`) ย้ายไป worker thread
+- **#1001 impact gate: project root ที่ไม่ใช่ git ส่ง done ไม่ได้เลย:** `git_revision` คืน `no-git` (ตรวจจาก `.git` บนดิสก์ ไม่ใช่ข้อความ error ของ git) เมื่อ cwd ไม่อยู่ใน git tree ใดเลย · evidence ของ root แบบนี้ใส่ `no-git` หรือ null ได้ · git อ่านไม่ได้ (timeout/ไม่มี git) ยัง reject เหมือนเดิม
+- **#989 guard บล็อก commit ใน worktree ของ pane เอง:** คำว่า "for" ใน commit message ("audit for business…") ถูกนับเป็น shell loop → ปิด cd chaining ของ #972 → `cd <wt>/apps/api …; cd ../.. && git commit` ถูก deny · ข้อความใน `-m`/`--message` ไม่นับในการตรวจ loop แล้ว
+- **#997/#1000 `takkub done` รายงาน timeout 15 วิ ทั้งที่ done ถึง Lead แล้ว:** done รอคำตอบได้ 90 วิ (cockpit คำนวณ git facts + hash impact revision ก่อนตอบ) — กัน pane retry ซ้ำไปชน session ที่ retire แล้ว
+- **#988 opencode "Free usage limit reached" ไม่ถูกจับเป็น quota-hit:** เพิ่ม marker ที่ capture จากจอจริง + รองรับรูปแบบ `⚠ Retrying in 310s · attempt 4 · Free usage limit reached.`
+- **#990 codex รับ Enter ของ task ไปกด "Update now" แล้วปิดตัว:** spawn codex ด้วย `-c check_for_update_on_startup=false` (session-scoped, ไม่แตะ config.toml ของ user)
+
 ## [v2.2.51] - 2026-11-05
 
 ### Changed (เปลี่ยน)

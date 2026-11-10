@@ -1245,6 +1245,22 @@ class WorktreeManager:
         top = res.stdout.strip()
         return top or None
 
+    def main_root(self, cwd: str) -> str | None:
+        """The MAIN checkout of the repo containing *cwd* — unlike
+        :meth:`git_root`, which inside a linked worktree returns that
+        worktree itself (#998: "merged" must mean reachable from the main
+        checkout's HEAD, not from the worktree's own). None for a bare repo
+        or when *cwd* is not in a git work tree."""
+        res = self._run(
+            ["-C", cwd, "rev-parse", "--path-format=absolute", "--git-common-dir"], None
+        )
+        if not res.ok or not res.stdout.strip():
+            return None
+        common = Path(res.stdout.strip())
+        if common.name != ".git":
+            return None  # bare repo / separate git dir — no main checkout to compare
+        return str(common.parent)
+
     def head_sha(self, cwd: str) -> str | None:
         res = self._run(["-C", cwd, "rev-parse", "HEAD"], None)
         return res.stdout.strip() if res.ok and res.stdout.strip() else None
@@ -2193,8 +2209,14 @@ class WorktreeManager:
 
     # -- CLI ops (P2.4: takkub worktree list / merge / clean) ----------------
 
-    def list_isolated(self, git_root: str, extra_path: str | None = None) -> list[dict]:
+    def list_isolated(
+        self, git_root: str, extra_path: str | None = None, *, with_status: bool = True
+    ) -> list[dict]:
         """All ``wt/*`` worktrees of the repo with commits-ahead + dirty flags.
+
+        *with_status=False* (#1006) skips the per-row ``rev-list`` + ``git
+        status`` (``ahead``/``dirty`` come back ``None``) — a caller that only
+        needs "which paths are registered" must not pay N status scans per call.
 
         Row shape: {"path", "branch", "sha", "ahead": int, "dirty": bool}.
         Works from git state alone — no PaneState needed (usable after a
@@ -2220,11 +2242,7 @@ class WorktreeManager:
                     branch = f"(detached {ent['sha'][:7]})"
                 if not ref:
                     continue
-                ahead_res = self._run(["-C", git_root, "rev-list", "--count", f"HEAD..{ref}"], None)
-                try:
-                    ahead = int(ahead_res.stdout.strip() or "0") if ahead_res.ok else 0
-                except ValueError:
-                    ahead = 0
+                ahead = self.commits_ahead(git_root, ref) if with_status else None
                 rows.append(
                     {
                         "path": ent["path"],
@@ -2234,7 +2252,7 @@ class WorktreeManager:
                         "explicit": True,
                         "sha": ent.get("sha", ""),
                         "ahead": ahead,
-                        "dirty": self.real_dirty_at(ent["path"]),
+                        "dirty": self.real_dirty_at(ent["path"]) if with_status else None,
                     }
                 )
                 continue
@@ -2253,11 +2271,7 @@ class WorktreeManager:
                 continue
             else:
                 ref = branch
-            ahead_res = self._run(["-C", git_root, "rev-list", "--count", f"HEAD..{ref}"], None)
-            try:
-                ahead = int(ahead_res.stdout.strip() or "0") if ahead_res.ok else 0
-            except ValueError:
-                ahead = 0
+            ahead = self.commits_ahead(git_root, ref) if with_status else None
             # #496: a phantom CRLF-only "M" (git status dirty, real diff
             # empty) must never KEEP a worktree in `clean_isolated` — the
             # pane already committed everything of substance.
@@ -2269,7 +2283,7 @@ class WorktreeManager:
                     "detached": detached,
                     "sha": ent.get("sha", ""),
                     "ahead": ahead,
-                    "dirty": self.real_dirty_at(ent["path"]),
+                    "dirty": self.real_dirty_at(ent["path"]) if with_status else None,
                 }
             )
         return rows

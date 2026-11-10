@@ -53,6 +53,7 @@ way, per-project, for the same reason.
 
 from __future__ import annotations
 
+import concurrent.futures
 import json
 import sqlite3
 import threading
@@ -674,9 +675,37 @@ def _open_codex_rollout(pid: int) -> tuple[str, str] | None:
     return None
 
 
+# #1005: how long one poll tick may wait for its transcript read before
+# leaving it to a later tick (the read itself runs on `_tail_io`).
+_TAIL_IO_WAIT_S = 0.05
+
+
+def _read_tail_delta(path: Path, offset: int) -> bytes | None:
+    """Bytes appended to *path* past *offset* (``b""`` = none, ``None`` =
+    unreadable). Runs on the notifier's I/O pool, never the Qt thread."""
+    try:
+        size = path.stat().st_size
+        if size <= offset:
+            return b""
+        with path.open("rb") as fh:
+            fh.seek(offset)
+            return fh.read(size - offset)
+    except OSError:
+        return None
+
+
 _CODEX_MARKER_SCAN_INTERVAL_S = 3.0
 _CODEX_MARKER_SCAN_FILES = 60
 _CODEX_MARKER_SCAN_LINES = 40
+
+
+# #1005: marker -> (session_id, cwd) found by the worker; marker -> running
+# scan thread. The scan globs the codex rollout store and resolves
+# `lead_cwd()` (`Path.resolve()` stalled the Qt main thread up to 7.3 s), so
+# it never runs on the poll tick — the tick only applies a finished result.
+_marker_scan_found: dict[str, tuple[str, str]] = {}
+_marker_scan_threads: dict[str, threading.Thread] = {}
+_marker_scan_lock = threading.Lock()
 
 
 def _bind_codex_session_by_marker(ps, project_ns: str, spawn_ts: float) -> None:
@@ -684,24 +713,52 @@ def _bind_codex_session_by_marker(ps, project_ns: str, spawn_ts: float) -> None:
     message carries a unique marker (spawn_engine → pane_instructions), so
     the rollout containing it is this pane's session — never a teammate's
     or a `codex exec` that shares the cwd. Binds `ps.session_uuid` once;
-    cheap no-op afterwards, throttled while the rollout doesn't exist yet."""
+    cheap no-op afterwards, throttled while the rollout doesn't exist yet.
+    The scan itself runs on a worker thread (#1005)."""
     marker = getattr(ps, "codex_session_marker", "") or ""
     if not marker or getattr(ps, "session_uuid", None):
+        return
+    with _marker_scan_lock:
+        found = _marker_scan_found.pop(marker, None)
+        if found is None and marker in _marker_scan_threads:
+            return  # a scan is still running
+    if found is not None:
+        ps.session_uuid, ps.session_uuid_cwd = found
+        ps.session_provider = "codex"
         return
     now = time.time()
     if now - float(getattr(ps, "codex_marker_scan_ts", 0.0) or 0.0) < _CODEX_MARKER_SCAN_INTERVAL_S:
         return
     ps.codex_marker_scan_ts = now
+
+    def scan() -> None:
+        try:
+            result = _scan_codex_marker(project_ns, spawn_ts, marker)
+        except Exception:
+            result = None
+        with _marker_scan_lock:
+            if result is not None:
+                _marker_scan_found[marker] = result
+            _marker_scan_threads.pop(marker, None)
+
+    thread = threading.Thread(target=scan, name="codex-marker-scan", daemon=True)
+    with _marker_scan_lock:
+        _marker_scan_threads[marker] = thread
+    thread.start()
+
+
+def _scan_codex_marker(project_ns: str, spawn_ts: float, marker: str) -> tuple[str, str] | None:
+    """`(session_id, cwd)` of the rollout whose head carries *marker*."""
     from .. import config as _config
 
     wanted_cwd = _norm_cwd(_config.lead_cwd(project_ns))
     root = _safe_codex_sessions_root(project_ns)
     if not wanted_cwd or not root.is_dir():
-        return
+        return None
     earliest = max(0.0, spawn_ts - 15.0) if spawn_ts else 0.0
     for n, path in enumerate(_codex_rollout_candidates(root, not_before=spawn_ts)):
         if n >= _CODEX_MARKER_SCAN_FILES:
-            return
+            return None
         if earliest and _safe_mtime(path) < earliest:
             continue
         meta = _codex_session_meta(path)
@@ -709,10 +766,8 @@ def _bind_codex_session_by_marker(ps, project_ns: str, spawn_ts: float) -> None:
             continue
         session_id = str(meta.get("id") or meta.get("session_id") or "").strip()
         if session_id and _file_head_contains(path, marker, _CODEX_MARKER_SCAN_LINES):
-            ps.session_uuid = session_id
-            ps.session_uuid_cwd = str(meta.get("cwd") or "")
-            ps.session_provider = "codex"
-            return
+            return session_id, str(meta.get("cwd") or "")
+    return None
 
 
 def _file_head_contains(path: Path, needle: str, max_lines: int) -> bool:
@@ -2480,6 +2535,14 @@ class LeadNotifier(QObject):
         # poller only checks completed reads; one daemon worker per project is
         # allowed at a time. Each result is tied to its exact session.
         self._agy_question_reads: dict[str, tuple[tuple, threading.Thread, dict]] = {}
+        # #1005: transcript stat/open/read ran on the Qt main thread — one
+        # `open("rb")` blocked it 7.9 s (46 stalls/day). The tick now hands the
+        # read to this pool and waits at most `_TAIL_IO_WAIT_S`; a slow read
+        # is picked up by a later tick instead of freezing the UI.
+        self._tail_io = concurrent.futures.ThreadPoolExecutor(
+            max_workers=2, thread_name_prefix="remote-tail-io"
+        )
+        self._tail_reads: dict[str, tuple[tuple, concurrent.futures.Future]] = {}
         self._timer = QTimer(self)
         self._timer.setInterval(_POLL_MS)
         self._timer.timeout.connect(self._poll_all)
@@ -2798,20 +2861,14 @@ class LeadNotifier(QObject):
                 self._broadcaster.push("working", activity, project_ns)
             return
 
-        try:
-            size = tail.path.stat().st_size
-        except OSError:
-            return
-        if size <= tail.offset:
+        ready, delta = self._tail_read_ready(project_ns, tail)
+        if not ready or delta is None:
+            return  # read still in flight (#1005), or the file is unreadable
+        chunk = delta
+        if not chunk:
             push_structured_ask()
             return
-        try:
-            with tail.path.open("rb") as fh:
-                fh.seek(tail.offset)
-                chunk = fh.read(size - tail.offset)
-        except OSError:
-            return
-        tail.offset = size
+        tail.offset += len(chunk)
         data = tail.partial + chunk
         lines = data.split(b"\n")
         tail.partial = lines.pop()  # last line may be mid-write; hold it back
@@ -2880,6 +2937,30 @@ class LeadNotifier(QObject):
                 self._screen_baselines[project_ns] = _pane_screen_lines(pane)
             self._lead_working[project_ns] = True
             self._broadcaster.push("working", activity, project_ns)
+
+    def _tail_read_ready(self, project_ns: str, tail: _Tail) -> tuple[bool, bytes | None]:
+        """``(ready, delta)`` for *tail*: the bytes appended since its offset
+        (``b""`` = nothing new, ``None`` = unreadable). ``ready=False`` while
+        the worker read hasn't finished — never blocks the tick longer than
+        ``_TAIL_IO_WAIT_S`` (#1005)."""
+        key = (id(tail), str(tail.path), tail.offset)
+        pending = self._tail_reads.get(project_ns)
+        if pending is not None and pending[0] == key:
+            future = pending[1]
+        else:
+            try:
+                future = self._tail_io.submit(_read_tail_delta, tail.path, tail.offset)
+            except RuntimeError:  # pool shut down (stop() raced a last tick)
+                return False, None
+            self._tail_reads[project_ns] = (key, future)
+        try:
+            delta = future.result(timeout=_TAIL_IO_WAIT_S)
+        except concurrent.futures.TimeoutError:
+            return False, None
+        except Exception:
+            delta = None
+        self._tail_reads.pop(project_ns, None)
+        return True, delta
 
     def _agy_question_records_ready(
         self, project_ns: str, tail: _Tail, reader
@@ -2964,4 +3045,6 @@ class LeadNotifier(QObject):
         self._session_keys.clear()
         self._pending_session_changes.clear()
         self._agy_question_reads.clear()
+        self._tail_reads.clear()
+        self._tail_io.shutdown(wait=False, cancel_futures=True)
         self._timer.stop()

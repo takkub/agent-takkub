@@ -53,3 +53,16 @@ def test_relative_escape_out_of_worktree_still_denied(tail: str) -> None:
 
 def test_bare_relative_cd_from_shared_cwd_still_denied() -> None:
     assert not pane_guard.classify("cd apps/api && git commit -m x", "backend", cwd=_SHARED).allowed
+
+
+def test_word_for_in_commit_message_is_not_a_shell_loop_989() -> None:
+    """#989 live (saas_admin_amb, 2.2.51): the message "… audit for business
+    rejections …" matched the `for` loop check, switching off cd chaining —
+    `cd <wt>/apps/api … ; cd ../.. && git commit` was denied in the pane's
+    own worktree. A real loop still disables chaining."""
+    msg = "feat: audit\n\n- WITHDRAWAL_REJECTED audit for business rejections"
+    cmd = f'cd {_WT}/apps/api && pnpm test 2>&1 | tail -2; cd ../.. && git commit -q -m "{msg}"'
+    assert pane_guard.classify(cmd, "backend", cwd=_WT).allowed
+    assert pane_guard.classify(cmd, "backend", cwd=_SHARED).allowed
+    assert not pane_guard._has_shell_loop(f'git commit -m "{msg}"')
+    assert pane_guard._has_shell_loop(f'for f in a b; do git commit -m "{msg}"; done')

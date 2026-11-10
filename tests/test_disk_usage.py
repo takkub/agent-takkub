@@ -170,6 +170,36 @@ class TestOrphanDetection:
         assert info["ahead"] is None
 
 
+class TestOrphanSweepCost:
+    def test_worktree_list_once_per_repo_and_no_sibling_status(self, tmp_path):
+        """#1006: the boot sweep re-ran `git worktree list` + a rev-list and
+        `git status` for EVERY sibling once per dir (O(N²): 11-25 min per boot
+        on 225 dirs, removed=0). One list per repo, and the prune pays no
+        status for registered rows (it skips them anyway)."""
+        home = tmp_path
+        entries = []
+        for i in range(6):
+            wt = home / "worktrees" / "proj" / f"backend-{i}"
+            wt.mkdir(parents=True)
+            (wt / ".git").write_text(f"gitdir: /repo/.git/worktrees/backend-{i}\n")
+            entries.append((str(wt), "abc123", f"wt/backend-{i}-1"))
+        porcelain = _porcelain(entries)
+        base = _make_runner("/repo", porcelain)
+        calls: list[list[str]] = []
+
+        def runner(args, cwd):
+            calls.append(list(args))
+            return base(args, cwd)
+
+        out = disk_usage._prune_orphan_worktrees(
+            home, dry_run=True, mgr=WorktreeManager(runner=runner)
+        )
+        assert out.targets == []
+        lists = [a for a in calls if "worktree" in a and "list" in a]
+        assert len(lists) == 1
+        assert not [a for a in calls if "status" in a or "rev-list" in a]
+
+
 class TestOrphanPruneBucket:
     def test_empty_dir_is_safe(self, tmp_path):
         wt = tmp_path / "wt-empty"
@@ -907,3 +937,58 @@ class TestDiskReport:
         report = disk_usage.disk_report(tmp_path)
 
         assert report["graft_store_root_outside_data_home"] is False
+
+
+class TestMergedWorktreeBootSweep:
+    def test_removes_only_merged_clean_unheld_worktrees_998(self, tmp_path, monkeypatch):
+        """#998: merged + clean registered worktrees were never removed
+        unless the Lead ran `takkub worktree clean` (190 GB on one machine).
+        The boot sweep removes those — judged against the MAIN checkout's
+        HEAD (not the worktree's own) — and keeps held / unmerged / dirty."""
+        import subprocess
+
+        monkeypatch.delenv("TAKKUB_SKIP_ORPHAN_WORKTREE_PRUNE", raising=False)
+        repo = tmp_path / "repo"
+        repo.mkdir()
+
+        def git(*args, cwd=repo):
+            subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True)
+
+        git("init", "-b", "main")
+        git("config", "user.email", "t@example.test")
+        git("config", "user.name", "T")
+        (repo / "a.txt").write_text("a", encoding="utf-8")
+        git("add", "a.txt")
+        git("commit", "-m", "base")
+        home = tmp_path / "home"
+        base = home / "worktrees" / "proj"
+        base.mkdir(parents=True)
+        names = {
+            "merged": "backend-1700000000",
+            "held": "frontend-1700000001",
+            "ahead": "qa-1700000002",
+            "dirty": "devops-1700000003",
+        }
+        for name in names.values():
+            git("worktree", "add", "-b", f"wt/{name}", str(base / name))
+        (base / names["ahead"] / "b.txt").write_text("b", encoding="utf-8")
+        git("add", "b.txt", cwd=base / names["ahead"])
+        git("commit", "-m", "unmerged", cwd=base / names["ahead"])
+        (base / names["dirty"] / "a.txt").write_text("changed", encoding="utf-8")
+
+        held = str((base / names["held"]).resolve())
+        removed = disk_usage.clean_merged_worktrees_boot(lambda: {held}, data_home=home)
+
+        assert removed == 1
+        assert not (base / names["merged"]).exists()
+        for key in ("held", "ahead", "dirty"):
+            assert (base / names[key]).is_dir(), key
+        branches = subprocess.run(
+            ["git", "branch", "--list", "wt/*"], cwd=repo, capture_output=True, text=True
+        ).stdout
+        assert f"wt/{names['merged']}" not in branches
+        assert f"wt/{names['ahead']}" in branches
+
+    def test_kill_switch_skips_998(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("TAKKUB_SKIP_ORPHAN_WORKTREE_PRUNE", "1")
+        assert disk_usage.clean_merged_worktrees_boot(lambda: set(), data_home=tmp_path) == 0

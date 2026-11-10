@@ -134,6 +134,8 @@ def test_assemble_generic_argv_reproduces_live_branch_argv(qapp, monkeypatch, tm
             "--dangerously-bypass-approvals-and-sandbox",
             "--disable",
             "apps",
+            "-c",
+            "check_for_update_on_startup=false",  # #990
         ],
         model_argv=["--model", "gpt-5-codex"],
         effort_argv=["-c", "model_reasoning_effort=high"],

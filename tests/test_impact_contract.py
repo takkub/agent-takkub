@@ -214,6 +214,38 @@ def test_ledger_rejects_stale_and_incomplete_evidence_after_resume(
     assert row["status"] == "working"  # completion gate precedes mark_done
 
 
+def test_non_git_task_root_can_complete_without_a_faked_revision_1001(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """#1001: a multi-repo parent folder is no git tree — `task impact` gave
+    revision null and the gate rejected every done, so finished work could
+    never report. It now reports the explicit `no-git` marker, and evidence
+    for such a root may carry it or null; a git root still pins the tree."""
+    from agent_takkub.impact_contract import NO_GIT_REVISION, validate_evidence
+
+    parent = tmp_path / "multi-repo-parent"
+    parent.mkdir()
+    if any((d / ".git").exists() for d in (parent.resolve(), *parent.resolve().parents)):
+        pytest.skip("tmp dir sits inside a git tree on this machine")
+    assert git_revision(parent) == NO_GIT_REVISION
+    assert git_revision(tmp_path / "missing-dir") is None  # unreadable stays a reject
+    monkeypatch.setattr(task_ledger, "RUNTIME_DIR", tmp_path / "runtime")
+    plan = _plan()
+    task = append_block("แก้ audio_mode seedance_only", "impact-plan", plan)
+    task_ledger.create_assignment(
+        "project", "devops", str(parent), task, "goal", "feature", "codex", task_id="task-n"
+    )
+    for rev in (None, NO_GIT_REVISION):
+        note = append_block("done", "impact-evidence", _evidence(plan, "task-n", rev))
+        assert not task_ledger.check_impact_completion("project", "devops", "task-n", note)
+    assert "revision" in validate_evidence(
+        plan, _evidence(plan, "task-n", NO_GIT_REVISION), task_id="task-n", revision="git:abc"
+    )
+    assert "missing: revision" in validate_evidence(
+        plan, _evidence(plan, "task-n", None), task_id="task-n", revision="git:abc"
+    )
+
+
 def test_plan_and_gate_are_provider_independent(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr(task_ledger, "RUNTIME_DIR", tmp_path / "runtime")
     task = append_block("เปลี่ยนโหมดเสียง", "impact-plan", _plan())
