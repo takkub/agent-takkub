@@ -87,6 +87,59 @@ def _log_reject(reason: str, raw_path: str) -> None:
         pass
 
 
+# 2026-11-10 audit: a SUCCESSFUL remote request left no trace at all — only
+# rejections were logged, so `takkub ma` and a 90-day usage audit read the
+# phone as unused while the owner used it every day (558 phone → Lead
+# messages). One breadcrumb per authenticated request: every user action
+# (a POST) always, read-only polling at most once per route per 5 min.
+_USE_LOG_READ_INTERVAL_S = 300.0
+_USE_LOG_MAX_PER_MIN = 120
+_use_log_last: dict[str, float] = {}
+_use_log_window: list[float] = [0.0, 0.0]
+_use_log_lock = threading.Lock()
+
+
+def _route_of(raw_path: str) -> str:
+    """Path after the secret segment, query string dropped (tickets/tokens)."""
+    segments = raw_path.split("?", 1)[0].split("/", 2)
+    route = "/" + segments[2] if len(segments) > 2 else "/"
+    return route[:120] + "..." if len(route) > 120 else route
+
+
+def _log_use(method: str, raw_path: str) -> None:
+    try:
+        import time
+        from datetime import datetime
+
+        route = _route_of(raw_path)
+        if not route.startswith("/api/"):
+            return
+        now = time.time()
+        key = f"{method} {route}"
+        with _use_log_lock:
+            if now - _use_log_window[0] >= 60.0:
+                _use_log_window[0], _use_log_window[1] = now, 0.0
+            if _use_log_window[1] >= _USE_LOG_MAX_PER_MIN:
+                return
+            if method == "GET" and now - _use_log_last.get(key, 0.0) < _USE_LOG_READ_INTERVAL_S:
+                return
+            _use_log_last[key] = now
+            _use_log_window[1] += 1
+        line = json.dumps(
+            {
+                "ts": datetime.now().isoformat(timespec="seconds"),
+                "event": "remote_use",
+                "method": method,
+                "route": route,
+            },
+            ensure_ascii=False,
+        )
+        with open(_config.EVENTS_LOG, "a", encoding="utf-8") as stream:
+            stream.write(line + "\n")
+    except Exception:
+        pass
+
+
 _STATIC_ROOT = Path(__file__).resolve().parent / "static"
 _MAX_BODY_BYTES = 64 * 1024
 _MAX_IMAGE_BODY_BYTES = 12 * 1024 * 1024
@@ -640,6 +693,7 @@ class _RemoteHandler(http.server.BaseHTTPRequestHandler):
             # a bearer is neither required nor checked. Still counts as
             # activity for idle-expire, same as a successful token check.
             self.server.auth.touch()
+            _log_use(self.command, self.path)
             return True
         header = self.headers.get("Authorization", "")
         token = header[7:] if header.startswith("Bearer ") else None
@@ -651,6 +705,7 @@ class _RemoteHandler(http.server.BaseHTTPRequestHandler):
             )
             return False
         self.server.auth.touch()  # M-6: only a *successful* auth counts as activity
+        _log_use(self.command, self.path)
         return True
 
     def _drain_request_body(self) -> None:
@@ -1020,6 +1075,7 @@ class _RemoteHandler(http.server.BaseHTTPRequestHandler):
             self._send_json(200, {"seq": broadcaster.seq, "events": []})
             return
         self.server.auth.touch()
+        _log_use(self.command, self.path)
         if not self.server.poll_slots.acquire(blocking=False):
             # Too many held polls (dead tabs behind a tunnel): answer at once
             # rather than pinning another server thread.
@@ -1193,6 +1249,7 @@ class _RemoteHandler(http.server.BaseHTTPRequestHandler):
             self._reject("sse_bad_ticket")
             return
         self.server.auth.touch()  # M-6: a valid ticket is a successful auth
+        _log_use(self.command, self.path)
         q = self.server.broadcaster.register(project_ns)
         if q is None:
             self.send_response(503)

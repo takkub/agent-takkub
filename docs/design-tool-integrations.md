@@ -2,7 +2,7 @@
 
 Real clients for the optional design-tool integrations named in
 `core.capabilities.design_integrations.OPTIONAL_DESIGN_MCPS`: 21st.dev
-component reference and Penpot (Figma was removed 2026-10-22 by user decision). Storybook detection (real,
+component reference and Penpot. Storybook detection (real,
 filesystem-only, always on when a project has it) is unaffected — see
 `design_integrations.detect_storybook`.
 

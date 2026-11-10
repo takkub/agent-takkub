@@ -46,10 +46,6 @@ from collections.abc import Iterable
 from datetime import datetime
 
 from ._win_console import SUBPROCESS_NO_WINDOW
-from .ccc_store import ccc_cli_path, ccc_server_path
-from .ccc_store import index_ready as _ccc_index_ready
-from .ccc_store import pane_mcp_config as _ccc_pane_mcp_config
-from .ccc_store import project_root_for_pane as _ccc_project_root
 from .config import RUNTIME_DIR
 from .graft_store import graft_cli_path, graph_store_dir, has_completed_build, staging_dir_for
 from .pane_tools_policy import effective_mcps
@@ -171,28 +167,6 @@ GRAFT_MCP: dict = {
         "env": {},
     },
 }
-
-# cocoindex-code (https://github.com/cocoindex-io/cocoindex-code) — semantic
-# code search over an AST-chunked, locally-embedded index (`search` tool).
-# Second code MCP next to graft, NOT a replacement: graft answers "what calls
-# this / show me the file's API", ccc answers "where is the code that does X"
-# when X is not spelled the way the identifiers are (pilot: 10/12 vs 5/12,
-# docs/audit/2026-10-22-cocoindex-code-pilot.md). Bare template — the per-pane
-# writer (`browser_profile_mcp_config_path`) pins the project root + DB
-# mapping in `env` and DROPS the entry for any project nobody indexed yet
-# (ccc_store.index_ready), because `ccc mcp` would otherwise seed a fresh
-# project in the pane's cwd and a first index runs for tens of minutes.
-# `ensure_ccc_mcp` only writes this when the `ccc` launcher is installed.
-# `cocoindex-code serve`, not `ccc mcp` — see ccc_store.ccc_server_path.
-CCC_MCP: dict = {
-    "ccc": {
-        "type": "stdio",
-        "command": "cocoindex-code",
-        "args": ["serve"],
-        "env": {},
-    },
-}
-
 
 # How long a warm-up subprocess may run before it is killed. The point of the
 # warm is the npx CACHE, and populating that means a cold first run downloads
@@ -447,6 +421,32 @@ def browser_profile_mcp_config_path_readonly(
     return SHARED_MCP_FILE.parent / _templated_config_filename(base_role, shard_idx, project)
 
 
+def _main_checkout_equivalent(target: pathlib.Path, wt_root: pathlib.Path) -> pathlib.Path | None:
+    """The directory in the MAIN checkout that corresponds to *target*, a
+    path inside a linked git worktree under *wt_root*; None when it cannot
+    be worked out. Read from the worktree's `.git` FILE
+    (``gitdir: <main>/.git/worktrees/<name>``) — no git subprocess, this runs
+    on the spawn path."""
+    top = target
+    while top != wt_root and wt_root in top.parents:
+        if (top / ".git").is_file():
+            break
+        top = top.parent
+    else:
+        return None
+    try:
+        line = (top / ".git").read_text(encoding="utf-8", errors="replace").strip()
+    except OSError:
+        return None
+    if not line.startswith("gitdir:"):
+        return None
+    gitdir = pathlib.Path(line[len("gitdir:") :].strip())
+    if gitdir.parent.name != "worktrees" or gitdir.parent.parent.name != ".git":
+        return None
+    main = gitdir.parent.parent.parent / target.relative_to(top)
+    return main if main.is_dir() else None
+
+
 def browser_profile_mcp_config_path(
     base_role: str, shard_idx: int | None, project: str, cwd: str | None = None
 ) -> str | None:
@@ -516,8 +516,7 @@ def browser_profile_mcp_config_path(
     servers = data.get("mcpServers") or {}
     browser_names = [n for n in servers if n in _BROWSER_MCP_NAMES]
     has_graft = "graft" in servers and cwd
-    has_ccc = "ccc" in servers and cwd
-    if not browser_names and not has_graft and not has_ccc:
+    if not browser_names and not has_graft:
         return base_path  # nothing this role's config needs templated
 
     # Sanitize the project namespace for use in file/dir names.
@@ -571,6 +570,17 @@ def browser_profile_mcp_config_path(
             under_worktree = resolved_target == wt_root or wt_root in resolved_target.parents
         except OSError:
             pass
+        if under_worktree:
+            # A worktree checkout has no graph of its own (never built — M3),
+            # but the checkout it was cut from does. Serve THAT graph: the
+            # pane gets a map of the code as it was when its branch started
+            # (2026-11-10 audit: writers work in worktrees, so the roles
+            # graft was meant for never had it — 13 calls in 90 days).
+            main = _main_checkout_equivalent(resolved_target, wt_root)
+            if main is not None:
+                target = main
+                store = graph_store_dir(target)
+                under_worktree = False
         if under_worktree or graft_cli_path() is None or not has_completed_build(store):
             # H3/M3: never hand an agent a graft MCP that can only answer
             # graceful-but-wrong empties — see the docstring above. The
@@ -600,23 +610,6 @@ def browser_profile_mcp_config_path(
                 args = [*args, str(staging_dir_for(target))]
                 cfg["args"] = args
                 servers["graft"] = cfg
-
-    if has_ccc:
-        # Same contract as graft above: never hand a pane a server that can
-        # only answer wrong — or, worse for ccc, one that would start a fresh
-        # index inside the pane's cwd. The entry survives only when the
-        # launcher exists AND `takkub ccc index` already ran for the project
-        # this pane belongs to (a worktree pane maps to its main checkout).
-        ccc_root = _ccc_project_root(cwd, project)
-        launcher = ccc_server_path()
-        if ccc_root is None or launcher is None or not _ccc_index_ready(ccc_root):
-            del servers["ccc"]
-        else:
-            # Through the cockpit runner, not the launcher: only the runner
-            # can start the shared embedding daemon at low priority (#904).
-            cfg = dict(servers["ccc"])
-            cfg.update(_ccc_pane_mcp_config(ccc_root))
-            servers["ccc"] = cfg
 
     # #281: applied again here, not only in the role-variant writer, so a
     # variant file left on disk from before this fix (they are only rewritten
@@ -761,42 +754,6 @@ def ensure_graft_mcp() -> tuple[bool, str]:
     return True, f"updated graft MCP: {', '.join(changed)}"
 
 
-def ensure_ccc_mcp() -> tuple[bool, str]:
-    """Merge CCC_MCP into runtime/shared-mcp.json when `ccc` is installed —
-    and remove a stale entry when it is not, so no pane is handed a server
-    whose launcher is gone. Idempotent; mirrors `ensure_graft_mcp`.
-    """
-    config: dict = {}
-    if SHARED_MCP_FILE.is_file():
-        try:
-            config = json.loads(SHARED_MCP_FILE.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            return False, f"could not parse {SHARED_MCP_FILE}; leaving as-is"
-    servers = config.setdefault("mcpServers", {})
-    installed = ccc_cli_path() is not None
-    changed = []
-    for name, server_cfg in CCC_MCP.items():
-        if not installed:
-            if name in servers:
-                del servers[name]
-                changed.append(f"-{name}")
-            continue
-        desired = json.loads(json.dumps(server_cfg))  # deep copy
-        if servers.get(name) != desired:
-            servers[name] = desired
-            changed.append(name)
-    if not changed:
-        _write_role_variants()
-        return True, "ccc MCP already present" if installed else "ccc not installed; skipped"
-    try:
-        SHARED_MCP_FILE.parent.mkdir(parents=True, exist_ok=True)
-        _write_private_mcp_json(SHARED_MCP_FILE, config)
-    except OSError as e:
-        return False, f"could not write {SHARED_MCP_FILE}: {e}"
-    _write_role_variants()
-    return True, f"updated ccc MCP: {', '.join(changed)}"
-
-
 # Browser MCP names are force-injected by ensure_browser_mcps() with pinned
 # versions and specific flags.  User copies of the same names are skipped so
 # cockpit's version always wins.
@@ -807,9 +764,7 @@ _BROWSER_MCP_NAMES = frozenset(BROWSER_MCPS.keys())
 # MCP. `_BROWSER_MCP_NAMES` alone stays browser-only on purpose (it also
 # drives the --user-data-dir profile-isolation loop, which graft has no
 # use for), so this is a separate, wider set rather than an in-place edit.
-MANAGED_MCP_NAMES: frozenset[str] = (
-    _BROWSER_MCP_NAMES | frozenset(GRAFT_MCP.keys()) | frozenset(CCC_MCP.keys())
-)
+MANAGED_MCP_NAMES: frozenset[str] = _BROWSER_MCP_NAMES | frozenset(GRAFT_MCP.keys())
 
 # Explicit allowlist of user MCP names that are safe to copy into
 # runtime/shared-mcp.json by default.  Criteria: stdio servers with no
@@ -922,14 +877,14 @@ def _forget_user_mcp_merged(name: str) -> None:
 # falling through to the master file.
 _ROLE_MCP_POLICY: dict[str, frozenset[str]] = {
     "lead": frozenset(),
-    "qa": frozenset({"playwright", "chrome-devtools", "graft", "ccc"}),
-    "critic": frozenset({"playwright", "chrome-devtools", "graft", "ccc"}),
+    "qa": frozenset({"playwright", "chrome-devtools", "graft"}),
+    "critic": frozenset({"playwright", "chrome-devtools", "graft"}),
     "designer": frozenset({"playwright", "chrome-devtools"}),
-    "reviewer": frozenset({"graft", "ccc"}),
-    "frontend": frozenset({"graft", "ccc"}),
-    "backend": frozenset({"graft", "ccc"}),
-    "mobile": frozenset({"graft", "ccc"}),
-    "devops": frozenset({"graft", "ccc"}),
+    "reviewer": frozenset({"graft"}),
+    "frontend": frozenset({"graft"}),
+    "backend": frozenset({"graft"}),
+    "mobile": frozenset({"graft"}),
+    "devops": frozenset({"graft"}),
     "codex": frozenset(),
 }
 

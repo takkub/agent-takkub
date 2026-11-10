@@ -950,6 +950,13 @@ def _remove_link(p: Path) -> None:
             p.unlink()
         elif p.is_dir():
             os.rmdir(p)
+        else:
+            # A DANGLING junction (target moved/deleted) is none of the above
+            # on Windows — is_symlink/is_file/is_dir all say False — so it was
+            # never removed (8 dead skill links sat in codex-home for weeks).
+            # rmdir drops the reparse point; it cannot recurse.
+            p.lstat()  # raises when there is really nothing there
+            os.rmdir(p)
     except OSError:
         pass  # best-effort; git worktree remove reports anything left behind
 

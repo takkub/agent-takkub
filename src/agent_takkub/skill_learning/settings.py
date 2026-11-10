@@ -17,8 +17,8 @@ from .. import config
 
 MODES = ("auto", "propose", "off")
 # Reflector candidates in preference order. gemini is deliberately absent:
-# `agy -p` needs a real TTY and returns nothing when captured (see
-# gemini_helper.gemini_exec) — gemini panes are still LEARNED FROM, they just
+# `agy -p` needs a real TTY and returns nothing when captured (see the
+# gemini_helper module docstring) — gemini panes are still LEARNED FROM, they just
 # never act as the reflector. Documented gap, not a silent one.
 REFLECTOR_PROVIDERS = ("claude", "codex", "opencode", "cursor")
 ENV_MODE = "TAKKUB_SKILL_LEARNING"

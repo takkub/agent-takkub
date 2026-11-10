@@ -2,7 +2,7 @@
 Remote mirror used to copy-paste (2026-10-24 review D):
 
 * `run_cli` — the non-interactive `subprocess.run` + exception mapping
-  behind `codex_exec` / `gemini_exec` / `cursor_exec`. Each helper still owns
+  behind `codex_exec` / `cursor_exec`. Each helper still owns
   its argv shape and how it reads success/failure output.
 * `find_executable` — PATH names first, then known install locations.
 * `strip_remote_prefix` / `live_user_payload` — the "[remote → lead] " marker

@@ -1,7 +1,6 @@
 """core.capabilities.design_clients — real HTTP clients for the optional
 design-tool integrations (#373, GAP-014/015/016): 21st.dev component
-reference search and Penpot's self-hosted REST/RPC API (Figma removed by
-user decision 2026-10-22).
+reference search and Penpot's self-hosted REST/RPC API.
 
 Every client here:
   - is pure stdlib (`urllib`) — no new dependency for two optional,

@@ -86,6 +86,9 @@ def test_reconcile_removes_stale_links_keeps_real(tmp_path, monkeypatch):
     _skill(home / "skills", "real", "mine")
     shutil.rmtree(gs / "gone")
     native_skills.link_native_skills(spec, "A")
-    assert not (home / "skills" / "gone").exists()
-    assert not (home / "skills" / "old").exists()
+    # listdir, not .exists(): a DANGLING junction reports exists() False while
+    # still sitting in the folder (2026-11-10: dead links stayed for weeks).
+    import os
+
+    assert sorted(os.listdir(home / "skills")) == ["real"]
     assert (home / "skills" / "real" / "SKILL.md").read_text() == "mine"

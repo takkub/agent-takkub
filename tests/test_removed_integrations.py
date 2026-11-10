@@ -74,8 +74,10 @@ def test_cleanup_removes_only_mcp_plugin_entries_and_backs_up_first(home):
     assert removed_integrations.cleanup_integration("figma") == 0  # idempotent
 
 
-def test_boot_cleanup_runs_once_per_install(home):
-    assert removed_integrations.run_boot_cleanups() == {"figma": 10}
+def test_boot_cleanup_runs_once_per_install(home, tmp_path, monkeypatch):
+    monkeypatch.setattr(removed_integrations.Path, "home", classmethod(lambda cls: tmp_path))
+    result = removed_integrations.run_boot_cleanups()
+    assert result["figma"] == 10 and result["ccc"] >= 1
     # the user adds a figma MCP back on purpose — a later boot must not strip it
     p = home / "claude-config" / ".claude.json"
     data = json.loads(p.read_text(encoding="utf-8"))
@@ -89,3 +91,38 @@ def test_dev_checkout_is_never_touched(home, monkeypatch):
     monkeypatch.setattr(config, "REPO_ROOT", home)
     assert removed_integrations.run_boot_cleanups() == {}
     assert "figma" in _read(home, "claude-config/.claude.json")["mcpServers"]
+
+
+def test_ccc_cleanup_is_exact_name_and_parks_index_and_cursor_entry(home, tmp_path, monkeypatch):
+    """2.2.53: ccc (cocoindex-code) removed — zero MCP calls in 90 days of
+    prod transcripts, yet every pane of an indexed project carried its tool
+    schemas. The cleanup drops `mcpServers.ccc` (exact name: a key that only
+    CONTAINS the letters stays), parks the index (15 GB on the owner's
+    machine) and global settings in backups/, and strips the Cursor entry
+    `takkub ccc provision` wrote. Nothing is deleted."""
+    monkeypatch.setattr(removed_integrations.Path, "home", classmethod(lambda cls: tmp_path))
+    (home / "runtime" / "shared-mcp-backend.json").write_text(
+        json.dumps({"mcpServers": {"ccc": {}, "graft": {}, "acccess": {}}}), encoding="utf-8"
+    )
+    (home / "cocoindex-db" / "proj").mkdir(parents=True)
+    (tmp_path / ".cocoindex_code").mkdir()
+    cursor = tmp_path / ".cursor" / "mcp.json"
+    cursor.parent.mkdir()
+    cursor.write_text(json.dumps({"mcpServers": {"ccc": {}, "mine": {}}}), encoding="utf-8")
+
+    assert removed_integrations.cleanup_integration("ccc") >= 5
+    assert _read(home, "runtime/shared-mcp-backend.json")["mcpServers"] == {
+        "graft": {},
+        "acccess": {},
+    }
+    assert "ccc" not in _read(home, "claude-config/.claude.json")["mcpServers"]
+    assert _read(home, "capabilities/mcp/permissions.json")["roles"]["frontend"]["mcps"] == [
+        "figma"
+    ]
+    assert json.loads(cursor.read_text(encoding="utf-8"))["mcpServers"] == {"mine": {}}
+    assert not (home / "cocoindex-db").exists()
+    assert not (tmp_path / ".cocoindex_code").exists()
+    (b,) = list((home / "backups").glob("ccc-removed-*"))
+    assert (b / "cocoindex-db" / "proj").is_dir()
+    assert (b / "external" / ".cocoindex_code").is_dir()
+    assert removed_integrations.cleanup_integration("ccc") == 0  # idempotent

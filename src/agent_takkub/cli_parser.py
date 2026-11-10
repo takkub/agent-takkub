@@ -1455,29 +1455,6 @@ def _add_backups(sub: Any, c: ModuleType) -> None:
     sbk.set_defaults(func=c.cmd_backups)
 
 
-def _add_ccc(sub: Any, c: ModuleType) -> None:
-
-    sccc = sub.add_parser(
-        "ccc",
-        help="cocoindex-code semantic code search: build/inspect a project's index "
-        "(the `ccc` MCP reaches panes only for projects indexed here)",
-    )
-    sccc_sub = sccc.add_subparsers(dest="ccc_cmd", required=True)
-    for _name, _help in (
-        ("index", "run `ccc init` (if needed) + `ccc index` for the project, DB under DATA_HOME"),
-        ("status", "is the project indexed where the cockpit expects it, plus `ccc status`"),
-        ("env", "print the env the cockpit gives `ccc` for the project (for manual runs)"),
-        ("serve", "internal MCP runner; resolves the pane project and starts cocoindex-code"),
-        ("provision", "configure agy, OpenCode, and Cursor to invoke the safe ccc runner"),
-    ):
-        _p = sccc_sub.add_parser(_name, help=_help)
-        _p.add_argument("--project", default=None, help="project name (default: this pane's)")
-        _p.add_argument(
-            "--cwd", default=None, help="project root (default: the project's lead cwd)"
-        )
-    sccc.set_defaults(func=c.cmd_ccc)
-
-
 def _add_migrate_skills(sub: Any, c: ModuleType) -> None:
 
     sms = sub.add_parser(
@@ -2081,32 +2058,6 @@ def _add_codex(sub: Any, c: ModuleType) -> None:
     sx.set_defaults(func=c.cmd_codex)
 
 
-def _add_gemini(sub: Any, c: ModuleType) -> None:
-
-    sg = sub.add_parser(
-        "gemini",
-        help="one-shot Antigravity CLI (agy) query (non-interactive, pure local)",
-    )
-    sg.add_argument("prompt", help="prompt text to send to Antigravity (positional)")
-    sg.add_argument(
-        "--cwd",
-        default=None,
-        help="working directory for the agy run (default: current dir)",
-    )
-    sg.add_argument(
-        "--model",
-        default=None,
-        help="override agy's default model (e.g. gemini-3.1-pro)",
-    )
-    sg.add_argument(
-        "--timeout",
-        type=float,
-        default=120.0,
-        help="seconds to wait before killing the agy process (default: 120)",
-    )
-    sg.set_defaults(func=c.cmd_gemini)
-
-
 def _add_release(sub: Any, c: ModuleType) -> None:
 
     srel = sub.add_parser(
@@ -2272,7 +2223,6 @@ def build_parser(c: ModuleType) -> argparse.ArgumentParser:
     _add_audit_skills(sub, c)
     _add_skills(sub, c)
     _add_backups(sub, c)
-    _add_ccc(sub, c)
     _add_migrate_skills(sub, c)
     _add_search(sub, c)
     _add_issue(sub, c)
@@ -2285,7 +2235,6 @@ def build_parser(c: ModuleType) -> argparse.ArgumentParser:
     _add_provision(sub, c)
     _add_pipeline(sub, c)
     _add_codex(sub, c)
-    _add_gemini(sub, c)
     _add_release(sub, c)
     _add_services(sub, c)
     _add_lead_edits(sub, c)

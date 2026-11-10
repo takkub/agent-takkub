@@ -1136,7 +1136,7 @@ def _build_main_window():
     except Exception as e:  # pragma: no cover - defensive, must never block boot
         _boot_log(f"removed-provider migration errored: {type(e).__name__}: {e}")
     try:
-        # Leftovers of removed integrations (Figma) — once per install, with
+        # Leftovers of removed integrations — once per install, with
         # backup, so every machine gets the cleanup, not just one.
         from .removed_integrations import run_boot_cleanups
 

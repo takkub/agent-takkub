@@ -34,9 +34,9 @@ class TestNpxEntriesGetTheFlag:
     def test_flag_lands_before_the_package_spec(self) -> None:
         """npm only accepts its own flags ahead of the package argument — a
         flag after it would be passed through to the server instead."""
-        cfg = {"command": "npx", "args": ["-y", "figma-developer-mcp", "--stdio"]}
+        cfg = {"command": "npx", "args": ["-y", "some-developer-mcp", "--stdio"]}
         args = _prefer_offline_npx(cfg)["args"]
-        assert args.index(_NPX_OFFLINE_FLAG) < args.index("figma-developer-mcp")
+        assert args.index(_NPX_OFFLINE_FLAG) < args.index("some-developer-mcp")
         assert args[-1] == "--stdio", "server's own flags must keep their position"
 
     def test_pinned_entries_are_patched_too(self) -> None:

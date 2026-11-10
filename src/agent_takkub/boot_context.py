@@ -78,7 +78,6 @@ DYNAMIC_STATE_CATEGORIES = frozenset(
         "native_project_memory",
         "native_project_memory_LEAD",
         "graft_caveats",
-        "ccc_caveats",  # same policy source as graft_caveats (2026-10-22)
         # #516 follow-up: whatever the operator has personally installed
         # under CLAUDE_CONFIG_DIR/skills — per-machine, not repo content.
         "native_skill_catalog",
@@ -131,7 +130,6 @@ def measure_role_appendix(base_role: str, project_ns: str) -> list[CategoryMeasu
     from .config import agent_role_dir, default_cwd_for_role, lead_cwd, role_needs_stale_file_guard
     from .lead_context import (
         BIG_FILE_GUARD,
-        CCC_TOOL_CAVEATS,
         GRAFT_TOOL_CAVEATS,
         STALE_FILE_GUARD,
         _allowed_project_roots,
@@ -222,8 +220,6 @@ def measure_role_appendix(base_role: str, project_ns: str) -> list[CategoryMeasu
         granted = frozenset()
     if "graft" in granted:
         out.append(_cat("graft_caveats", GRAFT_TOOL_CAVEATS))
-    if "ccc" in granted:
-        out.append(_cat("ccc_caveats", CCC_TOOL_CAVEATS))
 
     try:
         gate_appendix = render_claude_gate_appendix(spawn_cwd)

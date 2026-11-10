@@ -1012,10 +1012,10 @@ def test_boot_phase_detail_names_the_servers_being_waited_on() -> None:
     for."""
     s = _feed_screen(
         "OpenAI Codex (v0.147.0)",
-        "Starting MCP servers (0/3): codex_apps, context7, figma (12s • esc to interrupt)",
+        "Starting MCP servers (0/3): codex_apps, context7, playwright (12s • esc to interrupt)",
     )
     detail = s.boot_phase_detail()
-    assert "context7" in detail and "figma" in detail
+    assert "context7" in detail and "playwright" in detail
     assert len(detail) <= 200
 
 

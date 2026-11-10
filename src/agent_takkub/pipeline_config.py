@@ -1,4 +1,9 @@
-"""Pipeline template store — ``~/.takkub/pipelines.json``.
+"""Pipeline template store — ``SETTINGS_HOME/projects/<slug>/pipelines.json``
+(dev checkout: ``~/.takkub``; installed cockpit: ``~/.agent-takkub``).
+
+Not only the "run a template" feature: this file is also where each
+project's role on/off switches (``rolesEnabled``) and team template live, so
+it is read on every assign even when nobody ever runs a pipeline.
 
 Owns the user's named dev-pipeline templates (an ordered list of *hops*, each
 hop a set of roles that run in **parallel**; hops run in **sequence**) plus the

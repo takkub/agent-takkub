@@ -1,6 +1,6 @@
 {
   "generated_by": "grimp 3.14",
-  "module_count": 375,
+  "module_count": 374,
   "modules": [
     {
       "module": "agent_takkub",
@@ -70,7 +70,6 @@
         "agent_takkub.boot_flow_window",
         "agent_takkub.browser_chrome",
         "agent_takkub.claude_update",
-        "agent_takkub.cli",
         "agent_takkub.compose_autodown",
         "agent_takkub.core.secrets.backends.keychain_backend",
         "agent_takkub.doctor",
@@ -118,7 +117,7 @@
         "agent_takkub.verify",
         "agent_takkub.worktree_manager"
       ],
-      "fan_in": 52,
+      "fan_in": 51,
       "fan_out": 0
     },
     {
@@ -496,19 +495,6 @@
       "fan_out": 0
     },
     {
-      "module": "agent_takkub.ccc_store",
-      "imports": [
-        "agent_takkub.config",
-        "agent_takkub.worktree_manager"
-      ],
-      "imported_by": [
-        "agent_takkub.cli",
-        "agent_takkub.shared_dev_tools"
-      ],
-      "fan_in": 2,
-      "fan_out": 2
-    },
-    {
       "module": "agent_takkub.chatlog_scanner",
       "imports": [
         "agent_takkub.config"
@@ -554,14 +540,12 @@
     {
       "module": "agent_takkub.cli",
       "imports": [
-        "agent_takkub._win_console",
         "agent_takkub.auto_migrate_boot",
         "agent_takkub.auto_resume",
         "agent_takkub.backlog",
         "agent_takkub.backup_prune",
         "agent_takkub.bm25_search",
         "agent_takkub.boot_flow_terminal",
-        "agent_takkub.ccc_store",
         "agent_takkub.chatlog_scanner",
         "agent_takkub.cli_parser",
         "agent_takkub.codex_agents_md",
@@ -580,7 +564,6 @@
         "agent_takkub.disk_usage",
         "agent_takkub.docs_verify",
         "agent_takkub.doctor",
-        "agent_takkub.gemini_helper",
         "agent_takkub.impact_contract",
         "agent_takkub.lead_context",
         "agent_takkub.lead_readiness",
@@ -625,7 +608,7 @@
         "agent_takkub.__main__"
       ],
       "fan_in": 1,
-      "fan_out": 66
+      "fan_out": 63
     },
     {
       "module": "agent_takkub.cli_parser",
@@ -814,7 +797,6 @@
         "agent_takkub.boot_flow",
         "agent_takkub.boot_flow_window",
         "agent_takkub.browser_chrome",
-        "agent_takkub.ccc_store",
         "agent_takkub.chatlog_scanner",
         "agent_takkub.claude_auth_config",
         "agent_takkub.claude_update",
@@ -932,7 +914,7 @@
         "agent_takkub.worktree_manager",
         "agent_takkub.worktree_reuse"
       ],
-      "fan_in": 129,
+      "fan_in": 128,
       "fan_out": 2
     },
     {
@@ -2868,19 +2850,16 @@
     },
     {
       "module": "agent_takkub.gemini_helper",
-      "imports": [
-        "agent_takkub.provider_cli_common"
-      ],
+      "imports": [],
       "imported_by": [
-        "agent_takkub.cli",
         "agent_takkub.core.conversation.ingest.gemini_adapter",
         "agent_takkub.provider_spec",
         "agent_takkub.remote.notify",
         "agent_takkub.spawn_engine",
         "agent_takkub.token_meter"
       ],
-      "fan_in": 6,
-      "fan_out": 1
+      "fan_in": 5,
+      "fan_out": 0
     },
     {
       "module": "agent_takkub.git_changes_service",
@@ -4065,11 +4044,10 @@
       "imported_by": [
         "agent_takkub.codex_helper",
         "agent_takkub.cursor_helper",
-        "agent_takkub.gemini_helper",
         "agent_takkub.opencode_helper",
         "agent_takkub.remote.notify"
       ],
-      "fan_in": 5,
+      "fan_in": 4,
       "fan_out": 1
     },
     {
@@ -5365,7 +5343,6 @@
       "module": "agent_takkub.shared_dev_tools",
       "imports": [
         "agent_takkub._win_console",
-        "agent_takkub.ccc_store",
         "agent_takkub.config",
         "agent_takkub.graft_store",
         "agent_takkub.pane_tools_policy",
@@ -5391,7 +5368,7 @@
         "agent_takkub.spawn_engine"
       ],
       "fan_in": 16,
-      "fan_out": 7
+      "fan_out": 6
     },
     {
       "module": "agent_takkub.skill_audit",
@@ -6202,7 +6179,6 @@
         "agent_takkub.user_profile"
       ],
       "imported_by": [
-        "agent_takkub.ccc_store",
         "agent_takkub.cli",
         "agent_takkub.cli_server",
         "agent_takkub.core.capabilities.skill_store",
@@ -6219,7 +6195,7 @@
         "agent_takkub.user_profile",
         "agent_takkub.worktree_reuse"
       ],
-      "fan_in": 16,
+      "fan_in": 15,
       "fan_out": 3
     },
     {

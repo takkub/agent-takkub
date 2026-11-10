@@ -2,6 +2,27 @@
 
 All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses [SemVer](https://semver.org/).
 
+## [v2.2.53] - 2026-11-10
+
+รอบเก็บกวาดจาก audit การใช้งานจริง 90 วัน (prod): ถอดของที่ไม่มีใครใช้ ทำให้ของที่ควรใช้ถูกใช้ได้จริง
+
+### Removed (ถอดออก)
+
+- **ccc (cocoindex-code semantic search) ถอดออกทั้งระบบ:** 90 วัน MCP ถูกเรียก 0 ครั้ง แต่เปิดทุก boot และกิน token ของ tool schema ในทุก pane ของโปรเจคที่ index ไว้ — ลบ `ccc_store`, `takkub ccc`, MCP `ccc`, กฎ/คำเตือนใน prompt ของ pane และเอกสาร pilot · **ตอนอัปเดต** boot cleanup ทำครั้งเดียว: เอา `ccc` ออกจาก `shared-mcp*.json` / `~/.cursor/mcp.json` และย้าย `cocoindex-db` (index ต่อโปรเจค — บางเครื่อง 15 GB) กับ `~/.cocoindex_code` ไป `backups/ccc-removed-<วันที่>/` (ย้าย ไม่ลบ — `takkub backups prune --yes` ลบให้เมื่อเก่ากว่า 14 วัน หรือลบโฟลเดอร์นั้นเองได้เลย) · ตัวโปรแกรม `cocoindex-code` ที่ลงผ่าน uv ไม่ได้ถูกถอนให้: `uv tool uninstall cocoindex-code`
+- **`takkub gemini` (ถาม one-shot):** ไม่เคยได้คำตอบจริง — `agy -p` ต้องมี TTY และคืนค่าว่างเมื่อถูก capture · งาน gemini ใช้ pane เท่านั้น (`takkub assign --role gemini`) — ลบคำสั่ง, `gemini_exec` และเทส
+- **Figma ที่ยังค้าง:** ลิงก์ skill `figma-*` 8 ตัวใน `codex-home/skills` (ชี้ไป skill ที่ถูกย้ายออกตั้งแต่ 2.2.27) จะหายเองตอน spawn codex ครั้งถัดไป (ดูข้อ dangling link ด้านล่าง) · ลบการอ้างถึง Figma ที่เหลือใน comment/docstring/เทส
+
+### Fixed (แก้)
+
+- **ลิงก์ skill ที่ปลายทางหายแล้วไม่เคยถูกลบบน Windows:** junction ที่ปลายทางหาย `is_symlink/is_file/is_dir` ตอบ False ทั้งหมด `_remove_link` จึงข้าม — skill ที่ถูกลบ/ย้ายออกจาก store ทิ้งลิงก์ตายไว้ใน `codex-home/skills` ตลอดไป · ตอนนี้ลบ reparse point ได้ (ยังไม่มีทาง recurse เข้าโฟลเดอร์จริง)
+- **มือถือ (Remote/PWA) ใช้ทุกวันแต่ log บอกว่าไม่มีใครใช้:** request ที่สำเร็จไม่เคยถูกบันทึก (มีแต่ตัวที่ถูกปฏิเสธ) — ทุก request ที่ผ่าน auth ทิ้ง `remote_use` ใน `events.log`: POST ทุกครั้ง, GET ไม่เกิน 1 ครั้ง/route/5 นาที, เพดาน 120 บรรทัด/นาที, เก็บแค่ method + route (ไม่มี query string/secret)
+- **Graft แทบไม่ถูกใช้ (13 ครั้งใน 90 วัน):** สองสาเหตุ — (1) pane ที่ทำงานใน worktree (คือ pane ที่เขียนโค้ดเกือบทั้งหมด) ถูกตัด graft ออกเสมอ: ตอนนี้ได้ graph ของ checkout หลักที่ worktree แตกออกมา (อ่านจากไฟล์ `.git` ของ worktree ไม่เรียก git) ถ้า checkout หลักยังไม่ build ก็ตัดออกเหมือนเดิม (2) prompt มีแต่ "ข้อห้าม" ไม่มีบอกว่าใช้ตอนไหน: เพิ่มบรรทัดบอกเครื่องมือ + จังหวะที่ควรใช้ · Graft ไม่มีค่าใช้จ่าย (ไม่ใช้ LLM/API key)
+- **`uv.lock` ยังล็อก ruff 0.17.1** ขณะที่ `pyproject.toml` ปัก 0.17.4 — lock ใหม่เฉพาะ ruff
+
+### Changed (เปลี่ยน)
+
+- docstring ของ `pipeline_config`: ระบุที่เก็บจริง (`SETTINGS_HOME/projects/<slug>/pipelines.json`) และว่าไฟล์นี้เก็บสวิตช์เปิด/ปิดตำแหน่ง + team template ด้วย จึงถูกอ่านทุก assign แม้ไม่เคยรัน pipeline
+
 ## [v2.2.52] - 2026-11-10
 
 ### Fixed (แก้)

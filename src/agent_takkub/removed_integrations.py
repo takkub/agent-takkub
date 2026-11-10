@@ -31,7 +31,29 @@ from pathlib import Path
 from . import config
 
 #: name -> release it left in. Add a name here when an integration is removed.
-REMOVED_INTEGRATIONS: dict[str, str] = {"figma": "2.2.25"}
+REMOVED_INTEGRATIONS: dict[str, str] = {"figma": "2.2.25", "ccc": "2.2.53"}
+
+# Names matched EXACTLY (case-insensitive), not as a substring: "ccc" would
+# otherwise catch any key that merely contains the letters.
+_EXACT_NAMES = frozenset({"ccc"})
+
+
+# Cockpit-written leftovers OUTSIDE the generic MCP/plugin containers.
+# ccc (cocoindex-code semantic search, removed 2.2.53 — zero MCP calls in 90
+# days of prod transcripts while it cost tool-schema tokens on every pane of
+# an indexed project): its per-project index under DATA_HOME (15 GB on the
+# owner's machine) and the global settings `takkub ccc index` wrote.
+def _extra_move_targets(home: Path, name: str) -> list[Path]:
+    if name == "ccc":
+        return [home / "cocoindex-db", Path.home() / ".cocoindex_code"]
+    return []
+
+
+def _extra_json_targets(name: str) -> list[tuple[Path, bool]]:
+    if name == "ccc":  # `takkub ccc provision` wrote `mcpServers.ccc` here
+        return [(Path.home() / ".cursor" / "mcp.json", False)]
+    return []
+
 
 # Dicts whose KEYS are server/plugin/skill ids — a matching key is dropped.
 _KEYED_CONTAINERS = frozenset(
@@ -106,11 +128,13 @@ def cleanup_integration(name: str, *, home: Path | None = None) -> int:
     pattern = re.compile(re.escape(name), re.IGNORECASE)
 
     def hit(s: str) -> bool:
+        if name in _EXACT_NAMES:
+            return s.strip().lower() == name
         return bool(pattern.search(s))
 
     backup = home / "backups" / f"{name}-removed-{time.strftime('%Y-%m-%d')}"
     changed = 0
-    for path, top_keyed in _json_targets(home):
+    for path, top_keyed in [*_json_targets(home), *_extra_json_targets(name)]:
         if not path.is_file():
             continue
         try:
@@ -128,7 +152,9 @@ def cleanup_integration(name: str, *, home: Path | None = None) -> int:
             shutil.copy2(path, dst)
         if config._write_json_atomic(path, cleaned):
             changed += 1
-    for src in _move_targets(home, name):
+    for src in [*_move_targets(home, name), *_extra_move_targets(home, name)]:
+        if not src.exists():
+            continue
         dst = backup / _backup_rel(src, home)
         if dst.exists():
             continue  # an earlier partial run already parked a copy — keep both safe

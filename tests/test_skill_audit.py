@@ -300,7 +300,7 @@ class TestAuditNewRoleText:
         # (a term present in every doc has idf=log(N/df)=0 when df==N).
         existing = {
             "backend": "REST API endpoint database schema migration handler",
-            "designer": "figma color palette typography spacing layout",
+            "designer": "wireframe color palette typography spacing layout",
         }
         overlaps = audit_new_role_text(
             "shadow-backend",
@@ -316,7 +316,7 @@ class TestAuditNewRoleText:
         existing = {"backend": "REST API endpoint database schema migration handler"}
         overlaps = audit_new_role_text(
             "designer",
-            "figma color palette typography spacing layout",
+            "wireframe color palette typography spacing layout",
             threshold=0.6,
             existing=existing,
         )

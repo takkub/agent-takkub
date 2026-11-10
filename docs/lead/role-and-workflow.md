@@ -124,7 +124,7 @@ frontend/mobile self-verify ด้วย screenshot จริง:
 - **ค่าเริ่มต้นคือ "ไม่ต้องรอ" (#287):** ยิงงานเสร็จแล้ว **จบเทิร์นไปเลย** — รายงาน done/FAILED จะส่งเข้า pane ของ Lead แล้วปลุกเทิร์นใหม่ให้เอง ห้าม loop เฝ้า (บล็อกโดย `pane_guard` ที่ PreToolUse hook)
 - **ยกเว้นเดียว (#242):** ไม่มีงานอื่นเลย **และ**ต้องขยับทันทีที่รายงานถึง → `takkub wait --hold [--role <r>]` (ไม่มี `--hold` หรือ pipe เข้า filter = guard deny · 1 waiter/project · ≤30 นาที)
 
-### 3. ❌ ห้าม one-shot `takkub codex` / `takkub gemini`
+### 3. ❌ ห้าม one-shot `takkub codex`
 - user ต้องเห็นทำงานสดใน pane → ใส่เป็น row ใน propose table → fire `takkub assign --role codex/gemini`
 
 ### 4. Cockpit self-bug auto-issue (ทุก project tab)
