@@ -94,6 +94,40 @@ def python_executable_problem(py_path: Path, *, platform: str | None = None) -> 
     return "bad-magic"
 
 
+def resolve_cockpit_python() -> Path:
+    """The console interpreter of the venv this process runs in — the path
+    written into the pane launcher shims (#1019).
+
+    Never the file a POSIX venv's ``bin/python`` links to: that is the base
+    install (uv/pyenv/python.org), which has no ``agent_takkub``. Resolving
+    the symlink once (`Path(sys.executable).resolve()`) pointed the shims at
+    the base interpreter and every ``takkub`` call on that machine died with
+    "No module named agent_takkub".
+
+    Tried in order, first existing wins: the running interpreter's own
+    directory when that is a venv (`interpreter_dir` keeps the directory and
+    never follows the file), the venv ``sys.prefix`` names, the venv this
+    package is installed in (found from its own location — right even when
+    the process was started by a base interpreter), the running
+    interpreter's directory whatever it is, and finally ``sys.executable``."""
+    name = "python.exe" if sys.platform == "win32" else "python"
+    sub = "Scripts" if sys.platform == "win32" else "bin"
+    candidates: list[Path] = []
+    if venv_root() is not None:
+        candidates.append(interpreter_dir() / name)
+    if sys.prefix != getattr(sys, "base_prefix", sys.prefix):
+        candidates.append(Path(sys.prefix) / sub / name)
+    for parent in Path(__file__).absolute().parents:
+        if (parent / "pyvenv.cfg").is_file():
+            candidates.append(parent / sub / name)
+            break
+    candidates.append(interpreter_dir() / name)
+    for cand in candidates:
+        if cand.is_file() or cand.is_symlink():
+            return cand
+    return Path(sys.executable)
+
+
 def interpreter_dir(executable: str | Path | None = None) -> Path:
     """The script directory of the interpreter this process runs from
     (``venv/Scripts`` on Windows, ``venv/bin`` on POSIX). Resolves the

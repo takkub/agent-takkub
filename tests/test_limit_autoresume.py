@@ -263,43 +263,66 @@ def test_ordinary_output_does_not_trigger_model_reroute() -> None:
     reroute.assert_not_called()
 
 
-def test_quota_probe_restores_live_fallback_lead(monkeypatch) -> None:
+@pytest.mark.parametrize("reason", ["reprobe", "window_elapsed"])
+def test_quota_back_never_pulls_a_live_fallback_lead_back_1012(reason) -> None:
+    """#1012: Codex's quota came back and the cockpit force-closed the
+    healthy Claude Lead the user was talking to — mid-conversation, with a
+    task delivery in flight — to return to Codex. Quota being available on
+    the configured provider is not consent to switch: the live Lead stays,
+    whichever path (reprobe or the reset timer) noticed the quota."""
     from agent_takkub import limit_autoresume as la
-    from agent_takkub import provider_config
 
     o = _bare_orch()
     lead = _pane_alive()
-    lead.model.provider_name = "gemini"
+    lead.model.provider_name = "claude"
+    lead.state = "working"
     o._panes_by_project = {"proj": {"lead": lead}}
     o._lead_quota_recovery = {"proj": ("codex", "C:/work", "brief", time.time() + 3600)}
-    monkeypatch.setattr(provider_config, "provider_for", lambda role, project: "codex")
-    with patch.object(o, "_reroute_pane_to_provider") as reroute:
-        la.AutoResumeMixin._clear_provider_quota_stall(o, "proj", "codex", reason="reprobe")
-    reroute.assert_called_once_with(
-        "proj",
-        "lead",
-        o._ps("proj::lead"),
-        "codex",
-        "gemini",
-        0.0,
-        manual=True,
-        restoring=True,
-    )
+    o._lead_quota_recovery_spawned_at = {"proj": time.time() - 3600}
+    with (
+        patch.object(o, "_reroute_pane_to_provider") as reroute,
+        patch.object(o, "close") as close,
+        patch.object(la, "_log_event") as log,
+    ):
+        la.AutoResumeMixin._clear_provider_quota_stall(o, "proj", "codex", reason=reason)
+    reroute.assert_not_called()
+    close.assert_not_called()
+    assert "proj" not in o._lead_quota_recovery
+    assert "proj" not in o._lead_quota_recovery_spawned_at
+    assert any(c.args[0] == "lead_quota_restore_skipped_live_lead" for c in log.call_args_list)
 
 
-def test_reset_timer_keeps_live_fallback_recovery_until_probe() -> None:
+def test_reset_timer_leaves_live_fallback_lead_alone_1012() -> None:
     o = _bare_orch()
     lead = _pane_alive()
     lead.model.provider_name = "gemini"
     o._panes_by_project = {"proj": {"lead": lead}}
-    recovery = ("codex", "C:/work", "brief", time.time())
-    o._lead_quota_recovery = {"proj": recovery}
+    o._lead_quota_recovery = {"proj": ("codex", "C:/work", "brief", time.time())}
     o._ps("proj::lead")
+
+    with patch.object(o, "_reroute_pane_to_provider") as reroute:
+        o._emit_rate_limit_reset("proj", "lead")
+
+    reroute.assert_not_called()
+    assert "proj" not in o._lead_quota_recovery
+    o._notify_lead.assert_not_called()
+
+
+def test_reset_with_the_project_tab_closed_spawns_nothing_1022() -> None:
+    """#1022: the tab was closed, so no Lead pane existed to spawn into —
+    `spawn` failed with "registry desync" and raised leadUnavailable for a
+    project nobody had open."""
+    o = _bare_orch()
+    o._panes_by_project = {"proj": {}}
+    o._lead_quota_recovery = {"proj": ("claude", "C:/work", "brief", time.time())}
+    o.spawn = MagicMock(return_value=(False, "could not create pane for lead (registry desync)"))
+    o.leadUnavailable = MagicMock()
 
     o._emit_rate_limit_reset("proj", "lead")
 
-    assert o._lead_quota_recovery["proj"] == recovery
-    o._notify_lead.assert_not_called()
+    o.spawn.assert_not_called()
+    o.leadUnavailable.emit.assert_not_called()
+    assert "proj" not in o._lead_quota_recovery
 
 
 # ── layer 2: _maybe_auto_resume_park gate ───────────────────────────────────
@@ -535,18 +558,109 @@ class TestOnLimitUsageConfirmed:
         o = _bare_orch()
         o._on_limit_usage_confirmed("proj", "backend", True)  # no PaneState registered — no crash
 
-    def test_not_confirmed_clears_quota_stall(self) -> None:
+    def _unknown(self, provider: str, banner: str, *, mid_turn: bool = False):
+        """An episode whose usage probe had no answer, with the pane's screen
+        reading *banner* (`quota_banner_state`)."""
         o = _bare_orch()
+        pane = _pane_alive()
+        pane.session.quota_banner_state.return_value = banner
+        pane.session.seconds_since_output.return_value = 1.0 if mid_turn else 120.0
+        pane.session.is_at_ready_prompt.return_value = not mid_turn
+        o._panes_by_project = {"proj": {"backend": pane}}
         ps = o._ps("proj::backend")
         ps.last_assigned_task = "do the thing"
         ps.rate_limited_until = time.time() + 3600
+        ps.quota_provider = provider
+        ps.quota_marker = "banner"
         ps.limit_confirm_pending = True
-        with patch.object(o, "_park_pane_for_limit") as park:
-            o._on_limit_usage_confirmed("proj", "backend", False)
-        park.assert_not_called()
-        assert ps.limit_confirm_pending is False
+        return o, ps
+
+    @pytest.mark.parametrize(
+        ("provider", "banner"),
+        [
+            ("gemini", "latest"),  # #1008: agy "Individual quota reached", idle
+            ("opencode", "retrying"),  # #1010/#1020: "Retrying in 279s · attempt 4 · Free usage…"
+            ("codex", "latest"),
+        ],
+    )
+    def test_unknown_probe_with_the_pane_stopped_on_its_banner_moves_the_task(
+        self, provider, banner
+    ) -> None:
+        """The probe has no answer for these (no meter for opencode's free
+        tier, a per-model quota for agy). That used to be read as "probably
+        quoted text" and the episode was cleared within seconds — the pane
+        then sat on its banner for 40 minutes with nothing moved."""
+        o, ps = self._unknown(provider, banner)
+        with patch.object(o, "_reroute_or_park") as reroute:
+            o._on_limit_usage_unknown("proj", "backend")
+        reroute.assert_called_once_with("proj", "backend", ps)
+        assert ps.rate_limited_until > time.time()
+        assert ps.quota_false_positive_armed is False
+
+    def test_unknown_probe_retry_line_counts_even_while_the_screen_repaints(self) -> None:
+        """opencode's countdown repaints every second, so "output is still
+        flowing" says nothing — the retry line itself is the block."""
+        o, _ps = self._unknown("opencode", "retrying", mid_turn=True)
+        with patch.object(o, "_reroute_or_park") as reroute:
+            o._on_limit_usage_unknown("proj", "backend")
+        reroute.assert_called_once()
+
+    @pytest.mark.parametrize("banner", ["stale", "none"])
+    def test_unknown_probe_with_the_pane_past_its_banner_is_a_false_positive(self, banner) -> None:
+        """#1009: agy announced a model change and carried on working — the
+        banner is history. Cleared quietly; nothing was announced."""
+        o, ps = self._unknown("gemini", banner)
+        with patch.object(o, "_reroute_or_park") as reroute:
+            o._on_limit_usage_unknown("proj", "backend")
+        reroute.assert_not_called()
         assert ps.rate_limited_until == 0.0
         assert ps.quota_false_positive_armed is True
+        o._notify_lead.assert_not_called()
+
+    def test_unknown_probe_while_still_streaming_under_the_banner_waits(self) -> None:
+        o, ps = self._unknown("gemini", "latest", mid_turn=True)
+        with patch.object(o, "_reroute_or_park") as reroute:
+            o._on_limit_usage_unknown("proj", "backend")
+        reroute.assert_not_called()
+        assert ps.rate_limited_until > time.time()  # re-judged on the next round
+        assert ps.limit_confirm_pending is False
+
+    def test_unknown_probe_for_claude_keeps_waiting_for_its_probe(self) -> None:
+        """Claude's probe normally answers, so "unknown" is a fetch error —
+        the #595 fallback timeout decides, not the first failed fetch."""
+        o, ps = self._unknown("claude", "latest")
+        with patch.object(o, "_reroute_or_park") as reroute:
+            o._on_limit_usage_confirmed("proj", "backend", False)
+        reroute.assert_not_called()
+        assert ps.limit_confirm_pending is False
+        assert ps.rate_limited_until > time.time()
+        assert ps.quota_false_positive_armed is False
+
+    def test_fallback_timeout_consults_the_screen(self) -> None:
+        from agent_takkub import auto_resume
+
+        now = time.time()
+        for banner, expect_reroute in (("latest", True), ("stale", False), ("none", False)):
+            o, ps = self._unknown("claude", banner)
+            ps.limit_confirm_pending = False
+            ps.limit_confirm_first_attempt_ts = now - auto_resume.CONFIRM_FALLBACK_TIMEOUT_S - 1
+            pane = o._panes_by_project["proj"]["backend"]
+            with (
+                patch.object(o, "_reroute_or_park") as reroute,
+                patch.object(auto_resume, "is_enabled", return_value=True),
+            ):
+                o._maybe_auto_resume_park("proj", "backend", pane, now)
+            assert reroute.called is expect_reroute, banner
+            assert (ps.rate_limited_until == 0.0) is (not expect_reroute), banner
+
+    def test_denied_probe_does_not_clear_a_pane_stopped_on_its_banner(self) -> None:
+        """The meter reads the account; agy's quota is per model — a healthy
+        account figure does not unblock a pane sitting on its banner."""
+        o, ps = self._unknown("gemini", "latest")
+        with patch.object(o, "_reroute_or_park") as reroute:
+            o._on_limit_usage_denied("proj", "backend", 12.0)
+        reroute.assert_called_once()
+        assert ps.rate_limited_until > time.time()
 
     def test_task_finished_meanwhile_skips_park(self) -> None:
         o = _bare_orch()
@@ -1249,9 +1363,13 @@ class TestPickRerouteProvider:
 
 class TestRerouteOrPark:
     def test_reroute_when_candidate_available(self, monkeypatch) -> None:
+        from agent_takkub import limit_autoresume as la
         from agent_takkub import provider_config
 
         monkeypatch.setattr(provider_config, "_provider_available", lambda p: True)
+        # Hermetic: the candidate check reads the machine's real usage meter,
+        # and a dev box whose codex is spent picked gemini here.
+        monkeypatch.setattr(la, "confirm_verdict_for_provider", lambda *a, **k: ("unknown", 0.0))
         o = _bare_orch()
         ps = o._ps("proj::backend")
         ps.quota_provider = "claude"
@@ -1453,6 +1571,11 @@ class TestReroutePaneToProvider:
         monkeypatch.setattr(provider_config, "_provider_available", lambda _provider: True)
         monkeypatch.setattr(auto_resume, "is_enabled", lambda: True)
         monkeypatch.setenv("TAKKUB_EVENTS_LOG_SYNC", "1")
+        # Hermetic: never read this machine's real usage meter (see above).
+        monkeypatch.setattr(
+            "agent_takkub.limit_autoresume.confirm_verdict_for_provider",
+            lambda *a, **k: ("unknown", 0.0),
+        )
 
         o = self._orch_with_respawn_hooks()
         now = time.time()

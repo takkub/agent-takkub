@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from datetime import UTC, datetime
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -14,15 +15,30 @@ from agent_takkub import compose_autodown as cad
 class FakeDocker:
     """Records docker argv; answers ps/stats/compose down like the real CLI."""
 
-    def __init__(self, rows: list[tuple[str, str, str, str]], down_rc: dict | None = None):
+    def __init__(
+        self,
+        rows: list[tuple[str, str, str, str]],
+        down_rc: dict | None = None,
+        started: dict[str, float] | None = None,
+    ):
         self.rows = rows
         self.down_rc = down_rc or {}
+        # container name -> epoch it came up; anything unlisted is "now-ish"
+        # (after SESSION_START), i.e. started by the work being wrapped up.
+        self.started = started or {}
         self.calls: list[list[str]] = []
 
     def __call__(self, args: list[str], timeout: int):
         self.calls.append(list(args))
         if args[0] == "ps":
             return 0, "\n".join("\t".join(r) for r in self.rows) + "\n"
+        if args[0] == "inspect":
+            out = []
+            for name in args[3:]:
+                ts = self.started.get(name, SESSION_START + 60)
+                stamp = datetime.fromtimestamp(ts, UTC).strftime("%Y-%m-%dT%H:%M:%S.%f")
+                out.append("\t".join((f"/{name}", f"{stamp}000Z", f"{stamp}000Z")))
+            return 0, "\n".join(out)
         if args[0] == "stats":
             names = args[4:]
             return 0, "\n".join(f"{n}\t70.5MiB / 7.6GiB" for n in names)
@@ -37,6 +53,9 @@ class FakeDocker:
 
     def downs(self) -> list[str]:
         return [c[2] for c in self.calls if c[:2] == ["compose", "-p"]]
+
+
+SESSION_START = 1_800_000_000.0
 
 
 def _p(tmp_path, *parts) -> str:
@@ -57,7 +76,7 @@ def test_downs_only_own_stacks_keeps_volumes_and_removes_exited(tmp_path) -> Non
         ]
     )
     with patch.object(cad, "_docker", fake):
-        report = cad.run_auto_down("evc", "end-session", [evc], {})
+        report = cad.run_auto_down("evc", "end-session", [evc], {}, started_after=SESSION_START)
 
     assert sorted(fake.downs()) == ["evc", "evce2e"]
     assert all("-v" not in c and "--volumes" not in c and "--rmi" not in c for c in fake.calls)
@@ -81,7 +100,7 @@ def test_staging_or_prod_named_stack_is_never_downed_985(tmp_path) -> None:
         ]
     )
     with patch.object(cad, "_docker", fake):
-        report = cad.run_auto_down("evc", "prod-deploy", [evc], {})
+        report = cad.run_auto_down("evc", "prod-deploy", [evc], {}, started_after=SESSION_START)
     assert fake.downs() == ["evc"]
     assert sorted(s for s, _ in report.skipped) == ["evc-prod", "evcstg"]
     assert not cad.is_long_running_stack("evc-e2e") and not cad.is_long_running_stack("product")
@@ -91,7 +110,9 @@ def test_stack_shared_with_another_open_tab_is_skipped(tmp_path) -> None:
     root = _p(tmp_path, "mono")
     fake = FakeDocker([("mono-db-1", "running", "mono", root)])
     with patch.object(cad, "_docker", fake):
-        report = cad.run_auto_down("a", "tab-close", [root], {"b": [root]})
+        report = cad.run_auto_down(
+            "a", "tab-close", [root], {"b": [root]}, started_after=SESSION_START
+        )
     assert fake.downs() == []
     assert report.skipped and "b" in report.skipped[0][1]
 
@@ -101,7 +122,9 @@ def test_broader_open_project_does_not_block_more_specific_owner(tmp_path) -> No
     child = _p(tmp_path, "evc")
     fake = FakeDocker([("evc-db-1", "running", "evc", child)])
     with patch.object(cad, "_docker", fake):
-        cad.run_auto_down("evc", "end-session", [child], {"workspace": [parent]})
+        cad.run_auto_down(
+            "evc", "end-session", [child], {"workspace": [parent]}, started_after=SESSION_START
+        )
     assert fake.downs() == ["evc"]
 
 
@@ -109,8 +132,60 @@ def test_failed_down_is_reported_not_silent(tmp_path) -> None:
     evc = _p(tmp_path, "evc")
     fake = FakeDocker([("evc-db-1", "running", "evc", evc)], down_rc={"evc": 1})
     with patch.object(cad, "_docker", fake):
-        report = cad.run_auto_down("evc", "end-session", [evc], {})
+        report = cad.run_auto_down("evc", "end-session", [evc], {}, started_after=SESSION_START)
     assert report.failed and "boom" in report.summary()
+
+
+def test_stack_running_before_the_work_began_is_never_downed_1015(tmp_path) -> None:
+    """#1015: `chat-p2p-web-1` served the live site through a tunnel and had
+    been up for hours; a devops done for a Cloudflare deploy that never touched
+    docker took it down (502 for 3 minutes). Only a stack that came up after
+    the work began is this work's to stop — and a kept stack is not a notice."""
+    root = _p(tmp_path, "chat-p2p")
+    fake = FakeDocker(
+        [
+            ("chat-p2p-web-1", "running", "chat-p2p", root),
+            ("chat-p2p-e2e-db-1", "running", "chat-p2p-e2e", os.path.join(root, "e2e")),
+        ],
+        started={"chat-p2p-web-1": SESSION_START - 6 * 3600},
+    )
+    with patch.object(cad, "_docker", fake):
+        report = cad.run_auto_down(
+            "chat-p2p", "prod-deploy", [root], {}, started_after=SESSION_START
+        )
+    assert fake.downs() == ["chat-p2p-e2e"]
+    assert report.kept == ["chat-p2p"]
+    assert "chat-p2p-web-1" not in report.summary()
+
+
+def test_one_preexisting_container_keeps_the_whole_stack_1015(tmp_path) -> None:
+    root = _p(tmp_path, "app")
+    fake = FakeDocker(
+        [("app-web-1", "running", "app", root), ("app-db-1", "running", "app", root)],
+        started={"app-db-1": SESSION_START - 10},
+    )
+    with patch.object(cad, "_docker", fake):
+        report = cad.run_auto_down("app", "end-session", [root], {}, started_after=SESSION_START)
+    assert fake.downs() == [] and report.kept == ["app"] and report.summary() == ""
+
+
+def test_unknown_start_of_work_downs_nothing_1015(tmp_path) -> None:
+    root = _p(tmp_path, "app")
+    fake = FakeDocker([("app-web-1", "running", "app", root)])
+    with patch.object(cad, "_docker", fake):
+        report = cad.run_auto_down("app", "end-session", [root], {})
+    assert fake.downs() == [] and report.kept == ["app"]
+
+
+def test_docker_time_parsing() -> None:
+    assert cad._parse_docker_time("0001-01-01T00:00:00Z") == 0.0
+    assert cad._parse_docker_time("garbage") == 0.0
+    assert cad._parse_docker_time("2026-11-13T01:54:43.123456789Z") == pytest.approx(
+        datetime(2026, 11, 13, 1, 54, 43, 123456, tzinfo=UTC).timestamp()
+    )
+    assert cad._parse_docker_time("2026-11-13T08:54:43+07:00") == pytest.approx(
+        datetime(2026, 11, 13, 1, 54, 43, tzinfo=UTC).timestamp()
+    )
 
 
 def test_docker_missing_means_nothing_to_do(tmp_path) -> None:
@@ -140,7 +215,9 @@ def _host(panes: dict, enabled: bool = True):
     host = SimpleNamespace(
         _project_panes=lambda project_ns: panes,
         _notify_lead=lambda *a, **k: notes.append((a, k)),
-        compose_auto_down=lambda project_ns, trigger: started.append((project_ns, trigger)) or True,
+        compose_auto_down=lambda project_ns, trigger, started_after=None: (
+            started.append((project_ns, trigger, started_after)) or True
+        ),
     )
     notes: list = []
     started: list = []
@@ -150,15 +227,22 @@ def _host(panes: dict, enabled: bool = True):
 
 def test_devops_prod_deploy_done_triggers_auto_down() -> None:
     fn, _notes, started = _host({"lead": object(), "devops": SimpleNamespace(state="working")})
-    assert fn("p", "devops", "deploy prod เสร็จ health ผ่าน", False) is True
-    assert started == [("p", "prod-deploy")]
+    assert fn("p", "devops", "deploy prod เสร็จ health ผ่าน", False, task_started_at=123.0) is True
+    # #1015: bounded by when THIS task began, not the whole session.
+    assert started == [("p", "prod-deploy", 123.0)]
+
+
+def test_prod_deploy_done_without_a_task_start_downs_nothing_1015() -> None:
+    fn, _notes, started = _host({"lead": object(), "devops": SimpleNamespace(state="working")})
+    assert fn("p", "devops", "deploy prod เสร็จ health ผ่าน", False) is False
+    assert started == []
 
 
 def test_prod_deploy_done_waits_while_another_pane_works() -> None:
     fn, notes, started = _host(
         {"devops": SimpleNamespace(state="done"), "qa": SimpleNamespace(state="working")}
     )
-    assert fn("p", "devops", "deploy prod เสร็จ health ผ่าน", False) is False
+    assert fn("p", "devops", "deploy prod เสร็จ health ผ่าน", False, task_started_at=123.0) is False
     assert started == [] and notes and "qa" in notes[0][0][1]
 
 

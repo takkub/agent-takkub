@@ -96,6 +96,76 @@ def find_chrome_executable(
     return None
 
 
+# Process names (lower-cased, ".exe" dropped) a browser run leaves behind:
+# Chrome/Chromium and their headless shell, Edge, Firefox, and Playwright's
+# own WebKit build. Prefix match — macOS spells helpers "Google Chrome
+# Helper (Renderer)", Windows "chrome_crashpad_handler".
+_BROWSER_PROCESS_PREFIXES = (
+    "chrome",
+    "chromium",
+    "google chrome",
+    "headless_shell",
+    "msedge",
+    "microsoft edge",
+    "firefox",
+    "webkit",
+    "playwright",
+)
+
+
+def is_browser_process_name(name: str) -> bool:
+    normalized = name.strip().lower()
+    if normalized.endswith(".exe"):
+        normalized = normalized[:-4]
+    return normalized.startswith(_BROWSER_PROCESS_PREFIXES)
+
+
+def close_browser_descendants(root_pid: int, *, grace_s: float = 3.0) -> list[str]:
+    """Close every browser process descending from *root_pid* (#1011) and
+    return the names of the browser roots that were closed.
+
+    Only descendants of *root_pid* are considered — the caller passes a
+    pane's own CLI pid, so nothing outside that pane's process tree can be
+    reached. The topmost browser process of each tree is asked to exit
+    (its renderer/GPU helpers go with it); whatever is still alive after
+    *grace_s* is killed. Blocking (psutil walk + wait): call off the Qt
+    thread."""
+    import psutil
+
+    try:
+        children = psutil.Process(root_pid).children(recursive=True)
+    except (psutil.Error, OSError):
+        return []
+    browsers: dict[int, psutil.Process] = {}
+    for child in children:
+        try:
+            if is_browser_process_name(child.name()):
+                browsers[child.pid] = child
+        except (psutil.Error, OSError):
+            continue
+    roots: list[psutil.Process] = []
+    names: list[str] = []
+    for proc in browsers.values():
+        try:
+            if proc.ppid() in browsers:
+                continue
+            name = proc.name()
+            proc.terminate()
+        except (psutil.Error, OSError):
+            continue
+        roots.append(proc)
+        names.append(name)
+    if not roots:
+        return []
+    _gone, alive = psutil.wait_procs(list(browsers.values()), timeout=grace_s)
+    for proc in alive:
+        try:
+            proc.kill()
+        except (psutil.Error, OSError):
+            continue
+    return names
+
+
 def should_manage_native_chrome(
     base_role: str,
     shard_idx: int | None,

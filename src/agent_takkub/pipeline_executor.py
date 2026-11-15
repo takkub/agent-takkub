@@ -877,6 +877,41 @@ class PipelineMixin:
             "`takkub done` ให้ชัดเจน — Lead จะรวมไฟล์ทุก shard เป็นรายงานเดียวเอง"
         )
 
+    def _assign_plan_shard(
+        self,
+        project_ns: str,
+        shard_role: str,
+        cwd,
+        task: str,
+        shard_total: int,
+        model: str | None,
+        backlog_id: str,
+    ) -> None:
+        """Assign one shard of a QA plan fan-out under the planner's backlog
+        card, and tell Lead when it could not be queued (#1017: a refused
+        shard used to vanish — the deferred call's result went nowhere)."""
+        if backlog_id:
+            stash = getattr(self, "_stash_assign_backlog", None)
+            if callable(stash):
+                try:
+                    stash(project_ns, shard_role, backlog_id, task)
+                except Exception:
+                    pass
+        result = self.assign(
+            shard_role, cwd=cwd, task=task, shard_total=shard_total, project=project_ns, model=model
+        )
+        if not (isinstance(result, tuple) and len(result) == 2) or result[0]:
+            return
+        msg = str(result[1])
+        _log_event("qa_plan_shard_failed", project=project_ns, role=shard_role, msg=msg[:200])
+        self._notify_lead(
+            project_ns,
+            f"⚠️ [{shard_role}] qa plan fan-out: ส่งงานให้ shard นี้ไม่ได้ — {msg}",
+            from_role=shard_role,
+            note="qa_plan_shard_failed",
+            kind="qa-plan-shard-failed",
+        )
+
     def _fire_qa_plan_fanout(
         self, project_ns: str, base_role: str, cfg: dict, planner_note: str = ""
     ) -> None:
@@ -894,6 +929,7 @@ class PipelineMixin:
         base_task = str(cfg.get("task", ""))
         cwd = cfg.get("cwd")
         model = str(cfg.get("model", "") or "").strip() or None
+        backlog_id = str(cfg.get("backlog_id", "") or "").strip()
         plan_path = pathlib.Path(str(cfg.get("plan_file", "")))
 
         buckets: list[tuple[str, str]] = []
@@ -939,8 +975,8 @@ class PipelineMixin:
                 shard_task = base_task  # degraded: self-split via TAKKUB_SHARD
             self._defer(
                 delay,
-                lambda r=shard_role, t=shard_task, kk=k, m=model: self.assign(
-                    r, cwd=cwd, task=t, shard_total=kk, project=project_ns, model=m
+                lambda r=shard_role, t=shard_task, kk=k, m=model: PipelineMixin._assign_plan_shard(
+                    self, project_ns, r, cwd, t, kk, m, backlog_id
                 ),
             )
             fired.append(shard_role)

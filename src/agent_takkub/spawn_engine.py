@@ -280,12 +280,9 @@ def _pane_cli_bin_dir() -> str:
     bin_dir = cli_shim.pane_bin_dir(DATA_HOME, REPO_ROOT)
     if DATA_HOME == REPO_ROOT:
         return str(bin_dir)
-    from .venv_integrity import interpreter_dir
+    from .venv_integrity import resolve_cockpit_python
 
-    if sys.platform == "win32":
-        py = interpreter_dir() / "python.exe"
-    else:
-        py = pathlib.Path(sys.executable)
+    py = resolve_cockpit_python()
     try:
         cli_shim.ensure_cli_shims(bin_dir, py)
     except OSError as exc:
@@ -1088,6 +1085,11 @@ class PaneState:
     # screen unchanged" clock + whether this episode's Lead notice went out.
     bg_wait_since_ts: float = 0.0
     bg_wait_notified: bool = False
+    # #1016 progress throttle: when the last progress notice went to Lead,
+    # and the latest update held since (with how many it stands for).
+    progress_notice_ts: float = 0.0
+    progress_held_note: str = ""
+    progress_held_count: int = 0
     # #655: throttle for the `stuck_recover_deferred_real_activity` log line
     # (the escalate-time last-chance probe fires every watchdog tick while
     # real activity persists — log the episode, not every 5s tick).
@@ -1251,6 +1253,9 @@ class PaneState:
     # screen `_rate_limit_suppressed` must not re-detect it every 5 s tick;
     # the latch clears itself the first tick the scrape no longer matches.
     quota_false_positive_armed: bool = False
+    # #1009: this episode's hit was confirmed and recorded for the audit
+    # trail (once). Reset by the detector at the start of every episode.
+    quota_hit_announced: bool = False
     # quota_banner_recorded: True from the tick the banner on this pane's
     # screen was recorded as an episode until the tick the scrape no longer
     # matches. The provider never repaints the banner away, so once the
@@ -1733,6 +1738,12 @@ class SpawnEngineMixin:
     # ──────────────────────────────────────────────────────────────
     def register_pane(self, pane: AgentPane | HeadlessPane, project: str | None = None) -> None:
         self._project_panes(project)[pane.role.name] = pane
+        if pane.role.name == LEAD.name:
+            # #1015: when this project's session began in this cockpit run —
+            # compose auto-down only stops stacks that came up after it.
+            self.__dict__.setdefault("_project_session_start", {}).setdefault(
+                self._resolve_project(project), time.time()
+            )
         pane.spawnRequested.connect(self._on_pane_spawn_clicked)
         pane.closeRequested.connect(self._on_pane_close_clicked)
         pane.inputBytes.connect(self._on_pane_input)
@@ -2487,6 +2498,42 @@ class SpawnEngineMixin:
             self._spawn_in_progress = False
             self._drain_spawn_queue()
 
+    def _ensure_native_chrome(self, role_name: str, project_ns: str) -> None:
+        """Start/reuse the cockpit-owned mb Chrome for a browser role's pane.
+
+        Called on spawn, and again when a task is handed to a pane that is
+        already running (#1011): that Chrome is released once every browser
+        pane has reported done, so the next task has to bring it back."""
+        base_role, shard_idx = _split_shard(role_name.lower().strip())
+        if (
+            not should_manage_native_chrome(base_role, shard_idx)
+            or os.environ.get("TAKKUB_SKIP_NATIVE_CHROME", "") == "1"
+        ):
+            return
+        manager = getattr(self, "_native_chrome", None)
+        if manager is None:
+            manager = self._native_chrome = NativeChromeManager()
+        chrome_ok, chrome_msg = manager.ensure_started()
+        _log_event(
+            "native_chrome",
+            role=role_name,
+            project=project_ns,
+            ok=chrome_ok,
+            msg=chrome_msg,
+        )
+        from .browser_chrome import CDP_HELD_ELSEWHERE
+
+        if not chrome_ok and chrome_msg.startswith(CDP_HELD_ELSEWHERE):
+            # #807: a pane told to attach to the user's browser must not
+            # find a cockpit Chrome at the same "localhost:9222" instead.
+            self._notify_lead(
+                project_ns,
+                f"⚠️ [{role_name}] {chrome_msg}",
+                from_role=role_name,
+                note="native_chrome_cdp_conflict",
+                kind="native-chrome-cdp-conflict",
+            )
+
     def spawn(
         self,
         role_name: str,
@@ -2805,33 +2852,7 @@ class SpawnEngineMixin:
         # Claude, Codex, and Gemini. Shards deliberately skip this path: mb
         # cannot target a per-shard port and would make every shard drive the
         # same browser (#92); their isolated Playwright MCP remains available.
-        if (
-            should_manage_native_chrome(base_role, shard_idx)
-            and os.environ.get("TAKKUB_SKIP_NATIVE_CHROME", "") != "1"
-        ):
-            manager = getattr(self, "_native_chrome", None)
-            if manager is None:
-                manager = self._native_chrome = NativeChromeManager()
-            chrome_ok, chrome_msg = manager.ensure_started()
-            _log_event(
-                "native_chrome",
-                role=role_name,
-                project=project_ns,
-                ok=chrome_ok,
-                msg=chrome_msg,
-            )
-            from .browser_chrome import CDP_HELD_ELSEWHERE
-
-            if not chrome_ok and chrome_msg.startswith(CDP_HELD_ELSEWHERE):
-                # #807: a pane told to attach to the user's browser must not
-                # find a cockpit Chrome at the same "localhost:9222" instead.
-                self._notify_lead(
-                    project_ns,
-                    f"⚠️ [{role_name}] {chrome_msg}",
-                    from_role=role_name,
-                    note="native_chrome_cdp_conflict",
-                    kind="native-chrome-cdp-conflict",
-                )
+        SpawnEngineMixin._ensure_native_chrome(self, role_name, project_ns)
 
         # ── shell pane: plain PowerShell, no agent ──────────────────
         # The "Open Shell" status-bar button drops the user into a raw

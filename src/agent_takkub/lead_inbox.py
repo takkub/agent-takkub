@@ -573,6 +573,31 @@ def _notice_role_tag(body: str) -> str | None:
     return None
 
 
+# #1021 / #1016 / #1013: status-only notices. The cockpit already handled
+# the event itself (moved the task, parked it, learned a skill, swept child
+# processes) and nothing is asked of the Lead, yet each one used to be pasted
+# into the Lead pane as a fresh turn — a whole cached-context read to answer
+# "nothing to do". They are logged (`lead_notice`, with a preview) for the
+# audit trail, the log panel and `takkub ma`, and never reach an AI pane, the
+# digest or the durable inbox (so a restart cannot replay them either).
+# A FAILED recovery is not in this set: `quota-reroute-failed` and
+# `limit-autoresume-stopped` still interrupt the Lead, once.
+STATUS_ONLY_NOTICE_KINDS: frozenset[str] = frozenset(
+    {
+        "quota-hit",
+        "quota-reset",
+        "quota-false-positive",
+        "quota-rerouted",
+        "limit-parked",
+        "limit-resumed",
+        "rate-limit-reset",
+        "skill-learning",
+        "subprocess-cleanup",
+        "assign-provider-switch",
+    }
+)
+
+
 def _log_lead_notice(kind: str | None, *, from_role: str, project_ns: str, body: str = "") -> None:
     """Log one `_notify_lead` call as a countable `lead_notice` event (#464 —
     Lead noise audit). *emitter* is the immediate caller's own file:line
@@ -4989,6 +5014,13 @@ class LeadInboxMixin:
             return
         occurred_ts = queued_ts if queued_ts is not None else time.time()
         _log_lead_notice(kind, from_role=from_role, project_ns=project_ns, body=body)
+        if kind in STATUS_ONLY_NOTICE_KINDS:
+            # Logged above; the pane chips / `takkub status` carry the state.
+            try:
+                self.statusChanged.emit()
+            except Exception:  # bare test double without the Qt signal
+                pass
+            return
         # #441: done notes / proposals / CCs are the cockpit's own copy of
         # whatever the pane printed — scrub credential values before the
         # text lands in the Lead transcript or the durable inbox file.

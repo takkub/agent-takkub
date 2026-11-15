@@ -517,6 +517,21 @@ def _usage_confirms_limit(
 # ── status-dump helpers (#158) — pure, no Qt/network, safe on a mock pane ──
 
 
+def _pane_mid_turn(pane) -> bool:
+    """#938: the pane is streaming a turn right now (fresh output, not at its
+    ready prompt) — proof its provider is still serving it. Any doubt → False."""
+    try:
+        sess = getattr(pane, "session", None)
+        if sess is None:
+            return False
+        quiet = sess.seconds_since_output()
+        if not isinstance(quiet, (int, float)) or quiet > 10.0:
+            return False
+        return sess.is_at_ready_prompt() is False
+    except Exception:
+        return False
+
+
 def _pane_cwd(pane: AgentPane | None) -> str | None:
     """Best-effort task cwd for *pane* — used to locate the working tree for
     the git-status half of the give-up dump. None on anything unexpected
@@ -648,7 +663,6 @@ def _lead_provider_takeover_brief(
     panes: dict,
     *,
     manual: bool = False,
-    restoring: bool = False,
 ) -> str:
     """Build the cross-provider context a replacement Lead can safely use.
 
@@ -661,9 +675,7 @@ def _lead_provider_takeover_brief(
     lines = [
         "[system] Lead provider takeover",
         (
-            f"The previous Lead ({hit_provider}) was a quota fallback; the configured provider is available again. "
-            if restoring
-            else f"The previous Lead ({hit_provider}) was replaced by the user. "
+            f"The previous Lead ({hit_provider}) was replaced by the user. "
             if manual
             else f"The previous Lead ({hit_provider}) hit its quota. "
         )
@@ -767,10 +779,10 @@ class AutoResumeMixin:
         # even though `effective_provider_for("lead")` still says claude):
         # claude → the profile's limit_status window, codex/gemini → the
         # #663 `fetch_provider_usage` probe. A provider with no usable probe
-        # (opencode/cursor, or a fetch error) answers "unknown", which
-        # keeps the pre-#704 behaviour: signal (a) alone after the #595
-        # fallback timeout. Only an explicit "not exhausted" answer clears
-        # the episode as a false positive (`_on_limit_usage_denied`).
+        # (opencode/cursor, or a fetch error) answers "unknown", and the
+        # pane's own screen decides (`_on_limit_usage_unknown`). An explicit
+        # "not exhausted" answer clears the episode as a false positive
+        # (`_on_limit_usage_denied`).
         if ps.limit_confirm_first_attempt_ts == 0.0:
             ps.limit_confirm_first_attempt_ts = now
         elif (now - ps.limit_confirm_first_attempt_ts) >= auto_resume.CONFIRM_FALLBACK_TIMEOUT_S:
@@ -778,13 +790,20 @@ class AutoResumeMixin:
             # incident had this retry every ~5s tick for 2h51m+ (1637
             # `pane_limit_confirm_failed` events) with zero reroute. Fall
             # back to signal (a) alone rather than sit silent indefinitely.
+            screen = self._screen_quota_verdict(project, role, ps)
             _log_event(
                 "pane_limit_confirm_timeout_fallback",
                 role=role,
                 project=project,
                 waited_s=int(now - ps.limit_confirm_first_attempt_ts),
+                screen=screen,
             )
-            self._reroute_or_park(project, role, ps)
+            if screen == "blocked":
+                self._reroute_or_park(project, role, ps)
+            else:
+                # Three minutes on, the pane has printed past the banner or
+                # scrolled it away: it was never stopped by it (#1009).
+                self._clear_quota_false_positive(project, role, ps, None)
             return
 
         if (now - ps.limit_confirm_last_attempt_ts) < auto_resume.CONFIRM_RETRY_INTERVAL_S:
@@ -906,9 +925,33 @@ class AutoResumeMixin:
         )
         return True
 
+    def _announce_quota_hit(self, project: str, role: str, ps: PaneState) -> None:
+        """Record a hit the moment it is acted on — once per episode, and
+        only for a hit that got this far (#1009: never announce a banner
+        match that the confirm loop then takes back)."""
+        if ps.quota_hit_announced:
+            return
+        ps.quota_hit_announced = True
+        announce = getattr(self, "_notify_quota_hit", None)  # absent on bare doubles
+        if announce is None:
+            return
+        pane = getattr(self, "_panes_by_project", {}).get(project, {}).get(role)
+        try:
+            announce(
+                project,
+                role,
+                ps.quota_provider or "claude",
+                ps.rate_limited_until,
+                ps.quota_marker,
+                pane,
+            )
+        except Exception:
+            pass
+
     def _reroute_or_park(self, project: str, role: str, ps: PaneState) -> None:
         hit_provider = ps.quota_provider or "claude"
         reset_at = ps.rate_limited_until
+        AutoResumeMixin._announce_quota_hit(self, project, role, ps)
 
         # Another logged-in account of the SAME provider first (user request
         # 2026-10-08): same CLI, same model/effort, only the quota changes —
@@ -1068,7 +1111,6 @@ class AutoResumeMixin:
         *,
         manual: bool = False,
         account: str | None = None,
-        restoring: bool = False,
         cause: str = "",
     ) -> None:
         """Close the quota-hit pane and respawn the SAME role on
@@ -1093,7 +1135,6 @@ class AutoResumeMixin:
                 new_provider,
                 self._panes_by_project.get(project, {}),
                 manual=manual,
-                restoring=restoring,
             )
             if is_lead
             else ""
@@ -1136,6 +1177,9 @@ class AutoResumeMixin:
         snap_assign_dirty_snapshot = ps.assign_dirty_snapshot
         snap_assign_non_git = bool(ps.assign_non_git)
         snap_distinct_from = ps.distinct_from
+        # #1017: a QA planner (`--plan --shards N`) rerouted mid-plan must still
+        # fan out when the replacement reports its plan.
+        snap_plan_fanout = ps.plan_fanout
         # This is the same registered assignment, not a fresh assign. Losing
         # its identity/scope here disconnects delivery and done from the
         # durable ledger, and resets its work budget on every quota switch.
@@ -1169,21 +1213,11 @@ class AutoResumeMixin:
             ps,
             pane,
             status="rerouted",
-            reason=(
-                "quota_provider_restored"
-                if restoring
-                else "manual_lead_replace"
-                if manual
-                else f"{from_label}->{to_label}"
-            ),
+            reason="manual_lead_replace" if manual else f"{from_label}->{to_label}",
         )
         human = _human_duration(max(0, reset_at - time.time())) if reset_at else "ไม่ทราบ"
         _log_event(
-            "lead_quota_provider_restored"
-            if restoring
-            else "lead_manually_replaced"
-            if manual
-            else "pane_quota_rerouted",
+            "lead_manually_replaced" if manual else "pane_quota_rerouted",
             role=role,
             project=project,
             from_provider=hit_provider,
@@ -1231,13 +1265,7 @@ class AutoResumeMixin:
             # and the takeover brief was pasted into the SAME pane every
             # 5 s tick — 300+ rounds on prod before anyone noticed.
             close_kwargs["force"] = True
-            close_kwargs["reason"] = (
-                "quota_provider_restored"
-                if restoring
-                else "manual_lead_replace"
-                if manual
-                else "quota_reroute"
-            )
+            close_kwargs["reason"] = "manual_lead_replace" if manual else "quota_reroute"
         self.close(role, **close_kwargs)
         # close() pops PaneState. Keep the handover latch on the fresh state
         # until the timer runs, so another × click cannot queue a second
@@ -1284,6 +1312,8 @@ class AutoResumeMixin:
             if snap_assign_dirty_snapshot is not None:
                 _ps_r.assign_dirty_snapshot = snap_assign_dirty_snapshot
             _ps_r.assign_non_git = snap_assign_non_git
+            if snap_plan_fanout is not None:
+                _ps_r.plan_fanout = snap_plan_fanout
 
             ok, msg = self.spawn(
                 role,
@@ -1444,8 +1474,9 @@ class AutoResumeMixin:
         self._clear_provider_quota_stall(project, provider, reason="window_elapsed")
 
     def _clear_provider_quota_stall(self, project: str, provider: str, *, reason: str) -> None:
-        """Clear the hit and restore a live Lead that fled this provider."""
-        from . import provider_config, provider_state
+        """Clear the provider's recorded hit. A live Lead that fled this
+        provider is left running where it is (#1012)."""
+        from . import provider_state
 
         provider_state.clear_quota_reset(provider)
         # #916: a reprobe clears the PROVIDER (some account is free), but a
@@ -1482,27 +1513,25 @@ class AutoResumeMixin:
         recovery = self.__dict__.get("_lead_quota_recovery", {}).get(project)
         if recovery is None or recovery[0] != provider:
             return
-        if provider_config.provider_for(LEAD.name, project) != provider:
-            return  # the operator changed the configured Lead meanwhile
         pane = self._project_panes(project).get(LEAD.name)
         if pane is None or pane.session is None or not pane.session.is_alive:
             return  # the existing reset/respawn path handles a dead Lead
+        # #1012: a live Lead stays where it is. Quota coming back on the
+        # configured provider is not consent to close a healthy session the
+        # user is talking to (prod 2026-11-11: a working Claude Lead was
+        # force-closed mid-conversation to go back to Codex, and the task
+        # being delivered to it was lost). The configured provider is used
+        # again the next time a Lead is started for this project.
         live_provider = getattr(getattr(pane, "model", None), "provider_name", None)
-        if live_provider == provider:
-            self._lead_quota_recovery.pop(project, None)
-            self.__dict__.get("_lead_quota_recovery_spawned_at", {}).pop(project, None)
-            return
-        ps = self._ps(f"{project}::{LEAD.name}")
-        self._reroute_pane_to_provider(
-            project,
-            LEAD.name,
-            ps,
-            provider,
-            str(live_provider or ""),
-            0.0,
-            manual=True,
-            restoring=True,
-        )
+        self._lead_quota_recovery.pop(project, None)
+        self.__dict__.get("_lead_quota_recovery_spawned_at", {}).pop(project, None)
+        if live_provider != provider:
+            _log_event(
+                "lead_quota_restore_skipped_live_lead",
+                project=project,
+                current_provider=live_provider,
+                configured_provider=provider,
+            )
 
     def _panes_parked_on(self, project: str, provider: str) -> list[tuple[str, float]]:
         """(role, reset_at) for live panes of *project* parked for a usage
@@ -1622,9 +1651,9 @@ class AutoResumeMixin:
 
     def _do_confirm_usage_fetch(self, project: str, role: str, config_dir: Path) -> None:
         """Runs in a background thread — network I/O, must never touch a Qt
-        widget directly. Emits `limitUsageConfirmed` (or, #704,
-        `limitUsageDenied`) so the park decision itself runs back on the Qt
-        thread."""
+        widget directly. Emits `limitUsageConfirmed`, `limitUsageDenied`
+        (#704) or `limitUsageUnknown` so the park decision itself runs back
+        on the Qt thread."""
         key = f"{project}::{role}"
         ps = getattr(self, "_pane_state", {}).get(key)
         provider = (ps.quota_provider if ps is not None else "") or effective_provider_for(
@@ -1636,15 +1665,88 @@ class AutoResumeMixin:
         if verdict == "denied":
             self.limitUsageDenied.emit(project, role, float(utilization))
             return
-        self.limitUsageConfirmed.emit(project, role, verdict == "confirmed")
+        if verdict == "confirmed":
+            self.limitUsageConfirmed.emit(project, role, True)
+            return
+        self.limitUsageUnknown.emit(project, role)
+
+    def _screen_quota_verdict(self, project: str, role: str, ps: PaneState) -> str:
+        """What the pane's own screen says about a recorded quota hit, for
+        when the usage probe cannot answer (no probe for opencode/cursor, a
+        per-model quota the meter does not carry, a failed fetch):
+
+        - ``"blocked"`` — the banner is the pane's latest output and nothing
+          is moving, or the CLI's own retry line carries it.
+        - ``"working"`` — the banner is still the latest output, but the
+          pane is streaming right now: too early to call.
+        - ``"past"``    — the pane printed well past the banner and carried on.
+        - ``"gone"``    — the banner is no longer on screen.
+
+        A screen that cannot be read answers "blocked": the detector's own
+        banner match stands, as it did before this check existed."""
+        pane = getattr(self, "_panes_by_project", {}).get(project, {}).get(role)
+        session = getattr(pane, "session", None)
+        if session is None:
+            return "blocked"
+        if ps.quota_marker == "usage-meter":
+            return "working" if _pane_mid_turn(pane) else "blocked"
+        try:
+            state = session.quota_banner_state(ps.quota_provider or CLAUDE)
+        except Exception:
+            return "blocked"
+        if state == "none":
+            return "gone"
+        if state == "stale":
+            return "past"
+        if state == "latest" and _pane_mid_turn(pane):
+            return "working"
+        return "blocked"
+
+    def _on_limit_usage_unknown(self, project: str, role: str) -> None:
+        """Qt-thread slot for `limitUsageUnknown`: the usage probe had no
+        answer. That used to be read as "not a quota hit — probably quoted
+        text" and the episode was cleared on the spot, so an agy pane showing
+        "Individual quota reached" (#1008) and opencode panes stuck in a
+        "Free usage limit reached" retry loop (#1010, #1020 — 40 min of zero
+        work) were never moved. The screen decides instead."""
+        ps = self._pane_state.get(f"{project}::{role}")
+        if ps is None:
+            return
+        ps.limit_confirm_pending = False
+        if ps.limit_park_stopped or ps.limit_parked or ps.quota_reroute_pending:
+            return
+        if (not ps.last_assigned_task and role != LEAD.name) or not ps.rate_limited_until:
+            return  # task finished, or the limit already cleared meanwhile
+        verdict = self._screen_quota_verdict(project, role, ps)
+        _log_event(
+            "pane_limit_confirm_unknown",
+            role=role,
+            project=project,
+            provider=ps.quota_provider,
+            screen=verdict,
+        )
+        if verdict in ("gone", "past"):
+            # #1009: it scrolled the banner away or worked on past it (agy
+            # dropping to another model) — it was never stopped by it.
+            self._clear_quota_false_positive(project, role, ps, None)
+        elif verdict == "blocked" and (ps.quota_provider or CLAUDE) != CLAUDE:
+            # No usable probe for this provider: its own banner, sitting as
+            # the last thing on a pane that stopped moving, is the evidence.
+            self._reroute_or_park(project, role, ps)
+        # claude + "blocked": its probe normally answers, so this is a fetch
+        # error — keep retrying; `_maybe_auto_resume_park` falls back to the
+        # banner alone after CONFIRM_FALLBACK_TIMEOUT_S (#595).
+        # "working": the pane is still producing output under the banner.
+        # Re-judged on the next confirm round, once it either scrolls the
+        # banner away or stops on it.
 
     def _on_limit_usage_denied(self, project: str, role: str, utilization: float | None) -> None:
         """Qt-thread slot for `limitUsageDenied` (#704): the provider's own
         telemetry says it is NOT exhausted, so the banner match was quoted
         text (a cockpit notice, a log the pane printed, a teammate's banner
         echoed in a report) rather than this pane's limit. Undo everything
-        the detector recorded, arm the re-detect latch for as long as that
-        text stays on screen, and tell Lead once."""
+        the detector recorded and arm the re-detect latch for as long as
+        that text stays on screen."""
         key = f"{project}::{role}"
         ps = self._pane_state.get(key)
         if ps is None:
@@ -1662,6 +1764,22 @@ class AutoResumeMixin:
                 # The live Codex footer is newer than a lagging usage API.
                 self._reroute_or_park(project, role, ps)
                 return
+        if (ps.quota_provider or CLAUDE) not in (CLAUDE, "codex") and (
+            self._screen_quota_verdict(project, role, ps) == "blocked"
+        ):
+            # The meter reads the account; agy's "Individual quota reached"
+            # is per model and opencode's free tier has no meter at all
+            # (#1008/#1010/#1020). A pane stopped on its own banner is hit.
+            self._reroute_or_park(project, role, ps)
+            return
+        self._clear_quota_false_positive(project, role, ps, utilization)
+
+    def _clear_quota_false_positive(
+        self, project: str, role: str, ps: PaneState, utilization: float | None
+    ) -> None:
+        """Undo a detection that turned out not to be this pane's limit and
+        latch it so the same on-screen text is not re-detected. Nothing was
+        announced for it (#1009), so nothing is retracted either."""
         marker = ps.quota_marker
         ps.rate_limited_until = 0.0
         ps.quota_marker = ""
@@ -1676,20 +1794,10 @@ class AutoResumeMixin:
             marker=marker,
             utilization=utilization,
         )
-        probe_note = (
-            f"probe ยืนยันใช้ไป {utilization:.0f}%"
-            if utilization is not None
-            else "ยืนยันแบนเนอร์โควตาไม่ได้"
-        )
-        self._notify_lead(
-            project,
-            f"ℹ️ [system] {role} ({ps.quota_provider or 'claude'}) ไม่ได้ชนโควตา — "
-            f"ข้อความ usage-limit ที่เห็นบนจออาจเป็นข้อความที่ถูก quote ({probe_note}) "
-            "ยกเลิกสถานะ stalled:quota แล้ว",
-            from_role=role,
-            note="rate_limit_false_positive",
-            kind="quota-false-positive",
-        )
+        try:
+            self.statusChanged.emit()
+        except (RuntimeError, AttributeError):
+            pass
 
     def _on_limit_usage_confirmed(self, project: str, role: str, confirmed: bool) -> None:
         """Qt-thread slot for `limitUsageConfirmed`. Re-validates against
@@ -1705,8 +1813,7 @@ class AutoResumeMixin:
             return  # task finished, or the limit already cleared meanwhile
 
         if not confirmed:
-            _log_event("pane_limit_confirm_failed", role=role, project=project)
-            self._on_limit_usage_denied(project, role, None)
+            self._on_limit_usage_unknown(project, role)
             return
 
         self._reroute_or_park(project, role, ps)

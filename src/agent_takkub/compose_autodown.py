@@ -15,7 +15,14 @@ Ownership is decided by the compose label
 whose configured path (or managed worktree root) contains that directory most
 specifically. A stack whose working dir is equally claimed by another OPEN
 tab is skipped as shared. Containers not created by compose carry no label
-and are never looked at. There is deliberately no per-project switch: the
+and are never looked at.
+
+And by time (#1015): only a stack whose containers all came up AFTER the work
+being wrapped up began is downed — the devops task for a prod-deploy done,
+the project's session for end-session / tab close. A stack that was already
+running (the container serving the live site through a tunnel went down for
+3 minutes after a Cloudflare deploy that never touched docker) is not
+something this work left behind. There is deliberately no per-project switch: the
 user does not edit projects.json — the safety rules above decide on their own.
 
 Every docker call has a timeout and never raises — Docker not installed or not
@@ -56,6 +63,8 @@ class AutoDownReport:
     freed_mib: float = 0.0
     skipped: list[tuple[str, str]] = field(default_factory=list)
     failed: list[tuple[str, str]] = field(default_factory=list)
+    # Stacks left alone because they were up before this work began (#1015).
+    kept: list[str] = field(default_factory=list)
     docker_unavailable: bool = False
 
     @property
@@ -230,19 +239,80 @@ def memory_mib(names: list[str]) -> float:
     return total
 
 
+_RFC3339_RE = re.compile(r"^(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d)(?:\.(\d+))?(Z|[+-]\d\d:\d\d)$")
+
+
+def _parse_docker_time(raw: str) -> float:
+    """Epoch for docker's RFC 3339 timestamp (nanosecond fraction); 0.0 for
+    the zero time of a never-started container or anything unparsable."""
+    m = _RFC3339_RE.match((raw or "").strip())
+    if not m or m.group(1).startswith("0001-"):
+        return 0.0
+    from datetime import datetime
+
+    frac = (m.group(2) or "0")[:6].ljust(6, "0")
+    zone = "+00:00" if m.group(3) == "Z" else m.group(3)
+    try:
+        return datetime.fromisoformat(f"{m.group(1)}.{frac}{zone}").timestamp()
+    except ValueError:
+        return 0.0
+
+
+def container_start_times(names: list[str]) -> dict[str, float]:
+    """name → epoch the container last came up (the later of created and
+    started). A name docker could not answer for is simply absent."""
+    if not names:
+        return {}
+    rc, out = _docker(
+        ["inspect", "--format", "{{.Name}}\t{{.Created}}\t{{.State.StartedAt}}", *names],
+        _PS_TIMEOUT,
+    )
+    times: dict[str, float] = {}
+    if rc != 0:
+        return times
+    for line in out.splitlines():
+        cols = line.split("\t")
+        if len(cols) < 3:
+            continue
+        times[cols[0].strip().lstrip("/")] = max(
+            _parse_docker_time(cols[1]), _parse_docker_time(cols[2])
+        )
+    return times
+
+
+def started_since(members: Iterable[Container], times: Mapping[str, float], since: float) -> bool:
+    """True when every container of the stack came up at/after *since* — the
+    work being wrapped up is what started it (#1015). One container that was
+    already there, or whose start time is unknown, makes the stack not ours
+    to stop."""
+    names = [c.name for c in members]
+    return bool(names) and all(times.get(name, 0.0) >= since for name in names)
+
+
 def run_auto_down(
     project: str,
     trigger: str,
     own_roots: Iterable[str | Path],
     other_open: Mapping[str, Iterable[str | Path]],
+    started_after: float | None = None,
 ) -> AutoDownReport:
+    """Down the project's stacks that came up at/after *started_after* (the
+    start of the work being wrapped up). #1015: a stack that was already
+    running before that — a container serving the live site through a tunnel
+    — is never touched, whatever its name; it is reported in ``kept`` (event
+    log only, no notice). ``started_after=None`` means the start is unknown,
+    and nothing is downed."""
     report = AutoDownReport(project=project, trigger=trigger)
     containers = list_compose_containers()
     if containers is None:
         report.docker_unavailable = True
         return report
     ours, report.skipped = plan_stacks(containers, own_roots, other_open)
+    times = container_start_times([c.name for members in ours.values() for c in members])
     for stack, members in ours.items():
+        if started_after is None or not started_since(members, times, started_after):
+            report.kept.append(stack)
+            continue
         running = [c.name for c in members if c.state in ("running", "restarting", "paused")]
         freed = memory_mib(running)
         rc, out = _docker(["compose", "-p", stack, "down"], _DOWN_TIMEOUT)

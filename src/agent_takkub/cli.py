@@ -1210,9 +1210,20 @@ def cmd_assign(args: argparse.Namespace) -> dict:
             )
         ]
         detail = ("\n" + "\n".join(resource_blocked)) if resource_blocked else ""
+        # #1017: "queued 0/2 shards" alone left Lead guessing why — say what
+        # each refused shard was told (one line when they all share a reason).
+        reasons = {
+            n: str(r.get("msg") or r.get("error") or "ไม่ทราบสาเหตุ")
+            for n, r in enumerate(results, 1)
+            if not r.get("ok")
+        }
+        if reasons and len(reasons) > 1 and len(set(reasons.values())) == 1:
+            fail_detail = f"\nทุก shard ที่ไม่ผ่าน: {next(iter(reasons.values()))}"
+        else:
+            fail_detail = "".join(f"\n{args.role}#{n}: {why}" for n, why in reasons.items())
         return {
             "ok": ok_count == shards,
-            "msg": f"queued {ok_count}/{shards} shards{warn}{detail}",
+            "msg": f"queued {ok_count}/{shards} shards{warn}{detail}{fail_detail}",
         }
     resp = _request(
         _with_project(
@@ -1686,7 +1697,7 @@ def cmd_send(args: argparse.Namespace) -> dict:
         return {"ok": False, "msg": "send requires a message (or --to user --file <path>)"}
     _warn_deprecated_role(getattr(args, "to", None))
     kind = getattr(args, "kind", "instruction") or "instruction"
-    return _request(
+    resp = _request(
         _with_project(
             {
                 "cmd": "send",
@@ -1697,6 +1708,66 @@ def cmd_send(args: argparse.Namespace) -> dict:
             }
         )
     )
+    wait_s = float(getattr(args, "wait", _SEND_RECEIPT_WAIT_S) or 0.0)
+    if getattr(args, "no_wait", False):
+        wait_s = 0.0
+    return _await_send_receipt(resp, args.to, wait_s)
+
+
+# #1007: how long `takkub send` waits for the pane to show it took the
+# message before answering. The submit-verify chain normally settles in 1-3 s;
+# long enough to cover it, short enough not to stall a Lead turn.
+_SEND_RECEIPT_WAIT_S = 8.0
+_SEND_ID_RE = re.compile(r"\(id ([0-9a-f]{12})\)")
+
+
+def _await_send_receipt(resp: dict, to_role: str, wait_s: float) -> dict:
+    """Turn `send`'s "written, receipt pending" into an answer the caller can
+    act on (#1007): wait up to *wait_s* for the message's own record to say
+    the pane took it, and report what was actually observed — confirmed,
+    failed (with the reason), or still unconfirmed after the wait. Reads the
+    message log on disk; the cockpit is not asked again."""
+    if not resp.get("ok") or wait_s <= 0:
+        return resp
+    m = _SEND_ID_RE.search(str(resp.get("msg", "")))
+    if not m:
+        return resp  # no pane open yet (stored for its spawn), or a shell pane
+    msg_id = m.group(1)
+    from . import role_messages
+    from .config import RUNTIME_DIR
+
+    started = time.monotonic()
+    rec: dict | None = None
+    while True:
+        rec = role_messages.find_record(RUNTIME_DIR, msg_id)
+        state = str((rec or {}).get("state", ""))
+        if state in ("delivered", "abandoned"):
+            break
+        if time.monotonic() - started >= wait_s:
+            break
+        time.sleep(0.4)
+    elapsed = time.monotonic() - started
+    state = str((rec or {}).get("state", ""))
+    if state == "delivered":
+        return {
+            **resp,
+            "msg": f"delivered to {to_role} (id {msg_id}) — pane รับข้อความแล้ว "
+            f"(ยืนยันใน {elapsed:.1f}s)",
+        }
+    if state == "abandoned":
+        reason = str((rec or {}).get("abandoned_reason", "") or "ไม่ทราบสาเหตุ")
+        return {
+            "ok": False,
+            "msg": f"ส่งไม่ถึง {to_role} (id {msg_id}): {reason} — "
+            f"ดู `takkub messages --role {to_role}`",
+            "exit_code": 1,
+        }
+    return {
+        **resp,
+        "msg": f"sent to {to_role} (id {msg_id}) — เขียนเข้า session แล้ว แต่ pane ยังไม่ยืนยัน"
+        f"รับใน {elapsed:.0f}s (อาจกำลังรัน tool ยาว) · ยังไม่ถือว่าถึง — ตรวจด้วย "
+        f"`takkub messages --role {to_role}`",
+    }
 
 
 def _resolve_role_arg(args: argparse.Namespace) -> tuple[str | None, str | None]:

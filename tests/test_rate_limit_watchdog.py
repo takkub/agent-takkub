@@ -405,7 +405,9 @@ class TestStaleBannerAfterReset:
             assert suppressed is False
             timer.assert_not_called()
         assert ps.rate_limited_until == 0.0
-        o._notify_quota_hit.assert_called_once()
+        # #1009: detection never announces; the hit is recorded only once the
+        # confirm loop acts on it.
+        o._notify_quota_hit.assert_not_called()
 
     def test_reset_timer_path_then_stale_banner_ignored(self) -> None:
         o = _bare_emit_orch()
@@ -430,7 +432,7 @@ class TestStaleBannerAfterReset:
         assert suppressed is False
         timer.assert_not_called()
         assert ps.rate_limited_until == 0.0
-        o._notify_quota_hit.assert_called_once()
+        o._notify_quota_hit.assert_not_called()
 
     def test_episode_cleared_elsewhere_still_latches(self) -> None:
         """Auto-resume's wake (limit_autoresume._wake_parked_pane) zeroes
@@ -471,4 +473,5 @@ class TestStaleBannerAfterReset:
         assert suppressed is True
         assert ps.rate_limited_until == now + 3620 + 7200
         timer.assert_called_once()
-        assert o._notify_quota_hit.call_count == 2
+        assert ps.quota_hit_announced is False  # a fresh, not-yet-confirmed episode
+        o._notify_quota_hit.assert_not_called()

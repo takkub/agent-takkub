@@ -345,6 +345,36 @@ def undelivered_for_generation(
     return undelivered_in(read(runtime_dir, project_ns), role, current_generation)
 
 
+def find_record(runtime_dir: pathlib.Path, msg_id: str) -> dict | None:
+    """The record with id *msg_id* in any project's log, or None (#1007).
+
+    Read straight from disk, uncached: this backs the CLI's short wait for a
+    delivery acknowledgement, which runs in its own process and must see the
+    cockpit's latest write. Ids are random 12-hex, so the project need not be
+    known. Never raises."""
+    if not msg_id:
+        return None
+    try:
+        files = sorted(
+            (runtime_dir / "messages").glob("*.jsonl"),
+            key=lambda p: p.stat().st_mtime,
+            reverse=True,
+        )
+    except OSError:
+        return None
+    for path in files:
+        try:
+            raw = path.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        if msg_id not in raw:
+            continue
+        for rec in reversed(_parse_lines(raw)):
+            if rec.get("id") == msg_id:
+                return dict(rec)
+    return None
+
+
 def format_for_cli(records: list[dict], *, limit: int = 20) -> list[str]:
     """Human-readable lines for `takkub messages`, newest last."""
     from datetime import datetime

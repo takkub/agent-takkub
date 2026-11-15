@@ -435,6 +435,20 @@ def _add_send(sub: Any, c: ModuleType) -> None:
         default="instruction",
         help="message kind: instruction (default, requires follow-up review if unverified) or info (informational, does not trigger follow-up warning on done)",
     )
+    ss.add_argument(
+        "--wait",
+        type=float,
+        default=8.0,
+        metavar="SECONDS",
+        help="how long to wait for the pane to confirm it took the message before "
+        "answering (#1007, default 8) — the reply then says delivered / failed / "
+        "still unconfirmed instead of a bare 'sent'",
+    )
+    ss.add_argument(
+        "--no-wait",
+        action="store_true",
+        help="answer as soon as the message is written, without waiting for the receipt",
+    )
     ss.set_defaults(func=c.cmd_send)
 
 

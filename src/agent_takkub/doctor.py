@@ -1668,7 +1668,11 @@ def check_installed_integrity() -> list[Finding]:
 
     pane_bin = _cli_shim.pane_bin_dir(DATA_HOME, REPO_ROOT)
     try:
-        _cli_shim.ensure_cli_shims(pane_bin, CLI_BIN_DIR / py_name_for_shim())
+        from .venv_integrity import resolve_cockpit_python as _resolve_cockpit_python
+
+        # #1019: the same interpreter spawn writes into the shims — never a
+        # second derivation that can disagree with it.
+        _cli_shim.ensure_cli_shims(pane_bin, _resolve_cockpit_python())
         findings.append(Finding("installed", "pane-bin", Status.OK, str(pane_bin)))
     except OSError as exc:
         findings.append(

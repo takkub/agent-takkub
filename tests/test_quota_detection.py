@@ -271,84 +271,133 @@ def _quota_pane(reset_at: float, marker: str = "individual quota reached", model
     return pane
 
 
-class TestRateLimitSuppressedNotifiesImmediately:
-    def test_detection_calls_notify_with_provider_and_role(self) -> None:
-        o = _bare_orch_with_notify()
-        now = time.time()
-        pane = _quota_pane(now + 6000)
-        with (
-            patch("agent_takkub.orchestrator.QTimer.singleShot"),
-            patch("agent_takkub.orchestrator._log_event"),
-        ):
-            suppressed = o._rate_limit_suppressed("proj", "frontend", pane, now)
-        assert suppressed is True
-        o._notify_lead.assert_called_once()
-        call_project, msg = o._notify_lead.call_args[0]
-        assert call_project == "proj"
-        assert "[system]" in msg
-        assert "frontend" in msg
-        assert "gemini" in msg
-        # #704: the matched phrase is never quoted — this notice lands on the
-        # Lead screen where the same detector runs.
-        assert "individual quota reached" not in msg
-        assert "usage-limit banner" in msg
-        ps = o._pane_state["proj::frontend"]
-        assert ps.quota_marker == "individual quota reached"
-        assert ps.quota_provider == "gemini"
+class TestQuotaHitAnnouncedOnlyOnceConfirmed:
+    """#1009: a banner match alone announces nothing — "hit quota" followed a
+    second later by a retraction made a user switch a working pane off its
+    provider. The hit is recorded when it is acted on (`_reroute_or_park`)."""
 
-    def test_non_claude_lead_does_not_disable_teammate_quota_detection(self) -> None:
-        """A Codex Lead still receives and can act on a teammate's quota hit."""
-        o = _bare_orch_with_notify()
-        now = time.time()
-        pane = _quota_pane(now + 6000)
-        lead = MagicMock()
-        lead.model.provider_name = "codex"
-        o._panes_by_project = {"proj": {"lead": lead, "frontend": pane}}
+    def _detect(self, o, pane, now, role="frontend"):
         with (
             patch("agent_takkub.orchestrator.QTimer.singleShot"),
             patch("agent_takkub.orchestrator._log_event") as log_event,
         ):
-            assert o._rate_limit_suppressed("proj", "frontend", pane, now) is True
-        assert o._pane_state["proj::frontend"].quota_provider == "gemini"
-        assert any(call.args[0] == "rate_limit_detected" for call in log_event.call_args_list)
-        assert o._notify_lead.call_count == 1
+            return o._rate_limit_suppressed("proj", role, pane, now), log_event
 
-    def test_model_downgrade_surfaced_in_notice(self) -> None:
+    def test_detection_records_the_episode_without_announcing(self) -> None:
+        o = _bare_orch_with_notify()
+        now = time.time()
+        pane = _quota_pane(now + 6000)
+        suppressed, log_event = self._detect(o, pane, now)
+        assert suppressed is True
+        o._notify_lead.assert_not_called()
+        assert any(call.args[0] == "rate_limit_detected" for call in log_event.call_args_list)
+        ps = o._pane_state["proj::frontend"]
+        assert ps.quota_marker == "individual quota reached"
+        assert ps.quota_provider == "gemini"
+        assert ps.quota_hit_announced is False
+
+    def test_acting_on_the_hit_announces_it_once(self) -> None:
+        from agent_takkub.limit_autoresume import AutoResumeMixin
+
         o = _bare_orch_with_notify()
         now = time.time()
         pane = _quota_pane(now + 6000, model="Gemini 3.5 Flash (Medium)")
-        with (
-            patch("agent_takkub.orchestrator.QTimer.singleShot"),
-            patch("agent_takkub.orchestrator._log_event"),
-        ):
-            o._rate_limit_suppressed("proj", "frontend", pane, now)
-        _, msg = o._notify_lead.call_args[0]
+        o._panes_by_project = {"proj": {"frontend": pane}}
+        self._detect(o, pane, now)
+        ps = o._pane_state["proj::frontend"]
+        AutoResumeMixin._announce_quota_hit(o, "proj", "frontend", ps)
+        AutoResumeMixin._announce_quota_hit(o, "proj", "frontend", ps)
+        o._notify_lead.assert_called_once()
+        call_project, msg = o._notify_lead.call_args[0]
+        assert call_project == "proj"
+        assert o._notify_lead.call_args.kwargs["kind"] == "quota-hit"
+        assert "[system]" in msg and "frontend" in msg and "gemini" in msg
         assert "Gemini 3.5 Flash" in msg
+        # #704: the matched phrase is never quoted.
+        assert "individual quota reached" not in msg
+        assert "usage-limit banner" in msg
 
-    def test_second_tick_does_not_renotify(self) -> None:
+    def test_a_new_episode_can_be_announced_again(self) -> None:
+        from agent_takkub.limit_autoresume import AutoResumeMixin
+
         o = _bare_orch_with_notify()
         now = time.time()
         pane = _quota_pane(now + 6000)
-        with (
-            patch("agent_takkub.orchestrator.QTimer.singleShot"),
-            patch("agent_takkub.orchestrator._log_event"),
-        ):
-            o._rate_limit_suppressed("proj", "qa", pane, now)
-            o._rate_limit_suppressed("proj", "qa", pane, now + 5)
-        assert o._notify_lead.call_count == 1
+        o._panes_by_project = {"proj": {"qa": pane}}
+        self._detect(o, pane, now, role="qa")
+        ps = o._pane_state["proj::qa"]
+        AutoResumeMixin._announce_quota_hit(o, "proj", "qa", ps)
+        ps.rate_limited_until = 0.0
+        ps.quota_banner_recorded = False
+        self._detect(o, pane, now + 10, role="qa")  # a fresh detection
+        assert ps.quota_hit_announced is False
+        AutoResumeMixin._announce_quota_hit(o, "proj", "qa", ps)
+        assert o._notify_lead.call_count == 2
 
-    def test_notify_failure_does_not_break_the_gate(self) -> None:
-        # notify is best-effort — a broken Lead-delivery path must never
-        # take down quota detection/suppression itself.
+    def test_announce_failure_does_not_break_the_reroute(self) -> None:
+        from agent_takkub.limit_autoresume import AutoResumeMixin
+
         o = _bare_orch_with_notify()
         o._notify_lead.side_effect = RuntimeError("boom")
-        now = time.time()
-        pane = _quota_pane(now + 6000)
-        with (
-            patch("agent_takkub.orchestrator.QTimer.singleShot"),
-            patch("agent_takkub.orchestrator._log_event"),
-        ):
-            assert o._rate_limit_suppressed("proj", "qa", pane, now) is True
+        ps = o._ps("proj::qa")
+        ps.rate_limited_until = time.time() + 600
+        AutoResumeMixin._announce_quota_hit(o, "proj", "qa", ps)  # must not raise
+        assert ps.quota_hit_announced is True
+
+
+class TestQuotaBannerState:
+    """The screen evidence the confirm loop falls back on when the usage
+    probe has no answer (#1008/#1009/#1010/#1020)."""
+
+    AGY = ("individual quota reached",)
+    OPENCODE = ("free usage limit reached",)
+
+    def test_no_banner(self) -> None:
+        from agent_takkub.pty_session import _quota_banner_state
+
+        assert _quota_banner_state(["• Working", "ran 3 tests"], self.AGY) == "none"
+
+    def test_agy_banner_as_the_last_output_is_latest(self) -> None:
+        from agent_takkub.pty_session import _quota_banner_state
+
+        screen = [
+            "● Edited src/app.tsx",
+            "⚠ Individual quota reached. Please upgrade your subscription. Resets in 4h48m",
+            "  Error ID 783d6dcf",
+            "╭──────────────╮",
+            "│ >            │",
+            "╰──────────────╯",
+            "Gemini 3.1 Pro · high        ? for shortcuts",
+        ]
+        assert _quota_banner_state(screen, self.AGY) == "latest"
+
+    def test_banner_the_pane_kept_working_past_is_stale(self) -> None:
+        from agent_takkub.pty_session import _quota_banner_state
+
+        screen = ["⚠ Individual quota reached. Resets in 4h48m"]
+        screen += [f"● Read file_{n}.ts" for n in range(20)]
+        assert _quota_banner_state(screen, self.AGY) == "stale"
+
+    def test_opencode_retry_line_is_a_live_block(self) -> None:
+        from agent_takkub.pty_session import _quota_banner_state
+
+        screen = [
+            "⚠ Retrying in 279s · attempt 4 · Free usage limit reached. Free models work in "
+            "OpenCode... subscribe to OpenCode Go",
+        ] + [f"  status row {n}" for n in range(30)]
+        assert _quota_banner_state(screen, self.OPENCODE) == "retrying"
+
+    def test_a_cockpit_notice_quoting_the_banner_is_not_a_banner(self) -> None:
+        from agent_takkub.pty_session import _quota_banner_state
+
+        screen = ["[system] qa (gemini) hit quota — Individual quota reached", "❯"]
+        assert _quota_banner_state(screen, self.AGY) == "none"
+
+    def test_prose_mentioning_the_phrase_is_not_a_banner(self) -> None:
+        from agent_takkub.pty_session import _quota_banner_state
+
+        screen = ["The log said individual quota reached at 15:31, so I retried."]
+        assert _quota_banner_state(screen, self.AGY) == "none"
 
 
 class TestStuckDetectorCatchesAgyElapsedCounter:

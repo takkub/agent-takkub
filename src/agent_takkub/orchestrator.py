@@ -75,7 +75,10 @@ from .lead_inbox import (  # re-exported for test/compat imports; mixin provides
     done_roles_in_notice,
 )
 from .lead_wait import LeadWaitMixin  # mixin providing takkub-wait methods (#242)
-from .limit_autoresume import AutoResumeMixin  # mixin providing auto-resume methods
+from .limit_autoresume import (
+    AutoResumeMixin,  # mixin providing auto-resume methods
+    _pane_mid_turn,
+)
 from .orchestrator_text import (  # re-exported for test/app/main_window imports
     _CODEX_TASK_NOTICE,
     _DEFAULT_TEAMMATE_TIER,
@@ -1082,19 +1085,6 @@ def _pane_provider(pane) -> str | None:
     return provider.strip().lower() if isinstance(provider, str) and provider.strip() else None
 
 
-def _pane_mid_turn(pane) -> bool:
-    """#938: the pane is streaming a turn right now (fresh output, not at its
-    ready prompt) — proof its provider is still serving it. Any doubt → False."""
-    try:
-        sess = pane.session
-        quiet = sess.seconds_since_output()
-        if not isinstance(quiet, (int, float)) or quiet > 10.0:
-            return False
-        return sess.is_at_ready_prompt() is False
-    except Exception:
-        return False
-
-
 def _open_with_dialog_process_present() -> bool:
     """Best-effort corroboration for the #104 Windows Open-With dialog
     tripwire (issue #199): a transcript-text match alone false-positived
@@ -1205,6 +1195,29 @@ _METER_PROBE_INTERVAL_S = 30.0
 # alive before `_release_native_chrome_if_idle` kills it (see
 # `_schedule_native_chrome_idle_release` for why not immediately).
 _NATIVE_CHROME_IDLE_GRACE_MS = 60_000
+
+# #1016: at most one `takkub progress` notice per role reaches the Lead in
+# this window; later ones are held and merged. A note that asks for something
+# (a question, a blocker, a request) is never held.
+PROGRESS_NOTICE_MIN_INTERVAL_S = 180.0
+_PROGRESS_NEEDS_LEAD_RE = re.compile(
+    r"\?|block|need|wait(?:ing)?\s+(?:for|on)\s+(?:lead|user|you)"
+    r"|ติดปัญหา|ติดขัด|ขอ(?!ง)|ต้องการ|ช่วย|ตัดสินใจ",
+    re.IGNORECASE,
+)
+
+# #1014: an explicit "do not commit" in the assigned task. A prohibition word
+# directly governing "commit" (also "commit/push", "push/commit", "git
+# commit") — a bare "ห้าม push" or a task that merely talks about commits
+# does not match.
+_TASK_FORBIDS_COMMIT_RE = re.compile(
+    r"(?:\b(?:no|never|don'?t|do\s+not|must\s+not|should\s+not|without|skip)\s+"
+    r"(?:any\s+|auto[- ]?|git\s+)?(?:push\s*(?:/|or|,)\s*)?commit"
+    r"|\bno-commit\b"
+    r"|\bforbid(?:s|den)?\s+(?:to\s+)?commit"
+    r"|(?:ห้าม|อย่า|ไม่ต้อง|งด)\s*(?:ทำ\s*)?(?:git\s+)?(?:push\s*(?:/|หรือ|,)\s*)?(?:commit|คอมมิต))",
+    re.IGNORECASE,
+)
 # #435: min seconds between two `takkub done`-typed-as-text nudges per pane.
 DONE_TEXT_NOTICE_COOLDOWN_S = 10 * 60
 
@@ -1691,6 +1704,9 @@ class Orchestrator(
     # False` which also covers an offline/failed probe. (project, role,
     # utilization)
     limitUsageDenied = pyqtSignal(str, str, float)
+    # The probe had no answer (no probe for the provider, or a failed fetch):
+    # the pane's own screen decides (#1008/#1010/#1020).
+    limitUsageUnknown = pyqtSignal(str, str)
     # #663: (provider, probed reset_at, verdict, new_reset_at) from the
     # background quota re-probe thread → Qt thread (`_on_quota_reprobed`).
     quotaReprobed = pyqtSignal(str, float, str, float)
@@ -2186,6 +2202,7 @@ class Orchestrator(
         # always executes on the Qt thread.
         self.limitUsageConfirmed.connect(self._on_limit_usage_confirmed)
         self.limitUsageDenied.connect(self._on_limit_usage_denied)
+        self.limitUsageUnknown.connect(self._on_limit_usage_unknown)
         self.quotaReprobed.connect(self._on_quota_reprobed)
         self.skillLearningReport.connect(self._on_skill_learning_report)
 
@@ -2334,7 +2351,10 @@ class Orchestrator(
         """True while any live pane is one that `spawn()` starts/reuses the
         cockpit-owned mb Chrome for (#406): a non-sharded browser role
         (`browser_chrome.should_manage_native_chrome`) whose session is still
-        attached and not already in the `exited` state. Shards never share
+        attached and that is neither `exited` nor `done`. A pane stays open
+        after it reports done (pane reuse) and would otherwise hold ~500 MB
+        of Chrome for as long as it idles (#1011) — `_ensure_native_chrome`
+        brings Chrome back when its next task arrives. Shards never share
         that Chrome (#92), so they don't keep it alive either."""
         from .browser_chrome import should_manage_native_chrome
 
@@ -2345,7 +2365,7 @@ class Orchestrator(
                     continue
                 if getattr(pane, "session", None) is None:
                     continue
-                if getattr(pane, "state", None) == "exited":
+                if getattr(pane, "state", None) in ("exited", "done"):
                     continue
                 return True
         return False
@@ -2397,6 +2417,42 @@ class Orchestrator(
         threading.Thread(
             target=manager.close, name="native-chrome-idle-release", daemon=True
         ).start()
+
+    def _cleanup_pane_browser_processes(self, project_ns: str, role_name: str) -> None:
+        """#1011: close the browsers a pane left open once its task is
+        reported. Panes outlive `done` (pane reuse), so a browser a test run
+        launched — a Playwright MCP's Chromium, a headed window from a test
+        script — stayed up until the pane itself was closed, piling up one
+        set of windows per task.
+
+        Ownership is the process tree: only browser processes that descend
+        from THIS pane's CLI are touched, so another pane's browser, the
+        cockpit's shared mb Chrome and the user's own browser are out of
+        reach by construction. Runs on a daemon thread (a psutil tree walk
+        on the Qt thread is the input-lag class the stall dumps catch)."""
+        pane = self._project_panes(project_ns).get(role_name)
+        session = getattr(pane, "session", None)
+        pid = getattr(session, "_pid", None)
+        if not isinstance(pid, int) or pid <= 0:
+            return
+
+        def _sweep() -> None:
+            try:
+                from .browser_chrome import close_browser_descendants
+
+                closed = close_browser_descendants(pid)
+            except Exception:
+                return
+            if closed:
+                _log_event(
+                    "pane_browser_cleanup",
+                    role=role_name,
+                    project=project_ns,
+                    closed=len(closed),
+                    names=sorted(set(closed))[:5],
+                )
+
+        threading.Thread(target=_sweep, name=f"browser-cleanup-{role_name}", daemon=True).start()
 
     def shutdown_timers(self) -> None:
         """Stop every QTimer this Orchestrator (recursively) owns (#344).
@@ -4342,6 +4398,34 @@ class Orchestrator(
             and os.path.normcase(os.path.abspath(_pane_cwd_now))
             != os.path.normcase(os.path.abspath(cwd))
         )
+        if isinstance(worktree, dict):
+            # #1014: a task that says not to commit — no done/close snapshot
+            # may commit on its behalf. Rides in the worktree dict so every
+            # consumer (done, close, give-up, restore) sees it; re-evaluated
+            # for each task handed to the same worktree.
+            if Orchestrator._task_forbids_commit(task):
+                worktree["no_commit"] = True
+            else:
+                worktree.pop("no_commit", None)
+        if pane_is_running:
+            # #1011: the shared mb Chrome is released once every browser pane
+            # is done — a task landing in a pane that stayed open needs it back.
+            Orchestrator._ensure_native_chrome(self, role_name, project_ns)
+        if role_name == LEAD.name and (_provider_switch_wanted or _cwd_switch_wanted):
+            # #1013: the Lead is close-protected, so the idle-switch branch
+            # below closed nothing, re-dispatched itself 2 s later, found the
+            # same live Lead and announced the same switch again — eleven
+            # identical notices in 20 s on prod. A running Lead keeps its
+            # provider and cwd; the task is simply delivered to it.
+            _log_event(
+                "assign_provider_override_ignored",
+                role=role_name,
+                project=project_ns,
+                provider=provider,
+                reason="lead-protected",
+            )
+            _provider_switch_wanted = False
+            _cwd_switch_wanted = False
         if _cwd_switch_wanted and not _pane_idle:
             _log_event(
                 "assign_cwd_switch_refused_busy",
@@ -4681,6 +4765,8 @@ class Orchestrator(
                 "task": task,
                 "plan_file": str(plan_file),
                 "model": model,
+                # #1017: the shards run the verification this card tracks.
+                "backlog_id": ps_assign.backlog_id or "",
             }
             _log_event(
                 "assign_plan",
@@ -5669,6 +5755,17 @@ class Orchestrator(
             mgr = WorktreeManager()
             if not mgr.real_dirty(info):
                 return
+            if worktree.get("no_commit"):
+                # #1014: the task forbade committing. The worktree is never
+                # auto-deleted, so the files stay recoverable as they are.
+                _log_event(
+                    "worktree_auto_commit_skipped_task_restriction",
+                    role=role,
+                    project=project,
+                    branch=info.branch,
+                    reason=reason,
+                )
+                return
             committed, wip_ref = mgr.snapshot_dirty_worktree(info, role, reason)
             _log_event(
                 "worktree_dirty_snapshot",
@@ -5699,6 +5796,58 @@ class Orchestrator(
                 reason=reason,
                 error=str(exc)[:200],
             )
+
+    @staticmethod
+    def _task_forbids_commit(task_text: str | None) -> bool:
+        """True when the ASSIGNED task text explicitly forbids committing
+        (#1014). Only the Lead's own instruction counts — a pane's done note
+        saying "not committed" is exactly the forgot-to-commit case the #525
+        snapshot exists for. A false match is the safe side: the worktree is
+        kept uncommitted and the Lead is told so."""
+        if not task_text:
+            return False
+        return bool(_TASK_FORBIDS_COMMIT_RE.search(str(task_text)))
+
+    def _snapshot_worktree_before_report(
+        self,
+        project_ns: str,
+        from_role: str,
+        worktree: dict,
+        info,
+        mgr,
+        summary: str,
+        dirty: bool | None = None,
+    ) -> bool:
+        """#525: a pane that finished with real uncommitted work and no
+        commit gets a snapshot commit on its own branch, so its work reaches
+        the Lead as a merge proposal like any other. Returns True when a
+        commit was made.
+
+        #1014: never when the task forbade committing (`worktree["no_commit"]`,
+        stamped at assign) — the tree is left exactly as the pane left it.
+        And this runs BEFORE the done digest reads git, not after it: the
+        digest used to say "0 commit, 10 uncommitted" about a worktree that
+        was clean at an auto-commit by the time anyone looked. *dirty*: the
+        caller's own fresh reading, to save the git call."""
+        if not (mgr.real_dirty(info) if dirty is None else dirty):
+            return False
+        if worktree.get("no_commit"):
+            _log_event(
+                "worktree_auto_commit_skipped_task_restriction",
+                role=from_role,
+                project=project_ns,
+                branch=info.branch,
+            )
+            return False
+        if not mgr.auto_commit_snapshot(info, from_role, summary=summary):
+            return False
+        _log_event(
+            "worktree_auto_commit_snapshot",
+            role=from_role,
+            project=project_ns,
+            branch=info.branch,
+        )
+        return True
 
     def _finalize_worktree(
         self,
@@ -5759,26 +5908,22 @@ class Orchestrator(
             info = WorktreeInfo.from_dict(worktree)
             mgr = WorktreeManager()
             commits = precomputed["commits"] if precomputed is not None else mgr.commit_count(info)
-            if commits == 0:
-                # #525: real uncommitted work but nothing committed used to
-                # fall straight to the "no commit kept" warning below with no
-                # merge proposal ever sent — auto-commit a snapshot on the
-                # pane's own branch first so it gets one like a pane that
-                # remembered to commit itself. `precomputed` (if any) is now
+            if commits == 0 and Orchestrator._snapshot_worktree_before_report(
+                self,
+                project_ns,
+                from_role,
+                worktree,
+                info,
+                mgr,
+                note,
+                dirty=precomputed["dirty"] if precomputed is not None else None,
+            ):
+                # `done()` already tried this before building its digest; this
+                # is the `close()` path (no digest). `precomputed` (if any) is
                 # stale the moment a commit lands, so it is dropped and every
                 # fact below this point is re-read fresh via `mgr.*`.
-                dirty_before = (
-                    precomputed["dirty"] if precomputed is not None else mgr.real_dirty(info)
-                )
-                if dirty_before and mgr.auto_commit_snapshot(info, from_role, summary=note):
-                    _log_event(
-                        "worktree_auto_commit_snapshot",
-                        role=from_role,
-                        project=project_ns,
-                        branch=info.branch,
-                    )
-                    precomputed = None
-                    commits = mgr.commit_count(info)
+                precomputed = None
+                commits = mgr.commit_count(info)
             if commits > 0:
                 # #244: commits > 0 does NOT mean "ready to merge" — the
                 # branch can carry accepted commits AND still hold fresh
@@ -5911,7 +6056,12 @@ class Orchestrator(
             # this was worth chasing before `takkub worktree clean` could
             # touch it.
             dirty_stat = mgr.dirty_diffstat(info) if dirty else ""
-            if dirty and dirty_stat:
+            if dirty and worktree.get("no_commit"):
+                # #1014: said out loud, so "uncommitted" reads as intended.
+                state_note = "งานสั่งห้าม commit — cockpit ไม่ commit ให้ ไฟล์อยู่ครบแบบ uncommitted" + (
+                    f" ({dirty_stat})" if dirty_stat else ""
+                )
+            elif dirty and dirty_stat:
                 state_note = f"มี uncommitted changes ในนั้น — ยังกู้ได้ ({dirty_stat})"
             elif dirty:
                 state_note = "มี uncommitted changes ในนั้น — ยังกู้ได้"
@@ -6169,6 +6319,26 @@ class Orchestrator(
             )
         if pane.session is None or not pane.session.is_alive:
             return False, f"{to_role} is not running (spawn it first)"
+        # #1007: say so up front when the pane cannot take a message right
+        # now, instead of writing into it and reporting a hopeful "queued".
+        # Only the two states that are certain: parked until its quota resets
+        # (it reads nothing until then), or mid provider-switch (the session
+        # is being replaced). A bare quota *suspicion* (`rate_limited_until`
+        # alone) does not qualify — and the Lead is never refused: a human's
+        # message must always reach it.
+        ps_send_check = self._pane_state.get(f"{project_ns}::{to_role}")
+        if ps_send_check is not None and to_role != LEAD.name:
+            if ps_send_check.quota_reroute_pending is True:
+                return False, (
+                    f"ส่งไม่ถึง: {to_role} กำลังย้าย provider (session เดิมกำลังปิด) — ส่งใหม่อีกครั้งในไม่กี่วินาที"
+                )
+            if ps_send_check.limit_parked is True:
+                until = float(ps_send_check.rate_limited_until or 0.0)
+                when = time.strftime("%H:%M", time.localtime(until)) if until else "quota reset"
+                return False, (
+                    f"ส่งไม่ถึง: {to_role} park รอโควตาถึง {when} — ยังอ่านข้อความไม่ได้ · "
+                    f"ส่งใหม่หลังเวลานั้น หรือ `takkub close --role {to_role}` แล้ว assign ใหม่"
+                )
 
         # #255: Lead sending straight into a pane that still has a task
         # delivery retrying toward it is a strong signal Lead has taken
@@ -6528,9 +6698,19 @@ class Orchestrator(
             target_provider = getattr(getattr(pane, "model", None), "provider_name", "")
             if isinstance(target_provider, str):
                 steering_warning = busy_steering_warning_for(target_provider)
+        # #1007: nothing is "queued" here — the text is already written into
+        # the live session (steering the active turn when the pane is busy).
+        # What is still open is the RECEIPT, confirmed a moment later by the
+        # submit-verify chain; the CLI waits for that and reports it
+        # (`cmd_send`), so this line only states what has happened so far.
+        try:
+            mid_turn = not _send_sess.is_at_ready_prompt()
+        except Exception:
+            mid_turn = False
+        where = "แทรกเข้า turn ที่กำลังทำงาน" if mid_turn else "เข้า session ที่ว่างอยู่"
         return True, (
-            f"queued to {to_role} (id {message_id}) — "
-            f"ยืนยันว่าถึงมือจริงไหมด้วย `takkub messages --role {to_role}`"
+            f"sent to {to_role} (id {message_id}) — เขียน{where}แล้ว รอ pane ยืนยันรับ · "
+            f"ดูสถานะ: `takkub messages --role {to_role}`"
             + (f" · {steering_warning}" if steering_warning else "")
         )
 
@@ -8950,6 +9130,7 @@ class Orchestrator(
         ops_task: bool = False,
         investigate_task: bool = False,
         sibling_files: frozenset[str] | None = None,
+        snapshot=None,
     ) -> tuple[object, dict | None]:
         """One-shot git-fact gather for the Lead Inbox Digest bullet (#245,
         follow-up to #244). Fired exactly once per `done()` event — never
@@ -8994,6 +9175,17 @@ class Orchestrator(
                 # #496: real_dirty/real_uncommitted_count filter out
                 # CRLF-only phantom "M" entries — same protection as the
                 # precomputed (`collect_done_git_facts`) path above.
+                commits = mgr.commit_count(info)
+                dirty = mgr.real_dirty(info)
+                uncommitted = mgr.real_uncommitted_count(info) if dirty else 0
+                crlf_phantom = mgr.crlf_phantom(info)
+            if commits == 0 and dirty and snapshot is not None and snapshot(info, mgr):
+                # #1014: *snapshot* (the #525 done snapshot) just committed
+                # the pane's work — everything read above, and any facts
+                # gathered off-thread before it, describe a tree that no
+                # longer exists. Re-read, so the digest and the merge
+                # proposal state what is actually there.
+                gf = None
                 commits = mgr.commit_count(info)
                 dirty = mgr.real_dirty(info)
                 uncommitted = mgr.real_uncommitted_count(info) if dirty else 0
@@ -10083,7 +10275,9 @@ class Orchestrator(
         # Refresh hot.md immediately so Obsidian shows the done event
         # without waiting up to a minute for the periodic tick.
         self._write_hot_md()
-        self._maybe_auto_down_after_prod_deploy(project_ns, from_role, note, failed)
+        self._maybe_auto_down_after_prod_deploy(
+            project_ns, from_role, note, failed, task_started_at=had_assign_ts
+        )
         self.agentDone.emit(project_ns, from_role, note)
         _msg = f"{from_role} reported done"
         _msg += self._language_nudge_suffix(project_ns, from_role, note, _lang_task_id)
@@ -10094,9 +10288,15 @@ class Orchestrator(
     ):
         """Move the task's backlog card to review (ok) or keep it open (failed) (extracted from `done`, 2026-10-24)."""
         backlog_review_line = None
+        if getattr(_ps_done, "plan_fanout", None):
+            # #1017: a QA planner's done means "the plan is written" — not one
+            # test has run. Its card stays active for the shards it fans out
+            # to (`_fire_qa_plan_fanout` hands them the same card); closing it
+            # here marked a whole verification done with every case NOT RUN
+            # and made the follow-up `--backlog <id>` assign fail.
+            return None
         # A successful report moves its card to review. FAILED/blocked reports
         # leave it active for the fix loop or an owner decision.
-        backlog_review_line = None
         if not failed and not blocked:
             try:
                 from . import backlog
@@ -10489,6 +10689,11 @@ class Orchestrator(
                     ops_task=ops_task,
                     investigate_task=investigate_task,
                     sibling_files=sibling_files,
+                    # #1014: snapshot (or deliberately not) BEFORE the facts
+                    # are final, so the digest states the tree's real state.
+                    snapshot=lambda _info, _mgr: Orchestrator._snapshot_worktree_before_report(
+                        self, project_ns, from_role, had_worktree, _info, _mgr, note, dirty=True
+                    ),
                 )
             except Exception as exc:  # digest cosmetics must never break done()
                 _log_event(
@@ -10854,6 +11059,15 @@ class Orchestrator(
             except Exception:
                 pass
 
+        # #1011: the task is reported (done or FAILED) — close the browsers
+        # this pane's process tree left open, and let the shared mb Chrome go
+        # once no browser pane is still mid-task. Class/getattr dispatch so a
+        # bare test double for `self` needs neither method.
+        Orchestrator._cleanup_pane_browser_processes(self, project_ns, from_role)
+        _chrome_idle = getattr(self, "_schedule_native_chrome_idle_release", None)
+        if _chrome_idle is not None:
+            _chrome_idle()
+
         # Auto-chain handoff: if this pane was tagged --auto-chain at
         # assign time, and it was the LAST pending auto-chain pane in
         # the project, inject a pre-authorisation prompt so Lead fires
@@ -10989,6 +11203,36 @@ class Orchestrator(
         except Exception:
             pass
 
+        # #1016: a pane narrating its work every 10-90 s woke the Lead for a
+        # full turn each time (8 turns in 7 minutes, none needing a decision).
+        # One progress notice per role per PROGRESS_NOTICE_MIN_INTERVAL_S: an
+        # update inside the window is held (latest wins) and goes out when the
+        # window ends, unless a done report gets there first. An update that
+        # asks for something goes straight through.
+        now_p = time.time()
+        since_last = now_p - _ps_self.progress_notice_ts
+        needs_lead = bool(_PROGRESS_NEEDS_LEAD_RE.search(note))
+        if _ps_self.progress_notice_ts and since_last < PROGRESS_NOTICE_MIN_INTERVAL_S:
+            if not needs_lead:
+                first_hold = not _ps_self.progress_held_note
+                _ps_self.progress_held_note = note
+                _ps_self.progress_held_count += 1
+                if first_hold:
+                    QTimer.singleShot(
+                        int((PROGRESS_NOTICE_MIN_INTERVAL_S - since_last) * 1000) + 50,
+                        lambda: Orchestrator._flush_held_progress(
+                            self, project_ns, from_role, _ps_self
+                        ),
+                    )
+                _log_event(
+                    "progress", role=from_role, project=project_ns, note=note[:200], held=True
+                )
+                _msg = f"{from_role} progress recorded (Lead ได้อัปเดตรวมทุก ~{int(PROGRESS_NOTICE_MIN_INTERVAL_S // 60)} นาที)"
+                _msg += self._language_nudge_suffix(project_ns, from_role, note, _ps_self.task_id)
+                return True, _msg
+        _ps_self.progress_notice_ts = now_p
+        _ps_self.progress_held_note = ""
+        _ps_self.progress_held_count = 0
         origin_pane_token = self._current_pane_identity(project_ns, from_role)
         body = f"[{from_role} progress] {note}"
         self._notify_lead(
@@ -11003,6 +11247,29 @@ class Orchestrator(
         _msg = f"{from_role} progress reported"
         _msg += self._language_nudge_suffix(project_ns, from_role, note, _ps_self.task_id)
         return True, _msg
+
+    def _flush_held_progress(self, project_ns: str, from_role: str, ps: PaneState) -> None:
+        """Deliver the latest progress update held by the #1016 throttle.
+        A no-op when the pane's state was retired meanwhile (its done report
+        says more than the held update did) or nothing is held any more."""
+        if (
+            self._pane_state.get(f"{project_ns}::{from_role}") is not ps
+            or not ps.progress_held_note
+        ):
+            return
+        note, count = ps.progress_held_note, ps.progress_held_count
+        ps.progress_held_note = ""
+        ps.progress_held_count = 0
+        ps.progress_notice_ts = time.time()
+        earlier = f" (+{count - 1} อัปเดตก่อนหน้า)" if count > 1 else ""
+        self._notify_lead(
+            project_ns,
+            f"[{from_role} progress] {note}{earlier}",
+            from_role=from_role,
+            note="progress",
+            pane_token=self._current_pane_identity(project_ns, from_role),
+            kind="progress",
+        )
 
     def stamp_activity(self, from_role: str, project: str | None = None) -> tuple[bool, str]:
         """#617: silently stamp a pane's idle-no-progress clock as "real
@@ -11446,14 +11713,29 @@ class Orchestrator(
         )
 
     def _maybe_auto_down_after_prod_deploy(
-        self, project_ns: str, from_role: str, note: str, failed: bool
+        self,
+        project_ns: str,
+        from_role: str,
+        note: str,
+        failed: bool,
+        task_started_at: float = 0.0,
     ) -> bool:
         """#984 trigger 2: a devops done that states a healthy prod deploy
-        takes the local stacks down — unless another teammate of the project
-        is still working (it may be running e2e/qa against that stack)."""
+        takes down the local stacks THAT TASK brought up — unless another
+        teammate of the project is still working (it may be running e2e/qa
+        against that stack).
+
+        #1015: *task_started_at* (the task's assign time) bounds it. A stack
+        that was already running when the task began is not the task's to
+        stop — a Cloudflare deploy that never touched docker took the
+        container serving the live site down for 3 minutes. Unknown start
+        (0.0) downs nothing."""
         from .compose_autodown import is_prod_deploy_success
 
         if failed or _split_shard(from_role)[0] != "devops" or not is_prod_deploy_success(note):
+            return False
+        if not task_started_at:
+            _log_event("compose_auto_down_skipped_no_task_start", project=project_ns)
             return False
         busy = [
             name
@@ -11472,7 +11754,7 @@ class Orchestrator(
                 kind="compose-auto-down",
             )
             return False
-        return self.compose_auto_down(project_ns, "prod-deploy")
+        return self.compose_auto_down(project_ns, "prod-deploy", started_after=task_started_at)
 
     def _project_compose_roots(self, project_ns: str) -> list[str]:
         """#984: configured paths + managed worktree root of *project_ns*."""
@@ -11492,16 +11774,28 @@ class Orchestrator(
             pass
         return roots
 
-    def compose_auto_down(self, project_ns: str, trigger: str) -> bool:
-        """#984: `docker compose down` every local stack *project_ns* owns, on
-        a worker thread; the result reaches Lead as a notice. Fully automatic —
-        no user setting (the user never edits projects.json). Returns False
-        when it did not start (the project has no paths)."""
+    def compose_auto_down(
+        self, project_ns: str, trigger: str, started_after: float | None = None
+    ) -> bool:
+        """#984: `docker compose down` the local stacks *project_ns* brought
+        up, on a worker thread; the result reaches Lead as a notice. Fully
+        automatic — no user setting (the user never edits projects.json).
+        Returns False when it did not start (the project has no paths).
+
+        #1015: only stacks that came up at/after *started_after* — default,
+        the moment this project's Lead pane was first registered in this
+        cockpit run (`_project_session_start`), i.e. the session being
+        closed. Whatever was already running before that is left alone."""
         from . import compose_autodown as _cad
         from . import config as _cfg
 
         # __dict__ read: getattr on a QObject whose Qt __init__ never ran
         # (test doubles built with __new__) raises instead of defaulting.
+        sessions: dict[str, float] = self.__dict__.get("_project_session_start", {})
+        if started_after is None:
+            started_after = sessions.get(project_ns)
+        if trigger == "tab-close":
+            sessions.pop(project_ns, None)  # reopening the tab is a new session
         if project_ns in self.__dict__.get("_compose_keep", ()):
             _log_event("compose_auto_down_kept", project=project_ns, trigger=trigger)
             return False
@@ -11516,7 +11810,9 @@ class Orchestrator(
 
         def _work() -> None:
             try:
-                report = _cad.run_auto_down(project_ns, trigger, own_roots, other_open)
+                report = _cad.run_auto_down(
+                    project_ns, trigger, own_roots, other_open, started_after=started_after
+                )
             except Exception:
                 _log_event("compose_auto_down_error", project=project_ns, trigger=trigger)
                 return
@@ -11527,6 +11823,7 @@ class Orchestrator(
                 downed=[s for s, _ in report.downed],
                 failed=[s for s, _ in report.failed],
                 skipped=[s for s, _ in report.skipped],
+                kept_preexisting=report.kept,
                 freed_mib=round(report.freed_mib),
                 docker_unavailable=report.docker_unavailable,
             )
@@ -17126,6 +17423,30 @@ class Orchestrator(
                     idle_no_progress_escalate = idle_no_progress_for >= IDLE_NO_PROGRESS_ESCALATE_S
                     if not content_stale and not idle_no_progress_escalate:
                         continue
+                    # #1018: the CLI itself says it is babysitting a background
+                    # shell/agent (claude's "1 shell · esc to interrupt" footer)
+                    # — a wait loop on a remote job or a VPN sits silent at
+                    # the prompt for as long as the outside world takes. The
+                    # live-children grace below is bounded, so once it ran out
+                    # this pane was closed and respawned every ~40 min, killing
+                    # the watcher each time (prod: 13:16, 13:58, 15:09) with
+                    # the task still unfinished. Never auto-recovered: the
+                    # one-off bg-wait notice (#994) already tells Lead, who
+                    # decides. Providers without such a marker keep the
+                    # bounded grace.
+                    try:
+                        if pane.session.has_background_work() is True:
+                            if (now - ps_ck.idle_defer_log_ts) >= 300:
+                                ps_ck.idle_defer_log_ts = now
+                                _log_event(
+                                    "stuck_recover_deferred_background_work",
+                                    role=role,
+                                    project=project_name,
+                                    content_static_s=int(now - last_content_ts),
+                                )
+                            continue
+                    except Exception:
+                        pass
                     if ps_ck.stuck_recover_gave_up:
                         # Already hit STUCK_RECOVER_MAX for this pane and handed it
                         # to the operator (#41). Stop recovering — re-recovering a
@@ -18430,6 +18751,7 @@ class Orchestrator(
         ps.quota_banner_recorded = True
         ps.quota_marker = marker
         ps.quota_provider = provider
+        ps.quota_hit_announced = False
         # #595: fresh episode — the confirm-loop bookkeeping below belongs to
         # THIS quota hit only; a stale timestamp surviving from a previous
         # episode (e.g. the window reset naturally before signal (b) ever
@@ -18447,20 +18769,11 @@ class Orchestrator(
             marker=marker,
             resets_in_s=int(max(0, reset_at - now)),
         )
-        # #301: tell Lead the instant a pane hits quota — the reset-time
-        # notice above only fires hours later when the window lifts, so
-        # without this Lead has no signal at all that a "working" pane is
-        # actually frozen until it either notices `takkub status` staying
-        # stale or the user reports it by hand (real incident, issue #301:
-        # a gemini/agy pane silently downgraded Pro→Flash and kept going
-        # while Lead's own status read "working / progress 2s ago").
-        # Best-effort (try/except): must never let a Lead-delivery failure
-        # take down the gate itself, and keeps this call harmless against
-        # minimal test fixtures that don't wire the full notify plumbing.
-        try:
-            self._notify_quota_hit(project, role, provider, reset_at, marker, pane)
-        except Exception:
-            pass
+        # #1009: nothing is announced here. A banner match is only a
+        # suspicion until the confirm loop agrees — announcing first and
+        # retracting a second later ("hit quota" → "ไม่ได้ชนโควตา") made a
+        # user switch a working pane off its provider. `_reroute_or_park`
+        # records the hit (`_announce_quota_hit`) once it is acted on.
         # v2.1.198 pairs the banner with an interactive chooser whose
         # preselected option 1 is "Stop and wait for limit to reset" — confirm
         # it once so the pane waits out the window and auto-resumes, instead of
@@ -18483,10 +18796,9 @@ class Orchestrator(
         marker: str,
         pane: AgentPane,
     ) -> None:
-        """Inject an immediate `[system]` notice into Lead the moment a pane
-        hits its quota/usage limit (#301) — same channel `toggle_provider`
-        uses for `[system] <provider> ENABLED/DISABLED`, so it reads as
-        cockpit-authored chrome rather than the teammate's own words."""
+        """Record that a pane's quota hit was confirmed and is being acted
+        on (#301). Status-only since #1021: it lands in the audit log and
+        the status surfaces, never in an AI pane."""
         human = _human_duration(max(0, reset_at - time.time()))
         model = None
         try:
@@ -18538,7 +18850,21 @@ class Orchestrator(
         if recovery is not None:
             panes = self._project_panes(project)
             lead = panes.get(LEAD.name)
-            if lead is None or lead.session is None or not lead.session.is_alive:
+            if lead is None:
+                # #1022: the project's tab is closed, so there is no Lead
+                # pane to spawn into — `spawn` failed with "registry desync"
+                # and raised leadUnavailable for a project nobody had open.
+                # The provider is usable again; the Lead that starts when the
+                # tab is reopened uses it like any other start.
+                self._lead_quota_recovery.pop(project, None)
+                self.__dict__.get("_lead_quota_recovery_spawned_at", {}).pop(project, None)
+                _log_event(
+                    "lead_quota_reset_tab_closed",
+                    project=project,
+                    provider=recovery[0],
+                )
+                return
+            if lead.session is None or not lead.session.is_alive:
                 hit_provider, cwd, takeover, _reset_at = recovery
                 ps = self._ps(f"{project}::{LEAD.name}")
                 ps.provider_override = hit_provider
@@ -18562,19 +18888,21 @@ class Orchestrator(
                 if not ok:
                     self.leadUnavailable.emit(project, f"quota reset respawn failed: {msg}")
                     return
-            # A live fallback Lead still needs its recovery record. The
-            # provider's own meter/reset confirmation restores it later.
             else:
+                # #1012: a live fallback Lead is never pulled back to the
+                # provider it fled — the recovery record has nothing left
+                # to do once the window has reset.
                 live_provider = getattr(getattr(lead, "model", None), "provider_name", None)
+                self._lead_quota_recovery.pop(project, None)
+                self.__dict__.get("_lead_quota_recovery_spawned_at", {}).pop(project, None)
                 if live_provider != recovery[0]:
                     _log_event(
-                        "lead_quota_reset_waiting_for_probe",
+                        "lead_quota_restore_skipped_live_lead",
                         project=project,
-                        provider=recovery[0],
+                        current_provider=live_provider,
+                        configured_provider=recovery[0],
                     )
                     return
-                self._lead_quota_recovery.pop(project, None)
-                getattr(self, "_lead_quota_recovery_spawned_at", {}).pop(project, None)
 
         if _ps_rr is None:
             # A reset-triggered Lead replacement has no surviving PaneState

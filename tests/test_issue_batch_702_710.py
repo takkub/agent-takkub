@@ -139,9 +139,8 @@ class TestQuotaFalsePositive:
         assert ps.quota_false_positive_armed is True
         assert ps.limit_confirm_pending is False
         assert log.call_args[0][0] == "rate_limit_false_positive"
-        body = o._notify_lead.call_args[0][1]
-        assert "ไม่ได้ชนโควตา" in body
-        assert "hit your usage limit" not in body
+        # #1009: the hit was never announced, so there is nothing to retract.
+        o._notify_lead.assert_not_called()
 
     def test_armed_latch_skips_redetection_until_text_scrolls_off(self, monkeypatch) -> None:
         from agent_takkub.orchestrator import Orchestrator

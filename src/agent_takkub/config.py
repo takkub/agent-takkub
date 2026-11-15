@@ -461,12 +461,16 @@ def _resolve_cli_bin_dir() -> Path:
     * dev checkout → ``REPO_ROOT/bin`` (``bin/takkub`` + ``bin/takkub.cmd``),
       unchanged.
     * installed → the venv's own console-script directory (``Scripts/`` on
-      Windows, ``bin/`` on macOS/Linux), derived from ``sys.executable`` so
-      it always tracks whichever venv this process is actually running in.
+      Windows, ``bin/`` on macOS/Linux) of whichever venv this process is
+      actually running in. #1019: the DIRECTORY of the venv's interpreter,
+      never of the file it links to — a POSIX ``bin/python`` is a symlink to
+      the base install, and following it named the base's ``bin/`` here.
     """
     if DATA_HOME == REPO_ROOT:
         return REPO_ROOT / "bin"
-    return Path(sys.executable).resolve().parent
+    from .venv_integrity import interpreter_dir
+
+    return interpreter_dir()
 
 
 CLI_BIN_DIR = _resolve_cli_bin_dir()

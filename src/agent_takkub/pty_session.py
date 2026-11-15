@@ -1841,6 +1841,48 @@ def _quota_banner_text(lines) -> str:
     return "\n".join(banner)
 
 
+# Non-blank rows allowed below a banner for it to still count as the pane's
+# latest output: the composer chrome every CLI repaints under its last line
+# (borders, input row, status/context row, hint row, an "Error ID" line).
+_QUOTA_BANNER_TRAILING_ROWS = 12
+
+
+def _quota_banner_state(lines, markers: tuple[str, ...]) -> str:
+    """Where the quota banner sits on the screen (#1008/#1009/#1010/#1020):
+
+    - ``"none"``     — no banner-shaped line for *markers*.
+    - ``"retrying"`` — the CLI's own live retry status carries it (opencode's
+      "Retrying in 279s · attempt 4 · Free usage limit reached"): the CLI is
+      saying, right now, that it is blocked and will stay blocked.
+    - ``"latest"``   — the banner is the last thing the pane printed.
+    - ``"stale"``    — the pane kept printing after it (agy drops to another
+      model and carries on), so the banner is history, not a block.
+
+    The usage probe cannot answer for every provider or every per-model
+    quota; this is the evidence the confirm loop falls back on instead of
+    guessing "probably quoted text"."""
+    rows = list(lines)
+    last_idx = -1
+    retrying = False
+    for idx, raw in enumerate(rows):
+        low = raw.lower()
+        if any(tok in low for tok in _COCKPIT_NOTICE_LINE_TOKENS):
+            continue
+        candidate = low.replace("’", "'").strip().lstrip("⚠! └⎿■●").strip()
+        is_retry = candidate.startswith("retrying in ") and "·" in candidate
+        if is_retry:
+            candidate = candidate.rsplit("·", 1)[-1].strip()
+        if candidate.startswith(_QUOTA_BANNER_STARTS) and any(m in candidate for m in markers):
+            last_idx = idx
+            retrying = is_retry
+    if last_idx < 0:
+        return "none"
+    if retrying:
+        return "retrying"
+    trailing = sum(1 for row in rows[last_idx + 1 :] if row.strip())
+    return "latest" if trailing <= _QUOTA_BANNER_TRAILING_ROWS else "stale"
+
+
 def _resolve_quota_markers(provider: str) -> tuple[str, ...]:
     """Markers to check for `provider`'s quota/usage-limit state (#301):
     the `TAKKUB_RATE_LIMIT_MARKERS` env override if set (same override
@@ -3521,6 +3563,11 @@ class PtySession(QObject):
             if marker in text:
                 return marker
         return None
+
+    def quota_banner_state(self, provider: str = "claude") -> str:
+        """`_quota_banner_state` for this pane's live screen: "none",
+        "retrying", "latest" or "stale"."""
+        return _quota_banner_state(self.display_lines(), _resolve_quota_markers(provider))
 
     def current_model_label(self, provider: str) -> str | None:
         """Best-effort model name currently shown on this pane's screen, or

@@ -312,6 +312,29 @@ class TestCheckStuckPanes:
             fake._pane_state.get("agent-takkub::backend") or PaneState()
         ).last_stuck_recover == now
 
+    def test_1018_pane_babysitting_a_background_job_is_never_recovered(self) -> None:
+        """#1018: a backend pane waiting on a remote job through a background
+        loop (ssh poll / wait-for-VPN every 60 s) sat silent at its prompt;
+        once the bounded live-children grace ran out it was closed and
+        respawned every ~40 min, killing the watcher each time (13:16, 13:58,
+        15:09) with the task unfinished. The CLI's own background marker means
+        "leave it" — Lead is told once by the bg-wait notice instead."""
+        fake = _FakeOrch()
+        now = 1_000_000.0
+        pane = _FakePane(state="working", last_out=now - STUCK_THRESHOLD_S * 6, cwd="C:/foo")
+        pane.session.has_background_work.return_value = True
+        fake._panes_by_project["ai"] = {"backend": pane}
+        for tick in range(4):
+            _check(fake, now + tick * 5)
+        assert fake.close_calls == []
+        assert fake.spawn_calls == []
+
+        # No marker (every other provider, or the job is gone): the ordinary
+        # recovery still applies.
+        pane.session.has_background_work.return_value = False
+        _check(fake, now + 60)
+        assert fake.close_calls == [("backend", "ai")]
+
     def test_question_picker_waiting_for_user_is_not_recovered_and_noticed_once(self) -> None:
         fake = _FakeOrch()
         pane = _FakePane(last_out=1.0)
