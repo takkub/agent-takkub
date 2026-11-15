@@ -3582,9 +3582,10 @@
         "agent_takkub.remote.notify",
         "agent_takkub.settings_window",
         "agent_takkub.skill_learning.episode",
+        "agent_takkub.skill_learning.pipeline",
         "agent_takkub.spawn_engine"
       ],
-      "fan_in": 24,
+      "fan_in": 25,
       "fan_out": 11
     },
     {
@@ -5464,6 +5465,7 @@
     {
       "module": "agent_takkub.skill_learning.pipeline",
       "imports": [
+        "agent_takkub.orchestrator_text",
         "agent_takkub.skill_learning.episode",
         "agent_takkub.skill_learning.lifecycle",
         "agent_takkub.skill_learning.promoter",
@@ -5476,7 +5478,7 @@
         "agent_takkub.skill_learning_mixin"
       ],
       "fan_in": 2,
-      "fan_out": 6
+      "fan_out": 7
     },
     {
       "module": "agent_takkub.skill_learning.promoter",

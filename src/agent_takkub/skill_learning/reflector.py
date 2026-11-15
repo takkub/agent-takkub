@@ -25,6 +25,12 @@ from .episode import Episode
 from .settings import REFLECTOR_PROVIDERS, LearningSettings
 
 CHILD_ENV = "TAKKUB_SKILL_LEARNER"
+# The model a reflection runs on when the owner has not pinned one. With no
+# `--model` the CLI used the account's default — the top model (Opus/Fable on
+# prod), for a read-and-summarise job. A CLI alias, not a dated id, so it
+# follows the provider's current mid-tier model. Settings → Skill Learning
+# (provider + model pinned) still overrides it.
+DEFAULT_REFLECTOR_MODEL = {"claude": "sonnet"}
 DESC_INDEX_CUT = 80
 DESC_MAX = 300
 BODY_MAX_LINES = 30
@@ -53,7 +59,7 @@ FORMAT_SPEC = f"""\
 - `description` ≤ {DESC_MAX} ตัว และ **trigger ต้องอยู่ใน {DESC_INDEX_CUT} ตัวแรก** (index ตัดตรงนั้น)
 - `body` ≤ {BODY_MAX_LINES} บรรทัดที่ไม่ว่าง — เป็น "กฎที่ทำตามได้" ไม่ใช่เล่าเรื่อง session
 - `evidence` ต้อง copy มาจาก episode **ตรงตัว** อย่างน้อย 20 ตัวอักษร (ระบบตรวจ ถ้าไม่เจอ = ปฏิเสธ)
-- patch / merge / archive ทำได้เฉพาะ skill ในหัวข้อ "Skills ที่ระบบเรียนรู้ไว้"
+- patch / merge / archive ทำได้เฉพาะ skill ที่ **แสดง body เต็ม** ในเอกสารนี้ (ระบบปฏิเสธการแก้ skill ที่ไม่ได้แสดง body)
 - ถ้าบทเรียนใหม่ขัดกับ skill เก่า ต้อง patch ตัวเก่าในคำตอบเดียวกัน ห้ามปล่อยให้ขัดกันเอง
 - ห้ามใส่ secret/token/password/URL ภายใน
 """
@@ -83,18 +89,97 @@ def _redact(text: str) -> str:
     return redact_secrets(text or "")[0]
 
 
-def library_section(project_ns: str) -> str:
+# A reflection used to carry the WHOLE learned library with every body: on
+# prod 2026-11-15 that was ~400 KB of a 460 KB bundle (~126k tokens written
+# fresh on the account's top model, 35-65 times a day) and it grew with every
+# skill learned. A reflection now gets the index of everything (so it never
+# duplicates a name or a topic) plus the full body of only the skills this
+# episode is about — the ones it may patch. The curator pass still reads the
+# whole library; it runs once per `curate_every` landed changes.
+LIBRARY_BODY_SKILLS = 10
+LIBRARY_BODY_CHARS = 30_000
+_WORD_RE = re.compile(r"[a-z0-9]{3,}")
+_STOP_WORDS = frozenset(
+    "use when the and for with from that this into not are how you your was has have "
+    "takkub skill project global testing tooling review devops run runs file files".split()
+)
+
+
+def relevant_skills(managed: list, corpus: str) -> list:
+    """The learned skills *corpus* (task + done note + transcript) is about,
+    best match first, bounded by LIBRARY_BODY_SKILLS / LIBRARY_BODY_CHARS.
+
+    Scored on words the skill's own name, description and body share with
+    the episode — a name word counts three times, since a pane that used or
+    tripped over a skill usually names it. Deterministic: the same inputs
+    always pick the same skills (`editable_names` relies on that)."""
+    words = set(_WORD_RE.findall((corpus or "").lower()))
+    scored: list[tuple[int, str, object]] = []
+    for r in managed:
+        name_words = set(_WORD_RE.findall(r.name.lower())) - _STOP_WORDS
+        desc_words = set(_WORD_RE.findall((r.description or "").lower())) - _STOP_WORDS
+        body_words = set(_WORD_RE.findall((r.body or "").lower())) - _STOP_WORDS
+        score = (
+            3 * len(name_words & words)
+            + len((desc_words - name_words) & words)
+            # The body shares commands/paths with the episode even when the
+            # title does not — capped so a long body cannot outrank a title hit.
+            + min(5, len((body_words - desc_words - name_words) & words))
+        )
+        if r.name.lower() in (corpus or "").lower():
+            score += 10
+        if score >= 3:
+            scored.append((score, r.name, r))
+    scored.sort(key=lambda t: (-t[0], t[1]))
+    picked, used = [], 0
+    for _score, _name, r in scored[:LIBRARY_BODY_SKILLS]:
+        size = len(r.body or "")
+        if picked and used + size > LIBRARY_BODY_CHARS:
+            break
+        picked.append(r)
+        used += size
+    return picked
+
+
+def editable_names(ep: Episode) -> set[str]:
+    """Names of the skills `build_bundle(ep)` shows in full — the only ones a
+    reflection may patch, merge or archive (it has not read the others)."""
+    managed = store.list_skills(ep.event.project_ns)
+    return {r.name for r in relevant_skills(managed, ep.corpus())}
+
+
+def library_section(project_ns: str, corpus: str | None = None) -> str:
+    """The library as the reflector sees it. *corpus* None = every body (the
+    curator pass); otherwise an index of all learned skills plus the full
+    body of the ones relevant to *corpus*."""
     managed = store.list_skills(project_ns)
     foreign = [r for r in store.list_skills(project_ns, managed_only=False) if not r.sidecar]
-    parts = ["## Skills ที่ระบบเรียนรู้ไว้ (แก้ได้)\n"]
-    if managed:
-        for r in managed:
+    if corpus is None:
+        shown = managed
+        parts = ["## Skills ที่ระบบเรียนรู้ไว้ (แก้ได้)\n"]
+    else:
+        shown = relevant_skills(managed, corpus)
+        parts = [
+            "## สารบัญ skill ที่ระบบเรียนรู้ไว้ทั้งหมด\n\n"
+            "(ห้ามตั้งชื่อซ้ำ · ถ้าบทเรียนนี้มี skill ในสารบัญครอบคลุมอยู่แล้วแต่ไม่ได้แสดง body ด้านล่าง "
+            "= ไม่ต้องสร้างใหม่ ปล่อยให้ curator จัดการ)\n"
+        ]
+        parts.append(
+            "\n".join(
+                f"- {r.name} [{r.layer} · {r.category}]: {(r.description or '')[:DESC_INDEX_CUT]}"
+                for r in managed
+            )
+            or "(ยังไม่มี)"
+        )
+        parts.append("\n## Skills ที่เกี่ยวกับ episode นี้ — body เต็ม (แก้ได้เฉพาะชุดนี้)\n")
+    if shown:
+        for r in shown:
             parts.append(
                 f"### {r.name} [{r.layer} · {r.category}]\n"
                 f"description: {r.description}\n\n{r.body}\n"
             )
     else:
-        parts.append("(ยังไม่มี)\n")
+        parts.append("(ยังไม่มี)\n" if corpus is None else "(ไม่มี skill เดิมที่เกี่ยวข้อง)\n")
     parts.append("\n## Skills อื่นที่มีอยู่ (ของ user/ติดตั้ง — ห้ามแตะ ห้ามตั้งชื่อซ้ำ)\n")
     parts.append("\n".join(f"- {r.name}: {r.description[:120]}" for r in foreign) or "(ไม่มี)")
     return "\n".join(parts)
@@ -114,7 +199,7 @@ def build_bundle(ep: Episode) -> str:
             "### งานที่ได้รับมอบหมาย\n\n" + _redact(ev.task)[:6000],
             "### done note\n\n" + _redact(ev.note)[:6000],
             "### Transcript (redacted)\n\n" + (ep.transcript or "(ไม่มี)"),
-            library_section(ev.project_ns),
+            library_section(ev.project_ns, ep.corpus()),
             FORMAT_SPEC,
         ]
     )
@@ -286,20 +371,26 @@ def short_reason(error: str) -> str:
 
 def build_argv(provider: str, binary: str, prompt: str, model: str) -> list[str]:
     if provider == "claude":
+        # The bundle rides in on stdin and the answer is one JSON object, so
+        # the run needs no tool, skill catalog or MCP server — and each of
+        # those is prompt it pays for. Measured 2026-11-15 on `reply ok`:
+        # 37.3k tokens with the old `--disallowedTools …` (a permission deny;
+        # the schemas were still sent) vs 10.2k with this set. No session
+        # file either: 800+ one-shot reflect sessions had piled up in the
+        # account's `projects/`.
         argv = [
             binary,
             "-p",
             prompt,
             "--output-format",
             "text",
-            "--disallowedTools",
-            "Bash",
-            "Edit",
-            "Write",
-            "NotebookEdit",
-            "WebFetch",
+            "--tools",
+            "",
+            "--disable-slash-commands",
+            "--strict-mcp-config",
+            "--no-session-persistence",
         ]
-        return argv + (["--model", model] if model else [])
+        return [*argv, "--model", model or DEFAULT_REFLECTOR_MODEL["claude"]]
     if provider == "codex":
         # `-` = read the prompt from stdin (the bundle rides in it).
         argv = [binary, "exec", "--skip-git-repo-check", "--sandbox", "read-only"]

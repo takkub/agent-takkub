@@ -43,7 +43,10 @@ _BOUNDS: dict[str, tuple[int, int]] = {
 class LearningSettings:
     mode: str = "auto"
     provider: str = "auto"  # "auto" or one of REFLECTOR_PROVIDERS
-    model: str = ""  # "" = the provider's own default
+    # "" = `reflector.DEFAULT_REFLECTOR_MODEL` for claude (a mid-tier alias,
+    # never the account's top model), the CLI's own default elsewhere.
+    # Honoured only together with a pinned `provider`.
+    model: str = ""
     min_interval_s: int = 600  # per project, between two reflections
     daily_cap: int = 24  # reflections per project per day
     max_intents: int = 3  # skill changes accepted from one reflection

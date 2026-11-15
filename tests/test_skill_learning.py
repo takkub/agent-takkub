@@ -291,9 +291,90 @@ def test_build_argv_every_reflector_provider(provider):
     # codex reads its prompt from stdin (`-`); the others take it as an arg
     assert ("-" in argv) if provider == "codex" else ("PROMPT" in argv)
     if provider == "claude":
-        assert "Write" in argv and "Bash" in argv  # write tools denied
+        # No tool at all (so nothing can be written or run), and none of the
+        # prompt a one-shot JSON answer has no use for.
+        assert argv[argv.index("--tools") + 1] == ""
+        for flag in ("--disable-slash-commands", "--strict-mcp-config", "--no-session-persistence"):
+            assert flag in argv
+        assert "--disallowedTools" not in argv  # a permission deny still sends the schemas
     if provider == "codex":
         assert "read-only" in argv and "--skip-git-repo-check" in argv
+
+
+def test_claude_reflector_never_runs_on_the_accounts_default_model():
+    """Prod 2026-11-15: `model: ""` meant "the account default" — Opus/Fable,
+    ~126k fresh tokens a run, 35-65 runs a day, for a summarise job."""
+    argv = reflector.build_argv("claude", "claude", "P", "")
+    assert (
+        argv[argv.index("--model") + 1] == reflector.DEFAULT_REFLECTOR_MODEL["claude"] == "sonnet"
+    )
+    pinned = reflector.build_argv("claude", "claude", "P", "opus")
+    assert pinned[pinned.index("--model") + 1] == "opus"  # an explicit choice wins
+
+
+def _seed_library(n: int = 40) -> None:
+    for i in range(n):
+        store.create_skill(
+            "project",
+            NS,
+            f"unrelated-topic-{i:02d}",
+            f"Use when widget number {i} misbehaves in the legacy importer",
+            "\n".join(f"- rule {i}.{k}: " + "x" * 200 for k in range(20)),
+            category="tooling",
+            requests_now=0,
+        )
+    store.create_skill(
+        "project",
+        NS,
+        "uv-editable-reinstall",
+        "Use when the dev venv loses agent_takkub — reinstall editable",
+        "- run `uv pip install --no-deps -e .`\n- BODY-MARKER-RELEVANT",
+        category="tooling",
+        requests_now=0,
+    )
+
+
+def test_reflection_bundle_carries_the_index_and_only_relevant_bodies(_ready):
+    """The whole library used to ride along with every body: ~400 KB of a
+    460 KB bundle on prod, growing with each skill learned."""
+    _seed_library()
+    ep = episode.build(_event())
+    bundle = reflector.build_bundle(ep)
+    for i in (0, 17, 39):  # every skill is still named (no duplicate names/topics)…
+        assert f"unrelated-topic-{i:02d}" in bundle
+    assert "rule 17.3" not in bundle  # …but an unrelated body is not shipped
+    assert "BODY-MARKER-RELEVANT" in bundle  # the one this episode is about is, in full
+    assert reflector.editable_names(ep) == {"uv-editable-reinstall"}
+    assert len(bundle) < 40_000
+    # The curator pass still reads everything.
+    assert "rule 17.3" in reflector.build_curator_bundle(NS)
+
+
+def test_pipeline_drops_an_edit_of_a_skill_the_reflector_never_read(_ready):
+    _seed_library(3)
+    blind_patch = {
+        "op": "patch",
+        "name": "unrelated-topic-01",
+        "body": "- rewritten without ever seeing the old body",
+        "reason": "r",
+        "evidence": EVIDENCE,
+    }
+    seen_patch = {
+        "op": "patch",
+        "name": "uv-editable-reinstall",
+        "body": "- run `uv pip install --no-deps -e .`\n- and restart the cockpit",
+        "reason": "r",
+        "evidence": EVIDENCE,
+    }
+    before = store.find_managed(NS, "unrelated-topic-01").body
+    rec = pipeline.on_done(
+        _event(),
+        runner=_fake_runner({"intents": [blind_patch, seen_patch]}, []),
+        settings=settings.LearningSettings(min_worth=0),
+    )
+    assert rec.status == "landed"
+    assert store.find_managed(NS, "unrelated-topic-01").body == before
+    assert "restart the cockpit" in store.find_managed(NS, "uv-editable-reinstall").body
 
 
 def test_reflector_env_is_a_pane_env_not_the_raw_cockpit_env(monkeypatch):
@@ -401,7 +482,7 @@ def test_pipeline_auto_lands_and_notifies(_ready):
     assert calls[0][0][0] == "claude-bin"
     assert notes and "uv-editable-reinstall" in notes[0]
     bundle = (calls[0][1] / "episode.md").read_text(encoding="utf-8")
-    assert "Skills ที่ระบบเรียนรู้ไว้" in bundle and EVIDENCE in bundle
+    assert "สารบัญ skill ที่ระบบเรียนรู้ไว้" in bundle and EVIDENCE in bundle
 
 
 def test_pipeline_propose_then_approve(_ready):

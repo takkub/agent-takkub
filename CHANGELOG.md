@@ -2,6 +2,16 @@
 
 All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses [SemVer](https://semver.org/).
 
+## [v2.2.56] - 2026-11-15
+
+### Fixed (แก้ไข)
+
+- **Skill Learning กิน token เกินเหตุ:** วัดจาก prod 60 วัน — reflection รัน 35–65 รอบต่อวัน แต่ละรอบเขียน context ใหม่ ~126k token บนโมเดลตัวบนสุดของบัญชี (Opus/Fable) คิดเป็น ~8% ของ token ทั้งหมดของ Claude และโตขึ้นทุกครั้งที่เรียน skill เพิ่ม · สามสาเหตุ แก้ครบ:
+  - **ส่งห้องสมุด skill ทั้งก้อนทุกรอบ:** bundle 460 KB เป็นเนื้อหา skill ที่ไม่เกี่ยวกับงานนั้นไปแล้ว ~400 KB — ตอนนี้ส่ง **สารบัญ** ของทุก skill (กันตั้งชื่อ/หัวข้อซ้ำ) กับ **เนื้อหาเต็มเฉพาะ skill ที่เกี่ยวกับงานนั้น** (สูงสุด 10 ตัว / 30,000 ตัวอักษร) · สร้าง bundle ของ 25 รอบล่าสุดใน prod ใหม่: median 463,884 → 98,102 ตัวอักษร (เล็กลง 79%) · reflection แก้/รวม/archive ได้เฉพาะ skill ที่ได้อ่านเนื้อหาเต็ม คำสั่งแก้ skill ที่ไม่ได้อ่านถูกทิ้ง (ลง log `skill_learning_blind_edit_dropped`) · รอบ curator ยังอ่านทั้งห้องสมุดเหมือนเดิม
+  - **ไม่ได้ระบุโมเดล = ใช้ตัวแพงสุดของบัญชี:** ตอนนี้ claude reflector ใช้ `sonnet` เป็นค่าเริ่มต้น · ตั้งเองได้ที่ Settings → Skill Learning (ต้องเลือก provider คู่กับ model)
+  - **ส่ง tool schema / skill catalog / MCP ที่ไม่ได้ใช้:** งานนี้รับเอกสารทาง stdin แล้วตอบ JSON ก้อนเดียว — เปลี่ยนจาก `--disallowedTools` (แค่ห้ามใช้ schema ยังถูกส่ง) เป็น `--tools ""` + `--disable-slash-commands` + `--strict-mcp-config` · วัดจริง prompt พื้นฐาน 37.3k → 10.2k token · และไม่เขียนไฟล์ session แล้ว (`--no-session-persistence` — เดิมมี session ของ reflection ค้างในบัญชี 800+ ไฟล์)
+  - **ผลรวม (ลองจริง 1 รอบกับห้องสมุดของ prod):** ~126k token บน Opus/Fable → 56.7k token บน Sonnet คำตอบ parse ได้ปกติ · provider อื่น (codex/opencode/cursor) ได้ส่วน bundle ที่เล็กลงเหมือนกัน ส่วนโมเดล/flag ยังเป็นค่าเดิมของ CLI นั้น
+
 ## [v2.2.55] - 2026-11-15
 
 รอบ `takkub ma`: ปิด issue ที่เปิดอยู่ทั้ง 16 ใบ (#1007–#1022) — ตัวตรวจโควตา, ข้อความที่ปลุก Lead โดยไม่จำเป็น, Lead ถูกดึงกลับ provider เดิม, auto-commit/auto-down ที่ไปแตะของที่ไม่ควรแตะ

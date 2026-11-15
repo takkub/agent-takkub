@@ -119,6 +119,35 @@ def _save(rec: RunRecord) -> None:
         shutil.rmtree(old, ignore_errors=True)  # run scratch only — skills live elsewhere
 
 
+_EDIT_OPS = frozenset({"patch", "merge", "archive"})
+
+
+def _targets_editable(intent: dict, editable: set[str]) -> bool:
+    """False for a patch/merge/archive that touches a skill whose body the
+    reflector was not shown (a merge touches both `name` and `into`)."""
+    op = str(intent.get("op") or "")
+    if op not in _EDIT_OPS:
+        return True
+    targets = [str(intent.get("name") or "")]
+    if op == "merge":
+        targets.append(str(intent.get("into") or ""))
+    return all(t in editable for t in targets)
+
+
+def _log_blind_edits(project_ns: str, run_id: str, blind: list[dict]) -> None:
+    try:
+        from ..orchestrator_text import _log_event
+
+        _log_event(
+            "skill_learning_blind_edit_dropped",
+            project=project_ns,
+            run_id=run_id,
+            intents=[f"{i.get('op')}:{i.get('name')}" for i in blind][:10],
+        )
+    except Exception:
+        logging.getLogger(__name__).debug("blind-edit log failed", exc_info=True)
+
+
 def _stage(rec: RunRecord, intents: list[dict], ep: episode_mod.Episode) -> None:
     store.write_json(
         store.state_dir(rec.project_ns) / "pending" / f"{rec.run_id}.json",
@@ -211,6 +240,14 @@ def _on_done(event, notify, runner, force, s: LearningSettings) -> RunRecord:
         _save(rec)
         return rec
     intents = [i for i in intents if str(i.get("op") or "") != "none"]
+    # The reflector read the full body of only the skills this episode is
+    # about (`reflector.editable_names`). A patch/merge/archive aimed at any
+    # other skill rewrites or removes text it never saw — dropped here.
+    editable = reflector.editable_names(ep)
+    blind = [i for i in intents if not _targets_editable(i, editable)]
+    if blind:
+        intents = [i for i in intents if _targets_editable(i, editable)]
+        _log_blind_edits(ns, rec.run_id, blind)
     if not intents:
         rec.status, rec.summary = "empty", "ไม่มีบทเรียนใหม่"
         _save(rec)
