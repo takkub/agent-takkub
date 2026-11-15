@@ -11,7 +11,8 @@ cockpit layer, for every provider alike (a model-side rule would only ever
 bind on the provider that read it).
 
 Pure, stdlib-only, no I/O — callable from any thread and from the remote
-scanner. Two families of match:
+scanner. Three families of match (the third: a labelled credential inside a
+sentence, `_INLINE_CRED_RE`):
 
 * **key = value** lines whose key name looks like a credential
   (``*_SECRET``, ``*PASSWORD``, ``*TOKEN``, ``*API_KEY``, ``*PRIVATE_KEY``,
@@ -42,6 +43,20 @@ _KEY_VALUE_RE = re.compile(
     r"(?:SECRET|PASSWORD|PASSWD|TOKEN|API_KEY|PRIVATE_KEY|_KEY|ACCESS_KEY|CLIENT_SECRET))"
     r"(?P<sep>[ \t]*[=:][ \t]*)"
     r"(?P<q>[\"']?)(?P<val>[^\s\"']{4,})(?P=q)"
+)
+
+# A credential written into a SENTENCE — "creds prod … Username: x  Password:
+# S3cr3t!" — which the line-anchored pattern above never sees. Prod
+# 2026-11-12: a production login went through `takkub send` exactly like
+# that and sat in plain text in the message log, the handoff file and two
+# transcripts. The label may be anywhere on the line; the value must look
+# like a secret (letters AND digits, 6+ chars, no spaces) so prose such as
+# "password: required", "token: res.data.token" or "รหัสผ่าน: ต้องยาว 8 ตัว"
+# is left alone. An all-letter password is the documented miss.
+_INLINE_CRED_RE = re.compile(
+    r"(?i)(?P<label>\b(?:pass(?:word|wd)?|pwd|secret|token|api[ _-]?key)\b|รหัสผ่าน|พาสเวิร์ด)"
+    r"(?P<sep>[ \t]*[:=][ \t]*)"
+    r"(?P<q>[\"'`]?)(?P<val>(?=[^\s\"'`]*[A-Za-z])(?=[^\s\"'`]*\d)[^\s\"'`]{6,})(?P=q)"
 )
 
 # Values that are clearly not a real secret — leave them so docs/examples
@@ -134,11 +149,13 @@ def _is_placeholder(value: str) -> bool:
     return bool(_PLACEHOLDER_RE.match(value.strip()))
 
 
-def redact_secrets(text: str) -> tuple[str, list[str]]:
+def redact_secrets(text: str, *, inline: bool = True) -> tuple[str, list[str]]:
     """Return ``(redacted_text, names)`` — *names* lists what was scrubbed
     (the env key for key=value hits, the literal family otherwise), in order
     of first appearance, deduplicated. Empty list = nothing touched and the
     text is returned as-is (same object), so callers can branch cheaply.
+    *inline* False skips the in-sentence credential family — for text a human
+    typed to their own Lead on purpose.
     """
     if not text:
         return text, []
@@ -158,6 +175,17 @@ def redact_secrets(text: str) -> tuple[str, list[str]]:
         return f"{m.group('lead')}{key}{m.group('sep')}{q}{REDACTED_FMT.format(name=key)}{q}"
 
     out = _KEY_VALUE_RE.sub(_kv, text)
+
+    def _inline(m: re.Match[str]) -> str:
+        val = m.group("val")
+        if _is_placeholder(val) or val.startswith("<redacted:"):
+            return m.group(0)
+        _remember("password" if "pass" in m.group("label").lower() else "credential")
+        q = m.group("q")
+        return f"{m.group('label')}{m.group('sep')}{q}{REDACTED_FMT.format(name='credential')}{q}"
+
+    if inline:
+        out = _INLINE_CRED_RE.sub(_inline, out)
     for family, pat in _LITERAL_PATTERNS:
 
         def _lit(m: re.Match[str], family: str = family) -> str:

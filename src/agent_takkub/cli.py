@@ -1733,6 +1733,10 @@ def _await_send_receipt(resp: dict, to_role: str, wait_s: float) -> dict:
     if not m:
         return resp  # no pane open yet (stored for its spawn), or a shell pane
     msg_id = m.group(1)
+    # Anything the cockpit added on its own lines (a "secret was stripped"
+    # warning) must survive the rewording below.
+    _head, _sep, extra = str(resp.get("msg", "")).partition("\n")
+    extra = f"\n{extra}" if extra else ""
     from . import role_messages
     from .config import RUNTIME_DIR
 
@@ -1752,7 +1756,7 @@ def _await_send_receipt(resp: dict, to_role: str, wait_s: float) -> dict:
         return {
             **resp,
             "msg": f"delivered to {to_role} (id {msg_id}) — pane รับข้อความแล้ว "
-            f"(ยืนยันใน {elapsed:.1f}s)",
+            f"(ยืนยันใน {elapsed:.1f}s){extra}",
         }
     if state == "abandoned":
         reason = str((rec or {}).get("abandoned_reason", "") or "ไม่ทราบสาเหตุ")
@@ -1766,7 +1770,7 @@ def _await_send_receipt(resp: dict, to_role: str, wait_s: float) -> dict:
         **resp,
         "msg": f"sent to {to_role} (id {msg_id}) — เขียนเข้า session แล้ว แต่ pane ยังไม่ยืนยัน"
         f"รับใน {elapsed:.0f}s (อาจกำลังรัน tool ยาว) · ยังไม่ถือว่าถึง — ตรวจด้วย "
-        f"`takkub messages --role {to_role}`",
+        f"`takkub messages --role {to_role}`{extra}",
     }
 
 

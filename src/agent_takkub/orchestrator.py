@@ -6265,15 +6265,23 @@ class Orchestrator(
             )
 
     def _redact_forwarded_text(
-        self, text: str, project_ns: str, *, hop: str, from_role: str | None = None
+        self,
+        text: str,
+        project_ns: str,
+        *,
+        hop: str,
+        from_role: str | None = None,
+        inline: bool = True,
     ) -> str:
         """(#441) Scrub credential-shaped values from text the cockpit is
         about to copy somewhere new (Lead transcript, inbox file, phone).
         Logs one event per hit so the audit trail shows a value WAS
-        forwarded and stripped, without ever logging the value itself."""
+        forwarded and stripped, without ever logging the value itself.
+        *inline* False leaves a credential written inside a sentence alone
+        (see `secret_redact._INLINE_CRED_RE`)."""
         from .secret_redact import redact_secrets
 
-        out, names = redact_secrets(text)
+        out, names = redact_secrets(text, inline=inline)
         if not names:
             return text
         _log_event(
@@ -6302,7 +6310,20 @@ class Orchestrator(
         project_ns = self._resolve_project(project)
         # #441: a pane that just `cat`-ed an env file forwards the values
         # verbatim in its message — scrub at the cockpit hop, every provider.
-        msg = self._redact_forwarded_text(msg, project_ns, hop="send", from_role=from_role)
+        # A login written into a sentence ("Password: …") is scrubbed too —
+        # it would otherwise sit in the message log, the handoff file and two
+        # transcripts. Not for a human's own words to their Lead (the mobile
+        # remote / the pane input): that is the owner's call, not a forward.
+        _unredacted = msg
+        msg = self._redact_forwarded_text(
+            msg,
+            project_ns,
+            hop="send",
+            from_role=from_role,
+            inline=from_role not in {"user", "remote"},
+        )
+        secret_stripped = msg != _unredacted
+        del _unredacted
         raw_msg = msg
         if _split_shard(to_role)[0] != "shell" and from_role != "remote":
             from .orchestrator_text import _message_handoff_pointer
@@ -6712,6 +6733,14 @@ class Orchestrator(
             f"sent to {to_role} (id {message_id}) — เขียน{where}แล้ว รอ pane ยืนยันรับ · "
             f"ดูสถานะ: `takkub messages --role {to_role}`"
             + (f" · {steering_warning}" if steering_warning else "")
+            + (
+                # The sender must know the value never arrived, and how to
+                # hand a credential over properly.
+                f"\n⚠ ตัดค่า secret/รหัสผ่านออกจากข้อความแล้ว — {to_role} ไม่ได้รับค่านั้น · "
+                "ใส่ค่าในไฟล์ .env ของโปรเจค (gitignored) แล้วบอกชื่อตัวแปรแทน"
+                if secret_stripped
+                else ""
+            )
         )
 
     def push_report(

@@ -148,3 +148,80 @@ def test_transcript_chunk_redacts_bare_values_byte_exact() -> None:
     # an untouched chunk (incl. a split multi-byte char) comes back as-is
     split = "ไทย".encode()[:-1]
     assert _redact_transcript_chunk(split, secrets) is split
+
+
+class TestCredentialInsideASentence:
+    """Prod 2026-11-12: a production login went through `takkub send` as
+    "creds prod https://… — Username: x  Password: <value>" and stayed in
+    plain text in the message log, the handoff file and two transcripts —
+    the line-anchored KEY=value pattern never sees a label mid-sentence."""
+
+    # Built at runtime so the gitleaks pre-commit hook doesn't flag a fixture.
+    VALUE = "Xy" + "." + "987654" + "!"
+
+    def test_login_written_in_a_sentence_is_scrubbed(self) -> None:
+        text = f"creds prod https://app.example.test — Username: someone  Password: {self.VALUE}  (ห้ามเขียนลงไฟล์)"
+        out, names = redact_secrets(text)
+        assert self.VALUE not in out
+        assert "Password: <redacted:credential>" in out
+        assert "Username: someone" in out and "https://app.example.test" in out
+        assert names == ["password"]
+
+    def test_thai_label_quotes_and_other_labels(self) -> None:
+        for text in (
+            f"รหัสผ่าน: {self.VALUE}",
+            f"pwd=`{self.VALUE}`",
+            f'ใช้ token: "{self.VALUE}" ยิง API',
+            f"api key = {self.VALUE}",
+        ):
+            out, names = redact_secrets(text)
+            assert self.VALUE not in out and names, text
+
+    def test_prose_and_code_about_passwords_are_left_alone(self) -> None:
+        for text in (
+            "password: required",
+            "รหัสผ่าน: ต้องยาวอย่างน้อย 8 ตัว",
+            "token: res.data.token",
+            "password: hashPassword(dto.password)",
+            "ลืม password แล้ว reset ที่หน้า login",
+            "Password: <paste-here>",
+            "the password field is empty; token expired",
+        ):
+            out, names = redact_secrets(text)
+            assert out is text and names == [], text
+
+    def test_a_humans_own_message_can_opt_out(self) -> None:
+        text = f"Password: {self.VALUE}"
+        out, names = redact_secrets(text, inline=False)
+        assert out is text and names == []
+
+
+def test_send_strips_a_login_and_tells_the_sender(monkeypatch) -> None:
+    from PyQt6.QtCore import QCoreApplication
+
+    from agent_takkub.orchestrator import Orchestrator, _exit_key
+
+    _app = QCoreApplication.instance() or QCoreApplication([])
+    monkeypatch.setattr(Orchestrator, "_resolve_project", staticmethod(lambda p: p or "proj"))
+    orch = Orchestrator()
+    orch.shutdown_timers()
+    pane = MagicMock()
+    pane.state = "working"
+    pane.session.is_alive = True
+    pane.session.is_at_ready_prompt.return_value = False
+    orch._panes_by_project.setdefault("proj", {})["qa"] = pane
+    orch._ps(_exit_key("proj", "qa"))
+    value = TestCredentialInsideASentence.VALUE
+    ok, msg = orch.send("qa", f"login prod — Password: {value}", from_role="lead", project="proj")
+    assert ok, msg
+    assert "ตัดค่า secret" in msg and ".env" in msg  # the sender is told, with the way out
+    written = b"".join(
+        c.args[0] if isinstance(c.args[0], bytes) else str(c.args[0]).encode()
+        for c in pane.session.write.call_args_list
+        if c.args
+    )
+    assert value.encode() not in written
+    from agent_takkub import config, role_messages
+
+    logged = role_messages.read(config.RUNTIME_DIR, "proj", role="qa")
+    assert logged and all(value not in rec["body"] for rec in logged)

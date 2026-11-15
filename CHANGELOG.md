@@ -2,6 +2,12 @@
 
 All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses [SemVer](https://semver.org/).
 
+## [v2.2.57] - 2026-11-15
+
+### Security (ความปลอดภัย)
+
+- **รหัสผ่านที่เขียนอยู่กลางประโยคถูกตัดออกก่อนส่งต่อ:** ตัวกรอง secret เดิมจับได้เฉพาะบรรทัดรูปแบบ `KEY=value` — ข้อความแบบ "creds prod … Username: x  Password: <ค่า>" ที่ส่งผ่าน `takkub send` จึงค้างเป็นข้อความธรรมดาใน message log, ไฟล์ handoff และ transcript (เจอจริงใน prod 2026-11-12) · ตอนนี้ค่าที่ตามหลัง `password` / `pwd` / `secret` / `token` / `api key` / `รหัสผ่าน` และมีหน้าตาเป็นรหัส (มีทั้งตัวอักษรและตัวเลข ยาว 6 ตัวขึ้นไป) ถูกแทนด้วย `<redacted:credential>` ที่ทุกจุดที่ cockpit ส่งต่อข้อความ (`send`, done note, digest, transcript ที่ cockpit เขียน, remote mirror) · ผู้ส่งได้รับแจ้งทันทีว่าค่าถูกตัดและ pane ปลายทางไม่ได้รับ พร้อมวิธีส่งที่ถูก (ใส่ใน `.env` ที่ gitignore แล้วบอกชื่อตัวแปร) · ข้อความทั่วไปอย่าง "password: required" หรือ "token: res.data.token" ไม่ถูกแตะ · **ข้อยกเว้น:** ข้อความที่เจ้าของพิมพ์ถึง Lead ของตัวเอง (จาก pane หรือ Remote) ไม่ถูกตัด · **ข้อจำกัด:** รหัสผ่านที่เป็นตัวอักษรล้วนไม่มีตัวเลขจับไม่ได้ และค่าที่เคยค้างใน transcript เก่าไม่ถูกลบย้อนหลัง — ต้องเปลี่ยนรหัสนั้นเอง
+
 ## [v2.2.56] - 2026-11-15
 
 ### Fixed (แก้ไข)
