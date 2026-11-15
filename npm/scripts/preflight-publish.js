@@ -8,6 +8,7 @@
 
 const fs = require('fs');
 const path = require('path');
+const { spawnSync } = require('child_process');
 const { findWheelForVersion } = require('./lib');
 
 function checkDistWheelMatchesVersion(distDir, version) {
@@ -44,6 +45,12 @@ function checkDistWheelMatchesVersion(distDir, version) {
   return { ok: true, wheel: path.basename(wheel) };
 }
 
+function checkPackedWheel(files, wheel) {
+  return files.some((file) => file.path === `dist/${wheel}`)
+    ? { ok: true }
+    : { ok: false, reason: `npm package omits dist/${wheel} — check dist/.npmignore` };
+}
+
 function main() {
   const pkg = require('../../package.json');
   const dist = path.join(__dirname, '..', '..', 'dist');
@@ -52,10 +59,23 @@ function main() {
     console.error(`[agent-takkub] publish preflight FAILED: ${result.reason}`);
     process.exit(1);
   }
+  const packed = spawnSync(process.execPath, [process.env.npm_execpath, 'pack', '--dry-run', '--json', '--ignore-scripts'], {
+    cwd: path.join(__dirname, '..', '..'), encoding: 'utf8',
+  });
+  if (packed.status !== 0) {
+    console.error(`[agent-takkub] publish preflight FAILED: npm pack: ${packed.stderr || packed.error}`);
+    process.exit(1);
+  }
+  const payload = JSON.parse(packed.stdout)[0];
+  const included = checkPackedWheel(payload.files, result.wheel);
+  if (!included.ok) {
+    console.error(`[agent-takkub] publish preflight FAILED: ${included.reason}`);
+    process.exit(1);
+  }
   console.log(`[agent-takkub] publish preflight OK — dist/${result.wheel} matches package.json ${pkg.version}`);
 }
 
-module.exports = { checkDistWheelMatchesVersion };
+module.exports = { checkDistWheelMatchesVersion, checkPackedWheel };
 
 if (require.main === module) {
   main();

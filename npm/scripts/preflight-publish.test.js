@@ -4,7 +4,7 @@ const assert = require('node:assert/strict');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const { checkDistWheelMatchesVersion } = require('./preflight-publish');
+const { checkDistWheelMatchesVersion, checkPackedWheel } = require('./preflight-publish');
 
 function tmpDist(files) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'agent-takkub-preflight-'));
@@ -43,4 +43,10 @@ test('fails when dist/ has more than one wheel', () => {
   const res = checkDistWheelMatchesVersion(dir, '1.0.84');
   assert.equal(res.ok, false);
   assert.match(res.reason, /expected exactly one/);
+});
+
+test('fails when npm pack excludes an existing wheel', () => {
+  const wheel = 'agent_takkub-1.0.84-py3-none-any.whl';
+  assert.equal(checkPackedWheel([{ path: 'package.json' }], wheel).ok, false);
+  assert.equal(checkPackedWheel([{ path: `dist/${wheel}` }], wheel).ok, true);
 });

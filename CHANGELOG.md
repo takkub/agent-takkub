@@ -2,6 +2,12 @@
 
 All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses [SemVer](https://semver.org/).
 
+## [v2.2.58] - 2026-11-15
+
+### Fixed (แก้ไข)
+
+- **npm update ติดตั้ง Cockpit ไม่สำเร็จ (#1025):** เพิ่ม `dist/.npmignore` เพื่อให้ npm บรรจุ Python wheel แม้ `dist/.gitignore` จะซ่อนไฟล์ที่ build ไว้ และให้ publish preflight ตรวจรายชื่อไฟล์ใน npm package จริงก่อนเผยแพร่
+
 ## [v2.2.57] - 2026-11-15
 
 ### Security (ความปลอดภัย)

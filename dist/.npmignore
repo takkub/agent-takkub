@@ -1,0 +1,1 @@
+# Override dist/.gitignore so npm includes the bundled wheel.
