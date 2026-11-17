@@ -419,6 +419,47 @@ def record_impact_evidence(project: str, role: str, task_id: str, evidence: dict
     return True
 
 
+def record_model_switch(
+    project: str, role: str, to_model: str, reason: str = "", ts: datetime | None = None
+) -> bool:
+    """#1031: stamp on *role*'s open row that its CLI moved the session to
+    *to_model* mid-task, so the Lead can tell which part of the work ran on a
+    lesser model. False when there is no open row (nothing to stamp)."""
+    state = _load_state(project)
+    ptr = state.get("open", {}).get(role)
+    if not isinstance(ptr, dict):
+        return False
+    row, _rows = _open_row(state, ptr)
+    if not isinstance(row, dict):
+        return False
+    switches = row.setdefault("model_switches", [])
+    if not isinstance(switches, list):
+        switches = row["model_switches"] = []
+    switches.append(
+        {
+            "at": (ts or datetime.now()).strftime("%H:%M:%S"),
+            "to": str(to_model)[:80],
+            "reason": str(reason)[:120],
+        }
+    )
+    try:
+        _save_state(project, state)
+        _regen_index(project, state)
+    except OSError:
+        return False
+    return True
+
+
+def _model_switch_suffix(row: dict) -> str:
+    switches = row.get("model_switches")
+    if not isinstance(switches, list) or not switches:
+        return ""
+    parts = [
+        f"{s.get('to', '?')} ตั้งแต่ `{s.get('at', '?')}`" for s in switches if isinstance(s, dict)
+    ]
+    return f" · 🔻 สลับรุ่นกลางงาน: {', '.join(parts)}" if parts else ""
+
+
 def check_impact_completion(
     project: str,
     role: str,
@@ -813,7 +854,7 @@ def _render_group(group: dict) -> str:
             )
             lines.append(
                 f"- [{sym}] `{row['assign_hhmmss']}` **{row['role']}** · {row['cwd']} · "
-                f"{row['summary']}{link} — {_status_suffix(row)}"
+                f"{row['summary']}{link} — {_status_suffix(row)}{_model_switch_suffix(row)}"
             )
         lines.append("")
     return "\n".join(lines).rstrip() + "\n"

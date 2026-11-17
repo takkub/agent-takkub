@@ -836,6 +836,11 @@ class PaneState:
     # needed — nothing reads these unless rate_limited_until is set).
     quota_marker: str = ""
     quota_provider: str = ""
+    # #1031: the CLI's own "Switched to <model> …" line last acted on (so one
+    # switch is announced once) and the model it named — what the pane is
+    # really running on now, shown in the done digest beside the spawn model.
+    model_switch_seen: str = ""
+    model_switched_to: str = ""
     # _auto_respawn_attempts: consecutive crash-respawn count (capped at AUTO_RESPAWN_MAX)
     auto_respawn_attempts: int = 0
     # #313: consecutive SpawnTargetCorrupt count (capped at
@@ -1530,6 +1535,39 @@ def _teammate_autocompact() -> int | None:
     from .provider_spec import TEAMMATE_AUTOCOMPACT_TOKENS
 
     return TEAMMATE_AUTOCOMPACT_TOKENS
+
+
+#: #1031: the Lead's fallback when nothing is configured — the newest Sonnet,
+#: same generation as the role tier table in `orchestrator_text`.
+_LEAD_FALLBACK_DEFAULT = "claude-sonnet-5-5"
+
+
+def _resolve_fallback_model(env_var: str, default: str, main_model: str, env: dict) -> str:
+    """The ``--fallback-model`` for a claude pane, or ``""`` for none (#1031).
+
+    Precedence: the operator's env force (an explicitly empty value disables
+    the fallback) > the provider's saved fallback (`takkub provider model
+    claude --fallback …`) > *default*. A fallback equal to the pane's own
+    model is dropped — falling back to the model that is overloaded does
+    nothing.
+
+    The defaults used to be hardcoded one generation behind
+    (`claude-haiku-4-5`, `claude-sonnet-5`): a pane on Sonnet 5.5 was moved
+    mid-task to Haiku 4.5 with a context window a fifth the size.
+    """
+    if env_var in os.environ:
+        chosen = os.environ[env_var].strip()
+    else:
+        try:
+            from .provider_models import fallback_for
+
+            chosen = (fallback_for("claude") or default or "").strip()
+        except Exception:
+            chosen = (default or "").strip()
+    chosen = _remap_pinned_model(chosen, env)
+    if chosen and chosen == _remap_pinned_model((main_model or "").strip(), env):
+        return ""
+    return chosen
 
 
 def _remap_pinned_model(model: str, env: dict[str, str]) -> str:
@@ -3400,7 +3438,8 @@ class SpawnEngineMixin:
         if provider_bin is None:
             return False, spec.install_instructions
         if _is_lead:
-            spawn_cwd = cwd or lead_cwd(project=project_ns) or str(DATA_HOME)
+            _project_root = cwd or lead_cwd(project=project_ns)
+            spawn_cwd = _project_root or str(DATA_HOME)
         else:
             spawn_cwd = cwd or default_cwd_for_role(role_name, project=project_ns) or str(DATA_HOME)
         if resume_uuid:
@@ -3872,6 +3911,7 @@ class SpawnEngineMixin:
         # model (when the CLI exposes one) takes precedence over this at
         # render time, see pane_provider_label.py.
         pane.model.spawn_model = provider_model
+        pane.model.switched_model = ""
         pane.model.spawn_effort = provider_effort
         pane.model.spawn_model_explicit = bool(_ps_initial.model_override)
         # MCP injection (#100): dispatched per spec.mcp_adapter_variant —
@@ -4092,12 +4132,15 @@ class SpawnEngineMixin:
             # user's actual codebase. The cockpit's CLAUDE.md (takkub
             # cheatsheet + role guide) is appended as system prompt so
             # Lead still knows about `takkub assign / send / done / ...`.
-            spawn_cwd = cwd or lead_cwd(project=project_ns) or str(DATA_HOME)
+            _project_root = cwd or lead_cwd(project=project_ns)
+            spawn_cwd = _project_root or str(DATA_HOME)
             # Render Lead's system prompt fresh each spawn so BLOCKED_DIRS
             # tracks whatever project is active in projects.json right now.
-            # Skip injection when Lead is anchored at the cockpit itself
-            # (no project context to enforce).
-            if spawn_cwd != str(DATA_HOME):
+            # Skip injection when Lead has no project root at all (anchored at
+            # the data home). A project whose root IS the data home — the dev
+            # checkout working on itself — still gets its context: comparing
+            # paths left that Lead with no policy and a denied first tool call.
+            if _project_root:
                 try:
                     post_compact_brief = self._build_post_compact_brief(project_ns)
                     # #903: the Required policy docs ride in the system prompt
@@ -4706,6 +4749,7 @@ class SpawnEngineMixin:
             # explicit covers both the per-assign override and the
             # TAKKUB_TEAMMATE_MODEL env force (model_argv branches).
             pane.model.spawn_model = teammate_model
+            pane.model.switched_model = ""
             pane.model.spawn_effort = teammate_effort
             pane.model.spawn_model_explicit = bool(_ps_initial.model_override) or (
                 "TAKKUB_TEAMMATE_MODEL" in os.environ
@@ -4720,8 +4764,9 @@ class SpawnEngineMixin:
             # Sonnet roles → Haiku, Opus gate roles → Sonnet) rather than
             # erroring mid-task and forcing a respawn. Set
             # TAKKUB_TEAMMATE_FALLBACK="" to disable, or to another model id.
-            teammate_fallback = os.environ.get("TAKKUB_TEAMMATE_FALLBACK", tier_fallback).strip()
-            teammate_fallback = _remap_pinned_model(teammate_fallback, env)
+            teammate_fallback = _resolve_fallback_model(
+                "TAKKUB_TEAMMATE_FALLBACK", tier_fallback, teammate_model, env
+            )
             if teammate_fallback:
                 fallback_argv.extend(["--fallback-model", teammate_fallback])
             # Hard-enforce the pane-mode side of #268 at the CLI level. Native
@@ -4779,12 +4824,14 @@ class SpawnEngineMixin:
             # — the Lead is the single pane the user is actually talking to,
             # so a hard failure there stalls the whole session. Set
             # TAKKUB_LEAD_FALLBACK="" to disable.
-            lead_fallback = os.environ.get("TAKKUB_LEAD_FALLBACK", "claude-sonnet-5").strip()
-            lead_fallback = _remap_pinned_model(lead_fallback, env)
+            lead_fallback = _resolve_fallback_model(
+                "TAKKUB_LEAD_FALLBACK", _LEAD_FALLBACK_DEFAULT, lead_model or "", env
+            )
             if lead_fallback:
                 fallback_argv.extend(["--fallback-model", lead_fallback])
             # #591: Lead never gets --effort (rides the user's own default).
             pane.model.spawn_model = lead_model
+            pane.model.switched_model = ""
             pane.model.spawn_effort = ""
             pane.model.spawn_model_explicit = bool(_ps_initial.model_override)
 
@@ -5239,7 +5286,16 @@ class SpawnEngineMixin:
         (same path as a quota reroute). True when a reroute was started."""
         from .provider_spec import bootstrap_failure_marker
 
-        if not (getattr(ps, "last_assigned_task", None) or ""):
+        is_lead = role_name == LEAD.name
+        if is_lead:
+            # #1032: a Lead has no "outstanding task" — it IS the session. One
+            # ordinary respawn first (the routing lookup that fails here is
+            # the provider's own service and often answers on the next try);
+            # a second bootstrap death moves the Lead instead of looping to
+            # the respawn cap and leaving the project with no Lead at all.
+            if int(getattr(ps, "auto_respawn_attempts", 0) or 0) < 1:
+                return False
+        elif not (getattr(ps, "last_assigned_task", None) or ""):
             return False
         try:
             lines = session.display_lines() if session is not None else []
@@ -5405,9 +5461,7 @@ class SpawnEngineMixin:
 
         key = f"{project}::{role_name}"
         ps = self._ps(key)
-        if role_name != LEAD.name and self._maybe_reroute_bootstrap_failure(
-            project, role_name, ps, _prov, session
-        ):
+        if self._maybe_reroute_bootstrap_failure(project, role_name, ps, _prov, session):
             return
         attempts = ps.auto_respawn_attempts
         if attempts >= AUTO_RESPAWN_MAX:

@@ -15,6 +15,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+import time
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -321,6 +322,77 @@ def ensure_project_skill_links(
         central = config.project_skills_dir(project_ns)
     except ValueError:
         return []
+    fresh_key = (str(project_root), project_ns, bool(copy))
+    signature = _links_signature(project_root, project_ns)
+    known = _LINKS_FRESH.get(fresh_key)
+    if (
+        signature is not None
+        and known is not None
+        and known[0] == signature
+        and time.monotonic() - known[1] < _LINKS_FRESH_TTL_S
+    ):
+        return []  # #1023: nothing changed since the last full pass
+    _LINKS_FRESH.pop(fresh_key, None)
+    errors = _ensure_project_skill_links_full(project_root, project_ns, central, copy=copy)
+    if not errors:
+        # Signature AFTER the pass: it includes the names now planted.
+        signature = _links_signature(project_root, project_ns)
+        if signature is not None:
+            _LINKS_FRESH[fresh_key] = (signature, time.monotonic())
+    return errors
+
+
+# #1023: this runs on the GUI thread at every pane spawn, for every configured
+# path of the project. The full pass resolves a link per skill and, for a
+# worktree copy, walks and stats every file of every skill (`_tree_stamp`) —
+# 8–11 s main-thread stalls on prod, twice with `copytree` on top. The second
+# and later spawns into the same root have nothing to do, and can tell from
+# three directory listings.
+_LINKS_FRESH: dict[tuple[str, str, bool], tuple[str, float]] = {}
+_LINKS_FRESH_TTL_S = 600.0
+
+
+def _links_signature(project_root: Path, project_ns: str) -> str | None:
+    """Cheap fingerprint of "what a full pass would look at": every skill in
+    both stores (name, dir mtime, SKILL.md mtime), the project's excludes, and
+    the names present at the destination. None when it cannot be taken — the
+    caller then does the full pass."""
+    parts: list[str] = []
+    try:
+        stores = (config.project_skills_dir(project_ns), config.global_skills_dir())
+        excluded = sorted(config.project_skill_excludes(project_ns))
+    except Exception:
+        return None
+    for store in stores:
+        try:
+            entries = sorted(os.scandir(store), key=lambda e: e.name)
+        except OSError:
+            parts.append(f"{store}:absent")
+            continue
+        for entry in entries:
+            try:
+                dir_mtime = entry.stat().st_mtime_ns
+            except OSError:
+                return None
+            try:
+                skill_mtime = os.stat(os.path.join(entry.path, "SKILL.md")).st_mtime_ns
+            except OSError:
+                skill_mtime = 0
+            parts.append(f"{entry.name}:{dir_mtime}:{skill_mtime}")
+        parts.append("/")
+    parts.append("x:" + ",".join(excluded))
+    try:
+        planted = sorted(e.name for e in os.scandir(project_root / ".claude" / "skills"))
+    except OSError:
+        planted = []
+    parts.append("d:" + ",".join(planted))
+    return "|".join(parts)
+
+
+def _ensure_project_skill_links_full(
+    project_root: Path, project_ns: str, central: Path, *, copy: bool
+) -> list[str]:
+    errors: list[str] = []
     _prune_dangling_store_links(project_root)
     if central.is_dir():
         for skill_dir in sorted(central.iterdir()):

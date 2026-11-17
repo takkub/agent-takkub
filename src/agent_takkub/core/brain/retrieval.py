@@ -82,6 +82,35 @@ _W_CONFIDENCE = 0.3
 _W_IMPORTANCE = 0.3
 
 
+# #1023: `recall` used to tokenize every record on every call — pure-Python
+# CPU on a worker thread while the Qt thread waits on it (300 ms cap in
+# `_inject_v2_context`). Measured on prod 2026-11-16: 11 of 15 assigns timed
+# out, i.e. the recall delivered nothing and still held the GIL beside a
+# spawn. Record content is immutable once written, so its tokens are kept;
+# a cold pass sleeps briefly every few records so the GUI thread is not
+# queued behind it (same reasoning as `graft_autobuild._yield_gil`, #973).
+_TOKEN_CACHE: dict[str, list[str]] = {}
+_TOKEN_CACHE_MAX = 20_000
+_COLD_YIELD_EVERY = 16
+_COLD_YIELD_S = 0.002
+
+
+def _doc_tokens(contents: list[str]) -> list[list[str]]:
+    out: list[list[str]] = []
+    cold = 0
+    for content in contents:
+        tokens = _TOKEN_CACHE.get(content)
+        if tokens is None:
+            if len(_TOKEN_CACHE) >= _TOKEN_CACHE_MAX:
+                _TOKEN_CACHE.clear()
+            tokens = _TOKEN_CACHE[content] = tokenize(content)
+            cold += 1
+            if cold % _COLD_YIELD_EVERY == 0:
+                time.sleep(_COLD_YIELD_S)
+        out.append(tokens)
+    return out
+
+
 @dataclass(frozen=True, slots=True)
 class ScoredRecord:
     record: MemoryRecord
@@ -178,7 +207,7 @@ class RetrievalEngine:
             # be relevant TO, so rank nothing rather than handing back the
             # whole store ordered by recency/trust.
             return []
-        docs_tokens = [tokenize(r.content) for r in records]
+        docs_tokens = _doc_tokens([r.content for r in records])
         bm25_raw = _bm25_scores(docs_tokens, query_tokens)
 
         scored: list[ScoredRecord] = []

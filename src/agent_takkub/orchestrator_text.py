@@ -246,24 +246,24 @@ _HARVEST_EXCLUDE_DIRS = frozenset(
 # (this table kept pointing at claude-opus-4-8 after claude-opus-5 shipped
 # and became current) — check both when bumping.
 _DEFAULT_TEAMMATE_TIER: tuple[str, str, str] = (
-    "claude-sonnet-5",
+    "claude-sonnet-5-5",
     "medium",
-    "claude-haiku-4-5",
+    "claude-haiku-5-5",
 )
 _ROLE_MODEL_TIERS: dict[str, tuple[str, str, str]] = {
-    "reviewer": ("claude-opus-5-5", "high", "claude-sonnet-5"),
-    "critic": ("claude-opus-5-5", "high", "claude-sonnet-5"),
+    "reviewer": ("claude-opus-5-5", "high", "claude-sonnet-5-5"),
+    "critic": ("claude-opus-5-5", "high", "claude-sonnet-5-5"),
     # maintainer: full-system review + subtle-bug hunting on agent-takkub
     # itself — a gate-style workload, not high-frequency impl — so it sits
     # in the reviewer/critic tier rather than the backend/devops tier.
-    "maintainer": ("claude-opus-5-5", "high", "claude-sonnet-5"),
-    "backend": ("claude-sonnet-5", "high", "claude-haiku-4-5"),
-    "devops": ("claude-sonnet-5", "high", "claude-haiku-4-5"),
+    "maintainer": ("claude-opus-5-5", "high", "claude-sonnet-5-5"),
+    "backend": ("claude-sonnet-5-5", "high", "claude-haiku-5-5"),
+    "devops": ("claude-sonnet-5-5", "high", "claude-haiku-5-5"),
     # codex/gemini substitutes: when the real binary is unavailable, Claude
     # backs the role — use Opus/high so the cross-check has the same quality
     # as reviewer/critic rather than falling to the default Sonnet tier.
-    "codex": ("claude-opus-5-5", "high", "claude-sonnet-5"),
-    "gemini": ("claude-opus-5-5", "high", "claude-sonnet-5"),
+    "codex": ("claude-opus-5-5", "high", "claude-sonnet-5-5"),
+    "gemini": ("claude-opus-5-5", "high", "claude-sonnet-5-5"),
 }
 
 # ── #433 UI evidence gate for `takkub done` ──────────────────────────────────

@@ -645,7 +645,8 @@ class TestCloseSnapshotsDirtyWorktreeBeforeFinalize:
         orch._snapshot_dirty_worktree_if_needed.assert_called_once_with(
             "proj", "backend", worktree, "close"
         )
-        orch._finalize_worktree.assert_called_once_with("proj", "backend", worktree)
+        # note="close" (#1026): the notice must not call a closed pane "done".
+        orch._finalize_worktree.assert_called_once_with("proj", "backend", worktree, note="close")
 
     def test_no_worktree_skips_both(self, orch, monkeypatch):
         self._close_ready_orch(orch, monkeypatch, None)

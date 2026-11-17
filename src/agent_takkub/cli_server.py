@@ -1045,6 +1045,47 @@ class CliServer(QObject):
                             }:
                                 self._reply(sock, ok=False, msg="--mode must be pane or subagent")
                                 return
+                    # #1029: a worktree assign to a bare role whose pane is
+                    # mid-task used to be refused ("type reviewer#2 yourself")
+                    # while the same assign in shared mode queued. Open the
+                    # next free instance instead — every later step sees the
+                    # `role#N` name exactly as if the Lead had typed it.
+                    instance_note = ""
+                    if (
+                        str(req.get("isolation", "shared") or "shared") == "worktree"
+                        and mode_requested != "subagent"
+                        and int(req.get("shard_total", 0) or 0) == 0
+                        and not bool(req.get("plan", False))
+                        and "#" not in str(role)
+                    ):
+                        _next_instance_fn = getattr(self._orch, "next_worktree_instance", None)
+                        _next_instance = None
+                        if callable(_next_instance_fn):
+                            from .routing_planner import _MODE_TO_LEGACY_ROLE as _MODE_PANE
+
+                            _pane_role = (
+                                _MODE_PANE.get(str(mode_requested or ""), req_base_role)
+                                if req_base_role == "reviewer"
+                                else req_base_role
+                            )
+                            try:
+                                _next_instance = _next_instance_fn(
+                                    str(role), from_project, _pane_role
+                                )
+                            except Exception:
+                                _next_instance = None
+                        if isinstance(_next_instance, str) and _next_instance:
+                            instance_note = (
+                                f"[{role} กำลังทำงานอยู่ → เปิด {_next_instance} ให้ "
+                                "(pane + worktree ของตัวเอง ไม่แตะงานที่ค้างอยู่) #1029]"
+                            )
+                            _log_event(
+                                "assign_worktree_next_instance",
+                                role=role,
+                                project=from_project,
+                                instance=_next_instance,
+                            )
+                            role = _next_instance
                     # #364 lever 2: when the caller left --mode unset, decide
                     # pane vs. subagent here instead of defaulting straight to
                     # "pane" — an explicit --mode from the caller always wins
@@ -1328,7 +1369,7 @@ class CliServer(QObject):
 
                                 if _inp.get("reuse"):
                                     return WorktreeInfo.from_dict(_inp["reuse"]), ""
-                                return WorktreeManager().create(
+                                created = WorktreeManager().create(
                                     _inp["base_cwd"],
                                     _inp["project_ns"],
                                     _inp["role"],
@@ -1337,6 +1378,21 @@ class CliServer(QObject):
                                     base_ref=_inp.get("base_ref"),
                                     branch_override=_inp.get("wt_branch"),
                                 )
+                                # #1023: plant the skill copies here, on this
+                                # worker. The spawn that follows does the same
+                                # job on the GUI thread (`copytree` of every
+                                # skill — 8.6 s once) and now finds it done.
+                                try:
+                                    _new_wt = created[0] if isinstance(created, tuple) else None
+                                    if _new_wt is not None and getattr(_new_wt, "path", None):
+                                        from .skill_scan import ensure_project_skill_links
+
+                                        ensure_project_skill_links(
+                                            _new_wt.path, _inp["project_ns"], copy=True
+                                        )
+                                except Exception:
+                                    pass  # the spawn path repeats it
+                                return created
 
                             def _dispatch_prepared(prepared, _role=_role, _kw=_kw):
                                 if prepared is None:
@@ -1392,6 +1448,8 @@ class CliServer(QObject):
                         ack_msg = f"{resolution_line}{ack_msg}"
                     if cmd == "assign" and auto_mode_note:
                         ack_msg = f"{ack_msg}\n[{auto_mode_note}]"
+                    if cmd == "assign" and instance_note:
+                        ack_msg = f"{ack_msg}\n{instance_note}"
                     # #831: stale message cleanup belongs to the target execution role,
                     # not the unmapped alias (e.g. reviewer --mode e2e resolves to qa)
                     queued_notice = self._queued_no_pane_suffix(project_ns_fp, target_role)

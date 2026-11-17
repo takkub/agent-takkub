@@ -382,8 +382,11 @@ def build_argv(provider: str, binary: str, prompt: str, model: str) -> list[str]
             binary,
             "-p",
             prompt,
+            # json, not text: the envelope carries the run's token usage,
+            # which `--no-session-persistence` otherwise leaves recorded
+            # nowhere (`_unwrap_reply`).
             "--output-format",
-            "text",
+            "json",
             "--tools",
             "",
             "--disable-slash-commands",
@@ -465,6 +468,64 @@ def _subprocess_runner(
     return True, proc.stdout or ""
 
 
+def _unwrap_reply(provider: str, out: str) -> tuple[str, dict]:
+    """``(reply text, usage)`` from a reflector's stdout.
+
+    claude runs with ``--output-format json``: one envelope whose ``result``
+    is the model's reply and whose ``usage`` is what the run cost. Anything
+    that is not that envelope — another provider, an older CLI printing plain
+    text, a reply that is itself the intents object — is returned unchanged
+    with no usage."""
+    if provider != "claude" or not out:
+        return out, {}
+    try:
+        data = json.loads(out)
+    except ValueError:
+        return out, {}
+    if not isinstance(data, dict) or not isinstance(data.get("result"), str):
+        return out, {}
+    usage = data.get("usage") if isinstance(data.get("usage"), dict) else {}
+    found = {
+        key: int(usage.get(key) or 0)
+        for key in (
+            "input_tokens",
+            "cache_creation_input_tokens",
+            "cache_read_input_tokens",
+            "output_tokens",
+        )
+        if isinstance(usage.get(key), int | float)
+    }
+    models = data.get("modelUsage")
+    if isinstance(models, dict) and models:
+        found["models"] = ",".join(sorted(str(m) for m in models))
+    if isinstance(data.get("total_cost_usd"), int | float):
+        found["cost_usd"] = round(float(data["total_cost_usd"]), 4)
+    return data["result"], found
+
+
+def _log_run(provider: str, model: str, project_ns: str, ok: bool, usage: dict, **extra) -> None:
+    """One `skill_learning_reflect_run` event per provider attempt. A reflect
+    run writes no session file, so without this its tokens appear in no
+    transcript and no audit — after 2.2.56 the feature's cost could not be
+    measured at all. Token counts exist for claude only; the other CLIs print
+    no usage in the mode they are run in (gap), so their line carries the
+    bundle size and duration alone."""
+    try:
+        from ..orchestrator_text import _log_event
+
+        _log_event(
+            "skill_learning_reflect_run",
+            provider=provider,
+            model=model or "",
+            project=project_ns,
+            ok=ok,
+            **usage,
+            **extra,
+        )
+    except Exception:
+        pass
+
+
 def parse_intents(text: str) -> list[dict] | None:
     """The JSON object out of a model reply — fenced or bare. None = no
     parseable object (a failed run, distinct from a valid empty list)."""
@@ -525,9 +586,22 @@ def run(
         )
         argv = build_argv(provider, _binary(provider) or provider, prompt, model)
         env = reflector_env(provider, project_ns)
+        started = time.monotonic()
         ok, out = (runner or _subprocess_runner)(argv, run_dir, float(s.timeout_s), env, stdin_text)
+        usage: dict = {}
+        if ok:
+            out, usage = _unwrap_reply(provider, out)
         store.atomic_write_text(run_dir / f"reply-{provider}.txt", out or "")
         intents = parse_intents(out) if ok else None
+        _log_run(
+            provider,
+            model or DEFAULT_REFLECTOR_MODEL.get(provider, ""),
+            project_ns,
+            intents is not None,
+            usage,
+            bundle_chars=len(bundle),
+            duration_s=round(time.monotonic() - started, 1),
+        )
         if intents is not None:
             _failed_until.pop(provider, None)
             return provider, intents, out

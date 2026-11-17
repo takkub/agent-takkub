@@ -97,7 +97,7 @@ class TestTeammateDefaultModelPin:
         # No role/provider pin configured — backend's tier default applies.
         argv, env = _spawn_capture(orch, "backend")
         assert "--model" not in argv
-        assert env.get("ANTHROPIC_DEFAULT_MODEL") == "claude-sonnet-5"
+        assert env.get("ANTHROPIC_DEFAULT_MODEL") == "claude-sonnet-5-5"
 
     def test_role_pin_goes_to_anthropic_default_model_not_argv(self, orch: Orchestrator) -> None:
         role_models.set_model("backend", CLAUDE, "claude-opus-5")

@@ -168,8 +168,15 @@ class ShardGroup:
     done: dict = field(default_factory=dict)  # {shard_key: note}
     failed: set = field(default_factory=set)  # shard_keys that crashed or reported --fail
     failed_notes: dict = field(default_factory=dict)  # {shard_key: done --fail note}
+    # #1026: shards the Lead closed on purpose before they reported. They are
+    # settled — not a timeout, not a crash — so the group stops waiting on them.
+    withdrawn: set = field(default_factory=set)
     closed: bool = False
     generation: int = field(default_factory=lambda: next(_shard_generation_counter))
+
+    def settled(self) -> bool:
+        """Every shard has reported, failed, or been closed by the Lead."""
+        return len(self.done) + len(self.failed) + len(self.withdrawn) >= self.total
 
 
 @dataclass
@@ -730,17 +737,21 @@ class PipelineMixin:
         done_count = len(group.done)
         fail_count = len(group.failed)
         total = group.total
+        withdrawn = set(getattr(group, "withdrawn", ()) or ())
+        closed_note = f", {len(withdrawn)} ปิดโดย Lead" if withdrawn else ""
 
         if timed_out:
             status = (
                 f"[{group.base_role} fan-out timeout: {done_count}/{total} shards done"
                 + (f", {fail_count} failed" if fail_count else "")
+                + closed_note
                 + "]"
             )
         else:
             status = (
                 f"[{group.base_role} fan-out complete: {done_count}/{total} shards done"
                 + (f", {fail_count} failed" if fail_count else "")
+                + closed_note
                 + "]"
             )
 
@@ -756,7 +767,7 @@ class PipelineMixin:
             else:
                 lines.append(f"  shard {idx}: CRASHED (respawn-capped)")
         if timed_out:
-            reported = set(group.done) | group.failed
+            reported = set(group.done) | group.failed | withdrawn
             for n in range(1, total + 1):
                 shard_key = f"{group.base_role}#{n}"
                 if shard_key not in reported:
@@ -781,6 +792,30 @@ class PipelineMixin:
             failed=fail_count,
             timed_out=timed_out,
         )
+
+    def _withdraw_shard(self, project_ns: str, role_name: str) -> None:
+        """#1026: the Lead closed shard *role_name* before it reported. Count
+        it as settled so the group neither times out on it nor calls it "NO
+        RESPONSE"; when it was the last one outstanding the group closes now —
+        with a handoff only if some other shard actually has a result."""
+        base_role, shard_idx = _split_shard(role_name)
+        if shard_idx is None:
+            return
+        group_key = f"{project_ns}::{base_role}"
+        group = self._shard_groups.get(group_key)
+        if group is None or group.closed:
+            return
+        if role_name in group.done or role_name in group.failed:
+            return
+        group.withdrawn.add(role_name)
+        _log_event(
+            "shard_withdrawn", project=project_ns, role=role_name, withdrawn=len(group.withdrawn)
+        )
+        if group.settled():
+            group.closed = True
+            if group.done or group.failed:
+                self._inject_shard_fanout_handoff(project_ns, group)
+            self._shard_groups.pop(group_key, None)
 
     def _check_shard_group_timeout(
         self, project_ns: str, group_key: str, generation: int | None = None

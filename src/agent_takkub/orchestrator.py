@@ -1614,7 +1614,11 @@ def _pane_quota_stalled(orch: object, project: str, role: str, now: float) -> bo
     see `Orchestrator._pane_quota_stalled` for the real-incident rationale.
     Tolerant of a missing `_pane_state` attribute (defaults to not-stalled)."""
     ps = getattr(orch, "_pane_state", {}).get(f"{project}::{role}")
-    return ps is not None and ps.rate_limited_until > now
+    # #1033: a parked pane stays quota-stalled until its wake timer runs, which
+    # is WAKE_BUFFER_S after the recorded reset.
+    return ps is not None and (
+        ps.rate_limited_until > now or getattr(ps, "limit_parked", False) is True
+    )
 
 
 # #954: how long a closed pane's undelivered task waits before it is forwarded
@@ -3000,7 +3004,7 @@ class Orchestrator(
                     group.failed_notes[role_name] = body
                 else:
                     group.done[role_name] = body
-                if len(group.done) + len(group.failed) >= group.total:
+                if group.settled():
                     group.closed = True
                     self._inject_shard_fanout_handoff(project_ns, group)
                     self._shard_groups.pop(group_key, None)
@@ -3961,6 +3965,112 @@ class Orchestrator(
             f"หรือปิด/รอ {role_name} ปัจจุบันให้เสร็จก่อน (takkub close --role {role_name})"
         )
 
+    def _check_model_switch(self, project_ns: str, role: str, pane, key: str) -> None:
+        """#1031: the pane's CLI moved its running session to another model
+        ("Switched to Haiku 4.5 due to high demand for Sonnet 5.5 · context
+        window 1M → 200K tokens"). The work goes on, on a different model —
+        tell the Lead once per switch, record it on the task's ledger row, and
+        remember the model so the done digest names what really ran.
+
+        Every provider goes through here; only those with a captured switch
+        line in `provider_spec.MODEL_SWITCH_PATTERNS` can be detected (claude
+        today — codex/opencode/cursor are a stated gap, gemini's live model is
+        read from its footer by `current_model_label`)."""
+        session = getattr(pane, "session", None)
+        probe = getattr(session, "model_switch_notice", None)
+        if not callable(probe):
+            return
+        try:
+            provider = getattr(getattr(pane, "model", None), "provider_name", None)
+            if not (isinstance(provider, str) and provider):
+                from .provider_config import effective_provider_for
+
+                provider = effective_provider_for(role, project=project_ns)
+            hit = probe(provider)
+        except Exception:
+            return
+        if not isinstance(hit, dict) or not hit.get("to"):
+            return
+        ps = self._ps(key)
+        if ps.model_switch_seen == hit.get("text", ""):
+            return
+        ps.model_switch_seen = hit.get("text", "")
+        ps.model_switched_to = hit["to"]
+        try:
+            pane.model.switched_model = hit["to"]
+        except Exception:
+            pass
+        spawn_model = getattr(getattr(pane, "model", None), "spawn_model", "") or ""
+        before = hit.get("from") or spawn_model or "รุ่นเดิม"
+        context = f" · context {hit['context']}" if hit.get("context") else ""
+        _log_event(
+            "pane_model_switched",
+            role=role,
+            project=project_ns,
+            provider=provider,
+            to_model=hit["to"],
+            from_model=before,
+            why=hit.get("why", ""),
+            context=hit.get("context", ""),
+        )
+        try:
+            from .task_ledger import record_model_switch
+
+            if record_model_switch(project_ns, role, hit["to"], hit.get("why", "")):
+                self.ledgerChanged.emit(project_ns)
+        except Exception:
+            _log_event("ledger_hook_error", role=role, project=project_ns, stage="model_switch")
+        if role == LEAD.name:
+            return  # the Lead reads its own screen; the event + ledger are the record
+        self._notify_lead(
+            project_ns,
+            f"🔻 [model] {role} ({provider}): CLI สลับรุ่นกลางงาน {before} → {hit['to']} "
+            f"({hit.get('why') or 'ไม่ระบุเหตุผล'}){context} — งานหลังจากนี้ทำบน {hit['to']} "
+            "ถ้าเป็นงานที่พลาดแล้วแพง ให้ตรวจซ้ำส่วนที่ทำหลังสลับ",
+            from_role=role,
+            note="model_switched",
+            kind="model-switch",
+        )
+
+    _WORKTREE_INSTANCE_MAX = 9
+
+    def next_worktree_instance(
+        self, role_name: str, project: str | None, pane_role: str | None = None
+    ) -> str | None:
+        """#1029: the `role#N` to use when `assign --isolation worktree` names
+        a bare role whose pane is mid-task, or None when the bare name is free.
+
+        A shared assign to a busy pane queues; a worktree assign was refused
+        and told the Lead to type `role#2` itself. Worktree isolation promises
+        an independent pane per call, so the cockpit picks the next free
+        instance instead. *pane_role* is the pane the role resolves to
+        (`reviewer --mode e2e` runs as `qa`); the instance number is chosen
+        against that pane name and applied to the role the caller typed.
+        """
+        role_name = (role_name or "").strip().lower()
+        if not role_name or _split_shard(role_name)[1] is not None:
+            return None
+        pane_base = (pane_role or role_name).strip().lower()
+        if not self._worktree_bare_role_collision(pane_base, project):
+            return None
+        project_ns = self._resolve_project(project)
+        panes = self._project_panes(project_ns)
+        recent = getattr(self, "_recent_assign_queue", {}) or {}
+        now = time.time()
+        for n in range(2, self._WORKTREE_INSTANCE_MAX + 1):
+            existing = panes.get(f"{pane_base}#{n}")
+            if existing is not None and not self._pane_idle_for_reassign(existing):
+                continue
+            # An instance accepted a moment ago has no pane yet — two assigns
+            # in one breath must not both land on the same number.
+            if existing is None and any(
+                now - float(recent.get((project_ns, f"{name}#{n}"), 0) or 0) < 180
+                for name in {pane_base, role_name}
+            ):
+                continue
+            return f"{role_name}#{n}"
+        return None
+
     @staticmethod
     def _pane_idle_at_prompt(pane) -> bool:
         """True when a live pane's screen reads "ready prompt, no background
@@ -4667,7 +4777,7 @@ class Orchestrator(
                 grp_fail = self._shard_groups[gk_fail]
                 if not grp_fail.closed:
                     grp_fail.failed.add(role_name)
-                    if len(grp_fail.done) + len(grp_fail.failed) >= grp_fail.total:
+                    if grp_fail.settled():
                         grp_fail.closed = True
                         self._inject_shard_fanout_handoff(pns_fail, grp_fail)
                         self._shard_groups.pop(gk_fail, None)
@@ -5701,7 +5811,9 @@ class Orchestrator(
             try:
                 if never_delivered:
                     worktree["never_delivered"] = True
-                self._finalize_worktree(project_ns, role_name, worktree)
+                # note="close": the notice used to say the pane reported
+                # "done" for a pane that was closed and never reported (#1026).
+                self._finalize_worktree(project_ns, role_name, worktree, note="close")
             except Exception as exc:
                 _log_event(
                     "close_worktree_finalize_error",
@@ -6027,6 +6139,24 @@ class Orchestrator(
                 # #161's "forgot to commit" case) must keep alarming exactly
                 # as before.
                 head_sha = mgr.head_sha(info.path)
+                if (
+                    worktree.get("shard_withdrawn")
+                    and head_sha
+                    and head_sha == info.base_sha
+                    and not worktree.get("never_delivered")
+                ):
+                    # #1026: a shard the Lead closed on purpose whose checkout
+                    # is still exactly the base — no commit, no edit — has
+                    # nothing to lose and nothing to check; N of these notices
+                    # arrived for N shards closed in one go. The worktree
+                    # stays (#161); `takkub worktree clean` removes it.
+                    _log_event(
+                        "worktree_untouched_on_close",
+                        role=from_role,
+                        project=project_ns,
+                        branch=info.branch,
+                    )
+                    return
                 if head_sha and head_sha != info.base_sha:
                     if mgr.branch_merged_into_base(info.git_root, info.branch):
                         _log_event(
@@ -8020,6 +8150,13 @@ class Orchestrator(
         getattr(self, "_last_done_task_ids", {}).pop(key, None)
 
         if had_worktree_close and not recovery_close:
+            if (
+                int(getattr(_ps_close, "shard_total", 0) or 0) > 0
+                and not suppress_pipeline
+                and not _task_undelivered_close
+                and isinstance(had_worktree_close, dict)
+            ):
+                had_worktree_close["shard_withdrawn"] = True  # #1026, read by finalize
             self._close_worktree_git(
                 project_ns,
                 role_name,
@@ -8045,6 +8182,20 @@ class Orchestrator(
                 pl_run_close.hop_failed.add(role_name)
                 if not pl_run_close.hop_pending:
                     self._advance_pipeline(project_ns, pipeline_key_close, pl_run_close)
+
+        # #1026: a shard closed before it reported is settled, not missing —
+        # otherwise its group waits out the 45-minute timer and then tells
+        # the Lead the shard it closed itself "did not respond".
+        if (
+            _ps_close is not None
+            and int(getattr(_ps_close, "shard_total", 0) or 0) > 0
+            and not recovery_close
+            and not suppress_pipeline
+            and not _task_undelivered_close
+        ):
+            _withdraw = getattr(self, "_withdraw_shard", None)
+            if callable(_withdraw):
+                _withdraw(project_ns, role_name)
 
         # For teammates, fully remove from the layout so the right column
         # collapses back. Lead stays as it always anchors the cockpit.
@@ -10747,6 +10898,11 @@ class Orchestrator(
                 _spawn_model = getattr(_pane_model, "spawn_model", None)
                 if isinstance(_spawn_model, str) and _spawn_model:
                     _provider = f"{_provider}/{_spawn_model}"
+                # #1031: the CLI moved the session to another model mid-task —
+                # name what actually ran, not only what it was spawned with.
+                _switched_model = getattr(_pane_model, "switched_model", "")
+                if isinstance(_switched_model, str) and _switched_model:
+                    _provider = f"{_provider} → {_switched_model} (สลับรุ่นกลางงาน)"
                 from dataclasses import replace as _replace_facts
 
                 digest_facts = _replace_facts(digest_facts, provider=_provider)
@@ -11124,7 +11280,7 @@ class Orchestrator(
                     group.failed_notes[from_role] = notice_body
                 else:
                     group.done[from_role] = notice_body
-                if len(group.done) + len(group.failed) >= group.total:
+                if group.settled():
                     group.closed = True
                     self._inject_shard_fanout_handoff(project_ns, group)
                     self._shard_groups.pop(group_key, None)
@@ -12909,7 +13065,11 @@ class Orchestrator(
             quota_marker = ""
             model: str | None = None
             ps = getattr(self, "_pane_state", {}).get(f"{project_ns}::{role}")
-            if ps is not None and ps.rate_limited_until > now:
+            if ps is not None and (
+                ps.rate_limited_until > now or getattr(ps, "limit_parked", False) is True
+            ):
+                # #1033: parked past the reset time, waiting for the wake
+                # timer, is still "stalled:quota" — not "working".
                 quota_stalled = True
                 quota_resets_at = ps.rate_limited_until
                 quota_marker = ps.quota_marker
@@ -17209,10 +17369,28 @@ class Orchestrator(
                     # PTY output (the offending command may return immediately),
                     # so this must run whether or not the pane looks stuck.
                     self._check_shell_open_dialog(project_name, role, pane, key, now)
+                    # #1031: same reasoning — a CLI that moved the session to
+                    # another model keeps working, so nothing below notices.
+                    # Dispatched via the class and guarded: this sweep also
+                    # runs on bare test doubles, and a probe failure must
+                    # never cost the pane its stuck/quota checks below.
+                    try:
+                        Orchestrator._check_model_switch(self, project_name, role, pane, key)
+                    except Exception:
+                        pass
                     # A rate-limited pane is silent on purpose — never force-respawn
                     # it (the fresh session would just hit the same limit). The idle
                     # walker owns detection; here we only read the recorded state.
-                    if (self._pane_state.get(key) or PaneState()).rate_limited_until > now:
+                    # #1033: still parked counts too. The wake timer runs
+                    # WAKE_BUFFER_S after the reset, and in that gap the pane
+                    # was "20 minutes without progress" to this watchdog — the
+                    # Lead was told it might be stuck in a loop and closed two
+                    # panes that were about to resume on their own.
+                    _ps_quota = self._pane_state.get(key) or PaneState()
+                    if (
+                        _ps_quota.rate_limited_until > now
+                        or getattr(_ps_quota, "limit_parked", False) is True
+                    ):
                         continue
                     last_out = getattr(pane, "_last_output_ts", 0.0)
                     if not isinstance(last_out, (int, float)) or last_out <= 0:

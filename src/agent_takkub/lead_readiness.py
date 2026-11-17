@@ -97,8 +97,19 @@ def _sources(project: str, cwd: str) -> tuple[str, dict, dict]:
     return revision, documents, facts
 
 
-def _policy_block(facts: dict) -> str:
+def _policy_block(facts: dict, *, embedded: bool = False) -> str:
+    """*embedded*: the copy written into a system prompt that already carries
+    the whole policy — telling that Lead to run a read first would cost it a
+    round for text it is looking at (#1028)."""
     policy = facts["team"]
+    bootstrap = (
+        "This system prompt carries the complete policy; readiness is recorded at spawn "
+        "(this replaces the 'Mandatory Lead bootstrap' step above — do not spend a round on it). "
+        "Run `takkub context read` only when a guard says the policy changed.\n"
+        if embedded
+        else "Before substantive work, run `takkub context read`. "
+        "Repeat after resume, compaction, failover or policy changes.\n"
+    )
     if facts.get("project_config", {}).get("kind") == "pm":
         rule = (
             "PM: read-only across every project. No team — takkub assign/send/close are refused. "
@@ -115,8 +126,8 @@ def _policy_block(facts: dict) -> str:
         + json.dumps(facts, ensure_ascii=False, indent=2)
         + f"\n{rule}\nDo not change settings or invent a team override to bypass policy.\n"
         "Native subagents require explicit permitted routing; they do not substitute for requested visible positions.\n"
-        "Before substantive work, run `takkub context read`. Repeat after resume, compaction, failover or policy changes.\n"
-        "Docker reports distinguish host checks, image build, container recreation and observed health.\n"
+        + bootstrap
+        + "Docker reports distinguish host checks, image build, container recreation and observed health.\n"
     )
 
 
@@ -163,8 +174,10 @@ def docs_for_system_prompt(path: str | Path) -> tuple[str, str]:
     `mark_embedded` with that revision only once the prompt file is
     actually written (#903)."""
     state = read_state(path)
-    revision, documents, _facts = _sources(state["project"], state["cwd"])
-    return policy_docs_text(documents), revision
+    revision, documents, facts = _sources(state["project"], state["cwd"])
+    # #1028: the effective policy rides along, so an embedded prompt is the
+    # whole delivery and `reason()` can count it as read.
+    return "\n\n" + _policy_block(facts, embedded=True) + policy_docs_text(documents), revision
 
 
 def mark_embedded(path: str | Path, revision: str) -> None:
@@ -245,7 +258,10 @@ def reason(path: str | Path, *, project: str | None = None) -> str:
             return gap
         if revision != state["revision"]:
             return "Lead project/policy/team settings changed; run takkub context read"
-        if state.get("read_epoch") != state["epoch"]:
+        # #1028: a system prompt that carries this exact revision IS the
+        # delivery — it is in front of the Lead from the first turn and
+        # survives compaction/resume, so no read round is owed for it.
+        if state.get("read_epoch") != state["epoch"] and state.get("embedded_revision") != revision:
             return "Lead context has not been read for this session; run takkub context read"
         return ""
     except (OSError, ValueError, KeyError, TypeError) as exc:
@@ -303,7 +319,9 @@ def bootstrap_allowed(tool_name: str, tool_input: dict) -> bool:
         # would acknowledge a read the Lead never actually saw.
         return bool(
             re.fullmatch(
-                r"takkub (?:context (?:read(?: --full)?|status)|team status|doctor(?: --[\w-]+)*)"
+                # #1028: projects whose CLAUDE.md says "prefix every command with
+                # rtk" run it that way; rtk passes takkub output through whole.
+                r"(?:rtk (?:proxy )?)?takkub (?:context (?:read(?: --full)?|status)|team status|doctor(?: --[\w-]+)*)"
                 r"(?: 2>&1)?",
                 command,
             )

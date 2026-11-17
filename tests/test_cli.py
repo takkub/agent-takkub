@@ -1503,7 +1503,13 @@ class TestWorktreeCli:
             return type(self).merge_result
 
         def clean_isolated(
-            self, root, force=False, live_paths=frozenset(), branch=None, discard=False
+            self,
+            root,
+            force=False,
+            live_paths=frozenset(),
+            branch=None,
+            discard=False,
+            on_line=None,
         ):
             type(self).clean_branches.append(branch)
             type(self).clean_live_paths_calls.append(set(live_paths))

@@ -4235,7 +4235,7 @@ class LeadInboxMixin:
                 group_c = self._shard_groups.get(group_key_c)
                 if group_c and not group_c.closed:
                     group_c.failed.add(role_name)
-                    if len(group_c.done) + len(group_c.failed) >= group_c.total:
+                    if group_c.settled():
                         group_c.closed = True
                         self._inject_shard_fanout_handoff(project_ns, group_c)
                         self._shard_groups.pop(group_key_c, None)

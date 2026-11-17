@@ -313,9 +313,11 @@ def _add_worktree(sub: Any, c: ModuleType) -> None:
     )
     swc.add_argument(
         "--branch",
+        action="append",
         default=None,
-        help="clean only this wt/* branch (#439 — a role with several worktrees); "
-        "safety rules unchanged",
+        help="clean only this wt/* branch (#439 — a role with several worktrees); repeat "
+        "the flag for several branches in one run (#1027). Safety rules unchanged, except "
+        "that a branch named here skips the just-created wait",
     )
     swc.add_argument(
         "--path",
@@ -1997,6 +1999,14 @@ def _add_provider(sub: Any, c: ModuleType) -> None:
     spm.add_argument("name", help="provider name (e.g. claude, cursor)")
     spm.add_argument("model", nargs="?", help="model id; omit to show the current value")
     spm.add_argument("--clear", action="store_true", help="clear the model and use CLI default")
+    spm.add_argument(
+        "--fallback",
+        default=None,
+        metavar="MODEL",
+        help="(#1031) model the CLI switches a session to when its own model is overloaded "
+        '(claude only); "" clears it back to the cockpit default — the newest model of '
+        "the next tier down",
+    )
     spp = sprv_sub.add_parser(
         "probe",
         help="ask a provider whether its quota is usable now; clears a recorded quota-hit (#663)",

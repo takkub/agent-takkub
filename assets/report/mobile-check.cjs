@@ -35,10 +35,17 @@ const { chromium } = loadPlaywright();
 (async () => {
   fs.mkdirSync(out, { recursive: true });
   const browser = await chromium.launch();
-  const url = pathToFileURL(path.resolve(html)).href;
+  // --url (#1030): `takkub report check` serves the report with the same CSP
+  // as the published link; opening the file itself has no CSP at all.
+  const url = opt('--url') || pathToFileURL(path.resolve(html)).href;
   const result = {};
   for (const w of [360, 390, 768, 1440]) {
     const page = await browser.newPage({ viewport: { width: w, height: 900 } });
+    const errors = [];
+    page.on('pageerror', (e) => errors.push(String(e && e.message ? e.message : e)));
+    page.on('console', (m) => {
+      if (m.type() === 'error' && m.text().includes('Content Security Policy')) errors.push(m.text());
+    });
     await page.goto(url, { waitUntil: 'load' });
     await page.waitForTimeout(300);
     result[w] = await page.evaluate((vw) => {
@@ -57,11 +64,12 @@ const { chromium } = loadPlaywright();
     const shot = path.join(out, `report-${w}.png`);
     await page.screenshot({ path: shot, fullPage: true });
     result[w].screenshot = shot;
+    result[w].errors = errors;
     await page.close();
   }
   await browser.close();
   console.log(JSON.stringify(result, null, 1));
-  process.exit(Object.entries(result).some(([w, r]) => r.scrollWidth > Number(w)) ? 1 : 0);
+  process.exit(Object.entries(result).some(([w, r]) => r.scrollWidth > Number(w) || r.errors.length) ? 1 : 0);
 })().catch((e) => {
   console.error(e);
   process.exit(1);

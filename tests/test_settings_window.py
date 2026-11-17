@@ -825,8 +825,8 @@ class TestRoleModelEffortDefaultLabels:
         dlg = settings_window.SettingsWindow(initial_view=settings_window.VIEW_PROVIDERS_ROLES)
         combo = dlg._role_model_combos["backend"]
         # backend has no role/provider model set and no provider_models.json
-        # override -> falls to _DEFAULT_TEAMMATE_TIER's model, "claude-sonnet-5".
-        assert combo.itemText(0) == "(default) → sonnet-5"
+        # override -> falls to _DEFAULT_TEAMMATE_TIER's model, "claude-sonnet-5-5".
+        assert combo.itemText(0) == "(default) → sonnet-5-5"
         dlg.deleteLater()
 
     def test_reviewer_model_and_effort_default_show_its_own_tier(self) -> None:

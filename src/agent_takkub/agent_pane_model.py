@@ -85,6 +85,10 @@ class AgentPaneModel:
         # override or the TAKKUB_TEAMMATE_MODEL env force) rather than a
         # role/provider/tier default pin.
         self.spawn_model_explicit: bool = False
+        # #1031: the model the CLI itself moved this session to mid-task
+        # ("Switched to … due to high demand"); "" until that happens. Reset on
+        # every spawn together with `spawn_model`.
+        self.switched_model: str = ""
         # Edge-trigger latch: warn once while at/above the cap, then re-arm
         # only after a later usage sample falls below it (e.g. /compact).
         self.session_cap_warning_active: bool = False

@@ -2618,11 +2618,17 @@ class WorktreeManager:
         git_root: str,
         force: bool = False,
         live_paths: frozenset[str] | set[str] = frozenset(),
-        branch: str | None = None,
+        branch: str | list[str] | tuple[str, ...] | None = None,
         discard: bool = False,
         path: str | None = None,
+        on_line: Callable[[str], None] | None = None,
     ) -> list[str]:
         """Sweep leftover ``wt/*`` worktrees (crashed panes, forgotten probes).
+
+        *on_line* (#1027): called with each result line the moment it is
+        known — a KEEP as soon as it is decided, a REMOVED/FAILED as that
+        worktree finishes — so a long sweep shows it is working instead of
+        printing everything at the end. The returned list is unchanged.
 
         *path* (#976): restrict the sweep to the linked worktree at that path —
         including one the cockpit did not create (a detached checkout under
@@ -2632,8 +2638,11 @@ class WorktreeManager:
 
         *branch* (#439): restrict the sweep to that one ``wt/*`` branch — the
         way to drop a specific finished worktree when the same role has
-        several. Same safety rules apply; a branch that isn't an isolated
-        worktree yields a single ``NOT FOUND`` line.
+        several — or to a list of them (#1027). Same safety rules apply,
+        except the creation-age grace: the caller named the branch (a worktree
+        merged a minute after it was created used to be kept as "just
+        created" and needed a second run). A branch that isn't an isolated
+        worktree yields a ``NOT FOUND`` line.
 
         Default: remove only SAFE leftovers — clean tree AND no commits ahead
         (nothing of value can be lost). ``force=True`` removes a worktree with
@@ -2683,6 +2692,15 @@ class WorktreeManager:
             ]
         live = {str(Path(p).resolve()) for p in live_paths}
         out: list[str] = []
+
+        def _say(line: str) -> None:
+            if on_line is not None and line:
+                try:
+                    on_line(line)
+                except Exception:
+                    pass
+
+        wanted = [branch] if isinstance(branch, str) else [b for b in (branch or ()) if b]
         pending: list[tuple[int, dict, bool, str]] = []
         rows = (
             self.list_isolated(git_root, extra_path=path)
@@ -2697,16 +2715,22 @@ class WorktreeManager:
                     f"NOT FOUND  {path} — ไม่ใช่ linked worktree ที่ git ของ {git_root} รู้จัก "
                     "(ดูด้วย `git worktree list`; main worktree ลบไม่ได้)"
                 ]
-        if branch is not None:
-            rows = [r for r in rows if r["branch"] == branch]
+        if wanted:
+            known = {r["branch"] for r in rows}
+            rows = [r for r in rows if r["branch"] in wanted]
+            for name in wanted:
+                if name not in known:
+                    out.append(f"NOT FOUND  {name} — ไม่ใช่ wt/* worktree ที่ git รู้จัก")
+                    _say(out[-1])
             if not rows:
-                return [f"NOT FOUND  {branch} — ไม่ใช่ wt/* worktree ที่ git รู้จัก"]
+                return out
         for row in rows:
             if str(Path(row["path"]).resolve()) in live:
                 out.append(
                     f"KEEP  {row['branch']} — pane ยังใช้งาน worktree นี้อยู่ (live pane); "
                     "ปิด pane ก่อน (`takkub close --role <role>`) แล้วค่อย clean ใหม่"
                 )
+                _say(out[-1])
                 continue
             # #571: protect newly-created worktrees (within last 5 min) from removal
             # — pane spawned seconds earlier may not be registered in live-pane registry yet
@@ -2727,19 +2751,22 @@ class WorktreeManager:
                     "(ไม่มี epoch ในชื่อ branch และหา git admin dir ไม่เจอ) — "
                     "ลบเองด้วย `git worktree remove` เมื่อแน่ใจว่าไม่มี pane ใช้"
                 )
+                _say(out[-1])
                 continue
             elapsed = time.time() - created if created is not None else None
             # #974: a detached verify sibling is never in the live-pane
             # registry (that tracks a pane's own cwd) — a pane may still be
             # running a build in it, so it gets a longer grace than 5 min.
             grace = _DETACHED_GRACE_S if detached else 300
-            if row.get("explicit"):
-                grace = 0  # #976: the caller named this exact path
+            if row.get("explicit") or (wanted and not detached):
+                grace = 0  # #976 / #1027: the caller named this exact path / branch
             if elapsed is not None and elapsed < grace:
                 out.append(
                     f"KEEP  {row['branch']} — worktree สร้างใหม่ ({int(elapsed)}s ที่แล้ว) "
-                    "— pane อาจยังไม่ register ใน live registry ให้รอสักครู่"
+                    "— pane อาจยังไม่ register ใน live registry ให้รอสักครู่ "
+                    f"(หรือระบุ `--branch {row['branch']}` ถ้าแน่ใจว่าไม่มี pane ใช้แล้ว)"
                 )
+                _say(out[-1])
                 continue
             cherry_picked = False
             keep_reason = ""
@@ -2766,9 +2793,12 @@ class WorktreeManager:
                         )
             if keep_reason:
                 out.append(f"KEEP  {row['branch']} — {keep_reason}")
+                _say(out[-1])
                 continue
             pending.append((len(out), row, cherry_picked, discard_stat))
             out.append("")
+        if pending and on_line is not None:
+            _say(f"กำลังลบ {len(pending)} worktree …")
 
         def _delete_tree(row: dict) -> tuple[bool, str, str]:
             sweep_link_points(Path(row["path"]))
@@ -2780,62 +2810,75 @@ class WorktreeManager:
         # steps below stay sequential since they share refs and locks.
         from concurrent.futures import ThreadPoolExecutor
 
+        # #1027: results are consumed as each tree's disk work finishes (pool.map
+        # yields in submit order, lazily), so every line reaches `on_line`
+        # while the rest are still being deleted.
         with ThreadPoolExecutor(max_workers=4) as pool:
-            disk_results = list(pool.map(lambda p: _delete_tree(p[1]), pending))
-        for (slot, row, cherry_picked, discard_stat), (removed, disk_msg, leftover) in zip(
-            pending, disk_results, strict=True
-        ):
-            if not removed:
-                out[slot] = (
-                    f"FAILED  {row['branch']} — {disk_msg} "
-                    "(ไม่ได้ลบอะไร — worktree และ branch ยังอยู่ครบ)"
-                )
-                continue
-            rm_ok, detail = self._drop_worktree_metadata(git_root, row["path"])
-            if not rm_ok:
-                out[slot] = (
-                    f"FAILED  {row['branch']} — ลบไฟล์ออกจาก {row['path']} แล้ว "
-                    f"แต่ git ยังลบ metadata ไม่ได้ ({detail[:120]}) "
-                    "— รัน `worktree prune` เอง (branch ยังอยู่)"
-                )
-                continue
-            branch_rm = self._delete_branch(git_root, row["branch"])
-            if not branch_rm.ok:
-                # transient ref lock (another `git` process racing this one,
-                # e.g. a sibling `clean`/`merge` touching packed-refs) — retry
-                # once before reporting, same reasoning as the rmtree retry
-                # (#411: this call's result used to be discarded entirely, so
-                # a failure here silently left the branch dangling forever
-                # after `--force` had already destroyed its worktree).
-                branch_rm = self._delete_branch(git_root, row["branch"])
-            remote_note = (
-                self._delete_pushed_remote_branch(git_root, row["branch"]) if branch_rm.ok else ""
-            )
-            repair_note = repair_editable_pth_if_stale(git_root, row["path"])
-            note = f"REMOVED {row['branch']}"
-            if row.get("detached"):
-                note = f"REMOVED worktree {row['path']} {row['branch']} (#974)"
-            elif not row["branch"].startswith(f"{_BRANCH_PREFIX}/"):
-                note = f"REMOVED worktree {row['path']} (branch {row['branch']} เก็บไว้ — #813)"
-            if discard_stat:
-                note += f" (⚠ discarded uncommitted: {discard_stat})"
-            if cherry_picked:
-                note += f" ({row['ahead']} commit cherry-pick เข้า HEAD แล้ว — ตรวจด้วย patch-id)"
-            if leftover:
-                note += f" (ไฟล์บางส่วนค้างที่ {leftover} ลบเองทีหลังได้)"
-            if not branch_rm.ok:
-                b_lines = (branch_rm.stderr or branch_rm.stdout).strip().splitlines()
-                b_detail = b_lines[-1] if b_lines else f"exit {branch_rm.returncode}"
-                note += (
-                    f" (⚠ ลบ branch ไม่สำเร็จ: {b_detail} — รัน "
-                    f"`git -C {git_root} branch -D {row['branch']}` เอง)"
-                )
-            if remote_note:
-                note += f" · {remote_note}"
-            if repair_note:
-                note += f" · {repair_note}"
-            out[slot] = note
+            disk_results = pool.map(lambda p: _delete_tree(p[1]), pending)
+            for item, disk_result in zip(pending, disk_results, strict=True):
+                self._finish_clean_row(git_root, out, item, disk_result)
+                _say(out[item[0]])
         return out
+
+    def _finish_clean_row(
+        self,
+        git_root: str,
+        out: list[str],
+        item: tuple[int, dict, bool, str],
+        disk_result: tuple[bool, str, str],
+    ) -> None:
+        """Git-metadata half of one `clean_isolated` removal: writes the
+        REMOVED/FAILED line for *item* into ``out``."""
+        (slot, row, cherry_picked, discard_stat), (removed, disk_msg, leftover) = item, disk_result
+        if not removed:
+            out[slot] = (
+                f"FAILED  {row['branch']} — {disk_msg} (ไม่ได้ลบอะไร — worktree และ branch ยังอยู่ครบ)"
+            )
+            return
+        rm_ok, detail = self._drop_worktree_metadata(git_root, row["path"])
+        if not rm_ok:
+            out[slot] = (
+                f"FAILED  {row['branch']} — ลบไฟล์ออกจาก {row['path']} แล้ว "
+                f"แต่ git ยังลบ metadata ไม่ได้ ({detail[:120]}) "
+                "— รัน `worktree prune` เอง (branch ยังอยู่)"
+            )
+            return
+        branch_rm = self._delete_branch(git_root, row["branch"])
+        if not branch_rm.ok:
+            # transient ref lock (another `git` process racing this one,
+            # e.g. a sibling `clean`/`merge` touching packed-refs) — retry
+            # once before reporting, same reasoning as the rmtree retry
+            # (#411: this call's result used to be discarded entirely, so
+            # a failure here silently left the branch dangling forever
+            # after `--force` had already destroyed its worktree).
+            branch_rm = self._delete_branch(git_root, row["branch"])
+        remote_note = (
+            self._delete_pushed_remote_branch(git_root, row["branch"]) if branch_rm.ok else ""
+        )
+        repair_note = repair_editable_pth_if_stale(git_root, row["path"])
+        note = f"REMOVED {row['branch']}"
+        if row.get("detached"):
+            note = f"REMOVED worktree {row['path']} {row['branch']} (#974)"
+        elif not row["branch"].startswith(f"{_BRANCH_PREFIX}/"):
+            note = f"REMOVED worktree {row['path']} (branch {row['branch']} เก็บไว้ — #813)"
+        if discard_stat:
+            note += f" (⚠ discarded uncommitted: {discard_stat})"
+        if cherry_picked:
+            note += f" ({row['ahead']} commit cherry-pick เข้า HEAD แล้ว — ตรวจด้วย patch-id)"
+        if leftover:
+            note += f" (ไฟล์บางส่วนค้างที่ {leftover} ลบเองทีหลังได้)"
+        if not branch_rm.ok:
+            b_lines = (branch_rm.stderr or branch_rm.stdout).strip().splitlines()
+            b_detail = b_lines[-1] if b_lines else f"exit {branch_rm.returncode}"
+            note += (
+                f" (⚠ ลบ branch ไม่สำเร็จ: {b_detail} — รัน "
+                f"`git -C {git_root} branch -D {row['branch']}` เอง)"
+            )
+        if remote_note:
+            note += f" · {remote_note}"
+        if repair_note:
+            note += f" · {repair_note}"
+        out[slot] = note
 
     def clean_dangling_branches(self, git_root: str, force: bool = False) -> list[str]:
         """#961: ``wt/*`` branches no worktree has checked out any more (the

@@ -2,6 +2,31 @@
 
 All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses [SemVer](https://semver.org/).
 
+## [v2.2.59] - 2026-11-17
+
+ปิด issue ที่เปิดอยู่ทั้ง 10 ใบ (#1023–#1033) — UI ค้าง, รุ่นโมเดลตกไปตัวเก่า, Lead เสียรอบแรกทุก session, pane ที่ park รอโควตาถูกเตือนว่าค้าง
+
+### Fixed (แก้ไข)
+
+- **Lead เสีย tool call แรกทุก session (#1028):** guard `lead_context` บังคับให้รัน `takkub context read` ก่อนทำอย่างอื่น แต่ Lead claude มี policy ทั้งชุดอยู่ใน system prompt ตั้งแต่ spawn อยู่แล้ว — ตอนนี้ system prompt ที่ถือ policy revision ปัจจุบันนับเป็น "อ่านแล้ว" (รวมหลัง compaction/resume) ต้อง read เฉพาะเมื่อ policy เปลี่ยนจริง · guard ยอมรับ `rtk takkub context read` / `rtk proxy takkub context read` (โปรเจคที่ CLAUDE.md สั่ง prefix `rtk` โดนบล็อกทั้ง batch แรก) · dev checkout ที่ root ของโปรเจคคือ data home ได้ Lead context ใน system prompt เหมือน prod (เดิมถูกข้าม) · provider อื่นที่ฝัง system prompt ไม่ได้ยังต้อง read ตามเดิม
+- **pane ถูกสลับไปรุ่นเก่ากลางงานโดยไม่มีใครรู้ (#1031):** ต้นเหตุคือ cockpit ส่ง `--fallback-model claude-haiku-4-5` / `claude-sonnet-5` ที่ฝังตายตัวไว้ — pane บน Sonnet 5.5 จึงตกไป Haiku 4.5 (context 1M → 200K)
+  - ค่าเริ่มต้นของ tier และ fallback เป็นรุ่นล่าสุดของแต่ละตระกูล (`claude-sonnet-5-5`, `claude-haiku-5-5`) · fallback ที่เท่ากับรุ่นหลักของ pane ไม่ถูกส่ง
+  - ตั้งเองได้: `takkub provider model claude --fallback <model>` (`""` = กลับค่าเริ่มต้น) · ลำดับ: env `TAKKUB_TEAMMATE_FALLBACK`/`TAKKUB_LEAD_FALLBACK` > ค่าที่ตั้ง > ค่าเริ่มต้น
+  - ตรวจจับบรรทัด "Switched to … due to high demand …" บนจอ pane → แจ้ง Lead 1 บรรทัดต่อการสลับ 1 ครั้ง (จากรุ่นไหน → รุ่นไหน, เหตุผล, context), ลงใน task ledger/INDEX.md ว่าสลับตั้งแต่กี่โมง และ done digest แสดงรุ่นที่รันจริง
+  - **gap ที่ยังเหลือ:** ตรวจจับได้เฉพาะ claude (มีข้อความจริงให้จับ) · gemini (agy) อ่านรุ่นจาก footer ตามเดิม (#301) · codex/opencode/cursor ยังไม่มีข้อความที่ยืนยันแล้ว และ CLI เหล่านั้นไม่มี flag กำหนด fallback
+- **UI ค้างนานเกิน 10 วิ (#1023):** ไล่ stack ของ stall จริงบน prod ได้ 3 ต้นเหตุ
+  - Task dock สร้างต้นไม้ใหม่ทั้งก้อนบน GUI thread ทุกครั้งที่ ledger เปลี่ยน — ledger โตไม่มีเพดาน (โปรเจคหนึ่ง 1,580 แถว / 1.3 MB) และวาดไอคอนสถานะใหม่ทุกแถว ตอนนี้สร้างเฉพาะกลุ่มล่าสุดไม่เกิน ~200 แถว (กลุ่มที่ยังมีงานเปิดแสดงเสมอ) ที่เหลือเป็นบรรทัดเดียวชี้ไป INDEX.md และไอคอน cache ตาม (glyph, สี)
+  - ทุก spawn ไล่ซ่อม skill link ของทุก path บน GUI thread และสำหรับ worktree คือ stat ทุกไฟล์ของทุก skill + `copytree` — ตอนนี้รอบที่ไม่มีอะไรเปลี่ยนจบด้วย directory listing 3 ครั้ง และการคัดลอก skill เข้า worktree ใหม่ย้ายไปทำบน worker ที่สร้าง worktree
+  - recall ความจำ (V2 context) tokenize ทุก record ใหม่ทุกครั้งบน worker ที่ GUI thread รออยู่ — 11 จาก 15 assign หมดเวลา 300 ms โดยไม่ได้อะไรกลับมา ตอนนี้เก็บ token ของ record ไว้ และรอบแรกคาย GIL เป็นระยะ
+- **pane ที่ park รอโควตาถูกเตือนว่า "อาจค้าง" (#1033):** ตรวจ log แล้ว cockpit จับโควตาและ park ถูกต้องตั้งแต่วินาทีที่ 2 (โปรเจคตั้งนโยบาย park) แต่ช่วง 3 นาทีระหว่างเวลา reset กับเวลาปลุก ตัวเฝ้า "ไม่มีความคืบหน้า 20 นาที" (#570) มองว่า pane ค้าง Lead จึงปิดทิ้งก่อนปลุก 1 นาที — pane ที่ยัง park ถูกข้ามและแสดง `stalled:quota` จนถึงเวลาปลุก, นาฬิกา no-progress เริ่มใหม่ตอนปลุก, และข้อความ park บอกเวลาปลุกพร้อมว่าไม่ต้องปิด/assign ซ้ำ
+- **Codex Lead ล้มตอน bootstrap แล้ววนจนหมดโควตา respawn (#1032):** การย้าย provider เมื่อ CLI ตายตอน bootstrap (#991) ไม่ครอบคลุม Lead — ตอนนี้ Lead ลอง respawn 1 ครั้ง ถ้าตายแบบเดิมอีกจึงย้ายไป provider ถัดไป พร้อม brief ที่บอกเหตุจริง (ไม่ใช่ "ชนโควตา") · จับข้อความ "workspace routing discovery failed" เพิ่ม และเทียบแบบไม่สนการตัดบรรทัดของจอแคบ
+- **รายงานที่มี Worker/WebAssembly ในหน้าใช้ไม่ได้เมื่อเปิดผ่านลิงก์ (#1030):** CSP ของ `/r/` อนุญาต `worker-src blob:`, `'wasm-unsafe-eval'`, `connect-src 'self' blob: data:` (ยังห้ามออกนอก origin ทุกทาง) · `takkub report check` เปิดหน้าด้วย CSP เดียวกับลิงก์จริง และนับ script error / CSP ปฏิเสธเป็นไม่ผ่าน (เดิมเปิดจากไฟล์ ไม่มี CSP จึงผ่านปลอม) · เลือก Playwright ตัวที่มี browser ติดตั้งแล้ว (เดิมเลือกตัวใหม่สุดที่ยังไม่มี browser แล้วรายงาน SKIPPED)
+- **`assign --isolation worktree` ถูกปฏิเสธเมื่อ pane ของ role นั้นกำลังทำงาน (#1029):** เปิด instance ถัดไปที่ว่างให้เอง (`reviewer#2` …) และบอกใน ack
+- **`--shards N` กับงานที่แค่มี screenshot ยืนยันท้ายงาน เปิด N pane ที่ได้ใบงานเดียวกัน (#1026):** งานแก้โค้ดที่ระบุว่า browser ใช้ self-verify เท่านั้น → 1 pane + N subagent ตาม #641 (งานที่ browser คือเนื้องาน — e2e, UI audit, ทุกหน้า — ยังเป็นหลาย pane ตาม #848) · shard ที่ Lead ปิดเองนับว่าจบ ไม่รอ timeout 45 นาทีแล้วรายงาน "NO RESPONSE" · pane ที่ถูกปิดไม่ถูกเรียกว่า "done" ในข้อความ worktree และ shard ที่ปิดโดยยังไม่แตะ worktree ไม่เตือน "ไม่มี commit"
+- **`takkub worktree clean` เงียบเกิน 2 นาที (#1027):** พิมพ์ผลทีละ worktree ทันที · `--branch` ใส่ซ้ำได้หลายตัว และ branch ที่ระบุชื่อไม่ติดเงื่อนไข "เพิ่งสร้าง"
+- **วัดต้นทุนของ Skill Learning ไม่ได้หลัง 2.2.56:** reflection รันโดยไม่เขียน session file จึงไม่อยู่ใน transcript ใด — ตอนนี้ทุกครั้งที่รันลง event `skill_learning_reflect_run` ใน `events.log` (provider, model, สำเร็จหรือไม่, ขนาด bundle, เวลา และสำหรับ claude: input / cache write / cache read / output token + cost) · provider อื่นยังไม่มีตัวเลข token (CLI ไม่พิมพ์ในโหมดที่ใช้ — gap)
+- **crash `wrapped C/C++ object of type _GitStatusSignals has been deleted` (#1024):** ผล git status ที่กลับมาหลัง view ถูกปิดถูกทิ้งแทนการโยน exception
+
 ## [v2.2.58] - 2026-11-15
 
 ### Fixed (แก้ไข)

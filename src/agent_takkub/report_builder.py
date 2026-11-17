@@ -14,6 +14,7 @@ and work on both Windows ConPTY and macOS.
 """
 
 import base64
+import contextlib
 import hashlib
 import html
 import io
@@ -679,33 +680,99 @@ def check_report_file(
         return False, [f"ไม่พบไฟล์ {html_path}"]
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
-    if playwright:
-        return _check_with_node(src, out, playwright)
-    try:
-        from playwright.sync_api import sync_playwright
-    except ImportError:
-        return _check_with_node(src, out)
-
-    lines: list[str] = []
-    ok = True
-    with sync_playwright() as p:
-        browser = p.chromium.launch()
+    # #1030: opened through the same CSP as the published link; an uncaught
+    # script error or a CSP refusal fails the check.
+    with _served_like_remote(src) as url:
+        if playwright:
+            return _check_with_node(src, out, playwright, url=url)
         try:
-            for width in CHECK_WIDTHS:
-                page = browser.new_page(viewport={"width": width, "height": 900})
-                try:
-                    page.goto(src.as_uri(), wait_until="load")
-                    scroll = int(page.evaluate("document.documentElement.scrollWidth"))
-                    shot = out / f"report-{width}.png"
-                    page.screenshot(path=str(shot), full_page=True)
-                finally:
-                    page.close()
-                verdict = "OK" if scroll <= width else "ล้นจอ"
-                ok = ok and scroll <= width
-                lines.append(f"{width}px: scrollWidth {scroll} — {verdict} · {shot}")
-        finally:
-            browser.close()
-    return ok, lines
+            from playwright.sync_api import sync_playwright
+        except ImportError:
+            return _check_with_node(src, out, url=url)
+
+        lines: list[str] = []
+        ok = True
+        with sync_playwright() as p:
+            browser = p.chromium.launch()
+            try:
+                for width in CHECK_WIDTHS:
+                    page = browser.new_page(viewport={"width": width, "height": 900})
+                    errors: list[str] = []
+                    page.on("pageerror", lambda exc, _e=errors: _e.append(str(exc)))
+                    page.on(
+                        "console",
+                        lambda msg, _e=errors: (
+                            _e.append(msg.text)
+                            if msg.type == "error" and "Content Security Policy" in msg.text
+                            else None
+                        ),
+                    )
+                    try:
+                        page.goto(url, wait_until="load")
+                        page.wait_for_timeout(300)
+                        scroll = int(page.evaluate("document.documentElement.scrollWidth"))
+                        shot = out / f"report-{width}.png"
+                        page.screenshot(path=str(shot), full_page=True)
+                    finally:
+                        page.close()
+                    verdict = "OK" if scroll <= width else "ล้นจอ"
+                    ok = ok and scroll <= width and not errors
+                    lines.append(f"{width}px: scrollWidth {scroll} — {verdict} · {shot}")
+                    lines += _script_error_lines(width, errors)
+            finally:
+                browser.close()
+        return ok, lines
+
+
+def _report_csp() -> str:
+    """The header the `/r/` route sends (`report_csp`, shared with it)."""
+    from .report_csp import REPORT_CSP_HEADER
+
+    return REPORT_CSP_HEADER
+
+
+@contextlib.contextmanager
+def _served_like_remote(src: Path):
+    """#1030: serve *src* on a loopback port with the same CSP as the `/r/`
+    route and yield its URL. Opening the file straight from disk has no CSP,
+    so a report whose script the real route blocks (Worker, WebAssembly, a
+    fetch) used to pass the check and fail for the reader."""
+    import threading
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    body = src.read_bytes()
+    csp = _report_csp()
+    ctype = "image/svg+xml" if src.suffix.lower() == ".svg" else "text/html; charset=utf-8"
+
+    class _Handler(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:
+            if self.path.split("?", 1)[0] != "/report":
+                self.send_response(204)  # favicon & co: not this report's fault
+                self.end_headers()
+                return
+            self.send_response(200)
+            self.send_header("Content-Type", ctype)
+            self.send_header("Content-Length", str(len(body)))
+            if csp:
+                self.send_header("Content-Security-Policy", csp)
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *_args: object) -> None:
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        yield f"http://127.0.0.1:{server.server_address[1]}/report"
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def _script_error_lines(width: int | str, errors: list[str]) -> list[str]:
+    seen = list(dict.fromkeys(e.strip().splitlines()[0][:300] for e in errors if e.strip()))
+    return [f"{width}px: สคริปต์ในหน้าพัง (เปิดผ่านลิงก์จริงจะพังแบบเดียวกัน) — {e}" for e in seen[:5]]
 
 
 def _npm_cache_dirs() -> list[Path]:
@@ -768,12 +835,44 @@ def find_node_playwright() -> Path | None:
                 except OSError:
                     continue
     if hits:
-        hits.sort(key=lambda h: h[0], reverse=True)
+        # Newest first, but an install whose browser build was never
+        # downloaded cannot launch — the newest npx entry is often exactly
+        # that, and the check then said SKIPPED beside a dozen that work.
+        hits.sort(key=lambda h: (_has_chromium(h[1]), h[0]), reverse=True)
         return hits[0][1]
     return None
 
 
-def _check_with_node(src: Path, out: Path, playwright: str | None = None) -> tuple[bool, list[str]]:
+def _has_chromium(playwright_dir: Path) -> bool:
+    """True when the Chromium build this Playwright wants is on disk."""
+    import json
+
+    try:
+        spec = json.loads(
+            (playwright_dir.parent / "playwright-core" / "browsers.json").read_text("utf-8")
+        )
+        revision = next(b["revision"] for b in spec["browsers"] if b["name"] == "chromium")
+    except (OSError, ValueError, KeyError, StopIteration, TypeError):
+        return False
+    custom = os.environ.get("PLAYWRIGHT_BROWSERS_PATH")
+    if custom and custom != "0":
+        roots = [Path(custom)]
+    elif sys.platform == "win32":
+        roots = [Path(os.environ.get("LOCALAPPDATA") or Path.home()) / "ms-playwright"]
+    elif sys.platform == "darwin":
+        roots = [Path.home() / "Library" / "Caches" / "ms-playwright"]
+    else:
+        roots = [Path.home() / ".cache" / "ms-playwright"]
+    return any(
+        (root / f"{name}-{revision}").is_dir()
+        for root in roots
+        for name in ("chromium_headless_shell", "chromium")
+    )
+
+
+def _check_with_node(
+    src: Path, out: Path, playwright: str | None = None, url: str | None = None
+) -> tuple[bool, list[str]]:
     import json
     import shutil
     import subprocess
@@ -788,6 +887,8 @@ def _check_with_node(src: Path, out: Path, playwright: str | None = None) -> tup
     pw = playwright or (str(find_node_playwright() or "") or None)
     if pw:
         cmd += ["--playwright", str(Path(pw).resolve())]
+    if url:
+        cmd += ["--url", url]
     res = subprocess.run(
         cmd,
         capture_output=True,
@@ -808,6 +909,7 @@ def _check_with_node(src: Path, out: Path, playwright: str | None = None) -> tup
         lines.append(
             f"{width}px: scrollWidth {row['scrollWidth']} — {verdict} · {row['screenshot']}"
         )
+        lines += _script_error_lines(width, list(row.get("errors") or []))
     return res.returncode == 0, lines
 
 

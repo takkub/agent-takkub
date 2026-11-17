@@ -1421,28 +1421,49 @@ def cmd_worktree(args: argparse.Namespace) -> dict:
         clean_kwargs: dict = {}
         if getattr(args, "path", None):
             clean_kwargs["path"] = args.path  # #976
+        _branches = getattr(args, "branch", None) or None
+        if isinstance(_branches, list | tuple):
+            _branches = [b for b in _branches if b] or None
+            if _branches and len(_branches) == 1:
+                _branches = _branches[0]
+
+        # #1027: every line is printed (and flushed) the moment it is known.
+        # 19 worktrees ran silent past two 120 s tool timeouts — nothing told
+        # a working sweep from a hung one.
+        _shown: list[str] = []
+
+        def _show(line: str) -> None:
+            _shown.append(line)
+            _utf8_print(f"  {line}")
+            sys.stdout.flush()
+
+        print("  กำลังตรวจ worktree …", flush=True)
         lines = mgr.clean_isolated(
             root,
             force=bool(args.force),
             live_paths=live_paths,
-            branch=getattr(args, "branch", None) or None,
+            branch=_branches,
             discard=bool(getattr(args, "discard", False)),
+            on_line=_show,
             **clean_kwargs,
         )
+        for line in lines:
+            if line not in _shown:  # a result the sweep did not stream
+                _show(line)
         # #411 — `.trash-*` staging dirs `remove_worktree_tree` leaves behind
         # after a partial/failed delete are our own already-vetted trash
         # (never a real checkout with work of unknown value), so they're
         # swept every `clean` call, unlike the gated `--orphans` report
         # below — no separate manual run needed to finish the job.
-        lines = lines + mgr.sweep_trash(root, live_paths=live_paths)
+        late_lines = mgr.sweep_trash(root, live_paths=live_paths)
         # #961: wt/* branches whose checkout is already gone are a trace of the
         # cockpit left in the user's repo — sweep them with the worktrees.
-        if not getattr(args, "branch", None) and not getattr(args, "path", None):
-            lines = lines + mgr.clean_dangling_branches(root, force=bool(args.force))
-        if lines:
-            for line in lines:
-                _utf8_print(f"  {line}")
-        else:
+        if not _branches and not getattr(args, "path", None):
+            late_lines = late_lines + mgr.clean_dangling_branches(root, force=bool(args.force))
+        for line in late_lines:
+            _show(line)
+        lines = lines + late_lines
+        if not lines:
             print("(nothing to clean)")
         failed = sum(1 for line in lines if line.startswith("FAILED"))
 
@@ -4900,6 +4921,22 @@ def cmd_provider(args: argparse.Namespace) -> dict:
             msg = f"unknown provider: {name!r}"
             _utf8_print(f"✗ {msg}")
             return {"ok": False, "msg": msg}
+        # #1031: the model the CLI drops to when its own is overloaded.
+        fallback_arg = getattr(args, "fallback", None)
+        if fallback_arg is not None:
+            from .provider_models import fallback_for, set_fallback
+
+            if not PROVIDER_REGISTRY[name].fallback_model_flag:
+                msg = (
+                    f"{name}: CLI นี้ไม่มี flag กำหนด fallback model ที่ cockpit รู้จัก "
+                    "(ตั้งได้เฉพาะ claude — provider อื่นยังเป็น gap)"
+                )
+                _utf8_print(f"✗ {msg}")
+                return {"ok": False, "msg": msg}
+            set_fallback(name, fallback_arg)
+            msg = f"{name} fallback model: {fallback_for(name) or '(cockpit default — รุ่นล่าสุดของ tier ถัดลงไป)'}"
+            _utf8_print(f"✓ {msg} · มีผลกับ pane ที่เปิดใหม่")
+            return {"ok": True, "msg": msg}
         if args.clear:
             clear_model(name)
             msg = f"{name} model cleared (provider default)"
@@ -4916,6 +4953,10 @@ def cmd_provider(args: argparse.Namespace) -> dict:
             return {"ok": True, "msg": msg}
         configured_model = model_for(name)
         msg = f"{name} model: {configured_model or '(provider default)'}"
+        if PROVIDER_REGISTRY[name].fallback_model_flag:
+            from .provider_models import fallback_for
+
+            msg += f"\n{name} fallback model: {fallback_for(name) or '(cockpit default)'}"
         _utf8_print(msg)
         return {"ok": True, "msg": msg}
 

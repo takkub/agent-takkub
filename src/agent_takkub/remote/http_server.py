@@ -32,6 +32,7 @@ from pathlib import Path
 from PyQt6.QtCore import QObject, pyqtSignal
 
 from .. import config as _config
+from ..report_csp import REPORT_CSP_HEADER as _REPORT_CSP_SHARED
 from . import api, notify, reports
 from .auth import AuthGate
 from .config import RemoteConfig
@@ -179,18 +180,10 @@ _CSP_HEADER = (
     "img-src 'self' data: blob:; style-src 'self' 'unsafe-inline'"
 )
 
-# #367 Remote Reports (`/r/` route): a report is a standalone document.
-# `publish()`/`validate_standalone_html` (`reports.py`) reject the external
-# reference shapes it knows to look for at store time, but that regex-based
-# check is a secondary gate, not the enforcement — this CSP is what actually
-# blocks a report from reaching a third-party origin at render/fetch time
-# (default-src 'self' catches anything the store-time check misses via
-# directive fallback), which is why inline script/style can safely be
-# allowed here (unlike the shell's `_CSP_HEADER` above).
-_REPORT_CSP_HEADER = (
-    "default-src 'self'; script-src 'self' 'unsafe-inline'; object-src 'none'; "
-    "base-uri 'none'; img-src 'self' data:; style-src 'self' 'unsafe-inline'"
-)
+# #367 Remote Reports (`/r/` route): the policy and its reasoning live in
+# `report_csp.py` — `takkub report check` serves a report under the same value
+# (#1030), so it has one home.
+_REPORT_CSP_HEADER = _REPORT_CSP_SHARED
 
 _REPORT_CONTENT_TYPES = {
     ".html": "text/html; charset=utf-8",

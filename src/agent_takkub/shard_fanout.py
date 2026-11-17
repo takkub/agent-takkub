@@ -55,8 +55,41 @@ _BROWSER_WORK_RE = re.compile(
 )
 
 
+#: #1026: words that only say a browser gets opened at some point. An
+#: implementation task ("ปรับ UI 4 หัวข้อ … แล้ว screenshot ยืนยัน") carries them
+#: for its closing self-verify, which the fan-out contract already gives to the
+#: parent pane after the subagents finish — the pieces themselves are code.
+_BROWSER_MENTION_ONLY = frozenset({"browser", "playwright", "screenshot", "เปิดเว็บ", "เปิดเบราว์เซอร์"})
+
+
 def is_browser_work(task: str) -> bool:
     return bool(_BROWSER_WORK_RE.search(task or ""))
+
+
+#: The task says the browser is for checking its own result afterwards.
+_SELF_VERIFY_RE = re.compile(
+    r"self[\s-]?verif|ยืนยัน|ตรวจ(?:สอบ)?(?:ผล)?(?:ด้วย)?ตัวเอง|หลัง(?:แก้|ทำ)|เสร็จแล้ว"
+    r"|\bafter (?:the )?(?:change|fix|edit)s?\b|\bwhen (?:done|finished)\b",
+    re.IGNORECASE,
+)
+#: …unless it is about pages in bulk — then looking at them IS the work (#848).
+_PER_PAGE_RE = re.compile(r"\b(?:each|every|all)\s+pages?\b|ทุกหน้า|ทีละหน้า", re.IGNORECASE)
+
+
+def browser_is_the_work(task: str) -> bool:
+    """True when the pieces themselves are browser work (e2e, smoke test, UI
+    audit, a look at every page…). False only for the narrow #1026 shape: the
+    task merely names a browser/screenshot AND says it is a self-verify of the
+    change. Anything unclear stays browser work — the #848 reading."""
+    task = task or ""
+    hits = [
+        re.sub(r"\s+", " ", m.group(0).strip().lower()) for m in _BROWSER_WORK_RE.finditer(task)
+    ]
+    if not hits:
+        return False
+    if any(hit not in _BROWSER_MENTION_ONLY for hit in hits) or _PER_PAGE_RE.search(task):
+        return True
+    return not _SELF_VERIFY_RE.search(task)
 
 
 def target_base_role(role: str, mode: str | None) -> str:
@@ -145,7 +178,14 @@ def resolve_shard_fanout(
         return "pane", (
             f"{base} เป็น browser-QA shard → fan-out เป็น pane แยก (browser profile ต่อ shard)"
         )
-    if task and is_browser_work(task):
+    # #1026: for a role that writes code, a task that merely ends with a
+    # browser self-verify stays a subagent fan-out — N panes each received the
+    # whole brief and redid it. Reviewer keeps the strict reading: it has no
+    # browser at all, so any browser mention is a routing mistake to surface.
+    browser_task = bool(task) and (
+        is_browser_work(task) if base == "reviewer" else browser_is_the_work(task)
+    )
+    if browser_task:
         # #847/#848: native subagents have no browser of their own, so a
         # browser/UI task "fanned out" to them silently ran serially (or was
         # BLOCKED outright). Decide here, at assign time, instead.
@@ -162,7 +202,9 @@ def resolve_shard_fanout(
             )
         return "pane", (
             f"งานต้องเปิดเบราว์เซอร์ → fan-out เป็น {shards} pane แยก "
-            "(subagent ไม่มีเบราว์เซอร์ของตัวเอง #848)"
+            "(subagent ไม่มีเบราว์เซอร์ของตัวเอง #848) · ทุก pane ได้ใบงานเดียวกัน + ขอบเขต "
+            f"'ส่วนที่ k จาก {shards}' — ใบงานควรแยกหัวข้อ 1./2./… ให้ครบ {shards} ข้อ "
+            "ไม่งั้น pane ต้องแบ่งกันเองตามลำดับ"
         )
     provider_name, hint = effective_provider_hint(base, project, provider)
     if not hint:

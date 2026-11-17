@@ -290,6 +290,31 @@ def project_progress(state: dict) -> tuple[int, int]:
     return done, total
 
 
+# #1023: the dock rebuilds its whole tree on the GUI thread at every ledger
+# change. A ledger only grows (prod: 1,580 rows / 1.3 MB for one project), so
+# an unbounded tree made every assign/done/close cost seconds — 17.6 s once,
+# under load. Only the newest groups are built, up to this many rows; a group
+# with work still open is always built. The rest is one line pointing at
+# INDEX.md, which keeps the full history.
+_DOCK_MAX_ROWS = 200
+_OPEN_STATUSES = frozenset({"working", "queued"})
+
+
+def visible_groups(state: dict) -> tuple[list[dict], int]:
+    """``(groups to build, rows left out)`` — groups are stored newest first."""
+    shown: list[dict] = []
+    used = 0
+    hidden = 0
+    for group in state.get("groups", []):
+        rows = [r for f in group.get("features", []) for r in f.get("rows", [])]
+        if used < _DOCK_MAX_ROWS or any(r.get("status") in _OPEN_STATUSES for r in rows):
+            shown.append(group)
+            used += len(rows)
+        else:
+            hidden += len(rows)
+    return shown, hidden
+
+
 def has_any_rows(state: dict) -> bool:
     """True if *state* has at least one task row — an empty/never-assigned
     project's card is skipped instead of rendered blank."""
@@ -410,6 +435,21 @@ def _row_status_icon(glyph: str, color: str) -> QIcon:
     and let the delegate's separately-painted text bleed through underneath,
     doubling the text visually.
     """
+    # #1023: one icon per (glyph, colour), not one per row — a 1,580-row
+    # ledger painted 1,580 identical pixmaps on the GUI thread at every
+    # assign/done/close. A theme switch changes the colour, hence the key.
+    cached = _ROW_ICON_CACHE.get((glyph, color))
+    if cached is not None:
+        return cached
+    icon = _paint_row_status_icon(glyph, color)
+    _ROW_ICON_CACHE[(glyph, color)] = icon
+    return icon
+
+
+_ROW_ICON_CACHE: dict[tuple[str, str], QIcon] = {}
+
+
+def _paint_row_status_icon(glyph: str, color: str) -> QIcon:
     size = 16
     pix = QPixmap(size, size)
     pix.fill(Qt.GlobalColor.transparent)
@@ -451,18 +491,28 @@ class _GitStatusWorker(QRunnable):
         self._project = project
         self._signals = signals
 
+    def _emit(self, signal_name: str, *args: object) -> None:
+        # #1024: the view that owns `_signals` can be torn down (tab closed,
+        # app quitting) while git is still running on the pool thread; the
+        # result then has nobody to go to — drop it instead of raising
+        # "wrapped C/C++ object … has been deleted" into sys.excepthook.
+        try:
+            getattr(self._signals, signal_name).emit(self._project, *args)
+        except RuntimeError:
+            pass
+
     def run(self) -> None:
         try:
             from . import git_status
         except ImportError as exc:
-            self._signals.failed.emit(self._project, f"git_status module ไม่พร้อมใช้งาน ({exc})")
+            self._emit("failed", f"git_status module ไม่พร้อมใช้งาน ({exc})")
             return
         try:
             repos = git_status.collect(self._project)
         except Exception as exc:
-            self._signals.failed.emit(self._project, str(exc))
+            self._emit("failed", str(exc))
             return
-        self._signals.finished.emit(self._project, repos)
+        self._emit("finished", repos)
 
 
 _GIT_PLACEHOLDER = "เลือกโปรเจคเพื่อดู git status"
@@ -941,7 +991,8 @@ class TaskDockWidget(QWidget):
         done, total = project_progress(state)
         item = QTreeWidgetItem([f"{project}  ({done}/{total})"])
         item.setData(0, Qt.ItemDataRole.UserRole, f"project:{project}")
-        for group in state.get("groups", []):
+        groups, hidden_rows = visible_groups(state)
+        for group in groups:
             # Goalless assigns (`create_assignment(..., goal=None)`) each land
             # in their own ledger group keyed by date — a project assigned-to
             # goalless on 2 different days rendered 2 separate "(ไม่ระบุ
@@ -954,6 +1005,12 @@ class TaskDockWidget(QWidget):
                     item.addChild(self._build_feature_item(project, group, feat))
             else:
                 item.addChild(self._build_group_item(project, group))
+        if hidden_rows:
+            older = QTreeWidgetItem([f"… งานเก่ากว่านี้อีก {hidden_rows} แถว — ดูทั้งหมดที่ INDEX.md (↗)"])
+            older.setData(0, Qt.ItemDataRole.UserRole, f"older:{project}")
+            older.setForeground(0, QColor(cockpit_theme.TEXT_MUTED))
+            older.setToolTip(0, str(task_ledger.index_path(project)))
+            item.addChild(older)
         return item
 
     def _build_group_item(self, project: str, group: dict) -> QTreeWidgetItem:

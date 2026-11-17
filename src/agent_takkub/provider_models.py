@@ -94,3 +94,42 @@ def clear_model(provider: str) -> None:
     models = _load()
     models.pop(provider, None)
     _save(models)
+
+
+# ── fallback model (#1031) ───────────────────────────────────────────────────
+# The model a provider's CLI switches a session to when its own model is
+# overloaded. Kept beside the registry in the same `models/` folder, in its own
+# file: `registry.json` is a flat provider→model map that every reader
+# sanitises by provider name, so a second kind of value cannot share it.
+
+
+def fallback_path() -> Path:
+    return path().with_name("fallback.json")
+
+
+def _load_fallbacks() -> dict[str, str]:
+    from .core.storage.v2_target import read_data
+
+    data = read_data(fallback_path())
+    return _sanitize(data) if isinstance(data, dict) else {}
+
+
+def fallback_for(provider: str) -> str | None:
+    """The configured fallback model, or ``None`` for the cockpit default
+    (the newest model of the next tier down — see ``_teammate_tier``)."""
+    return _load_fallbacks().get(provider)
+
+
+def set_fallback(provider: str, model: str) -> None:
+    """Set (or, with a blank value, clear) a provider's fallback model."""
+    if provider not in _providers():
+        raise ValueError(f"unknown provider: {provider!r}")
+    from .core.storage.v2_target import write_data
+
+    fallbacks = _load_fallbacks()
+    normalized = model.strip()
+    if normalized:
+        fallbacks[provider] = normalized
+    else:
+        fallbacks.pop(provider, None)
+    write_data(fallback_path(), fallbacks)

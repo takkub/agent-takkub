@@ -663,8 +663,12 @@ def _lead_provider_takeover_brief(
     panes: dict,
     *,
     manual: bool = False,
+    cause: str = "",
 ) -> str:
     """Build the cross-provider context a replacement Lead can safely use.
+
+    *cause* (#1032): why the Lead moved when it was not a quota hit (its CLI
+    died at bootstrap) — the brief must not tell the new Lead a quota story.
 
     CLI session ids are provider-specific, so a quota reroute cannot use
     ``--resume``. The managed Lead context covers durable project memory;
@@ -677,7 +681,11 @@ def _lead_provider_takeover_brief(
         (
             f"The previous Lead ({hit_provider}) was replaced by the user. "
             if manual
-            else f"The previous Lead ({hit_provider}) hit its quota. "
+            else (
+                f"The previous Lead ({hit_provider}) could not start: {cause}. "
+                if cause
+                else f"The previous Lead ({hit_provider}) hit its quota. "
+            )
         )
         + f"You are the replacement Lead on {new_provider}; continue coordinating the same unfinished work.",
         f"You are still the agent-takkub Lead for project {project}. Only the account/provider "
@@ -1135,6 +1143,7 @@ class AutoResumeMixin:
                 new_provider,
                 self._panes_by_project.get(project, {}),
                 manual=manual,
+                cause=cause,
             )
             if is_lead
             else ""
@@ -1279,7 +1288,11 @@ class AutoResumeMixin:
             try:
                 self.leadUnavailable.emit(
                     project,
-                    f"Lead is restarting after {hit_provider} quota reroute",
+                    (
+                        f"Lead is moving to {new_provider}: {cause}"
+                        if cause
+                        else f"Lead is restarting after {hit_provider} quota reroute"
+                    ),
                 )
             except RuntimeError:  # bare __new__ test fixture has no Qt C++ base
                 pass
@@ -1839,6 +1852,15 @@ class AutoResumeMixin:
             f"🌙 [auto-resume] {role} ({project}) ชน usage limit — park ไว้ "
             f"(รอบ {ps.limit_park_rounds}/{auto_resume.MAX_PARK_ROUNDS}) "
             "ปลุกทำงานต่ออัตโนมัติตอน quota reset"
+            # #1033: say WHEN, and that nothing is owed — the Lead closed two
+            # parked panes a minute before their wake, reading silence as stuck.
+            + (
+                f" ราว {time.strftime('%H:%M', time.localtime(reset_at + auto_resume.WAKE_BUFFER_S))}"
+                " — ไม่ต้องปิดหรือ assign ซ้ำ (โปรเจคนี้ตั้งนโยบายโควตาเป็น park); "
+                "ถ้าต้องการให้ทำต่อทันทีให้ assign ใหม่ด้วย --provider ตัวอื่น"
+                if reset_at
+                else ""
+            )
         )
         self._notify_lead(project, msg, from_role=role, note="limit_parked", kind="limit-parked")
         _single_shot_at(
@@ -1880,6 +1902,11 @@ class AutoResumeMixin:
         ps.limit_park_wake_ts = time.time()
         ps.rate_limited_until = 0.0  # let the rate-limit watchdog run normally again
         ps.last_content_change_ts = time.time()  # #53: don't false-trigger the stuck detector
+        # #1033: parked time is not idle time — the no-progress clock (#570)
+        # restarts at the wake, or the first tick after it reports "20 minutes
+        # without progress" for a pane that was not allowed to work.
+        ps.last_tool_marker_seen_ts = time.time()
+        ps.idle_no_progress_notified = False
         if not still_limited:
             # #158: mark the on-disk snapshot resumed rather than deleting it —
             # cheap audit trail of the park→wake cycle, harmless if it's

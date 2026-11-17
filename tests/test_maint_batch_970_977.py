@@ -165,7 +165,7 @@ class TestNodePlaywrightDiscovery975:
         monkeypatch.setattr(
             report_builder,
             "_check_with_node",
-            lambda src, out, pw=None: calls.append(pw) or (True, []),
+            lambda src, out, pw=None, url=None: calls.append(pw) or (True, []),
         )
         html = tmp_path / "r.html"
         html.write_text("<p>x</p>", encoding="utf-8")

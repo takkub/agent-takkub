@@ -3587,6 +3587,13 @@ class PtySession(QObject):
         m = _GEMINI_MODEL_RE.search(text)
         return m.group(1) if m else None
 
+    def model_switch_notice(self, provider: str) -> dict[str, str] | None:
+        """The CLI's own "moved this session to another model" line, if one is
+        on screen (#1031) — see `provider_spec.MODEL_SWITCH_PATTERNS`."""
+        from .provider_spec import model_switch_in
+
+        return model_switch_in(provider, self.display_lines())
+
     def auth_failure_reason(self, provider: str) -> str | None:
         """Return the matched marker if this pane's screen currently shows
         `provider`'s CLI stuck on an auth failure, else ``None`` (#248/#247

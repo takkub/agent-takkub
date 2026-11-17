@@ -2053,20 +2053,78 @@ BOOTSTRAP_FAILURE_MARKERS: dict[str, tuple[str, ...]] = {
     # codex 0.167.0, 2026-11-06 (#991): "Error: account/read failed during TUI
     # bootstrap: account/read failed: workspace routing discovery timed out
     # (code -32603)" — exit 1 three times in 40 s.
-    "codex": ("account/read failed during tui bootstrap",),
+    # codex 0.167.1, 2026-11-16 (#1032): same line ending "workspace routing
+    # discovery failed (code -32603)" — two Lead panes at once.
+    "codex": (
+        "account/read failed during tui bootstrap",
+        "workspace routing discovery failed",
+        "workspace routing discovery timed out",
+    ),
 }
 
 
 def bootstrap_failure_marker(provider: str, lines) -> str | None:
-    """The #991 bootstrap-failure marker found in *lines*, or None."""
+    """The #991 bootstrap-failure marker found in *lines*, or None.
+
+    Compared with all whitespace removed: the message is one long line that a
+    narrow pane wraps wherever the column ends, mid-phrase or mid-word."""
     markers = BOOTSTRAP_FAILURE_MARKERS.get(provider or "", ())
     if not markers:
         return None
     try:
-        text = "\n".join(str(line) for line in lines).casefold()
+        text = "".join("".join(str(line) for line in lines).casefold().split())
     except Exception:
         return None
-    return next((m for m in markers if m in text), None)
+    return next((m for m in markers if "".join(m.split()) in text), None)
+
+
+# #1031: the line a provider's CLI prints when it moves a RUNNING session to
+# another model. The pane keeps working, on a different (often lesser) model
+# with a different context window — the cockpit must say so. Captured wording
+# only, per provider:
+#   claude 2.1.322, 2026-11-16: "Switched to Haiku 4.5 due to high demand for
+#     Sonnet 5.5 · context window 1M → 200K tokens"
+#   gemini (agy): no switch line — its footer always names the live model, read
+#     by `PtySession.current_model_label` (#301).
+#   codex / opencode / cursor: no captured wording yet (gap — a switch there
+#     is not detected).
+MODEL_SWITCH_PATTERNS: dict[str, tuple[re.Pattern[str], ...]] = {
+    "claude": (
+        re.compile(
+            r"^[\s⎿●•*>-]*Switched to (?P<to>[A-Za-z][\w .\-]*?) due to (?P<why>[^·\n]+?)"
+            r"(?:\s*·\s*context window (?P<ctx>\S+\s*(?:→|->)\s*\S+)(?:\s*tokens)?)?\s*$",
+            re.MULTILINE,
+        ),
+    ),
+}
+
+
+def model_switch_in(provider: str, lines) -> dict[str, str] | None:
+    """The most recent model-switch line of *provider* in *lines*, as
+    ``{"to", "from", "why", "context", "text"}``, or None (#1031)."""
+    patterns = MODEL_SWITCH_PATTERNS.get(provider or "", ())
+    if not patterns:
+        return None
+    try:
+        text = "\n".join(str(line).rstrip() for line in lines)
+    except Exception:
+        return None
+    found = None
+    for pattern in patterns:
+        for match in pattern.finditer(text):
+            if found is None or match.start() >= found.start():
+                found = match
+    if found is None:
+        return None
+    why = " ".join(found.group("why").split())
+    came_from = re.search(r"\bfor (?P<model>[A-Za-z][\w .\-]*)$", why)
+    return {
+        "to": " ".join(found.group("to").split()),
+        "from": came_from.group("model").strip() if came_from else "",
+        "why": why,
+        "context": " ".join((found.group("ctx") or "").split()),
+        "text": " ".join(found.group(0).split()),
+    }
 
 
 def quota_markers_for(provider: str) -> tuple[str, ...]:

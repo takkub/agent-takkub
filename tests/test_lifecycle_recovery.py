@@ -791,7 +791,7 @@ class TestCodexGeminiModelTier:
         model, effort, fallback = _teammate_tier("codex")
         assert model == "claude-opus-5-5"
         assert effort == "high"
-        assert fallback == "claude-sonnet-5"
+        assert fallback == "claude-sonnet-5-5"  # #1031: newest of the family
 
     def test_gemini_uses_opus_high(self) -> None:
         from agent_takkub.orchestrator import _teammate_tier
@@ -799,7 +799,7 @@ class TestCodexGeminiModelTier:
         model, effort, fallback = _teammate_tier("gemini")
         assert model == "claude-opus-5-5"
         assert effort == "high"
-        assert fallback == "claude-sonnet-5"
+        assert fallback == "claude-sonnet-5-5"  # #1031: newest of the family
 
     def test_codex_gemini_tier_higher_than_default(self) -> None:
         from agent_takkub.orchestrator import _DEFAULT_TEAMMATE_TIER, _teammate_tier
