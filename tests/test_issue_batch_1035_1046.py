@@ -17,11 +17,12 @@ from agent_takkub.provider_spec import PROVIDER_REGISTRY
 
 # ── #1035 ────────────────────────────────────────────────────────────────
 def test_git_usr_bin_is_appended_last_once_and_only_on_windows():
-    usr = r"C:\Program Files\Git\usr\bin"
-    env = {"PATH": os.pathsep.join([r"C:\Windows\System32", r"C:\Program Files\Git\cmd"])}
+    # Drive-less on purpose: the CI's POSIX runners split PATH on ":".
+    usr = r"\Program Files\Git\usr\bin"
+    env = {"PATH": os.pathsep.join([r"\Windows\System32", r"\Program Files\Git\cmd"])}
     pane_env.append_git_usr_bin(env, platform="win32", usr_bin=usr)
     parts = env["PATH"].split(os.pathsep)
-    assert parts[-1] == usr and parts[0] == r"C:\Windows\System32"
+    assert parts[-1] == usr and parts[0] == r"\Windows\System32"
     pane_env.append_git_usr_bin(env, platform="win32", usr_bin=usr + "\\")
     assert env["PATH"].split(os.pathsep).count(usr) == 1
 
