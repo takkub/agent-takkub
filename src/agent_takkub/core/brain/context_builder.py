@@ -209,15 +209,18 @@ def _recent_summary_lines(project: str | None, role: str, task_text: str = "") -
     conv_dir = store.conversation_dir(project, conversation_id_for(project, role))
     summary = load_summary(conv_dir)
 
+    # #1040: these describe this role's PREVIOUS task. Labelled "current:" /
+    # "in progress:", a new opencode pane read the last pane's "provider=…
+    # model=glm-5.3" as its own setup and reported the wrong model.
     lines: list[str] = []
     if summary.current_state:
-        lines.append(f"- current: {summary.current_state}")
+        lines.append(f"- last finished: {summary.current_state}")
     for item in summary.in_progress[:3]:
-        lines.append(f"- in progress: {item}")
+        lines.append(f"- was in progress then: {item}")
     for item in summary.pending[:3]:
-        lines.append(f"- pending: {item}")
+        lines.append(f"- left pending then: {item}")
     if summary.next_action:
-        lines.append(f"- next: {summary.next_action}")
+        lines.append(f"- suggested next then: {summary.next_action}")
     task_tokens = set(tokenize(task_text))
     return [ln for ln in lines if _summary_line_relevant(ln, task_tokens)]
 
@@ -271,7 +274,9 @@ def build_context(
         parts.append("### Relevant memory")
         parts.extend(memory_lines)
     if summary_lines:
-        parts.append("### Recent summary")
+        parts.append(
+            "### This role's previous task (history — not this pane's state, model or settings)"
+        )
         parts.extend(summary_lines)
     return "\n".join(parts)
 

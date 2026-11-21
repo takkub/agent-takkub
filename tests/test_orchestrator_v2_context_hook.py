@@ -68,7 +68,7 @@ def test_flag_on_empty_context_leaves_task_unchanged(monkeypatch):
     assert _inject_v2_context(_TASK, "proj", "backend", "backend", "claude") == _TASK
 
 
-def test_timeout_path_leaves_task_unchanged_and_does_not_block_the_caller(monkeypatch):
+def test_timeout_path_says_context_is_missing_and_does_not_block_the_caller(monkeypatch):
     monkeypatch.setenv("TAKKUB_V2_CONTEXT", "1")
     import agent_takkub.core.brain.facade as facade
 
@@ -83,7 +83,9 @@ def test_timeout_path_leaves_task_unchanged_and_does_not_block_the_caller(monkey
     monkeypatch.setattr(facade, "build_context_for_assign", slow)
     try:
         out = _inject_v2_context(_TASK, "proj", "backend", "backend", "claude")
-        assert out == _TASK
+        # #1045: the task itself is intact and says its context is missing
+        assert out.startswith(_TASK) and "ไม่มี project context แนบ" in out
+        assert "too slow to matter" not in out
         assert entered.wait(timeout=5)  # worker actually started
         assert not release.is_set()  # we're back before the worker was ever released
     finally:

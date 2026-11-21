@@ -76,6 +76,10 @@ class BrainStore:
         self.project = project
         self._jsonl = JsonlStore(brain_store_path(project))
 
+    @property
+    def path(self) -> Path:
+        return self._jsonl.path
+
     def append_event(self, record: MemoryRecord) -> None:
         self._jsonl.append(_record_to_dict(record))
 

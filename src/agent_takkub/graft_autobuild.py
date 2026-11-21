@@ -296,8 +296,21 @@ def _dirs_for_project(project: dict) -> list[Path]:
     return list(seen.values())
 
 
+_git_bin_cache: tuple[str | None, float] | None = None
+
+
 def _git_bin() -> str | None:
-    return shutil.which("git")
+    """`git` on PATH. Cached (#1044): every live resync asked three times,
+    and each `shutil.which` on Windows is a stat per PATH dir per PATHEXT —
+    the resync thread was caught inside it in 32 UI stalls (69 s)."""
+    global _git_bin_cache
+    now = time.monotonic()
+    hit = _git_bin_cache
+    if hit is not None and now - hit[1] < (300.0 if hit[0] else 30.0):
+        return hit[0]
+    found = shutil.which("git")
+    _git_bin_cache = (found, now)
+    return found
 
 
 def _git_nonignored_files(target: Path) -> list[str] | None:
@@ -1003,6 +1016,8 @@ def _has_new_files(target: Path, rel_paths: list[str], staging: Path) -> bool:
 _LIVE_RESYNC_MIN_INTERVAL_S = 15.0
 _live_resync_lock = threading.Lock()
 _last_live_resync: dict[str, float] = {}
+# raw cwd string -> resolved key in `_last_live_resync` (#1044 pre-throttle).
+_resolved_cwd_keys: dict[str, str] = {}
 # Per-target fingerprint of the work tree as of the last live resync
 # (2026-08-28 prod py-spy: `_sync_staging` + `_stat_or_none` owned 32% of
 # ALL samples — every pane's 5s idle tick, throttled to 15s per cwd, walked
@@ -1147,6 +1162,15 @@ def resync_staging_only(cwd: str | None) -> None:
     """
     if _skip_env() or _graft_cli() is None or not cwd:
         return
+    # #1044: every pane's 5 s idle tick lands here on the Qt thread. Inside
+    # the throttle window it now leaves before `resolve()` / `is_dir()` /
+    # either lock (14 stalls, 44 s in `realpath` alone).
+    known = _resolved_cwd_keys.get(cwd)
+    if (
+        known is not None
+        and time.monotonic() - _last_live_resync.get(known, 0.0) < _LIVE_RESYNC_MIN_INTERVAL_S
+    ):
+        return
     try:
         target = Path(cwd).expanduser().resolve()
     except OSError:
@@ -1154,6 +1178,7 @@ def resync_staging_only(cwd: str | None) -> None:
     if not target.is_dir():
         return
     key = str(target)
+    _resolved_cwd_keys[cwd] = key
     with _lock:
         if key in _building:
             return  # in-flight full build already re-syncs this same mirror

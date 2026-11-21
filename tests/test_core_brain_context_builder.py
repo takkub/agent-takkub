@@ -279,8 +279,10 @@ def test_recent_summary_included_when_conversation_flag_on(runtime, monkeypatch)
     save_summary(conv_dir, RollingSummary(current_state="[backend] wired the login endpoint"))
 
     out = context_builder.build_context("proj", "backend", "extend the login endpoint", 2000)
-    assert "### Recent summary" in out
-    assert "wired the login endpoint" in out
+    # #1040: presented as the previous task's history, never as "current"
+    assert "### This role's previous task (history" in out
+    assert "- last finished: [backend] wired the login endpoint" in out
+    assert "current:" not in out
 
 
 def test_recent_summary_skips_unrelated_older_task(runtime, monkeypatch):

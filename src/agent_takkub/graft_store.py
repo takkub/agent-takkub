@@ -356,7 +356,11 @@ def graft_cli_path() -> str | None:
     """
     global _GRAFT_CLI_CACHE
     now = time.monotonic()
-    if _GRAFT_CLI_CACHE is not None and now - _GRAFT_CLI_CACHE[1] < _GRAFT_CLI_TTL_S:
+    # #1044: a found CLI does not move — hold it 10x longer than a miss (a
+    # 7.1 s UI stall sat in this PATH scan; install paths call invalidate).
+    if _GRAFT_CLI_CACHE is not None and now - _GRAFT_CLI_CACHE[1] < _GRAFT_CLI_TTL_S * (
+        10 if _GRAFT_CLI_CACHE[0] else 1
+    ):
         return _GRAFT_CLI_CACHE[0]
     res = shutil.which("graft.cmd") or shutil.which("graft") or local_graft_cli()
     _GRAFT_CLI_CACHE = (res, now)

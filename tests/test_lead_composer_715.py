@@ -324,6 +324,25 @@ class TestQuestionHost:
         host._apply_state("p", state)
         assert composer.shown[-1] is None
 
+    def test_visible_card_survives_a_few_empty_reads_1043(self, qapp) -> None:
+        """#1043: one empty transcript read hid the card, the next drew it
+        again with the selection cleared — it bounced and could not be clicked."""
+        from agent_takkub import lead_composer_host
+
+        state = {"questions": [{"prompt": "q", "multiSelect": False, "options": [{"index": 0}]}]}
+        host, composer, _calls, _mods = self._host(qapp, state)
+        composer.question_visible = lambda: bool(composer.shown and composer.shown[-1])
+        host._apply_state("p", state)
+        for _ in range(lead_composer_host._HIDE_AFTER_MISSES - 1):
+            host._apply_state("p", None)
+        assert composer.shown == [state], "an empty read must not take the card down"
+        host._apply_state("p", state)  # the question is back: the miss count restarts
+        host._apply_state("p", None)
+        assert composer.shown[-1] == state
+        for _ in range(lead_composer_host._HIDE_AFTER_MISSES):
+            host._apply_state("p", None)
+        assert composer.shown[-1] is None, "a question that is really gone still clears"
+
     def test_no_picker_on_screen_sends_nothing(self, qapp, monkeypatch) -> None:
         """#717: a question the transcript still reports but the TUI already
         closed — picker keys at a plain prompt were sent as "111"/"1121"."""

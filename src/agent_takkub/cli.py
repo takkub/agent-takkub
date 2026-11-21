@@ -3007,6 +3007,16 @@ def cmd_task(args: argparse.Namespace) -> dict:
                 "structured_output": True,
             }
         active["revision"] = git_revision(active["cwd"])
+        # #1047: `done` only requires the checks this role owns; the rest stay
+        # owed on the plan (leave them out, or report them `pending`).
+        _plan = (active.get("impact") or {}).get("plan")
+        if isinstance(_plan, dict):
+            from .impact_contract import checks_owned_by
+
+            _mine = checks_owned_by(_plan, args.role)
+            active["your_checks"] = sorted(
+                _mine if _mine is not None else {c["id"] for c in _plan["checks"]}
+            )
         _utf8_print(json.dumps(active, ensure_ascii=False, indent=2))
         return {"ok": True, "msg": "", "quiet": True}
     if args.t_cmd == "show":

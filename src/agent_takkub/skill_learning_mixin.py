@@ -7,10 +7,21 @@ from __future__ import annotations
 
 import os
 import sys
+import time
 
 from .skill_learning.reflector import CHILD_ENV
 
 SKIP_ENV = "TAKKUB_SKIP_SKILL_LEARNING"
+
+# #1038: a skill was distilled from a done note 6 minutes before the reviewer
+# proved its central claim wrong; it was linked into every new worktree and
+# the next pane repeated the mistake. A clean done from a non-checker role
+# now waits: a checker's PASS releases it, a checker's FAILED discards it,
+# and with no checker at work it is learned after HOLD_S. In memory only — a
+# cockpit restart inside the window loses those episodes (not durable).
+CHECKER_ROLES = frozenset({"qa", "critic", "reviewer", "tester"})
+HOLD_S = float(os.environ.get("TAKKUB_SKILL_LEARNING_HOLD_S", "1200"))
+HOLD_MAX_S = 3 * 3600.0
 
 
 def _log_event(event: str, **details) -> None:
@@ -76,11 +87,57 @@ class SkillLearningMixin:
                 claude_project_dir_name=_str(claude_project_dir_name),
             )
             self.__dict__.setdefault("_skill_learning_last", {})[(project_ns, role)] = ev
-            pipeline.submit(ev, notify=self.skillLearningReport.emit)
+            held = self.__dict__.setdefault("_skill_learning_held", {}).setdefault(project_ns, [])
+            if role.partition("#")[0] in CHECKER_ROLES:
+                # #1038: the checker's verdict decides what happens to the
+                # work that was waiting for it.
+                if failed and held:
+                    _log_event(
+                        "skill_learning_unverified_dropped",
+                        project=project_ns,
+                        checker=role,
+                        roles=[e.role for _t, e in held][:10],
+                    )
+                    held.clear()
+                else:
+                    self._skill_learning_release(project_ns)
+                pipeline.submit(ev, notify=self.skillLearningReport.emit)
+            elif failed:
+                pipeline.submit(ev, notify=self.skillLearningReport.emit)
+            else:
+                held.append((time.time(), ev))
         except Exception as exc:
             _log_event(
                 "skill_learning_hook_error", role=role, project=project_ns, error=str(exc)[:200]
             )
+
+    def _skill_learning_release(self, project_ns: str) -> None:
+        from .skill_learning import pipeline
+
+        held = self.__dict__.get("_skill_learning_held", {}).pop(project_ns, [])
+        for _ts, ev in held:
+            pipeline.submit(ev, notify=self.skillLearningReport.emit)
+
+    def _skill_learning_tick(self, now: float) -> None:
+        """Idle tick: learn from a finished task once nothing is left to
+        contradict it — `HOLD_S` with no checker working in the project, or
+        `HOLD_MAX_S` regardless. Never raises."""
+        try:
+            for project_ns, held in list(self.__dict__.get("_skill_learning_held", {}).items()):
+                if not held:
+                    continue
+                age = now - held[0][0]
+                if age < HOLD_S:
+                    continue
+                checking = any(
+                    name.partition("#")[0] in CHECKER_ROLES
+                    and getattr(pane, "state", None) == "working"
+                    for name, pane in self._project_panes(project_ns).items()
+                )
+                if not checking or age >= HOLD_MAX_S:
+                    self._skill_learning_release(project_ns)
+        except Exception as exc:
+            _log_event("skill_learning_hook_error", stage="tick", error=str(exc)[:200])
 
     def _on_skill_learning_report(self, project_ns: str, line: str) -> None:
         """Qt thread. Digest-able (not a blocking notice) — Lead sees it batched."""

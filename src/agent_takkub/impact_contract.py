@@ -179,9 +179,58 @@ def evidence_from_note(note: str) -> tuple[dict | None, str]:
     return _block(note, "impact-evidence")
 
 
+_CHECKER_ROLES = frozenset({"qa", "critic", "reviewer", "tester"})
+
+
+def _owner_key(name: object) -> str:
+    """`backend#2` → `backend`; qa/critic/tester/reviewer are one position (#513)."""
+    key = str(name or "").strip().lower().partition("#")[0]
+    return "reviewer" if key in _CHECKER_ROLES else key
+
+
+def checks_owned_by(plan: dict, role: str | None) -> set[str] | None:
+    """IDs of the plan's checks that *role* answers for, or None when the
+    gate cannot scope by owner (no role given, or the plan names no owner
+    that is this role — then the whole plan is this pane's, as before)."""
+    if not role:
+        return None
+    mine = {c["id"] for c in plan["checks"] if _owner_key(c.get("owner")) == _owner_key(role)}
+    return mine or None
+
+
+def outstanding_checks(plan: dict, evidence: dict | None) -> list[str]:
+    """`id (owner)` for every required check this evidence did not pass —
+    what is still owed on the plan after a pane closed its own part."""
+    passed = {
+        r.get("id")
+        for r in (evidence or {}).get("checks", [])
+        if isinstance(r, dict) and r.get("status") == "pass"
+    }
+    return [
+        f"{c['id']} ({c['owner']})"
+        for c in plan["checks"]
+        if c.get("required", True) and c["id"] not in passed
+    ]
+
+
 def validate_evidence(
-    plan: dict, evidence: dict | None, *, task_id: str, revision: str | None
+    plan: dict,
+    evidence: dict | None,
+    *,
+    task_id: str,
+    revision: str | None,
+    role: str | None = None,
 ) -> str:
+    """Empty string when *evidence* closes this pane's part of *plan*.
+
+    *role* (#1047) scopes the gate to the checks whose ``owner`` is that
+    role: a backend pane handed a 13-check plan owned by backend/frontend/qa
+    could only leave through ``done --blocked``, which wrote FAILED for work
+    that was finished. Another owner's check may be left out or reported
+    ``pending``; it stays owed on the plan (`outstanding_checks`). A shard
+    (``backend#2``) shares its role's checks with its siblings, so its own
+    may be ``pending`` with a ``limitation`` saying who covers them.
+    """
     if evidence is None:
         return "impact evidence missing; pass --impact-evidence-file"
     # #845: name both sides — a re-assign mid-task rotates the active task,
@@ -227,15 +276,38 @@ def validate_evidence(
             return f"duplicate impact evidence for {result['id']}"
         by_id[result["id"]] = result
     expected_ids = {check["id"] for check in plan["checks"]}
-    if set(by_id) != expected_ids:
-        return "impact evidence check IDs do not match the plan"
+    owned = checks_owned_by(plan, role)
+    is_shard = "#" in str(role or "")
+    if owned is None:
+        owned = expected_ids
+        is_shard = False
+    unknown = set(by_id) - expected_ids
+    missing_ids = owned - set(by_id)
+    if unknown or missing_ids:
+        return (
+            "impact evidence check IDs do not match the plan"
+            + (f" · not in the plan: {', '.join(sorted(unknown))}" if unknown else "")
+            + (
+                f" · missing for {role or 'this task'}: {', '.join(sorted(missing_ids))}"
+                if missing_ids
+                else ""
+            )
+        )
     for check in plan["checks"]:
-        result = by_id[check["id"]]
+        result = by_id.get(check["id"])
+        if result is None:
+            continue  # another owner's check, still owed on the plan
         status = result.get("status")
         if status != "pass":
-            if check.get("required", True):
+            deferrable = check["id"] not in owned or is_shard
+            if check.get("required", True) and not deferrable:
                 return f"required impact check {check['id']} is not passed"
             if status != "pending" or not str(result.get("limitation", "")).strip():
+                if deferrable and check.get("required", True):
+                    return (
+                        f"impact check {check['id']} (owner {check['owner']}) needs pass, or "
+                        "pending with a limitation naming who covers it"
+                    )
                 return f"optional impact check {check['id']} needs pass or pending with limitation"
         if status == "pass" and (
             not str(result.get("evidence", "")).strip()

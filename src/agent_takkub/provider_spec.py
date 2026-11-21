@@ -343,6 +343,11 @@ class ProviderSpec:
     # the capsule itself; see `subagent_dispatch_hint`.
     native_subagent_dispatch: str = ""
     model_flag: str | None = None
+    # #1036: env var holding inline JSON config whose top-level ``model`` key
+    # selects the model. When set, the interactive pane gets its model there
+    # and `model_flag` is NOT put on its argv (it still marks "this provider
+    # has per-role models" and is what one-shot subcommands take).
+    model_config_env: str | None = None
     tools_flag: str | None = None
     autocompact_flag: str | None = None
     # Slash command the idle-compact watchdog types to compact this CLI's
@@ -1554,6 +1559,12 @@ opencode_spec = ProviderSpec(
     supports_slash_commands=False,
     supports_hooks=False,
     model_flag="--model",  # `-m provider/model` — per-role model selection hook
+    # #1036: opencode 2.3.2 moved `--model` under `opencode run`; the TUI
+    # exits 1 on it ("Unrecognized flag: --model"), twice, then respawn-capped.
+    # The config `model` key works on both lines — verified on 1.19.5
+    # (`opencode debug config` shows the env value merged) and is what 2.x
+    # documents. Not verified live on 2.3.2: no 2.x binary on the dev machine.
+    model_config_env="OPENCODE_CONFIG_CONTENT",
     # GAP (#103): opencode 1.18.4 `opencode --help` exposes no reasoning-effort
     # flag. Keep None so the generic spawn path cannot pass an invented option.
     effort_flag=None,
@@ -2197,6 +2208,21 @@ def busy_steering_warning_for(provider: str) -> str:
     if spec is not None and spec.busy_steering_supported is False:
         return f"{provider}: active-turn steering unsupported; this CLI applies new input after the turn ends"
     return f"{provider or 'provider'}: active-turn steering unverified; CLI receipt does not prove the instruction was applied"
+
+
+def busy_input_waits_for_turn_end(provider: str) -> bool:
+    """True when input the cockpit writes into a working `provider` pane
+    WITHOUT steering only reaches the model after the turn ends (#1041):
+    codex's Tab queue ("Queued follow-up inputs"), or a CLI with no
+    active-turn steering at all (agy). Information-only notices are kept in
+    the cockpit for these instead of piling up as native follow-up turns.
+    Unknown provider or unverified steering → False (unchanged delivery)."""
+    spec = PROVIDER_REGISTRY.get(provider)
+    if spec is None:
+        return False
+    return spec.busy_steering_supported is False or bool(
+        spec.busy_queue_key and spec.busy_queue_key != "\r"
+    )
 
 
 def busy_queue_marker_for(provider: str) -> str | None:

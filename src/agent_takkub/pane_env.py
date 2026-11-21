@@ -211,6 +211,7 @@ def _build_pane_env(project_ns: str | None = None) -> dict[str, str]:
             allow.add(k.upper())
     env = {k: v for k, v in os.environ.items() if k.upper() in allow}
     _apply_win32_path_sanitization(env)
+    append_git_usr_bin(env)
     _apply_port_file(env)
     _apply_storage_root(env)
     _apply_mcp_timeout(env)
@@ -264,6 +265,7 @@ def _build_lead_env(project_ns: str | None = None) -> dict[str, str]:
             allow.add(k.upper())
     env = {k: v for k, v in os.environ.items() if k.upper() in allow}
     _apply_win32_path_sanitization(env)
+    append_git_usr_bin(env)
     _apply_port_file(env)
     _apply_storage_root(env)
 
@@ -875,6 +877,55 @@ def _apply_win32_path_sanitization(env: dict[str, str]) -> None:
             env["PATH"] = os.pathsep.join(path_parts)
         elif npm_idx == -1:
             env["PATH"] = npm_dir + os.pathsep + env.get("PATH", "")
+
+
+_git_usr_bin_cache: dict[str, str | None] = {}
+
+
+def _git_for_windows_usr_bin(path_value: str) -> str | None:
+    """Git for Windows' ``usr\\bin`` (sh, env, ls, wc, head …), found from
+    the ``git`` on *path_value*; None when there is none. Looked up once per
+    PATH value (every pane of a cockpit shares one)."""
+    if path_value in _git_usr_bin_cache:
+        return _git_usr_bin_cache[path_value]
+    import shutil
+
+    found: str | None = None
+    git = shutil.which("git", path=path_value)
+    if git:
+        # <Git>\cmd\git.exe, <Git>\bin\git.exe or <Git>\mingw64\bin\git.exe
+        here = Path(git).resolve().parent
+        for base in (here.parent, here.parent.parent):
+            candidate = base / "usr" / "bin"
+            if (candidate / "sh.exe").is_file():
+                found = str(candidate)
+                break
+    if len(_git_usr_bin_cache) > 32:
+        _git_usr_bin_cache.clear()
+    _git_usr_bin_cache[path_value] = found
+    return found
+
+
+def append_git_usr_bin(
+    env: dict[str, str], *, platform: str | None = None, usr_bin: str | None = None
+) -> None:
+    """#1035: put Git for Windows' ``usr\\bin`` LAST on a pane's PATH.
+
+    A CLI that runs its shell tool as a non-login ``bash -c`` (opencode) gets
+    the Windows PATH, which carries ``Git\\cmd`` but not ``Git\\usr\\bin`` —
+    so ``ls``/``wc``/``head`` were missing and the ``takkub`` shim's
+    ``#!/usr/bin/env sh`` had no ``sh`` to find. Appended, never prepended:
+    every Windows tool that shares a name (find, sort, bash→WSL) keeps
+    winning, this only fills in commands that were not there at all."""
+    if (platform or sys.platform) != "win32":
+        return
+    current = env.get("PATH", "")
+    usr_bin = usr_bin or _git_for_windows_usr_bin(current)
+    if not usr_bin:
+        return
+    have = {p.strip().rstrip("\\/").lower() for p in current.split(os.pathsep)}
+    if usr_bin.rstrip("\\/").lower() not in have:
+        env["PATH"] = f"{current}{os.pathsep}{usr_bin}" if current else usr_bin
 
 
 _WSL_SHARED_PREFIXES = ("TAKKUB_", "AGENT_TAKKUB_")

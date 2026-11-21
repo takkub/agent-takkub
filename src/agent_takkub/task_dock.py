@@ -776,7 +776,30 @@ class TaskDockWidget(QWidget):
         self._tree.itemCollapsed.connect(self._on_item_collapsed)
         self._tree.itemExpanded.connect(self._on_item_expanded)
 
+        # #1044: ledger writes arrive from inside done()/close()/assign();
+        # rebuilding the card right there cost 1-5 s of those calls under
+        # load (65 s over 2 days). Coalesced onto one deferred rebuild.
+        self._refresh_due: set[str] = set()
+        self._refresh_timer = QTimer(self)
+        self._refresh_timer.setSingleShot(True)
+        self._refresh_timer.setInterval(250)
+        self._refresh_timer.timeout.connect(self._run_scheduled_refresh)
+
         self.refresh_all()
+
+    def schedule_refresh(self, project: str) -> None:
+        """Deferred `refresh_project` — the slot for `Orchestrator.ledgerChanged`.
+        Several writes inside one done/close/assign become one rebuild, after
+        the caller has returned to the event loop."""
+        if self._project is not None and project != self._project:
+            return
+        self._refresh_due.add(project)
+        self._refresh_timer.start()
+
+    def _run_scheduled_refresh(self) -> None:
+        due, self._refresh_due = self._refresh_due, set()
+        for project in due:
+            self.refresh_project(project)
 
     # ──────────────────────────────────────────────────────────────
     # 🌿 Git tab lifecycle — active only while the dock is visible AND the

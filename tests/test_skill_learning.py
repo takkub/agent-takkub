@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -678,8 +679,78 @@ def test_orchestrator_hook_is_inert_under_skip_env(monkeypatch):
     assert submitted == []
     monkeypatch.delenv(mix.SKIP_ENV)
     obj._skill_learning_on_done(NS, "backend", **kwargs)
+    # #1038: a clean done waits for a checker's verdict (or the hold window)
+    assert submitted == []
+    obj._skill_learning_release(NS)
     assert submitted[0].provider == "codex" and submitted[0].role == "backend"
     assert obj._skill_learning_last[(NS, "backend")] is submitted[0]
+
+
+def _hold_orch(monkeypatch, panes=None):
+    from agent_takkub import skill_learning_mixin as mix
+
+    submitted = []
+    monkeypatch.delenv(mix.SKIP_ENV, raising=False)
+    monkeypatch.delenv(reflector.CHILD_ENV, raising=False)
+    monkeypatch.setattr(pipeline, "submit", lambda ev, **kw: submitted.append(ev.role))
+    obj = mix.SkillLearningMixin()
+    obj.skillLearningReport = SimpleNamespace(emit=lambda *a: None)
+    obj._project_panes = lambda _ns: panes or {}
+
+    def done(role, failed=False):
+        obj._skill_learning_on_done(
+            NS,
+            role,
+            task="t",
+            note="n",
+            failed=failed,
+            provider="opencode",
+            cwd="/w",
+            session_id="s",
+            pty_transcript="",
+            assigned_at=1.0,
+        )
+
+    return obj, done, submitted
+
+
+def test_checker_failed_discards_the_unverified_work_it_was_waiting_on_1038(monkeypatch):
+    obj, done, submitted = _hold_orch(monkeypatch)
+    done("opencode")
+    done("backend#2")
+    done("reviewer", failed=True)
+    assert submitted == ["reviewer"], "nothing is distilled from work a checker rejected"
+    obj._skill_learning_tick(time.time() + 99_999)
+    assert submitted == ["reviewer"]
+
+
+def test_checker_pass_releases_held_work_at_once_1038(monkeypatch):
+    _obj, done, submitted = _hold_orch(monkeypatch)
+    done("opencode")
+    done("qa")
+    assert submitted == ["opencode", "qa"]
+
+
+def test_held_work_is_learned_after_the_window_unless_a_checker_is_still_working_1038(
+    monkeypatch,
+):
+    from agent_takkub import skill_learning_mixin as mix
+
+    panes = {"reviewer": SimpleNamespace(state="working")}
+    obj, done, submitted = _hold_orch(monkeypatch, panes)
+    done("frontend")
+    now = time.time()
+    obj._skill_learning_tick(now + mix.HOLD_S - 5)
+    assert submitted == []
+    obj._skill_learning_tick(now + mix.HOLD_S + 5)
+    assert submitted == [], "a reviewer is still on it"
+    panes["reviewer"].state = "done"
+    obj._skill_learning_tick(now + mix.HOLD_S + 10)
+    assert submitted == ["frontend"]
+    done("backend")
+    panes["reviewer"].state = "working"
+    obj._skill_learning_tick(time.time() + mix.HOLD_MAX_S + 5)
+    assert submitted == ["frontend", "backend"], "never held past the hard ceiling"
 
 
 def test_reflector_child_env_disables_hook(monkeypatch):

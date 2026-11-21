@@ -82,6 +82,13 @@ stdout ของคำสั่งนี้เป็น JSON object เดีย
 }
 ```
 
+**ใครต้องตอบ check ไหน (#1047):** `done` บังคับเฉพาะ check ที่ `owner` ตรงกับ role ของ pane
+(`takkub task impact` แสดงเป็น `your_checks`; qa/critic/tester/reviewer นับเป็นตำแหน่งเดียวกัน)
+check ของ owner อื่นไม่ต้องใส่ หรือใส่ `pending` + `limitation` ก็ได้ — ระบบจะบอก Lead ใน done notice
+และใน INDEX ว่า plan ยังค้าง check ไหนของใคร pane shard (`backend#2`) ใส่ `pending` + `limitation`
+ให้ check ของ role ตัวเองที่ shard อื่นรับไปได้ ถ้า plan ไม่มี owner ที่ตรงกับ role เลย pane นั้นต้องตอบทุก check
+ไม่ต้องใช้ `done --blocked` เพื่อผ่าน gate อีก (`--blocked` = งานไปต่อไม่ได้จริง)
+
 `kind` เป็น `fake`, `mock`, `manual` หรือ `live` ให้ตรงกับสิ่งที่ตรวจจริง
 check เสริมที่ยังไม่ได้รันใช้ `status:"pending"` และ `limitation` ที่ชัดเจน
 check บังคับที่ยัง pending ทำให้ done ไม่ผ่านและ task ยังเปิดอยู่

@@ -488,7 +488,8 @@ class MainWindow(
         # fail/close; Orchestrator emits ledgerChanged right after each write
         # lands, so the dock repaints only the one project card that changed
         # instead of polling the state file on a timer.
-        self.orch.ledgerChanged.connect(self._tasks_dock_widget.refresh_project)
+        # #1044: deferred + coalesced — never rebuilt inside done()/close().
+        self.orch.ledgerChanged.connect(self._tasks_dock_widget.schedule_refresh)
 
         # Periodic session snapshot so a hard crash (Alt+F4 mishandled,
         # power loss, force-kill from Task Manager) still leaves a recent

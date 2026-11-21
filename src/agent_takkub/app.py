@@ -509,6 +509,7 @@ def _format_main_thread_frames(max_frames: int = _STALL_STACK_MAX_FRAMES) -> lis
         frame = sys._current_frames().get(threading.main_thread().ident)
         frames: list[str] = []
         own_seen = False
+        own_extra = 0
         while frame is not None:
             path = Path(frame.f_code.co_filename)
             try:
@@ -524,9 +525,14 @@ def _format_main_thread_frames(max_frames: int = _STALL_STACK_MAX_FRAMES) -> lis
             elif own:
                 # #871: a stall inside stdlib (`subprocess.run` → `communicate`
                 # → `join`) filled all five frames with stdlib and never named
-                # the cockpit call site — append the first frame of ours.
+                # the cockpit call site — append the first frames of ours.
+                # #1044: three, not one — the first is usually a shared
+                # wrapper (`worktree_manager._default_runner`, 25 stalls with
+                # no caller named).
                 frames.append(f"… {rel}:{frame.f_code.co_name}:{frame.f_lineno}")
-                break
+                own_extra += 1
+                if own_extra >= 3:
+                    break
             frame = frame.f_back
         return frames
     except Exception:

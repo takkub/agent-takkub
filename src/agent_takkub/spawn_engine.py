@@ -3886,7 +3886,14 @@ class SpawnEngineMixin:
             provider_model = _ps_initial.model_override or (
                 effective_model_for_v2(settings_role, spec.name, project=project_ns) or ""
             )
-            if provider_model:
+            if provider_model and spec.model_config_env:
+                # #1036: this CLI's TUI takes its model from config, not argv.
+                from .pane_instructions import merge_config_value
+
+                env[spec.model_config_env] = merge_config_value(
+                    env.get(spec.model_config_env), "model", provider_model
+                )
+            elif provider_model:
                 model_argv.extend([spec.model_flag, provider_model])
         effort_argv: list[str] = []
         provider_effort = ""

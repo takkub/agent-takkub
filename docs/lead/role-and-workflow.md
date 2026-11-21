@@ -62,11 +62,12 @@ Teammates: frontend · backend · mobile · devops · qa · reviewer · critic �
   2. **ต้องใช้ความรู้ที่มีแต่ user รู้** (business decision / domain knowledge ที่ไม่มีใน repo)
   3. **2 ทางเลือกที่ผลต่างกันมากจริง** (architectural tradeoffs)
 - ถ้าต้องถาม user: **ถาม 1 ข้อ + บอก default** แล้วเดินตาม default ได้เมื่อ user ไม่ตอบ (ยกเว้นกรณี irreversible ที่ต้องรอ confirm)
+- **ขอบเขต = คำสั่งล่าสุด (#1042):** "เปิด issue/รายงาน" ≠ สิทธิ์แก้โค้ด/assign · กำกวม → ทำส่วนที่ชัด แล้วถามและ**รอ** · ถูกทักว่าเกิน → หยุด
 - Notice ที่ไม่ขออะไรจาก user → audit log/digest เท่านั้น (#464)
 
 ### Proposal template (เฉพาะ 3 กรณีข้างบน)
 - **Format:** ตาราง `| Role | Scope | Task | cwd |` (ทุก row ต้องมี Scope tiny/normal/deep และ cwd ห้าม blank) + note (parallel/sequential) + คำถาม confirm พร้อม default
-- **Confirm handling:** "ok/ลุย/go" = fire · "แก้: X→Y" = update รอ confirm · "แก้ X แล้วลุยเลย" = apply + fire · "ไม่เอา" = abort · ห้าม assume คำตอบคลุมเครือ ("เออๆ") ให้ถามซ้ำ
+- **Confirm handling:** "ok/ลุย/go" = fire · "แก้: X→Y" = update รอ confirm · "ไม่เอา" = abort · คำตอบคลุมเครือ → ถามซ้ำ
 
 ---
 
@@ -108,8 +109,6 @@ frontend/mobile self-verify ด้วย screenshot จริง:
 **Lead tiny-fix carve-out (#585) — ครบทุกข้อ:** (1) แตะไฟล์ ≤ 2 ไฟล์ (2) แก้ ≤ 15 บรรทัด/ครั้ง สะสม ≤ 2 ไฟล์ และ ≤ 30 บรรทัด (รีเซ็ตทุก 30 นาที หรือเมื่อ assign) (3) ไม่อยู่ในหมวด deep (schema, migration, auth, security, tokens/secrets, crypto, payment, infra, lockfiles) (4) ทดสอบเองตรงจุดที่แก้ (คุมด้วย PreToolUse guard เกินเพดาน deny ทันที)
 
 **Carve-out: ไฟล์ doc/note ล้วนในโปรเจค user (#474):** BLOCKED_DIRS ไม่ทับเกณฑ์งานเล็กสำหรับไฟล์ที่ไม่ใช่ source — Lead เขียนเองได้เมื่อ: (1) เป็น `*.md`/`*.txt` ล้วน (2) ≤ 1 ไฟล์ และ ≤ ~40 บรรทัด (3) เนื้อหามาจากข้อมูลที่ Lead verify เองแล้วในเทิร์นนั้น (4) ไม่มี pane role ที่เหมาะเปิดอยู่แล้ว
-
-ทำไม: Lead ทำเอง = เสีย specialist context + ไร้ audit trail กฎนี้ไม่เปลี่ยนตาม provider หรือโปรเจค
 
 ---
 

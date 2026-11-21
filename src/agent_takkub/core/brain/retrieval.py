@@ -35,6 +35,7 @@ unrelated record). Fixing that needs word segmentation, not a threshold.
 from __future__ import annotations
 
 import math
+import os
 import time
 from dataclasses import dataclass
 
@@ -117,12 +118,26 @@ class ScoredRecord:
     score: float
 
 
-def _bm25_scores(docs_tokens: list[list[str]], query_tokens: list[str]) -> list[float]:
-    n = len(docs_tokens)
-    if n == 0 or not query_tokens:
-        return [0.0] * n
-    doc_len = [len(t) for t in docs_tokens]
-    avgdl = (sum(doc_len) / n) if n else 0.0
+@dataclass(frozen=True, slots=True)
+class _StoreIndex:
+    """Everything `recall` derives from a store's records alone, i.e. all of
+    it except the query. #1045: rebuilt per call it was ~90 % of a warm
+    recall (2 file reads + term counts over every record) — enough, beside
+    six working panes, to miss `_inject_v2_context`'s 300 ms on 64 % of
+    assigns. Kept per store file until that file's size/mtime moves."""
+
+    records: list[MemoryRecord]
+    token_sets: list[frozenset[str]]
+    doc_len: list[int]
+    tfs: list[dict[str, int]]
+    df: dict[str, int]
+
+
+_INDEX_CACHE: dict[str, tuple[tuple[int, int], _StoreIndex]] = {}
+_INDEX_CACHE_MAX = 64
+
+
+def _term_counts(docs_tokens: list[list[str]]) -> tuple[list[dict[str, int]], dict[str, int]]:
     df: dict[str, int] = {}
     tfs: list[dict[str, int]] = []
     for toks in docs_tokens:
@@ -132,6 +147,54 @@ def _bm25_scores(docs_tokens: list[list[str]], query_tokens: list[str]) -> list[
         tfs.append(counts)
         for t in counts:
             df[t] = df.get(t, 0) + 1
+    return tfs, df
+
+
+def _build_index(records: list[MemoryRecord]) -> _StoreIndex:
+    docs_tokens = _doc_tokens([r.content for r in records])
+    tfs, df = _term_counts(docs_tokens)
+    return _StoreIndex(
+        records, [frozenset(t) for t in docs_tokens], [len(t) for t in docs_tokens], tfs, df
+    )
+
+
+def _index_for(store: BrainStore) -> _StoreIndex:
+    path = getattr(store, "path", None)
+    sig: tuple[int, int] | None = None
+    if path is not None:
+        try:
+            st = os.stat(path)
+            sig = (st.st_mtime_ns, st.st_size)
+        except OSError:
+            sig = None
+    key = str(path)
+    if sig is not None:
+        hit = _INDEX_CACHE.get(key)
+        if hit is not None and hit[0] == sig:
+            return hit[1]
+    index = _build_index(store.load_active())
+    if sig is not None:
+        if len(_INDEX_CACHE) >= _INDEX_CACHE_MAX:
+            _INDEX_CACHE.clear()
+        _INDEX_CACHE[key] = (sig, index)
+    return index
+
+
+def _bm25_scores(docs_tokens: list[list[str]], query_tokens: list[str]) -> list[float]:
+    n = len(docs_tokens)
+    if n == 0 or not query_tokens:
+        return [0.0] * n
+    tfs, df = _term_counts(docs_tokens)
+    return _bm25_from_counts(tfs, df, [len(t) for t in docs_tokens], query_tokens)
+
+
+def _bm25_from_counts(
+    tfs: list[dict[str, int]], df: dict[str, int], doc_len: list[int], query_tokens: list[str]
+) -> list[float]:
+    n = len(tfs)
+    if n == 0 or not query_tokens:
+        return [0.0] * n
+    avgdl = (sum(doc_len) / n) if n else 0.0
     idf = {
         t: math.log(1.0 + (n - df.get(t, 0) + 0.5) / (df.get(t, 0) + 0.5))
         for t in set(query_tokens)
@@ -196,7 +259,8 @@ class RetrievalEngine:
         budget_tokens: int = 2000,
         now: float | None = None,
     ) -> list[MemoryRecord]:
-        records = self._store.load_active()
+        index = _index_for(self._store)
+        records = index.records
         if not records:
             return []
         now = now if now is not None else time.time()
@@ -207,12 +271,11 @@ class RetrievalEngine:
             # be relevant TO, so rank nothing rather than handing back the
             # whole store ordered by recency/trust.
             return []
-        docs_tokens = _doc_tokens([r.content for r in records])
-        bm25_raw = _bm25_scores(docs_tokens, query_tokens)
+        bm25_raw = _bm25_from_counts(index.tfs, index.df, index.doc_len, query_tokens)
 
         scored: list[ScoredRecord] = []
-        for record, bm25, doc_tokens in zip(records, bm25_raw, docs_tokens, strict=True):
-            coverage = len(query_set & set(doc_tokens)) / len(query_set)
+        for record, bm25, doc_tokens in zip(records, bm25_raw, index.token_sets, strict=True):
+            coverage = len(query_set & doc_tokens) / len(query_set)
             if coverage < _MIN_QUERY_COVERAGE:
                 continue
             relevance = coverage * (bm25 / (bm25 + _BM25_SATURATION)) if bm25 > 0 else 0.0

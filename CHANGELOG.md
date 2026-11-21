@@ -2,6 +2,37 @@
 
 All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses [SemVer](https://semver.org/).
 
+## [vNEXT]
+
+## [v2.2.60] - 2026-11-21
+
+ปิด issue ที่เปิดอยู่ทั้ง 13 ใบ (#1035–#1047) — รายงานถึง Codex Lead ค้างใน queue ท้ายเทิร์น, UI ค้างจาก I/O บน main thread, ใบงานส่วนใหญ่ไม่ได้ project context, impact plan ทำให้งานที่เสร็จถูกบันทึกเป็น FAILED, opencode 3 ใบ
+
+### Fixed (แก้ไข)
+
+- **รายงานถึง Lead ค้างใน "Queued follow-up inputs" จนจบเทิร์น (#1041, regression):** done / FAILED / handoff และข้อความที่ specialist ส่งตรงถึง Lead ถูกกด Tab (คิวท้ายเทิร์นของ codex) เพราะมีแค่ข้อความจากคนที่ได้ steer — Lead ที่ทำงาน 25 นาทีจึงได้รายงาน 5 ใบย้อนหลังทีละเทิร์น
+  - รายงานที่ต้องลงมือทุกชนิดเข้าเทิร์นที่กำลังทำงาน (codex: Enter = steer) รวมทาง force-deliver ของรายงานค้าง
+  - progress ล้วนไม่ถูกส่งเข้า queue ท้ายเทิร์นของ Lead ที่กำลังทำงานอีก (codex, agy): เก็บไว้ใน cockpit รุ่นล่าสุดต่อ role, done ของ role เดียวกันแทนที่มัน, ส่งเมื่อ Lead ว่าง · รายงานที่ต้องลงมือแซง progress ที่รออยู่ได้
+  - event `lead_notify_settled` แยก `submitted` / `turn_end_queue` / `stuck_in_composer`
+  - ยังไม่ได้ทดสอบสดกับ Codex Lead จริง (ทดสอบด้วย unit test ของ pump) — provider อื่นพฤติกรรมเดิม
+- **UI ค้างถี่จาก I/O แบบ sync บน main thread (#1044, #1037, #1039):** วัดจาก events.log ของ prod 2 วัน 709 ครั้ง
+  - `done()` ไม่รอการสแกนรูปหลักฐานเกิน 3 วิ (เคยค้าง 17.7 วิที่ `stat` ตัวเดียว) — เกินงบรายงานออกไปก่อนพร้อมบรรทัดบอกว่าสแกนไม่ทัน
+  - idle tick อ่าน `role_messages` แบบจำกัด 250 ms ต่อโปรเจค (เคยค้าง 18.8 วิ) รอบที่ไม่ทันถูกเก็บผลไว้ให้ tick ถัดไป
+  - Task dock ไม่ rebuild การ์ดกลาง `done()`/`close()`/`assign()` แล้ว — รวมเป็นรอบเดียวหลังกลับ event loop (65 วิใน 2 วัน)
+  - graft live-resync: ออกก่อนแตะดิสก์เมื่อยังอยู่ในช่วง throttle, cache ผล `which git`/`graft` (thread นี้ถูกจับได้ใน 32 ครั้งที่ค้าง)
+  - Chrome CDP: ไม่ probe `[::1]:9222` ระหว่างที่ Chrome ของ cockpit เองกำลัง boot
+  - stall record เก็บ frame ของ cockpit 3 ชั้นแทน 1 (25 ครั้งชี้แค่ `worktree_manager._default_runner` ไม่รู้ว่าใครเรียก) · auto-issue ของ stall ≥10 วิ ระบุจุดเรียก แนบ stack และ dedup ต่อจุดเรียก (วันที่ 20 ค้าง ≥10 วิ 3 ครั้งแต่ไม่มีใบ เพราะใบของวันที่ 18 ยังเปิดอยู่)
+  - ยังไม่ได้แก้: git subprocess ที่รอผลบน main thread ผ่าน `worktree_manager` (ต้องรอ stack ชุดใหม่ระบุผู้เรียก), `spawn_pty_bounded`, การสแกน plugin skills
+- **ใบงาน 64% ไม่ได้ project context (#1045):** recall อ่าน store 2 รอบและนับคำของทุก record ใหม่ทุกครั้ง — ตอนนี้เก็บ index ต่อไฟล์ store จนไฟล์เปลี่ยน (warm 100 ms → 10 ms) · ใบงานที่ context ไม่ทันมีบรรทัดบอก · event `context_builder_late` บอกเวลาที่ใช้จริง · auto-issue เมื่อหมดเวลา ≥30 ครั้ง/6 ชม.
+- **impact plan ทำให้งานที่เสร็จเป็น FAILED (#1047):** gate ตรวจเฉพาะ check ที่ `owner` ตรงกับ role ของ pane (`takkub task impact` แสดง `your_checks`; qa/critic/tester/reviewer นับเป็นตำแหน่งเดียว) check ของ owner อื่นเว้นได้หรือใส่ `pending` · shard ใส่ `pending` + `limitation` ให้ check ที่ shard อื่นรับ · done notice และ INDEX บอกว่า plan ยังค้าง check ไหนของใคร · checker ที่ตรวจเสร็จแล้วผลไม่ผ่าน ledger แสดง "ตรวจเสร็จ — ผลไม่ผ่าน" แยกจาก FAILED
+- **คำเตือน `[lead closing]` ของ session เก่าเด้งเข้า Lead ใหม่ 30 ชม.ให้หลัง (#1046):** ปิด Lead เองไม่ส่งคำเตือน subprocess ถึงใคร (ลง log) · notice แบบ `[role closing]` ที่เก่ากว่า 1 ชม. ถูกทิ้งตอนส่ง
+- **opencode 2.3.2 crash ด้วย `--model` (#1036):** model ของ pane ส่งผ่าน `OPENCODE_CONFIG_CONTENT` (`model`) แทน argv — ยืนยันบน 1.19.5 ว่า config ถูก merge; ยังไม่ได้ทดสอบสดบน 2.3.2
+- **ใบงานบอก model เก่าของ pane ก่อน (#1040):** บรรทัดนั้นคือสรุปงานก่อนหน้าของ role เดียวกันที่ติดป้าย `current:` — เปลี่ยนเป็น `last finished:` ใต้หัวข้อที่บอกว่าเป็นประวัติ ไม่ใช่สถานะ/model ของ pane นี้
+- **opencode pane บน Windows ไม่มี `ls`/`wc`/`head` และ shim `takkub` หา `sh` ไม่เจอ (#1035):** ต่อ `Git\usr\bin` ไว้ท้าย PATH ของทุก pane (ท้ายสุด — คำสั่ง Windows ที่ชื่อซ้ำยังชนะ)
+- **Skill learning กลั่น skill จากงานที่ยังไม่ผ่านตรวจ (#1038):** done ปกติของ role ที่ไม่ใช่ checker ถูกพักไว้ — checker PASS ปล่อย, checker FAILED ทิ้ง, ไม่มี checker ทำงานอยู่เรียนรู้หลัง 20 นาที (เพดาน 3 ชม.) · พักในหน่วยความจำ: restart cockpit ในช่วงนั้นงานที่พักหาย · ยังไม่มี `--no-skills` ต่อ assign และไม่ revoke skill ที่ลงไปก่อนหน้า
+- **Lead ขยายงานเองเมื่อคำสั่งกำกวม (#1042):** policy ของ Lead ทุก provider — คำสั่งล่าสุดคือขอบเขต, "เปิด issue/รายงาน" ไม่ใช่สิทธิ์แก้โค้ดหรือ assign, กำกวมให้ทำส่วนที่ชัดแล้วถามและรอ · เป็นการแก้ที่ข้อความ policy ไม่มีตัวบังคับในโค้ด
+- **การ์ดคำถามของ Lead เด้งสลับกับ composer จนคลิกไม่ทัน (#1043):** การอ่าน transcript ที่ว่างรอบเดียวเคยซ่อนการ์ดแล้ววาดใหม่พร้อมล้างตัวเลือก — การ์ดที่แสดงอยู่ทนการอ่านว่างได้ 3 รอบ (~4.5 วิ) · แก้ตามสาเหตุที่พบในโค้ด ยังไม่ได้ทำซ้ำบน macOS
+
 ## [v2.2.59] - 2026-11-17
 
 ปิด issue ที่เปิดอยู่ทั้ง 10 ใบ (#1023–#1033) — UI ค้าง, รุ่นโมเดลตกไปตัวเก่า, Lead เสียรอบแรกทุก session, pane ที่ park รอโควตาถูกเตือนว่าค้าง

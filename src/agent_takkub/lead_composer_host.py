@@ -36,6 +36,8 @@ _POLL_MS = 1500
 # After answering, the transcript still shows the question until the CLI
 # writes its tool result — don't redraw the same card in that window.
 _ANSWERED_HIDE_S = 8.0
+# #1043: consecutive empty reads (~4.5 s) before a visible card is taken down.
+_HIDE_AFTER_MISSES = 3
 
 
 # Backwards-compatible alias for the composer regression tests; source of
@@ -63,6 +65,7 @@ class LeadQuestionHost(QObject):
         self._active_project = active_project
         self._busy = False
         self._answered: dict[str, tuple[list, float]] = {}
+        self._misses: dict[str, int] = {}
         self._stateReady.connect(self._apply_state)
         self._timer = QTimer(self)
         self._timer.setInterval(_POLL_MS)
@@ -124,10 +127,25 @@ class LeadQuestionHost(QObject):
         if not isinstance(state, dict):
             state = None
         hidden = self._answered.get(project)
+        answered = False
         if state is not None and hidden is not None:
             questions, until = hidden
             if time.monotonic() < until and state.get("questions") == questions:
                 state = None
+                answered = True
+        # #1043: one transcript read that comes back empty (the CLI is mid-
+        # write, the scan lost a race) used to hide the card and bring the
+        # editor back; the next read 1.5 s later drew it again with the
+        # owner's selection cleared — the card bounced under the cursor and
+        # could not be clicked. A card on screen now survives a few empty
+        # reads; it goes at once only when the question was answered.
+        visible = getattr(pane.composer, "question_visible", lambda: False)
+        if state is None and not answered and visible():
+            misses = self._misses.get(project, 0) + 1
+            self._misses[project] = misses
+            if misses < _HIDE_AFTER_MISSES:
+                return
+        self._misses.pop(project, None)
         pane.composer.set_question(state)
 
     # ── answering ───────────────────────────────────────────────────────

@@ -33,3 +33,38 @@ def submit(fn: Callable[..., Any], *args: Any, **kwargs: Any) -> Future:
                     max_workers=_MAX_WORKERS, thread_name_prefix="cockpit-bg"
                 )
     return _pool.submit(fn, *args, **kwargs)
+
+
+_pending: dict[Any, Future] = {}
+
+
+def call_bounded(key: Any, fn: Callable[[], Any], *, timeout: float, default: Any = None) -> Any:
+    """`fn()` on the pool, waited on for at most `timeout` seconds (#1044).
+
+    For file/socket reads the Qt main thread does on a timer or inside
+    `done()`: normally microseconds, but 5-18 s each while the disk is wedged
+    (prod 2026-11-20: 159 stalls in 20 min, every stack ending in `stat` /
+    `read_text`). On timeout `default` is returned and the call keeps running;
+    the next call with the same `key` picks up its result (or waits on it
+    again) instead of starting another — so a stuck disk holds one worker per
+    key, never a pile. An exception from `fn` returns `default` as well.
+
+    `key` must identify the question being asked (include the arguments): a
+    late result is handed to the next caller with that key.
+    """
+    with _lock:
+        fut = _pending.get(key)
+    if fut is None:
+        fut = submit(fn)
+        with _lock:
+            _pending[key] = fut
+    try:
+        value = fut.result(timeout=timeout)
+    except TimeoutError:
+        return default
+    except Exception:
+        value = default
+    with _lock:
+        if _pending.get(key) is fut:
+            del _pending[key]
+    return value

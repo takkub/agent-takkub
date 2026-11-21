@@ -411,6 +411,11 @@ def record_impact_evidence(project: str, role: str, task_id: str, evidence: dict
     if not isinstance(impact, dict):
         return False
     impact["evidence"] = evidence
+    # #1047: what the plan is still owed after this pane closed its own part.
+    from .impact_contract import outstanding_checks
+
+    plan = impact.get("plan")
+    impact["outstanding"] = outstanding_checks(plan, evidence) if isinstance(plan, dict) else []
     try:
         _save_state(project, state)
         _regen_index(project, state)
@@ -448,6 +453,24 @@ def record_model_switch(
     except OSError:
         return False
     return True
+
+
+def impact_outstanding(project: str, role: str) -> list[str]:
+    """`id (owner)` of the required checks still owed on *role*'s open task's
+    impact plan after its own evidence was accepted (#1047). Empty when the
+    task has no plan or everything passed."""
+    active = open_impact(project, role)
+    impact = active.get("impact") if active else None
+    owed = impact.get("outstanding") if isinstance(impact, dict) else None
+    return [str(x) for x in owed] if isinstance(owed, list) else []
+
+
+def _impact_outstanding_suffix(row: dict) -> str:
+    impact = row.get("impact")
+    owed = impact.get("outstanding") if isinstance(impact, dict) else None
+    if not isinstance(owed, list) or not owed:
+        return ""
+    return f" · 📋 impact plan ค้าง {len(owed)} check: {', '.join(str(x) for x in owed[:6])}"
 
 
 def _model_switch_suffix(row: dict) -> str:
@@ -490,7 +513,7 @@ def check_impact_completion(
         return error
     current_revision = revision if revision is not None else git_revision(active["cwd"])
     error = validate_evidence(
-        active["impact"]["plan"], evidence, task_id=task_id, revision=current_revision
+        active["impact"]["plan"], evidence, task_id=task_id, revision=current_revision, role=role
     )
     if error:
         return error
@@ -646,7 +669,9 @@ def _resolve_open_row(
     return True, warning
 
 
-def mark_done(project: str, role: str, status: str, ts: datetime | None = None) -> str:
+def mark_done(
+    project: str, role: str, status: str, ts: datetime | None = None, reason: str | None = None
+) -> str:
     """Flip the currently-open ledger row for *role* to *status*.
 
     `status` is one of ``"ok"`` (clean done), ``"fail"`` (`takkub done
@@ -661,7 +686,7 @@ def mark_done(project: str, role: str, status: str, ts: datetime | None = None) 
         raise ValueError(f"invalid status: {status!r}")
     ts = ts or datetime.now()
     state = _load_state(project)
-    changed, warning = _resolve_open_row(state, project, role, status, ts)
+    changed, warning = _resolve_open_row(state, project, role, status, ts, reason=reason)
     if not changed:
         return ""
 
@@ -809,6 +834,8 @@ def _status_suffix(row: dict) -> str:
     if status == "ok":
         return f"✅ done `{done_hhmm}`"
     if status == "fail":
+        if row.get("reason") == "verdict":  # #1047: review done, result negative
+            return f"🔎 ตรวจเสร็จ — ผลไม่ผ่าน `{done_hhmm}`"
         return f"❌ FAILED `{done_hhmm}`"
     if status == "closed":
         reason = row.get("reason")
@@ -855,6 +882,7 @@ def _render_group(group: dict) -> str:
             lines.append(
                 f"- [{sym}] `{row['assign_hhmmss']}` **{row['role']}** · {row['cwd']} · "
                 f"{row['summary']}{link} — {_status_suffix(row)}{_model_switch_suffix(row)}"
+                f"{_impact_outstanding_suffix(row)}"
             )
         lines.append("")
     return "\n".join(lines).rstrip() + "\n"

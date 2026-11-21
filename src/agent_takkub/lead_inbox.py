@@ -539,6 +539,31 @@ def _human_notice(item) -> bool:
     return bool(isinstance(item, tuple) and len(item) > 3 and item[3] == "human")
 
 
+_PROGRESS_NOTICE_RE = re.compile(r"\[([^\]]+) progress\]", re.IGNORECASE)
+# #1046: `_warn_if_live_children`'s two bodies ("⚠️ [role closing] …" / "🧹 [role closing] …").
+_CLOSING_NOTICE_RE = re.compile(r"^\W*\[[^\]\r\n]+ closing\]")
+_CLOSING_NOTICE_MAX_AGE_S = 3600.0
+
+
+def _progress_only_notice(item) -> bool:
+    """True for a live-queue entry that carries nothing but progress updates
+    (#1041): a bare ``[role progress]`` body, or a digest built only from
+    them (tagged ``"progress"`` by `_flush_lead_digest`)."""
+    if isinstance(item, tuple) and len(item) > 3:
+        return item[3] == "progress"
+    body = item[0] if isinstance(item, tuple) and item else item
+    return bool(isinstance(body, str) and _PROGRESS_NOTICE_RE.match(body.strip()))
+
+
+def _lead_input_waits_for_turn_end(lead) -> bool:
+    """#1041: would an unsteered write into this working Lead only be read
+    after its turn ends (codex Tab queue / a CLI without steering)?"""
+    from .provider_spec import busy_input_waits_for_turn_end
+
+    provider = getattr(getattr(lead, "model", None), "provider_name", None) or "claude"
+    return busy_input_waits_for_turn_end(provider)
+
+
 def _is_immediate_lead_notice(body: str) -> bool:
     """True for notices that require Lead action or sequencing immediately."""
     return _is_blocking_lead_notice(body) or "[auto-chain handoff]" in body.lower()
@@ -4445,8 +4470,13 @@ class LeadInboxMixin:
         pane_token: str | None = None,
         queued_ts: float | None = None,
         human: bool = False,
+        progress_only: bool = False,
     ) -> None:
         """Append one ready-to-deliver body without starting the pump.
+
+        *progress_only* (#1041) tags a digest built only from progress
+        updates, so the pump never parks it in a working Lead's native
+        turn-end queue.
 
         *pane_token* (#228) records which pane instance's `done()` call — if
         any — produced *body*, so `_pump_lead_notify` can re-check at actual
@@ -4488,7 +4518,7 @@ class LeadInboxMixin:
                 priority_end += 1
             queue.insert(priority_end, item)
         else:
-            queue.append(item)
+            queue.append((*item, "progress") if progress_only else item)
 
     def _arm_lead_digest(self, project_ns: str, window_ms: int) -> None:
         """Debounce the project's digest using a generation-checked timer.
@@ -4527,13 +4557,26 @@ class LeadInboxMixin:
         lead = self._project_panes(project_ns).get(LEAD.name)
         hold_since = self.__dict__.setdefault("_digest_hold_since", {})
         held_s = time.time() - hold_since.get(project_ns, time.time())
+        # #1041: a burst of nothing but progress updates has no ceiling on a
+        # Lead whose CLI would only read it after the turn ends — past the
+        # ceiling each one became its own "Queued follow-up inputs" turn,
+        # replayed after the done report that had already replaced it. It
+        # stays here (latest per role) until the Lead is free or a report that
+        # needs action joins the burst.
+        waiting = getattr(self, "_lead_digest_queue", {}).get(project_ns) or ()
+        keep_progress = bool(
+            waiting
+            and lead
+            and all(_progress_only_notice(_unwrap_notice_item(e)[0]) for e in waiting)
+            and _lead_input_waits_for_turn_end(lead)
+        )
         if (
             not trailing_body
             and lead
             and lead.session
             and lead.session.is_alive
             and not lead.session.is_at_ready_prompt()
-            and held_s < DIGEST_MAX_HOLD_S
+            and (held_s < DIGEST_MAX_HOLD_S or keep_progress)
         ):
             # #992: this re-armed itself every second with no ceiling and no
             # log — a Lead the screen check misread as busy (idle, no turn)
@@ -4658,7 +4701,13 @@ class LeadInboxMixin:
             # done notes first without waiting through a separate digest turn.
             digest = f"{digest}\n\n{trailing_body}"
         oldest_ts = min((_unwrap_notice_item(e)[2] or now_ts) for e in items)
-        self._enqueue_live_lead_notice(project_ns, digest, queued_ts=oldest_ts)
+        self._enqueue_live_lead_notice(
+            project_ns,
+            digest,
+            queued_ts=oldest_ts,
+            progress_only=not trailing_body
+            and all(_progress_only_notice(_unwrap_notice_item(e)[0]) for e in items),
+        )
         _log_event("lead_inbox_digest", project=project_ns, count=len(items))
         if arm_pump:
             self._arm_lead_notify_pump(project_ns)
@@ -4828,6 +4877,17 @@ class LeadInboxMixin:
         Lead a real spawn failure had "resolved itself" purely because the
         pane it was reporting the absence of was, indeed, absent.
         """
+        # #1046: a "[role closing] … subprocess(es)" line describes the moment
+        # a pane was torn down. One of them reached a brand-new Lead session
+        # 30 h later as its first input, and the Lead went looking for a
+        # `git.exe` that had been dead for a day.
+        if (
+            queued_ts is not None
+            and _CLOSING_NOTICE_RE.match(body.strip())
+            and time.time() - queued_ts > _CLOSING_NOTICE_MAX_AGE_S
+        ):
+            _log_event("lead_notice_stale_dropped", project=project_ns, kind="pane-closing")
+            return ""
         role_match = re.match(r"\[([^\]]+) (?:FAILED|progress)\]", body.strip(), re.I)
         if role_match and queued_ts is not None:
             role = role_match.group(1)
@@ -5234,6 +5294,16 @@ class LeadInboxMixin:
             return
 
         if not lead.session.is_at_ready_prompt():
+            if _progress_only_notice(queue[0]) and _lead_input_waits_for_turn_end(lead):
+                # #1041: progress never joins a working Lead's turn-end queue.
+                # Let anything that needs action pass it; otherwise wait here.
+                later = next(
+                    (i for i, it in enumerate(queue) if not _progress_only_notice(it)), None
+                )
+                if later is None:
+                    QTimer.singleShot(1000, lambda: self._pump_lead_notify(project_ns))
+                    return
+                queue.rotate(-later)
             waiting_body = _unwrap_notice_item(queue[0])[0]
             auto_hold = self.__dict__.setdefault("_lead_notify_auto_hold_since", {})
             auto_held_s = time.time() - auto_hold.setdefault(project_ns, time.time())
@@ -5462,6 +5532,18 @@ class LeadInboxMixin:
 
         def _on_verify_settled(_outcome=None, *, p=project_ns) -> None:
             getattr(self, "_lead_notify_verify_active", set()).discard(p)
+            # #1041: written-to-PTY, parked in the CLI's turn-end queue and
+            # accepted by the submit check are three different states — an
+            # empty composer or cockpit `Q 0` proves none of them.
+            _log_event(
+                "lead_notify_settled",
+                project=p,
+                receipt="stuck_in_composer"
+                if getattr(_outcome, "stuck_in_composer", False)
+                else "turn_end_queue"
+                if getattr(_outcome, "queue_submit_used", False)
+                else "submitted",
+            )
             # #721: Lead is normally claude (Enter always submits, so a stuck
             # outcome can't fire) — but if a future busy-queue provider ever
             # becomes Lead, surface the stuck report instead of silently
@@ -5522,7 +5604,11 @@ class LeadInboxMixin:
             payload=payload if human_input else None,
             repaste=False,
             content_fragment=body,
-            steer=human_input,
+            # #1041: a done/FAILED/handoff report is something the Lead acts
+            # on — it enters the running turn (codex: Enter steers, Tab would
+            # park it until the turn ends). Only a progress-only body, which
+            # reaches here when the Lead is idle, keeps the plain submit.
+            steer=human_input or not _progress_only_notice(notice_item),
             on_resend=lambda rem: _log_event(
                 "lead_notify_enter_resend", project=project_ns, remaining=rem
             ),
@@ -5825,6 +5911,7 @@ class LeadInboxMixin:
             delay,
             payload=None,
             content_fragment=body,
+            steer=True,  # #1041: overdue reports enter the running turn
             on_resend=lambda rem: _log_event(
                 "done_notice_force_enter_resend", project=project_ns, remaining=rem
             ),

@@ -379,6 +379,11 @@ _EVIDENCE_SETTLE_SEC = 1.0
 # on that one file rather than letting done() blow up.
 _EVIDENCE_STAT_RETRIES = 3
 _EVIDENCE_STAT_RETRY_SLEEP_SEC = 0.05
+# #1044: how long done() waits on the screenshot scan before reporting without it.
+_EVIDENCE_SCAN_BUDGET_SEC = 3.0
+_EVIDENCE_SCAN_TIMED_OUT = object()
+# #1044: per-project budget for the idle tick's `role_messages` read.
+_ROLE_MESSAGES_READ_BUDGET_SEC = 0.25
 # Cap how many paths get pasted into a done notice — a shot-happy QA run can
 # produce dozens; Lead only needs the most recent handful.
 _EVIDENCE_MAX_FILES = 10
@@ -1407,6 +1412,12 @@ def _restart_reason_suffix(restart_info: dict) -> str:
     return ""
 
 
+_V2_CONTEXT_MISSING_NOTE = (
+    "(cockpit: ใบงานนี้ไม่มี project context แนบ — ตัวสร้าง context ไม่ทันเวลา "
+    'ถ้าต้องใช้ความรู้เดิมของโปรเจคให้ค้นเองด้วย `takkub search "<คำค้น>"`)'
+)
+
+
 def _inject_v2_context(
     task: str,
     project_ns: str | None,
@@ -1448,6 +1459,7 @@ def _inject_v2_context(
         # early instead of continuing to burn CPU/GIL time a Qt main thread
         # may right then be waiting on (e.g. mid pane-spawn).
         cancel_event = threading.Event()
+        started = time.monotonic()
         try:
             future = executor.submit(
                 build_context_for_assign,
@@ -1461,9 +1473,21 @@ def _inject_v2_context(
             try:
                 context_block = future.result(timeout=0.3)
             except concurrent.futures.TimeoutError:
-                context_block = ""
+                # #1045: 64 % of assigns ended here and nothing said so. The
+                # task now carries one line, and the worker reports how long
+                # it really needed (it keeps the store index it built, so the
+                # next assign for this project starts warm).
+                context_block = _V2_CONTEXT_MISSING_NOTE
                 cancel_event.set()
                 _log_event("context_builder_timeout", role=role_name, project=project_ns)
+                future.add_done_callback(
+                    lambda _f, r=role_name, p=project_ns, t=started: _log_event(
+                        "context_builder_late",
+                        role=r,
+                        project=p,
+                        elapsed_ms=round((time.monotonic() - t) * 1000),
+                    )
+                )
             else:
                 _log_context_gate_inefficient(role_name, project_ns)
         finally:
@@ -6762,8 +6786,10 @@ class Orchestrator(
             expires_at=message_expires_at,
             # #809: a message INTO a working teammate is a revision of its
             # active task — steer the live turn, don't park it until the turn
-            # ends. Human instructions to Lead have the same priority.
-            steer=to_role != LEAD.name or from_role in {"user", "remote"},
+            # ends. Human instructions to Lead have the same priority, and so
+            # does a specialist's direct message to its Lead (#1041: those sat
+            # in codex's "Queued follow-up inputs" until a 25-min turn ended).
+            steer=True,
         )
 
         # Record delivery time for stall detection: receiving a message counts
@@ -7192,11 +7218,16 @@ class Orchestrator(
             return
         for project_ns, panes in list(getattr(self, "_panes_by_project", {}).items()):
             # One read per project per tick, not one per pane — this runs on
-            # the Qt main thread every 5s.
-            try:
-                records = role_messages.read(RUNTIME_DIR, project_ns)
-            except Exception:
-                continue
+            # the Qt main thread every 5s. #1044: bounded — the stat/read/
+            # deep-copy held the UI up to 18 s on a wedged disk; a read that
+            # misses the budget is picked up by the next tick.
+            from . import bg_pool
+
+            records = bg_pool.call_bounded(
+                ("role-messages", str(RUNTIME_DIR), project_ns),
+                lambda p=project_ns: role_messages.read(RUNTIME_DIR, p),
+                timeout=_ROLE_MESSAGES_READ_BUDGET_SEC,
+            )
             if not records:
                 continue
             for role, pane in list(panes.items()):
@@ -7665,7 +7696,12 @@ class Orchestrator(
         detail = f" ({', '.join(names[:5])}{'…' if len(names) > 5 else ''})" if names else ""
         pane = self._project_panes(project_ns).get(role_name)
         is_done = pane is not None and getattr(pane, "state", None) == "done"
-        if is_done:
+        if role_name == LEAD.name:
+            # #1046: the pane being closed IS the Lead — nobody is there to
+            # read it, so it sat in the durable inbox and opened the next
+            # session, 30 h later. The event below is the record.
+            pass
+        elif is_done:
             self._notify_lead(
                 project_ns,
                 f"🧹 [{role_name} closing] Cleaned up {len(names)} child subprocess(es){detail} after completion.",
@@ -9925,6 +9961,16 @@ class Orchestrator(
                 )
                 if impact_error:
                     return False, f"impact checks pending: {impact_error}"
+                # #1047: this pane's part is closed; say what the plan is
+                # still owed so the Lead routes it instead of reading "done".
+                from .task_ledger import impact_outstanding
+
+                owed = impact_outstanding(project_ns, from_role)
+                if owed:
+                    note = (
+                        f"{note}\n📋 impact plan ยังค้าง {len(owed)} check ของ role อื่น/shard อื่น: "
+                        f"{', '.join(owed[:8])}"
+                    )
 
         # #228: capture this pane instance's own auth token *before* any
         # teardown below. close() (scheduled 2.5s later) is what revokes it,
@@ -10527,9 +10573,22 @@ class Orchestrator(
         # aggregate, the decision note) carries it — `done --fail` gets
         # evidence exactly the same way a clean done does.
         raw_note = note
-        evidence_line = self._scan_done_evidence(
-            project_ns, from_role, had_assign_ts, raw_note, failed=failed
+        # #1044: the scan stats every image under the artifacts dir — on a
+        # wedged disk one `stat` held the Qt thread 17.7 s inside done().
+        # Bounded: past the budget the report goes out without the list.
+        from . import bg_pool
+
+        evidence_line = bg_pool.call_bounded(
+            ("done-evidence", project_ns, from_role, had_assign_ts, raw_note, failed),
+            lambda: self._scan_done_evidence(
+                project_ns, from_role, had_assign_ts, raw_note, failed=failed
+            ),
+            timeout=_EVIDENCE_SCAN_BUDGET_SEC,
+            default=_EVIDENCE_SCAN_TIMED_OUT,
         )
+        if evidence_line is _EVIDENCE_SCAN_TIMED_OUT:
+            _log_event("done_evidence_scan_timeout", role=from_role, project=project_ns)
+            evidence_line = "⚠ evidence scan ไม่ทัน (ดิสก์ช้า) — ดูไฟล์ใน artifacts dir ของ role เอง"
         if evidence_line:
             note = f"{note}\n{evidence_line}" if note else evidence_line
 
@@ -10542,9 +10601,24 @@ class Orchestrator(
         # Task Ledger (A7): flip the role's open row to ok/fail. Best-effort —
         # never blocks the done() report itself.
         try:
+            # #1047: a checker that finished its review and found defects did
+            # its job — the ledger says "verdict: fail", not the FAILED of a
+            # task that could not be done.
+            from .impact_contract import _CHECKER_ROLES
             from .task_ledger import mark_done
 
-            ledger_warning = mark_done(project_ns, from_role, "fail" if failed else "ok", ts=now)
+            verdict = (
+                failed
+                and _split_shard(from_role)[0] in _CHECKER_ROLES
+                and not re.search(r"\bblocked\b", (raw_note or "")[:300], re.IGNORECASE)
+            )
+            ledger_warning = mark_done(
+                project_ns,
+                from_role,
+                "fail" if failed else "ok",
+                ts=now,
+                reason="verdict" if verdict else None,
+            )
             if ledger_warning:
                 self._notify_lead(
                     project_ns, ledger_warning, from_role=from_role, note="", kind="ledger-warning"
@@ -15526,6 +15600,10 @@ class Orchestrator(
         # Handles the case where notices spilled to _pending_done_notices while
         # Lead was busy — delivers them without requiring a Lead restart.
         self._reap_pending_done_notices()
+        # #1038: learn from finished work once no checker can contradict it.
+        _sl_tick = getattr(self, "_skill_learning_tick", None)
+        if callable(_sl_tick):
+            _sl_tick(now)
         # #277: re-deliver `takkub send` messages a respawn swallowed. Same
         # tick for the same reason as the line above — one sweep catches every
         # respawn path instead of each one remembering to replay.

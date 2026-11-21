@@ -231,21 +231,22 @@ class NativeChromeManager:
             return True, "native Chrome launch is Windows-only"
         if self._cdp_ready():
             return True, "reusing Chrome CDP 9222"
-        if self._port_held_on_ipv6():
-            return False, (
-                f"{CDP_HELD_ELSEWHERE}: another process (likely your own CDP Chrome) listens on "
-                "[::1]:9222 — not launching a second browser on 127.0.0.1:9222; mb needs "
-                "127.0.0.1:9222 (start that Chrome with --remote-debugging-address=127.0.0.1)"
-            )
-
         if self._process is not None and self._process.poll() is not None:
             self._process = None
             self._owns_process = False
         if self._process is not None and self._owns_process:
             # #871: ours is alive but CDP isn't answering yet — it is still
             # booting (the waiter thread below owns the outcome). Never launch
-            # a second Chrome onto the same port.
+            # a second Chrome onto the same port. Checked before the [::1]
+            # probe (#1044): every spawn during that boot paid a socket
+            # connect on the Qt thread for an answer it did not need.
             return True, "native Chrome CDP 9222 still starting"
+        if self._port_held_on_ipv6():
+            return False, (
+                f"{CDP_HELD_ELSEWHERE}: another process (likely your own CDP Chrome) listens on "
+                "[::1]:9222 — not launching a second browser on 127.0.0.1:9222; mb needs "
+                "127.0.0.1:9222 (start that Chrome with --remote-debugging-address=127.0.0.1)"
+            )
 
         chrome = find_chrome_executable()
         if not chrome:

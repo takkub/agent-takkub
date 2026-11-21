@@ -204,6 +204,17 @@ RULES: tuple[SignalRule, ...] = (
         skip_process_pauses=True,
     ),
     SignalRule(
+        key="context_builder_timeout",
+        event="context_builder_timeout",
+        min_count=30,
+        title="ใบงานส่วนใหญ่ไม่ได้ project context (builder ไม่ทัน)",
+        why=(
+            "#1045: 121 จาก 190 assign ใน 2 วันหมดเวลา 300 ms แล้วทิ้ง context เงียบๆ — "
+            "หลังแก้ (เก็บ index ของ store) ควรเหลือแค่ใบแรกของแต่ละโปรเจค; "
+            "30 ครั้งใน 6 ชม. คือกลับมาช้าอีก ดู `context_builder_late.elapsed_ms`"
+        ),
+    ),
+    SignalRule(
         key="auto_migrate_rolled_back",
         event="auto_migrate_rolled_back",
         min_count=1,
@@ -224,6 +235,24 @@ class SignalHit:
     count: int
     worst: float
     samples: list[str]
+    # #1044: cockpit call site of the worst stall ("file.py:function"), or "".
+    # Part of the dedup signature, so a stall somewhere NEW files its own
+    # issue instead of hiding behind the cooldown of an older, unrelated one
+    # (2026-11-20: three stalls ≥10 s, none reported — an 11-18 issue was open).
+    site: str = ""
+
+
+def _stall_frames(rec: dict) -> list[str]:
+    """The cockpit's own frames of a stall record, closest first, without the
+    stdlib frames above them."""
+    stack = rec.get("stack")
+    if not isinstance(stack, list):
+        return []
+    return [
+        str(f).removeprefix("… ").removeprefix("agent_takkub/")
+        for f in stack
+        if "agent_takkub/" in str(f)
+    ]
 
 
 def _parse_ts(value: object) -> datetime | None:
@@ -254,6 +283,7 @@ def scan_for_signals(
     counts: Counter[str] = Counter()
     worst: dict[str, float] = {}
     samples: dict[str, list[str]] = {}
+    sites: dict[str, str] = {}
     # #427: last counted stamp per (rule, chain value) for chain collapsing.
     last_chain: dict[tuple[str, str], datetime] = {}
     # #884-#887: sleep-gap markers, read once up front, only when a rule cares.
@@ -292,6 +322,9 @@ def scan_for_signals(
                             value = 0.0
                         if rule.field_min is not None and value < rule.field_min:
                             continue
+                        if value >= worst.get(rule.key, 0.0) and name == "main_thread_stall":
+                            frames = _stall_frames(rec)
+                            sites[rule.key] = frames[0].rsplit(":", 1)[0] if frames else ""
                         worst[rule.key] = max(worst.get(rule.key, 0.0), value)
                     if rule.chain_field is not None and rule.chain_window_s > 0:
                         chain_key = (
@@ -311,14 +344,27 @@ def scan_for_signals(
                         # an auto-filed issue that only says "×4" gives the
                         # reader nothing to act on (#331).
                         reason = str(rec.get("reason") or "")
+                        # #1044: a stall sample with no stack named nothing.
+                        where = (
+                            f" {rec.get('duration_ms', 0)}ms " + " < ".join(_stall_frames(rec)[:4])
+                            if name == "main_thread_stall"
+                            else ""
+                        )
                         samples[rule.key].append(
                             f"{stamp:%m-%d %H:%M} {name} {rec.get('role', '')}"
                             + (f" [{reason}]" if reason else "")
+                            + where
                         )
     except OSError:
         return []
     hits = [
-        SignalHit(rule, counts[rule.key], worst.get(rule.key, 0.0), samples.get(rule.key, []))
+        SignalHit(
+            rule,
+            counts[rule.key],
+            worst.get(rule.key, 0.0),
+            samples.get(rule.key, []),
+            sites.get(rule.key, ""),
+        )
         for rule in rules
         if counts[rule.key] >= rule.min_count
     ]
@@ -340,6 +386,8 @@ def build_issue(hit: SignalHit, *, window_hours: float | None = None) -> tuple[s
         window_hours if window_hours is not None else (hit.rule.window_hours or WINDOW_HOURS)
     )
     title = f"[auto] {hit.rule.title} — {hit.rule.event} ×{hit.count}/{window_hours:.0f}h"
+    if hit.site:
+        title += f" @ {hit.site}"
     lines = [
         "รายงานอัตโนมัติจากสัญญาณใน `events.log` ของ cockpit ที่รันอยู่ "
         "(ไม่ใช่ crash — ดู #297 ว่าทำไมถึงต้องมีทางนี้)",
@@ -371,7 +419,11 @@ def file_signal_issue(hit: SignalHit) -> None:
 
     if auto_issue_capture._auto_issue_suppressed() or not auto_issue_enabled():
         return
-    if not auto_issue_capture.reserve_signature(f"signal:{hit.rule.key}"):
+    # Per-site only for single-event rules: a count rule's "worst" site moves
+    # around within one bad hour and would file the same storm several times.
+    per_site = hit.site and hit.rule.min_count == 1
+    signature = f"signal:{hit.rule.key}" + (f":{hit.site}" if per_site else "")
+    if not auto_issue_capture.reserve_signature(signature):
         return
     title, body = build_issue(hit)
     try:

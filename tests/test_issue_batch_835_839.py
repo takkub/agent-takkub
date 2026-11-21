@@ -146,8 +146,9 @@ def test_notices_for_a_lead_never_read_as_ready_are_not_held_forever_992(monkeyp
         patch("agent_takkub.lead_inbox.QTimer.singleShot"),
         patch("agent_takkub.orchestrator._delayed_enter_verified") as submit,
     ):
-        # progress → digest: held while "busy", released after the ceiling
-        orch._notify_lead("p", "[frontend progress] step 1", queued_ts=clock[0])
+        # done → digest: held while "busy", released after the ceiling
+        # (a progress-only burst has no ceiling on a codex Lead — #1041)
+        orch._notify_lead("p", "[frontend done] step 1", queued_ts=clock[0])
         assert orch._flush_lead_digest("p", arm_pump=False) is False
         clock[0] += 121
         assert orch._flush_lead_digest("p", arm_pump=False) is True

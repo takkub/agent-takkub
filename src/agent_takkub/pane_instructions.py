@@ -107,6 +107,22 @@ def _codex_value(text: str, path: Path, marker: str = "") -> tuple[str, str]:
     return "developer_instructions=" + json.dumps(pointer, ensure_ascii=False), "file_pointer"
 
 
+def merge_config_value(raw: str | None, key: str, value: object) -> str:
+    """*raw* (a JSON-object env value, or nothing) with ``key`` set to
+    *value* — for CLIs that take per-process settings as inline JSON config
+    (opencode's ``OPENCODE_CONFIG_CONTENT``, merged over the user's own)."""
+    cfg: dict = {}
+    if raw:
+        try:
+            parsed = json.loads(raw)
+        except ValueError:
+            parsed = None
+        if isinstance(parsed, dict):
+            cfg = parsed
+    cfg[key] = value
+    return json.dumps(cfg, ensure_ascii=False)
+
+
 def _merge_opencode_config(raw: str | None, path: Path) -> str:
     cfg: dict = {}
     if raw:
