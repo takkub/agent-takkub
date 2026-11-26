@@ -906,7 +906,16 @@ class TestFullSuiteTesterExemption:
 
     @pytest.mark.parametrize(
         "command",
-        ["pytest", "python -m pytest", "vitest run", "jest", "turbo run test", "pnpm -r test"],
+        [
+            "pytest",
+            "python -m pytest",
+            # #1064: jest/vitest default to one worker per core — the raw
+            # suite is still tester's to run, but it names its worker cap.
+            "vitest run --maxWorkers=2",
+            "jest --maxWorkers=2",
+            "turbo run test",
+            "pnpm -r test",
+        ],
     )
     def test_raw_runner_allowed_for_tester(self, command: str) -> None:
         assert pane_guard.classify(command, "tester").allowed, f"should have allowed: {command}"

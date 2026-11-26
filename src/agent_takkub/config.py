@@ -25,26 +25,35 @@ DEFAULT_NPM_REGISTRY = "https://registry.npmjs.org/"
 
 # Plugins cockpit wants spawned agents to inherit (skipping claude-obsidian's broken
 # SessionStart hook). Each entry is a marketplace name under ~/.claude/plugins/cache/.
-_SAFE_PLUGINS: tuple[str, ...] = (
+#
+# The BASE set every install has and every pane gets (2.2.61). It used to
+# carry superpowers, Anthropic's official marketplace (frontend-design,
+# code-review, remember, security-guidance), UI/UX Pro Max and
+# addy-agent-skills as well. A prod audit over every transcript on disk
+# (2026-11-26: 2,890 claude + 834 codex sessions, 7,153 done notes) found one
+# of their ~25 skills in use — `systematic-debugging`, 19 times — while
+# superpowers' SessionStart hook ran on every pane start (7,877 times) and
+# each plugin's skill list rode in every pane prompt. They are no longer
+# installed or injected; `removed_integrations` uninstalls the copies an
+# earlier version put on the machine (backed up, once).
+_SAFE_PLUGINS: tuple[str, ...] = ("pordee",)
+
+# Marketplaces a user may still install and grant to a role in Settings →
+# Tools. Governable, never default: nothing here is installed, checked by
+# doctor, or loaded into a pane unless that role's own override names it.
+# (claude-obsidian-marketplace stays out: its SessionStart prompt-hook
+# crashed every pane in v0.2.0.)
+_OPTIONAL_PLUGINS: tuple[str, ...] = (
     "superpowers-dev",
-    "addy-agent-skills",
-    "pordee",
-    # Anthropic's official marketplace. The cockpit ships its dev-skill plugins
-    # (frontend-design, code-review) into panes; the hook-heavy ones in the same
-    # marketplace (remember, security-guidance — SessionStart command hooks that
-    # add a 180s agent-SDK setup / per-tool memory writes) are filtered out of
-    # pane injection by `lead_context._PANE_PLUGIN_DENYLIST` so they don't slow
-    # spawns, while staying user-enabled for the user's own sessions.
     "claude-plugins-official",
-    # UI/UX design-intelligence skill (design-system generator + BM25 KB). Its
-    # own marketplace; scoped to design roles only via lead_context's
-    # _ROLE_PLUGIN_POLICY so backend/devops/qa panes never pay for it.
     "ui-ux-pro-max-skill",
-    # claude-obsidian-marketplace is intentionally excluded: the cached 1.4.3
-    # build ships a SessionStart prompt-hook that crashed all panes in v0.2.0
-    # (ToolUseContext required error). Until a spawn smoke-test under cockpit
-    # flags confirms the hook no longer fires, do not add it here.
 )
+
+
+def governable_plugins() -> tuple[str, ...]:
+    """Base + optional marketplaces — what the pane loader may inject and
+    Settings may grant. Read at call time, so both lists can be patched."""
+    return tuple(dict.fromkeys(_SAFE_PLUGINS + _OPTIONAL_PLUGINS))
 
 
 def npm_registry() -> str:

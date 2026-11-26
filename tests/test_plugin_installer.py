@@ -12,7 +12,25 @@ import json
 import stat
 from unittest.mock import patch
 
+import pytest
+
 from agent_takkub import plugin_installer as pi
+
+# 2.2.61: the cockpit installs no plugin set any more (RECOMMENDED is empty).
+# The install machinery below is still what `install_by_id` and Settings use,
+# so it is exercised against the old dev-team set as sample data.
+_SAMPLE = tuple(p for p in pi.RETIRED if p.key != "agent-skills")
+
+
+@pytest.fixture(autouse=True)
+def _sample_recommended(monkeypatch, request):
+    if request.node.name != "test_nothing_is_recommended_any_more":
+        monkeypatch.setattr(pi, "RECOMMENDED", _SAMPLE)
+
+
+def test_nothing_is_recommended_any_more():
+    assert pi.RECOMMENDED == ()
+    assert pi.missing_plugins(set()) == []
 
 
 def test_recommended_set_shape():

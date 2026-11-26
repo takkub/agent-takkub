@@ -44,6 +44,19 @@ vulnerabilities:
 - **PATH / registry edits & desktop shortcut** created by the npm `postinstall`
   are local, idempotent, and marker-guarded.
 
+### Docker / headless deployments
+
+`docker-compose.yml` binds the remote-control port to **`127.0.0.1`** for both
+services, and the sandbox (`--profile sim`) refuses to start without your own
+`TAKKUB_SIM_PASSWORD` (no default; well-known values are rejected).
+
+- **Do not publish the port directly to the internet or an untrusted LAN** —
+  not by editing `ports:` to `0.0.0.0`, and not by a router/firewall forward.
+  The endpoint can drive an agent that runs shell commands.
+- If another machine must reach it, put an **authenticating reverse proxy**
+  (TLS + its own login) or a **VPN** in front of the loopback port.
+- Never commit `.env`; `.env.example` holds placeholders only.
+
 **In scope:** secret exfiltration, remote code execution, the IPC socket
 accepting untrusted or unauthenticated input, privilege escalation, a supply-chain
 issue in what the package publishes, or a token/auth bypass.

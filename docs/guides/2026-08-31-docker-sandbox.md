@@ -5,7 +5,7 @@
 ## Quick start (Windows PowerShell / macOS·Linux bash เหมือนกัน)
 
 ```bash
-cp .env.example .env               # ปรับ TAKKUB_SIM_PASSWORD ก่อน expose พอร์ตออกนอก localhost
+cp .env.example .env               # แล้วตั้ง TAKKUB_SIM_PASSWORD เป็นของตัวเอง (บังคับ — ไม่ตั้ง sandbox ไม่ขึ้น)
 docker compose --profile sim up -d --build
 docker compose --profile sim exec -it takkub-sim claude login    # ครั้งแรกเท่านั้น ถ้ายังไม่มี login
 docker compose --profile sim logs takkub-sim | grep pairing      # เอาลิงก์ pairing มาเปิด
@@ -43,6 +43,8 @@ rm -rf volumes/data/*      # เก็บ .gitkeep ไว้
 ## ยกขึ้น VPS
 
 โฟลเดอร์ `volumes/` ทั้งก้อนย้ายไป `/srv/agent-takkub/volumes/` บน VPS ได้ตรงๆ (bind-mount path เดียวกัน) — ขั้นต่ำแนะนำ 2 vCPU / 4GB RAM.
+
+พอร์ตผูกกับ `127.0.0.1` เท่านั้น (ทั้งบนเครื่องตัวเองและ VPS) — จะเข้าจากเครื่องอื่นต้องวาง reverse proxy ที่มีการยืนยันตัวตน (TLS + login ของ proxy เอง) หรือ VPN ไว้ข้างหน้า แล้วตั้ง `TAKKUB_SIM_PUBLIC_URL` เป็น URL ของ proxy · **ห้ามเปิดพอร์ตตรงๆ สู่อินเทอร์เน็ต** (ดู `SECURITY.md`)
 
 ---
 

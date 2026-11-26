@@ -170,7 +170,7 @@ def discover_marketplaces(
     Returns the installed marketplaces intersected with ``_SAFE_PLUGINS`` (the
     only ones pane injection can load), sorted. Missing/unreadable file → [].
     """
-    from .config import _SAFE_PLUGINS
+    from . import config as _config
 
     if installed_file is None:
         installed_file = _default_plugins_installed_file()
@@ -181,7 +181,7 @@ def discover_marketplaces(
     plugins = data.get("plugins") or {}
     if not isinstance(plugins, dict):
         return []
-    governable = set(_SAFE_PLUGINS)
+    governable = set(_config.governable_plugins())
     # Install-registry keys are ``name@marketplace``; the segment after ``@`` is
     # the marketplace. Keep only marketplaces the pane loader can inject.
     found = {

@@ -297,6 +297,11 @@ class BackgroundSampler:
         self._stop.set()
 
 
+# Share of `min_available_ram_percent` under which NO new non-light work is
+# admitted (#1064). A fraction of the machine's own threshold, not a number.
+_CRITICAL_RAM_FRACTION = 0.5
+
+
 class ResourceGovernor:
     """Non-blocking admission controller with hysteresis and project fairness.
 
@@ -606,6 +611,17 @@ class ResourceGovernor:
         account_id: str | None = None,
         priority: Priority = Priority.NORMAL,
     ) -> str:
+        # #1064: below half of the pause line (balanced: under 10% of RAM
+        # free) the machine has room for nothing new — not a heavy task, not
+        # an ordinary pane either (each is another CLI + MCP servers). The
+        # ladder below still admitted NORMAL work here, and one more pane was
+        # what tipped a full machine over. Lead/shell (LIGHT) are never held.
+        if (
+            resource_class is not ResourceClass.LIGHT
+            and self._available_ram_percent
+            < self.limits.min_available_ram_percent * _CRITICAL_RAM_FRACTION
+        ):
+            return "memory_low"
         if self._overloaded:
             # Overload latch still gates HEAVY-class work unconditionally
             # (unchanged legacy behavior); Phase 8a's backpressure ladder

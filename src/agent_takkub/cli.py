@@ -3331,7 +3331,46 @@ def cmd_status(args: argparse.Namespace) -> dict:
         payload["since"] = args.since
     if getattr(args, "role", None):
         payload["role"] = args.role
+    line = machine_load_line()
+    if line:
+        _utf8_print(line)
     return _request(payload)
+
+
+def machine_load_line(state_path=None, *, now: float | None = None) -> str:
+    """One line on the whole machine for `takkub status` (#1064): load, every
+    working pane of EVERY project, and this machine's per-pane worker budget.
+    A Lead sees only its own project's panes otherwise, and three projects
+    each starting "one" heavy job is how the machine filled up. Empty when
+    the cockpit has not written a fresh state file."""
+    import json as _json
+    import time as _time
+
+    try:
+        from .config import RUNTIME_DIR
+        from .machine_load import worker_budget
+
+        path = state_path or (RUNTIME_DIR / "machine-state.json")
+        data = _json.loads(path.read_text(encoding="utf-8"))
+        age = (now if now is not None else _time.time()) - float(data.get("ts") or 0)
+        if not isinstance(data, dict) or age > 120:
+            return ""
+        ram, cpu = data.get("ram_percent"), data.get("cpu_percent")
+        panes = [str(p) for p in (data.get("working_panes") or [])]
+        parts = [
+            f"RAM {ram:.0f}%" if isinstance(ram, (int, float)) else "RAM ?",
+            f"CPU {cpu:.0f}%" if isinstance(cpu, (int, float)) else "CPU ?",
+        ]
+        if data.get("overloaded"):
+            parts.append("OVERLOADED — งานหนักใหม่จะถูกพักคิว")
+        parts.append(
+            f"pane ที่ทำงานอยู่ทั้งเครื่อง {len(panes)}"
+            + (f" ({', '.join(panes[:8])}{'…' if len(panes) > 8 else ''})" if panes else "")
+        )
+        parts.append(f"งบ worker ต่อ pane {worker_budget()}")
+        return "[machine] " + " · ".join(parts)
+    except Exception:
+        return ""
 
 
 def cmd_tail(args: argparse.Namespace) -> dict:

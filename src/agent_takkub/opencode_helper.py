@@ -48,7 +48,7 @@ _TOOL_ACTIVITY: dict[str, str] = {
 }
 
 _INSTALL_HINT = (
-    "opencode binary not on PATH. Install with `npm install -g opencode-ai`, "
+    "opencode binary not on PATH. Install with `npm install -g @opencode/cli`, "
     "then run `opencode auth login` once to connect a model provider."
 )
 
@@ -79,6 +79,90 @@ def find_opencode_executable() -> str | None:
     """Return the absolute path to the `opencode` binary, or None when it
     can't be located."""
     return find_executable(("opencode", "opencode.cmd", "opencode.exe"), _default_opencode_paths())
+
+
+_NPM_PACKAGES = (("@opencode", "cli"), ("opencode-ai",))
+_major_cache: dict[tuple[str, int], int | None] = {}
+
+
+def _major_from_package_json(binary: Path) -> int | None:
+    """Major version from the npm package the *binary* shim belongs to — a
+    file read, no subprocess. Looks next to the shim (`<prefix>/node_modules`
+    on Windows), under `<prefix>/lib/node_modules` (POSIX), and above the
+    resolved target (a POSIX bin is a symlink into the package)."""
+    roots = [binary.parent / "node_modules", binary.parent.parent / "lib" / "node_modules"]
+    candidates = [
+        root.joinpath(*parts, "package.json") for root in roots for parts in _NPM_PACKAGES
+    ]
+    try:
+        resolved = binary.resolve()
+    except OSError:
+        resolved = binary
+    candidates += [parent / "package.json" for parent in list(resolved.parents)[:4]]
+    for pkg in candidates:
+        try:
+            data = json.loads(pkg.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if not isinstance(data, dict) or data.get("name") not in ("@opencode/cli", "opencode-ai"):
+            continue
+        head = str(data.get("version") or "").split(".")[0]
+        if head.isdigit():
+            return int(head)
+    return None
+
+
+def opencode_major_version(binary: str | None = None) -> int | None:
+    """Major version of the installed opencode, or None when it cannot be
+    told. Cached per binary (path + mtime). Falls back to `--version` only
+    when the npm layout gives no answer (a non-npm install)."""
+    path_str = binary or find_opencode_executable()
+    if not path_str:
+        return None
+    path = Path(path_str)
+    try:
+        key = (str(path), path.stat().st_mtime_ns)
+    except OSError:
+        key = (str(path), 0)
+    if key in _major_cache:
+        return _major_cache[key]
+    major = _major_from_package_json(path)
+    if major is None:
+        try:
+            import subprocess
+
+            from ._win_console import SUBPROCESS_NO_WINDOW
+            from .claude_update import parse_version
+
+            proc = subprocess.run(
+                [str(path), "--version"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+                check=False,
+                encoding="utf-8",
+                errors="replace",
+                creationflags=SUBPROCESS_NO_WINDOW,
+            )
+            head = (parse_version(proc.stdout or proc.stderr or "") or "").split(".")[0]
+            major = int(head) if head.isdigit() else None
+        except Exception:
+            major = None
+    _major_cache[key] = major
+    return major
+
+
+def private_server_argv(binary: str | None = None) -> list[str]:
+    """`["--standalone"]` on opencode 2.x, else nothing (#1056).
+
+    2.x runs ONE background server for every client on the machine; a pane's
+    own `OPENCODE_CONFIG_CONTENT` (per-role model AND the role's instructions)
+    and its isolated data home only reach a server the pane starts itself.
+    Verified on 2.4.2 (2026-11-26): with the shared server up, a second
+    client's env config is ignored; `--standalone` shows it merged. 1.x has no
+    server split and rejects the flag."""
+    major = opencode_major_version(binary)
+    return ["--standalone"] if major is not None and major >= 2 else []
 
 
 def opencode_db_path() -> Path | None:

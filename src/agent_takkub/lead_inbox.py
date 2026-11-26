@@ -1645,9 +1645,10 @@ class LeadInboxMixin:
         # wait counted directly against `BOOT_STALL_CEILING_SEC`, which is
         # meant to measure how long the pane has been stuck on ITS OWN boot
         # marker — a pane that had barely begun booting could trip the
-        # ceiling on its very first post-alive poll. Set once, never reset,
-        # for the life of this delivery.
+        # ceiling on its very first post-alive poll. Set once per session:
+        # cleared only when that session goes away mid-wait (#1060).
         elapsed_at_session_alive: list[int | None] = [None]
+        closed_mid_wait = [False]
         ready_streak = [0]
         # #130: logged once (not every 150ms poll) the first time the hard
         # timeout is deferred because the pane is busy, not stuck.
@@ -2176,6 +2177,20 @@ class LeadInboxMixin:
                 # polling to paste it, no warning to the Lead — see the
                 # 2026-07-11 dogfooding bug where a ~70s gate block outlived
                 # the 45s default and the task vanished into a blank pane).
+                if elapsed_at_session_alive[0] is not None:
+                    # #1060: this wait already saw the pane up — it has been
+                    # closed underneath (done → close → respawn for a queued
+                    # task). The time spent waiting on the old session says
+                    # nothing about the new spawn, so the no-session clock
+                    # starts now. It used to carry over and report "no
+                    # session after 90s" one second after the close, telling
+                    # the Lead to re-assign a task that was about to arrive.
+                    elapsed[0] = 0
+                    elapsed_at_session_alive[0] = None
+                    closed_mid_wait[0] = True
+                    _log_event(
+                        "task_deliver_pane_closed_mid_wait", project=project_ns, role=role_name
+                    )
                 elapsed[0] += _READY_POLL_INTERVAL_MS
                 _deferred = getattr(self, "_spawn_deferred", None)
                 _dk = f"{self._resolve_project(project)}::{role_name}"
@@ -2207,7 +2222,11 @@ class LeadInboxMixin:
                     self._warn_lead_spawn_failed(
                         role_name,
                         project,
-                        f"pane ไม่มี session หลังรอ {max_wait_ms / 1000:g}s — งานไม่ถึง pane",
+                        (
+                            f"pane ถูกปิดก่อนข้อความถึง และไม่ถูกเปิดใหม่ใน {max_wait_ms / 1000:g}s"
+                            if closed_mid_wait[0]
+                            else f"pane ไม่มี session หลังรอ {max_wait_ms / 1000:g}s — งานไม่ถึง pane"
+                        ),
                     )
                 else:  # replaced by a fresh spawn — that one carries on
                     self._warn_lead_delivery_unconfirmed(role_name, project, max_wait_ms)
@@ -4191,6 +4210,9 @@ class LeadInboxMixin:
         (#26). No-op when the failed role is the Lead itself."""
         if role_name == LEAD.name:
             return
+        # Counted before the live-Lead check: `_redispatch_assign` reads it to
+        # know the dispatch already reported its own failure.
+        self._spawn_failed_warn_seq = getattr(self, "_spawn_failed_warn_seq", 0) + 1
         project_ns = self._resolve_project(project)
         lead = self._project_panes(project_ns).get(LEAD.name)
         if not (lead and lead.session and lead.session.is_alive):

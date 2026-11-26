@@ -1101,7 +1101,48 @@ def test_list_issues_merges_unreconciled_local_backlog(tmp_path, monkeypatch, ca
         items = list_issues()
 
     assert any(i["number"] == 1 and i["title"] == "stranded local issue" for i in items)
-    assert "unreconciled local issue" in capsys.readouterr().err
+    assert "open local issue(s)" in capsys.readouterr().err
+
+
+def test_list_issues_closed_local_record_is_listed_without_warning(
+    tmp_path, monkeypatch, capsys
+) -> None:
+    """#1054: `issue close --local N` settles a local record — listing must
+    not keep warning about it (the warning told the user to run that same
+    close, forever)."""
+    import agent_takkub.issues as issues_mod
+
+    fake_repo_root = tmp_path / "cockpit-checkout"
+    fake_repo_root.mkdir()
+    monkeypatch.setattr("agent_takkub.issues.REPO_ROOT", fake_repo_root)
+    monkeypatch.setattr("agent_takkub.issues.DATA_HOME", fake_repo_root)
+
+    from agent_takkub.core.storage.v2_target import write_data
+
+    write_data(
+        issues_mod._cockpit_bug_v2_target(),
+        [
+            {
+                "number": 1,
+                "title": "closed on purpose, never on GitHub",
+                "status": "closed",
+                "severity": "med",
+                "role": "",
+                "noticed_in": "",
+                "tags": [],
+                "url": "local://issue/1",
+                "created_at": "2026-07-07T08:37:31Z",
+                "closed_at": "2026-11-23T08:00:00Z",
+            }
+        ],
+    )
+
+    with patch("agent_takkub.issues._gh") as mock_gh:
+        mock_gh.side_effect = ["takkub/agent-takkub", "[]", "[]"]
+        items = list_issues()
+
+    assert any(i["number"] == 1 for i in items)
+    assert "⚠" not in capsys.readouterr().err
 
 
 def test_list_issues_no_backlog_no_warning(tmp_path, monkeypatch, capsys) -> None:

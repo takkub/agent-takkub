@@ -347,6 +347,74 @@ def test_scrub_home_removes_forward_slash_home_path():
     assert "~" in scrubbed
 
 
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        (
+            r'File "C:\Users\alice\proj\app.py", line 10',
+            r'File "C:\Users\<user>\proj\app.py", line 10',
+        ),
+        ('File "c:/users/Alice/proj/app.py"', 'File "c:/users/<user>/proj/app.py"'),
+        ("cwd=/home/bob/work/repo", "cwd=/home/<user>/work/repo"),
+        ("open /Users/carol/Library/x.log failed", "open /Users/<user>/Library/x.log failed"),
+        # repr'd traceback: doubled backslashes, upper-case drive and folder
+        (r"'D:\\USERS\\Dave.Smith\\x'", r"'D:\\USERS\\<user>\\x'"),
+        # name at the very end of the text
+        (r"home is C:\Users\eve", r"home is C:\Users\<user>"),
+    ],
+)
+def test_scrub_user_paths_replaces_the_account_name(text, expected):
+    assert aic._scrub_user_paths(text) == expected
+
+
+def test_scrub_user_paths_is_idempotent_and_leaves_other_text_alone():
+    once = aic._scrub_user_paths(r"C:\Users\alice\a and /home/bob/b")
+    assert aic._scrub_user_paths(once) == once
+    plain = "no profile path here: C:\\Program Files\\x, /usr/lib/y, users=3"
+    assert aic._scrub_user_paths(plain) == plain
+
+
+def test_other_account_in_traceback_never_reaches_the_issue(monkeypatch):
+    """The reported leak: `_scrub_home` only knows the running user's home,
+    so a path under another account went out in the title/body as is."""
+    calls = []
+    monkeypatch.setattr(
+        aic.issues, "new_issue", lambda *a, **k: calls.append((a, k)) or (1, "local://issue/1")
+    )
+    message = (
+        r"cannot open C:\Users\otheruser\AppData\x.json; "
+        "also c:/users/OtherUser/y, /home/otheruser/z and /Users/otheruser/w"
+    )
+    et, ev, tb = _make_exc(OSError, message)
+    aic.capture_cockpit_crash(et, ev, tb, source="test")
+
+    title, body = calls[0][0]
+    assert "otheruser" not in (title + body).lower()
+    assert body.count("<user>") >= 4
+
+
+def test_signal_issue_title_and_body_are_path_scrubbed(monkeypatch):
+    from agent_takkub import auto_issue_signals as sig
+
+    calls = []
+    monkeypatch.setattr(aic.issues, "new_issue", lambda *a, **k: calls.append(a) or (1, "x"))
+    monkeypatch.setattr(aic, "_auto_issue_suppressed", lambda: False)
+    monkeypatch.setattr(sig, "auto_issue_enabled", lambda: True)
+    monkeypatch.setattr(aic, "reserve_signature", lambda s: True)
+    monkeypatch.setattr(
+        sig,
+        "build_issue",
+        lambda hit: (
+            r"[auto] stall @ C:\Users\otheruser\x.py:1",
+            "sample /home/otheruser/app.py:9",
+        ),
+    )
+    sig.file_signal_issue(sig.SignalHit(sig.RULES[0], 1, 0.0, [], ""))
+    title, body = calls[0][:2]
+    assert "otheruser" not in title + body
+    assert "<user>" in title and "<user>" in body
+
+
 def test_title_never_contains_raw_exception_message(monkeypatch):
     calls = []
     monkeypatch.setattr(

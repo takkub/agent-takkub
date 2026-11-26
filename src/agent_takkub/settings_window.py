@@ -120,6 +120,7 @@ from . import (
     auto_issue_signals,
     auto_resume,
     autoskills_installer,
+    autostart,
     cockpit_theme,
     config,
     custom_roles,
@@ -601,6 +602,10 @@ def _combo_model(combo: QComboBox) -> str:
 # own CLI default) applies instead — see spawn_engine._resolve_teammate_effort.
 _EFFORT_DEFAULT_LABEL = "(ตามค่าเริ่มต้นของ role)"
 _EFFORT_UNSUPPORTED_LABEL = "model นี้ไม่มี effort"
+# #1053: the whole provider takes no effort argument — a different label, so
+# nobody goes model-hunting for one that "has effort".
+_EFFORT_PROVIDER_UNSUPPORTED_LABEL = "provider นี้ยังไม่รองรับ effort"
+_EFFORT_UNSUPPORTED_LABELS = (_EFFORT_UNSUPPORTED_LABEL, _EFFORT_PROVIDER_UNSUPPORTED_LABEL)
 
 
 def _effort_default_label(role: str | None, provider: str, model: str) -> str:
@@ -609,8 +614,13 @@ def _effort_default_label(role: str | None, provider: str, model: str) -> str:
     plain "model นี้ไม่มี effort" when this provider/model can't take one at
     all (`provider_spec.effort_levels_for` already gates the caller for
     that; this just names it instead of leaving the row unlabeled)."""
-    if not provider_spec.effort_levels_for(provider, model):
-        return _EFFORT_UNSUPPORTED_LABEL
+    reason = provider_spec.effort_unsupported_reason(provider, model)
+    if reason:
+        return (
+            _EFFORT_PROVIDER_UNSUPPORTED_LABEL
+            if reason == "provider"
+            else _EFFORT_UNSUPPORTED_LABEL
+        )
     tier_effort = _teammate_tier(role)[1] if role else ""
     return f"{_EFFORT_DEFAULT_LABEL} → {tier_effort}" if tier_effort else _EFFORT_DEFAULT_LABEL
 
@@ -647,9 +657,16 @@ def _fill_effort_combo(
         if current:
             combo.addItem(current, current)
         combo.setEnabled(False)
-        combo.setToolTip(
-            "provider/model นี้ไม่รองรับ reasoning effort — ตั้งค่าไม่ได้ (Save & Apply จะตัดค่าเดิมออก ถ้ามี)"
-        )
+        if provider_spec.effort_unsupported_reason(provider, model) == "provider":
+            combo.setToolTip(
+                "CLI ของ provider นี้ไม่มีช่องรับ reasoning effort — เปลี่ยน model ก็ตั้งไม่ได้ "
+                "(Save & Apply จะตัดค่าเดิมออก ถ้ามี)"
+            )
+        else:
+            combo.setToolTip(
+                "model นี้ไม่รองรับ reasoning effort — เลือก model อื่นของ provider เดียวกันได้ "
+                "(Save & Apply จะตัดค่าเดิมออก ถ้ามี)"
+            )
     idx = combo.findData(current or "")
     combo.setCurrentIndex(idx if idx >= 0 else 0)
     combo.blockSignals(False)
@@ -664,7 +681,7 @@ def _combo_effort(combo: QComboBox) -> str:
     text = combo.currentText().strip()
     if text == _EFFORT_DEFAULT_LABEL or text.startswith(_EFFORT_DEFAULT_LABEL + " "):
         return ""
-    if text == _EFFORT_UNSUPPORTED_LABEL:
+    if text in _EFFORT_UNSUPPORTED_LABELS:
         return ""
     return text
 
@@ -1904,6 +1921,36 @@ class SettingsWindow(
         mode_lay.addWidget(mode_hint)
         lay.addWidget(mode_panel)
 
+        # Start with the computer. The OS registration is the state
+        # (`autostart` module) — the checkbox reads it back rather than a
+        # settings file, so switching it off in Task Manager shows here too.
+        autostart_panel = QWidget(view)
+        autostart_panel.setObjectName("panel")
+        autostart_lay = QVBoxLayout(autostart_panel)
+        autostart_lay.setContentsMargins(16, 16, 16, 16)
+        autostart_lay.setSpacing(8)
+        self._autostart_chk = QCheckBox("เปิด cockpit อัตโนมัติเมื่อเปิดเครื่อง", autostart_panel)
+        self._autostart_chk.setChecked(autostart.is_enabled())
+        self._autostart_chk.setEnabled(autostart.is_supported())
+        self._autostart_chk.setToolTip(
+            "ปิดอยู่โดยค่าเริ่มต้น เมื่อเปิด cockpit จะเริ่มเองหลังเข้าสู่ระบบ (sign in)\n"
+            "ลงทะเบียนเฉพาะบัญชีผู้ใช้นี้ ไม่ต้องใช้สิทธิ์ admin\n\n"
+            f"คำสั่งที่จะรัน: {autostart.launch_command()}"
+        )
+        self._autostart_chk.toggled.connect(self._on_autostart_toggled)
+        autostart_lay.addWidget(self._autostart_chk)
+        autostart_hint = QLabel(
+            "มีผลตั้งแต่การเปิดเครื่อง/เข้าสู่ระบบครั้งถัดไป · Windows: ดู/ปิดได้ที่ "
+            "Task Manager → Startup apps เช่นกัน · macOS: Login Items → Allow in the Background"
+            if autostart.is_supported()
+            else "ระบบปฏิบัติการนี้ยังไม่รองรับการเปิดอัตโนมัติ (รองรับ Windows และ macOS)",
+            autostart_panel,
+        )
+        autostart_hint.setObjectName("panelHint")
+        autostart_hint.setWordWrap(True)
+        autostart_lay.addWidget(autostart_hint)
+        lay.addWidget(autostart_panel)
+
         # ภาษา (#515) — placeholder: cockpit is Thai/English mixed UI copy
         # with no i18n layer yet, so there is nothing real to switch. Kept
         # visible (disabled) rather than omitted so "where would language
@@ -2153,6 +2200,20 @@ class SettingsWindow(
             QMessageBox.warning(self, "โหมดเครื่อง", "บันทึก performance-settings.json ไม่สำเร็จ")
             return
         self.pending_performance_reload = True
+
+    def _on_autostart_toggled(self, enabled: bool) -> None:
+        """Write-through, same as the other switches on this page. When the
+        OS refuses, the box snaps back to what is really registered."""
+        if autostart.set_enabled(bool(enabled)):
+            return
+        QMessageBox.warning(
+            self,
+            "เปิดอัตโนมัติเมื่อเปิดเครื่อง",
+            "ตั้งค่าไม่สำเร็จ — ระบบปฏิบัติการไม่ยอมให้บันทึกรายการเริ่มต้นของผู้ใช้นี้",
+        )
+        self._autostart_chk.blockSignals(True)
+        self._autostart_chk.setChecked(autostart.is_enabled())
+        self._autostart_chk.blockSignals(False)
 
     def _on_pane_discard_toggled(self, enabled: bool) -> None:
         """Write-through (#515, moved off the old Performance page's footer-

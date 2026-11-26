@@ -143,6 +143,23 @@ def _cap_snapshot_lines(text: str, max_lines: int = _MAX_DISCARD_SNAPSHOT_LINES)
 
 _TRAILING_PUNCT = ".,;:!?)]}>\"'`"
 
+_URL_HEAD_RE = re.compile(r"^(?:https?|mailto):", re.IGNORECASE)
+_URL_USERINFO_RE = re.compile(r"^(https?://)[^/@\s]*@", re.IGNORECASE)
+
+
+def _loggable_link(value: str) -> str:
+    """What a clicked link may leave in events.log (#1062). A URL keeps its
+    scheme, host and path; the query string and fragment are dropped (that is
+    where access keys ride — a published report's `?k=<key>`), as is any
+    `user:pass@`. A file path is logged as is."""
+    text = (value or "").strip()
+    if not _URL_HEAD_RE.match(text):
+        return text
+    cut = min((i for i in (text.find("?"), text.find("#")) if i >= 0), default=-1)
+    if cut >= 0:
+        text = text[:cut] + "?…"
+    return _URL_USERINFO_RE.sub(r"\1", text)
+
 
 def _resolve_open_path(
     raw: str, cwd: str | None = None, extra_bases: tuple[str, ...] = ()
@@ -1173,12 +1190,30 @@ class TerminalWidget(QWidget):
         self._log_link_event("open_path", str(resolved))
 
     def _log_link_event(self, kind: str, value: str) -> None:
-        from .config import EVENTS_LOG, ensure_runtime
+        """One JSON event like every other events.log line (#1062) — a bare
+        text line broke line-by-line `json.loads` readers and was invisible
+        to every counter. The value goes through `_loggable_link` first."""
+        import sys
 
+        target = _loggable_link(value)
         try:
+            orch = sys.modules.get("agent_takkub.orchestrator")
+            if orch is not None:
+                orch._log_event(kind, target=target)
+                return
+            from .config import EVENTS_LOG, ensure_runtime
+
             ensure_runtime()
+            line = json.dumps(
+                {
+                    "ts": datetime.now().isoformat(timespec="seconds"),
+                    "event": kind,
+                    "target": target,
+                },
+                ensure_ascii=False,
+            )
             with EVENTS_LOG.open("a", encoding="utf-8") as fh:
-                fh.write(f"{datetime.now().isoformat()} {kind} {value}\n")
+                fh.write(line + "\n")
         except Exception:
             pass
 

@@ -409,6 +409,45 @@ class TestGateDeferredSpawnDeliversEventually:
 
         assert any("#26" in c.args[0] for c in lead.session.write.call_args_list if c.args)
 
+    def test_pane_closed_mid_wait_restarts_the_no_session_clock_1060(
+        self, orch: Orchestrator, monkeypatch
+    ) -> None:
+        """A wait that outlived max_wait_ms on a busy pane must not report
+        "no session after Ns" the instant that pane is closed for a respawn —
+        the new session arrives two polls later and takes the delivery."""
+        lead = _pane(_live_session())
+        reviewer = _pane(_live_session())
+        reviewer.session.is_at_ready_prompt.return_value = False  # busy the whole time
+        reviewer.session.seconds_since_output.return_value = 2.0
+        orch._panes_by_project["P"] = {"lead": lead, "reviewer": reviewer}
+        orch._spawn_deferred = set()
+        calls = {"n": 0}
+        fresh = _live_session()
+        fresh.is_at_ready_prompt.return_value = True
+
+        def _fake_single_shot(_ms, fn):
+            calls["n"] += 1
+            if calls["n"] == 8:  # well past the 300ms window: done → close
+                reviewer.session = None
+            elif calls["n"] == 9:  # respawned one poll later (inside the fresh window)
+                reviewer.session = fresh
+            if calls["n"] < 60:
+                fn()
+
+        monkeypatch.setattr(orch_mod.QTimer, "singleShot", staticmethod(_fake_single_shot))
+        with patch("agent_takkub.lead_inbox._log_event") as log:
+            orch._send_when_ready("reviewer", "run smoke", max_wait_ms=300, project="P")
+
+        events = [c.args[0] for c in log.call_args_list if c.args]
+        assert "task_deliver_pane_closed_mid_wait" in events
+        assert "task_deliver_timeout_no_session" not in events
+        assert not any(
+            "spawn-failed" in c.args[0]
+            for c in lead.session.write.call_args_list
+            if c.args and isinstance(c.args[0], str)
+        )
+        assert fresh.write.called
+
 
 class TestReadyWaitMs:
     """agy (gemini role's engine) cold-boots ~46s — right at the 45s default

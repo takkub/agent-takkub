@@ -7,7 +7,10 @@
 # in QtWebEngineWidgets — see docs/design/2026-07-11-105-phaseB-headless.md
 # "known limitation"), so the image still needs Chromium's runtime shared
 # libraries even though no window is ever shown or rendered.
-FROM node:20-bookworm-slim AS base
+# Pinned to the full patch of a supported LTS line (Node 24 "Krypton"). Node 20
+# went end-of-life in 2026 and a floating tag hides what is running — bump the
+# pin by hand from the registry when a security release lands.
+FROM node:24.22.3-bookworm-slim AS base
 
 # python3.11 + the native libs PyQt6/PyQt6-WebEngine need to *import*
 # successfully with no X server (QT_QPA_PLATFORM is unset here — headless

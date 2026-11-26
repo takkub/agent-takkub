@@ -883,6 +883,24 @@ class TestRoleModelEffortDefaultLabels:
         assert effort_combo.itemText(0) == "model นี้ไม่มี effort"
         dlg.deleteLater()
 
+    def test_effort_label_blames_the_provider_when_no_model_can_take_one(self) -> None:
+        """#1053: cursor has no effort argument at all — the label must not
+        send the user hunting for a model that "has effort"."""
+        from agent_takkub import provider_spec
+
+        assert provider_spec.effort_unsupported_reason("cursor", "any-model") == "provider"
+        assert provider_spec.effort_unsupported_reason("claude", "claude-haiku-4-5") == "model"
+        assert provider_spec.effort_unsupported_reason("claude", "") == ""
+        combo = settings_window.QComboBox()
+        settings_window._fill_effort_combo(combo, "cursor", "any-model", "high")
+        assert combo.itemText(0) == "provider นี้ยังไม่รองรับ effort"
+        assert "เปลี่ยน model ก็ตั้งไม่ได้" in combo.toolTip()
+        assert settings_window._combo_effort(combo) == ""
+        combo.setEnabled(True)  # even if re-enabled, the label is never saved as a value
+        combo.setCurrentIndex(0)
+        assert settings_window._combo_effort(combo) == ""
+        combo.deleteLater()
+
 
 class TestRoleEffortCombo:
     """Per-role reasoning-effort override (#136 follow-up): a combo next to
@@ -1129,8 +1147,9 @@ class TestPluginsMatrixView:
         # machine's marketplace list) are preserved via _hidden_plugin_defaults
         # (see settings_window._reload_plugins_matrix's own note) — Save adds
         # the newly-checked column on TOP of them, it doesn't replace them.
+        # 2.2.61: the built-in default is the base (pordee) alone.
         assert pane_tools_policy.effective_plugins("backend") == frozenset(
-            {"ui-ux-pro-max-skill", "superpowers-dev", "pordee", "claude-plugins-official"}
+            {"ui-ux-pro-max-skill", "pordee"}
         )
         dlg.deleteLater()
 

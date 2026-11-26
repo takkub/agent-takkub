@@ -215,8 +215,18 @@ def _has_update(item: Any) -> bool:
     """True when a `ProviderUpdateItem` (duck-typed — the interface hadn't
     shipped when this was written, see module docstring) names a newer
     version than what's installed."""
+    status = getattr(item, "status", None)
+    if status:
+        # `check_provider_updates()` already compared the versions — the UI
+        # must never disagree with it (#1051: "3.2 → 1.19.6 มีอัพเดต").
+        return status == "update_available"
     latest = getattr(item, "latest", None)
-    return bool(latest) and latest != getattr(item, "current", None)
+    current = getattr(item, "current", None)
+    if not latest or not current:
+        return bool(latest) and latest != current
+    from .claude_update import compare_versions
+
+    return compare_versions(str(current), str(latest)) < 0
 
 
 def _version_diff_widget(current: str, latest: str | None, mono: str) -> QWidget:
@@ -1072,7 +1082,7 @@ class BootFlowWindow(QDialog):
 
             current = getattr(item, "current", "")
             latest = getattr(item, "latest", None)
-            has_update = bool(latest) and latest != current
+            has_update = _has_update(item)
             selected = bool(getattr(item, "selected", has_update))
 
             check = _CheckSquare(checked=selected and has_update, interactive=has_update)

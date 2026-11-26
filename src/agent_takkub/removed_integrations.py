@@ -164,6 +164,128 @@ def cleanup_integration(name: str, *, home: Path | None = None) -> int:
     return changed
 
 
+#: marker key for the one-time uninstall of the plugins retired in 2.2.61.
+RETIRED_PLUGINS_KEY = "retired-plugins-2.2.61"
+
+
+def cleanup_retired_plugins(*, home: Path | None = None, claude_dir: Path | None = None) -> int:
+    """Uninstall the plugins `plugin_installer.RETIRED` names from the
+    cockpit's own Claude config, so every machine ends on the same base.
+
+    Matched by exact id (``plugin@marketplace``) — never by substring, unlike
+    `cleanup_integration`: "remember" or "code-review" inside some unrelated
+    key must not be touched. Per plugin: its ``enabledPlugins`` /
+    ``installed_plugins`` / usage entries and its cache dir. Per marketplace,
+    only when no OTHER installed plugin still comes from it: the role grants
+    naming it, its ``known_marketplaces`` entry, and its checkout. Everything
+    changed is copied or moved to ``backups/retired-plugins-<date>/`` first.
+    Returns the number of files rewritten or moved; 0 on a clean machine."""
+    from .plugin_installer import RETIRED
+
+    home = home or config.DATA_HOME
+    claude = claude_dir or config.default_claude_config_dir()
+    plugins_dir = claude / "plugins"
+    retired_ids = {f"{p.key}@{p.marketplace}".lower() for p in RETIRED}
+    backup = home / "backups" / f"retired-plugins-{time.strftime('%Y-%m-%d')}"
+    changed = 0
+
+    def _load(path: Path) -> dict | None:
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
+        return data if isinstance(data, dict) else None
+
+    def _save(path: Path, data: dict) -> None:
+        nonlocal changed
+        dst = backup / _backup_rel(path, home)
+        if not dst.exists():
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(path, dst)
+        if config._write_json_atomic(path, data):
+            changed += 1
+
+    def _move(src: Path) -> None:
+        nonlocal changed
+        if not src.exists():
+            return
+        dst = backup / _backup_rel(src, home)
+        if dst.exists():
+            return
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(src), str(dst))
+        changed += 1
+
+    # Which marketplaces still have a plugin the user installed themselves.
+    installed_path = plugins_dir / "installed_plugins.json"
+    installed = _load(installed_path)
+    kept_marketplaces: set[str] = set()
+    if installed is not None and isinstance(installed.get("plugins"), dict):
+        for key in installed["plugins"]:
+            if isinstance(key, str) and key.lower() not in retired_ids:
+                kept_marketplaces.add(key.partition("@")[2].lower())
+        remaining = {k: v for k, v in installed["plugins"].items() if k.lower() not in retired_ids}
+        if remaining != installed["plugins"]:
+            _save(installed_path, {**installed, "plugins": remaining})
+    gone_marketplaces = {p.marketplace.lower() for p in RETIRED} - kept_marketplaces
+
+    settings_files = [claude / "settings.json"]
+    profiles = home / "providers" / "claude"
+    if profiles.is_dir():
+        settings_files += [p / "settings.json" for p in sorted(profiles.iterdir()) if p.is_dir()]
+    for path in settings_files:
+        data = _load(path)
+        if data is None:
+            continue
+        new = dict(data)
+        for container in ("enabledPlugins", "pluginUsage"):
+            block = data.get(container)
+            if isinstance(block, dict):
+                new[container] = {k: v for k, v in block.items() if k.lower() not in retired_ids}
+        if new != data:
+            _save(path, new)
+
+    # Role grants are marketplace names (`roles.<role>.plugins`).
+    perms_path = home / "capabilities" / "mcp" / "permissions.json"
+    perms = _load(perms_path)
+    if perms is not None and isinstance(perms.get("roles"), dict):
+        roles = {}
+        for role, entry in perms["roles"].items():
+            if isinstance(entry, dict) and isinstance(entry.get("plugins"), list):
+                entry = {
+                    **entry,
+                    "plugins": [
+                        m
+                        for m in entry["plugins"]
+                        if not (isinstance(m, str) and m.lower() in gone_marketplaces)
+                    ],
+                }
+            roles[role] = entry
+        if roles != perms["roles"]:
+            _save(perms_path, {**perms, "roles": roles})
+
+    known_path = plugins_dir / "known_marketplaces.json"
+    known = _load(known_path)
+    if known is not None:
+        new_known = {k: v for k, v in known.items() if k.lower() not in gone_marketplaces}
+        if new_known != known:
+            _save(known_path, new_known)
+
+    for plugin in RETIRED:
+        _move(plugins_dir / "cache" / plugin.marketplace / plugin.key)
+    for marketplace in sorted({p.marketplace for p in RETIRED}):
+        if marketplace.lower() not in gone_marketplaces:
+            continue
+        cache_dir = plugins_dir / "cache" / marketplace
+        try:
+            if cache_dir.is_dir() and not any(cache_dir.iterdir()):
+                cache_dir.rmdir()  # emptied by the moves above
+        except OSError:
+            pass
+        _move(plugins_dir / "marketplaces" / marketplace)
+    return changed
+
+
 def run_boot_cleanups() -> dict[str, int]:
     """Boot hook: clean up each removed integration once per install."""
     if config.DATA_HOME == config.REPO_ROOT:
@@ -181,6 +303,16 @@ def run_boot_cleanups() -> dict[str, int]:
             continue
         results[name] = cleanup_integration(name)
         done[name] = {"at": time.time(), "changed": results[name]}
+    if RETIRED_PLUGINS_KEY not in done:
+        try:
+            results[RETIRED_PLUGINS_KEY] = cleanup_retired_plugins()
+        except Exception:  # never block boot; retried next start (no marker written)
+            results.pop(RETIRED_PLUGINS_KEY, None)
+        else:
+            done[RETIRED_PLUGINS_KEY] = {
+                "at": time.time(),
+                "changed": results[RETIRED_PLUGINS_KEY],
+            }
     if results:
         marker.parent.mkdir(parents=True, exist_ok=True)
         config._write_json_atomic(marker, done)

@@ -105,7 +105,7 @@ takkub skills learned archive|revive <name> · archived · curate  # archive = �
 
 ## Tooling ที่ pane มี (รายละเอียด)
 
-- **superpowers / agent-skills** — skill libraries เรียกผ่าน `/skill-name`
+- **Plugin พื้นฐานของทุก pane = pordee เท่านั้น (2.2.61)** — superpowers / official marketplace / UI-UX Pro Max ไม่ถูกติดตั้งหรือส่งเข้า pane แล้ว (ตรวจ prod: แทบไม่ถูกใช้) · จะให้ role ใดได้ต้องติดตั้งเองแล้วเปิดใน Plugins Matrix
 - **MCP servers + plugins ต่อ role = policy เดียว** (`~/.takkub/pane-tools.json` · module `pane_tools_policy.py`) — default: qa/critic/designer ได้ playwright + chrome-devtools, role อื่นไม่มี MCP เลย (ประหยัด ~15k tokens/pane) · ปรับได้ 3 ทาง: แก้ไฟล์ตรง / `takkub mcp|plugins ...` (mutation lead-only) / chip **👥 Team → MCP Matrix / Plugins Matrix** ใน status bar · มีผลกับ pane ที่ spawn ใหม่ทันที · **user-level `~/.claude.json` mcpServers ไม่เข้า pane เด็ดขาด** (`--strict-mcp-config` + `--setting-sources project,local`)
 - **MCP timeout** — `MCP_TOOL_TIMEOUT=180000` (3 นาที) inject ทุก pane โดย default — กัน browser MCP timeout 60s ที่ทำ Lighthouse audit/page load พังบ่อย override ที่ cockpit env ได้
 - **rtk CLI** — token-optimized wrappers (ดู `~/.claude/CLAUDE.md`)

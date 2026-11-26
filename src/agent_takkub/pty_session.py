@@ -2825,6 +2825,7 @@ class PtySession(QObject):
             # Resize mutates the visible screen without a byte feed; invalidate
             # so the next reader preserves the existing resize semantics.
             self._display_cache_generation = -1
+            self._input_lines_cache = None
         if self._alive and self._proc is not None:
             try:
                 self._proc.setwinsize(rows, cols)
@@ -3313,8 +3314,20 @@ class PtySession(QObject):
         screen = self.__dict__.get("screen")
         if not isinstance(screen, _DimAwareScreen) or "display_lines" in self.__dict__:
             return self.display_lines()
+        # #1061: memoized per output generation, read lock-free on a hit —
+        # same scheme as `display_lines` (#658). This used to take
+        # `_screen_lock` and re-render every row on each call, twice per pane
+        # per idle tick on the Qt main thread, behind N reader threads.
+        generation = self.__dict__.get("_output_generation")
+        cached = self.__dict__.get("_input_lines_cache")
+        if cached is not None and generation is not None and cached[0] == generation:
+            return list(cached[1])
         with self._screen_lock:
-            return _safe_screen_display(screen, skip_dim=True)
+            generation = self.__dict__.get("_output_generation")
+            rows = _safe_screen_display(screen, skip_dim=True)
+            if generation is not None:
+                self._input_lines_cache = (generation, tuple(rows))
+            return rows
 
     def _bar_composer_has_input(self) -> bool:
         """opencode's composer is a `┃`-barred box with no prompt glyph, so

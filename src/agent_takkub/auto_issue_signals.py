@@ -426,6 +426,9 @@ def file_signal_issue(hit: SignalHit) -> None:
     if not auto_issue_capture.reserve_signature(signature):
         return
     title, body = build_issue(hit)
+    # A call-site sample can carry an absolute path — no account name leaves
+    # the machine in either field.
+    title, body = auto_issue_capture.scrub_paths(title), auto_issue_capture.scrub_paths(body)
     try:
         issues.new_issue(
             title,

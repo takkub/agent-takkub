@@ -10,7 +10,27 @@ from __future__ import annotations
 
 import argparse
 
+import pytest
+
 from agent_takkub import cli, plugin_installer
+
+
+@pytest.fixture(autouse=True)
+def _sample_recommended(monkeypatch):
+    """2.2.61 ships an empty RECOMMENDED; the detect-first / only-the-gaps
+    logic is exercised against the old set as sample data."""
+    monkeypatch.setattr(
+        plugin_installer,
+        "RECOMMENDED",
+        tuple(p for p in plugin_installer.RETIRED if p.key != "agent-skills"),
+    )
+
+
+def test_provision_installs_no_plugins_on_the_real_base(monkeypatch):
+    monkeypatch.setattr(plugin_installer, "RECOMMENDED", ())
+    installed = _patch_common(monkeypatch, on_disk=set(), install_result=(True, "x"))
+    res = cli.cmd_provision(argparse.Namespace())
+    assert res["ok"] is True and installed == []
 
 
 def _patch_common(monkeypatch, *, on_disk, install_result):

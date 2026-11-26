@@ -38,13 +38,13 @@ import re
 import sys
 
 from .config import (
-    _SAFE_PLUGINS,
     ASSETS_ROOT,
     REPO_ROOT,
     RUNTIME_DIR,
     active_project,
     default_claude_config_dir,
     ensure_runtime,
+    governable_plugins,
     lead_cwd,
     load_projects,
 )
@@ -697,10 +697,10 @@ provider ต่อไปนี้ใช้ไม่ได้ → **Claude รั
 
 {_sub_note_lines}
 
-**ไม่ต้อง refuse** — ตำแหน่งเหล่านี้ Claude รับแทนอัตโนมัติ:
-- propose / fire role เหล่านี้ได้ตามปกติ (primary หรือ cross-check)
+**ไม่ต้อง refuse เมื่อ user ขอ role นี้เอง** (เช่นขอ cross-check) — Claude รับแทน:
 - orchestrator จะ spawn pane ชื่อ role เดิมแต่รันด้วย claude
-- เวลา propose/fire ให้ **บอก user 1 บรรทัด** ว่า "{_all_unavailable} ใช้ไม่ได้ → Claude รับแทน (เสีย model diversity)" แล้วเดินงานต่อ ไม่ต้องหยุดรอ
+- บอก user 1 บรรทัดว่า "{_all_unavailable} ใช้ไม่ได้ → Claude รับแทน (เสีย model diversity)" แล้วเดินงานต่อ ไม่ต้องหยุดรอ
+- **ห้ามใช้ slot เหล่านี้เป็น "มือเพิ่ม" เมื่อ role เจ้าของงานไม่ว่าง (#1058)** — user ปิด provider นี้ไว้ และ pane ทดแทนใช้กติกาของ slot (ไม่ self-verify งาน UI) · role ไม่ว่าง: ไฟล์ชุดเดิม → `takkub send` ต่อท้าย · คนละไฟล์ → assign role เดิมอีกตัวด้วย `--isolation worktree` · ไม่งั้น assign role เดิม (เข้าคิวเอง)
 
 รายการนี้คือสถานะ**ตอน spawn** — ถ้าภายหลังมี `[system] <provider> ENABLED/DISABLED` ให้ถือตามข้อความล่าสุด · เช็คสถานะปัจจุบัน: `takkub provider list`
 """
@@ -1018,31 +1018,15 @@ def render_lead_agents_md(
 
 # Role-scoped plugin injection. `--plugin-dir` loads each plugin's skill +
 # agent descriptions into the pane's system prompt, so an unused plugin is
-# pure per-pane context bloat. addy-agent-skills (44 skills + 7 agents,
-# ~3-5k tokens) duplicates the role `.md` prompts and takkub's own role panes,
-# so it's dropped for every role. superpowers-dev (TDD/debug/brainstorm/plans)
-# stays for implementing teammates; Lead orchestrates and gets only pordee
-# (Thai compression, used in conversation). This mirrors `_ROLE_MCP_POLICY` in
-# shared_dev_tools.py: _SAFE_PLUGINS stays the full safe set (doctor validates
-# all of it); this policy only decides what each pane actually receives.
+# pure per-pane context bloat.
 #
-# Roles NOT in this map fall back to the teammate set, NOT the full set — a
-# future role should default to lean, not inherit addy-agent-skills by accident.
-# obsidian-vault removed from all roles 2026-07-02 (MCP-only, unused in plugin form).
-_TEAMMATE_PLUGINS: frozenset[str] = frozenset(
-    {"superpowers-dev", "pordee", "claude-plugins-official"}
-)
-# Design roles additionally get the UI/UX Pro Max marketplace (design-system
-# generator + a11y KB). Non-design teammates never see it — it's pure per-pane
-# context bloat for backend/devops/qa, so it stays scoped to who actually
-# designs UI. Installed for everyone by provision, injected only here.
-_DESIGN_PLUGINS: frozenset[str] = _TEAMMATE_PLUGINS | {"ui-ux-pro-max-skill"}
-_ROLE_PLUGIN_POLICY: dict[str, frozenset[str]] = {
-    "lead": frozenset({"pordee"}),
-    "frontend": _DESIGN_PLUGINS,
-    "designer": _DESIGN_PLUGINS,
-    "critic": _DESIGN_PLUGINS,
-}
+# 2.2.61: every role gets the base set (`config._SAFE_PLUGINS` — pordee) and
+# nothing else. Teammates used to get superpowers + Anthropic's official
+# marketplace, design roles UI/UX Pro Max on top; the prod audit recorded in
+# config.py found them all but unused. A role gets an optional marketplace
+# only through its own override in Settings → Tools (`effective_plugins`).
+_TEAMMATE_PLUGINS: frozenset[str] = frozenset({"pordee"})
+_ROLE_PLUGIN_POLICY: dict[str, frozenset[str]] = {"lead": frozenset({"pordee"})}
 
 # Plugin DIRS (by plugin-dir name) to NEVER inject into a pane via --plugin-dir,
 # even when their marketplace is in that role's allowed set. claude-plugins-
@@ -1090,7 +1074,7 @@ def _default_plugin_dirs(role: str | None = None, project: str | None = None) ->
     out: list[str] = []
     if not cache.exists():
         return out
-    for marketplace in _SAFE_PLUGINS:
+    for marketplace in governable_plugins():
         if allowed is not None and marketplace not in allowed:
             continue
         mp_dir = cache / marketplace

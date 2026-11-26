@@ -4,6 +4,49 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 
 ## [vNEXT]
 
+## [v2.2.61] - 2026-11-26
+
+เปิดโปรแกรมเองเมื่อเปิดเครื่อง (สวิตช์ใน Settings) + issue ที่เปิดอยู่ 16 ใบ (#1048–#1064), CodeQL alert #67 และความปลอดภัย 2 เรื่อง (ชื่อผู้ใช้ใน issue สาธารณะ, พอร์ต Docker)
+
+### Changed (เปลี่ยน)
+
+- **Plugin พื้นฐานเหลือ pordee ตัวเดียว เหมือนกันทุกเครื่อง:** เลิกติดตั้งและเลิกส่งเข้า pane — superpowers, frontend-design, code-review, security-guidance, remember, UI/UX Pro Max, agent-skills
+  - เหตุผล: ตรวจ prod จากประวัติทั้งหมดบนเครื่อง (transcript ของ Claude 2,890 ไฟล์, session ของ codex 834 ไฟล์, done note 7,153 ไฟล์) พบว่าใน ~25 skill ของชุดนี้ถูกใช้จริงตัวเดียว (`systematic-debugging` 19 ครั้ง) ขณะที่ hook ของ superpowers รันทุกครั้งที่ pane เปิด (7,877 ครั้ง) และรายชื่อ skill ของแต่ละ plugin ติดไปใน prompt ทุก pane
+  - เครื่องที่ติดตั้งไว้แล้ว: ตอนบูตครั้งแรกหลังอัปเดต ระบบถอนให้ครั้งเดียว (ตรง id เท่านั้น) และย้ายของเดิมไปไว้ที่ `backups/retired-plugins-<วันที่>/` — ไม่ลบทิ้ง · plugin อื่นที่ผู้ใช้ติดตั้งเองจาก marketplace เดียวกันไม่ถูกแตะ · dev checkout (`~/.claude`) ไม่ถูกแตะ
+  - ยังติดตั้งเองและเปิดให้ role ใน Settings → Tools ได้ (superpowers, official marketplace, UI/UX Pro Max) — เป็นตัวเลือก ไม่ใช่ค่าเริ่มต้น
+
+### Security (ความปลอดภัย)
+
+- **ชื่อบัญชีผู้ใช้หลุดใน issue ที่ระบบเปิดเอง:** เดิมปิดบังได้เฉพาะ home ของคนที่รันแอป — ตอนนี้ชื่อในพาธ `C:\Users\<ชื่อ>`, `c:/users/<ชื่อ>`, `/home/<ชื่อ>`, `/Users/<ชื่อ>` ทุกตัวถูกแทนเป็น `<user>` ทั้ง title และ body (ทาง crash และทางสัญญาณจาก events.log) · issue template เตือนให้แทนชื่อผู้ใช้ก่อนวาง log
+- **Docker base image:** `node:20-bookworm-slim` (Node 20 หมดอายุซัพพอร์ต, tag ลอย) → `node:24.22.3-bookworm-slim` (LTS, pin ถึง patch)
+- **Docker:** `docker-compose.yml` ผูกพอร์ต remote-control กับ `127.0.0.1` ทั้งสอง service · sandbox (`--profile sim`) ไม่มีรหัสเริ่มต้น `sandbox` อีก — ต้องตั้ง `TAKKUB_SIM_PASSWORD` เอง (ค่าที่รู้กันทั่วไปและค่าสั้นกว่า 8 ตัวถูกปฏิเสธ) · จะเข้าจากเครื่องอื่นให้ใช้ reverse proxy ที่มีการยืนยันตัวตนหรือ VPN (README, SECURITY.md)
+
+### Added (เพิ่ม)
+
+- **เปิด cockpit อัตโนมัติเมื่อเปิดเครื่อง:** สวิตช์ใน Settings → ทั่วไป (ปิดเป็นค่าเริ่มต้น มีผลทันที) · Windows ลงทะเบียนที่ Run key ของผู้ใช้ (ไม่ต้อง admin, `pythonw.exe`) และตามสวิตช์ใน Task Manager → Startup apps · macOS เขียน LaunchAgent · dev กับตัวติดตั้งใช้ชื่อคนละรายการ · ย้าย/ติดตั้งใหม่แล้วรายการชี้ตัวปัจจุบันเองตอนบูต
+
+### Fixed (แก้ไข)
+
+- **หลาย pane รันงานหนักพร้อมกันจนเครื่องเต็มแล้ว cockpit แครช (#1064, #1063):**
+  - ตัวกันคำสั่งหนักรู้จักทุกรูปแบบการเรียก runner — `npx --no-install jest --silent --ci` (คำสั่งที่เปิด 15 worker จน RAM 40 GB เต็ม) เคยหลุดทั้งกฎ full-suite และด่านเครื่องไม่ว่างเพราะมี flag คั่น · ครอบ `npx|bunx|pnpx [flags]`, `<pm> exec|dlx`, `pnpm|yarn <tool>`, `node …/bin/<tool>.js`, `.bin/<tool>` และ redirect (`pytest > out.txt`) · เพิ่ม docker build, turbo, nx, cargo, go, gradle/maven, dotnet, `vitest` เปล่า
+  - งบ worker ต่อ pane คิดจากสเปกเครื่อง × โหมดเครื่อง (ไม่ใช่ตัวเลขตายตัว): ส่งเป็น `TAKKUB_WORKER_BUDGET` + ตัวแปรของ vitest / pytest-xdist / cargo ให้ทุก pane ทุก provider · jest/vitest ทั้งชุดที่ไม่ระบุจำนวน worker ถูกปฏิเสธพร้อมบอก flag ที่ต้องใส่ (Lead และ tester)
+  - RAM ว่างต่ำกว่าครึ่งของเส้น pause: ไม่รับ pane ใหม่ทุกชนิด (เดิมกันแค่งานที่ถูกจัดเป็น heavy) — เข้าคิวแล้วส่งเองเมื่อเครื่องฟื้น
+  - `takkub status` ขึ้นบรรทัด `[machine]`: RAM/CPU, pane ที่ทำงานอยู่ของทุกโปรเจกต์, งบ worker
+  - ตัวอ่านจอของ pane ทน error ทรัพยากรหมด (`WinError 1450/1455/8/14`, `MemoryError`) — เดิม thread ของ pywinpty ตายแล้ว pane หายพร้อมงาน · error กลุ่มนี้ไม่ถูกเปิดเป็น issue บั๊กของ cockpit อีก
+  - ยังไม่ได้ทำ: กู้งานที่ค้างให้อัตโนมัติหลัง cockpit ตายจริง
+- **UI ค้างถี่บน 2.2.60 (#1061, regression ของ #1044):** idle tick ไม่รอผลจาก background pool อีก (`_reap_role_messages`, ตัวอ่าน transcript ของ Remote = poll อย่างเดียว) · สถานะ overage ของบัญชีอ่านนอก main thread และจำไว้ 60 วิ · `_input_lines` (อ่านจอ pane) จำผลต่อ output generation แทนการ render ใหม่ทุกครั้ง · ลิงก์ skill หลัง Skill Learning ทำบน pool — ยังไม่ได้วัดผลบนเครื่องที่รายงาน
+- **assign ที่ยิงตอน pane กำลังปิดหายเงียบ (#1055):** การ dispatch ซ้ำหลัง close→respawn ที่ตั้งไว้บน timer ลองอีกครั้งเมื่อล้ม แล้วแจ้ง Lead ถ้ายังไม่สำเร็จ (เดิม exception/การปฏิเสธใน timer ไม่มีใครเห็น)
+- **คำเตือน `[spawn-failed]` เท็จ 1 วิหลังส่งต่องานคิว (#1060):** นาฬิกา "ไม่มี session" เริ่มนับใหม่เมื่อ pane ถูกปิดระหว่างรอ ไม่เอาเวลาที่รอ pane เดิมมานับ
+- **เพดานเวลา task นับรวมช่วงเครื่อง sleep (#1059):** นับเฉพาะเวลาที่เครื่องตื่น
+- **pane ที่ถูกหยุดด้วยเพดานเวลาถูก restart วนทุก ~10 นาที (#1048):** watchdog/idle reminder ข้าม pane ที่เพดานหยุดไว้จนกว่าผู้ใช้จะตัดสินใจ
+- **boot update ของ OpenCode (#1049 #1050 #1051):** ติดตั้ง/อัปเดตจาก `@opencode/cli` และถอน `opencode-ai` ตัวเก่าก่อน · `parse_version("opencode v2.3.2")` ได้ `2.3.2` (เดิม `3.2`) · ป้าย "มีอัพเดต" ใช้ผลเทียบเวอร์ชันชุดเดียวกับ logic จึงไม่เสนอดาวน์เกรด
+- **opencode 2.x: model ต่อ role ไม่มีผล (#1056):** 2.x ใช้ background server ตัวเดียวทั้งเครื่อง config ของ pane (model และ instructions ของ role) จึงไม่ถูกอ่าน — pane บน 2.x เปิดด้วย `--standalone` · model id ที่ไม่มี `provider/` ไม่ถูกส่งต่อ (หลักฐาน: `docs/audit/2026-11-26-opencode-2x-model-effort.md`)
+- **Settings: ป้าย effort (#1053, #1052):** แยก "provider นี้ยังไม่รองรับ effort" ออกจาก "model นี้ไม่มี effort" · opencode ยังไม่มีช่องรับ effort ที่ยืนยันได้ (ไม่มี model ไหนมี `#variant`) — อัปเดตหมายเหตุ GAP ให้อ้าง 2.4.2
+- **`issue list` เตือน unreconciled ไม่หายหลัง `close --local` (#1054):** record ในเครื่องที่ปิดแล้วแสดงได้แต่ไม่เตือน
+- **events.log (#1062):** การคลิกลิงก์/ไฟล์เขียนเป็น JSON event และตัด query string (`?k=…`) ออก
+- **Lead ใช้ slot ของ provider ที่ปิดเป็นมือเพิ่ม (#1058):** นโยบายระบุชัดว่าห้าม พร้อมทางเลือกเมื่อ role ไม่ว่าง · คำเตือนสลับ provider แจ้งครั้งเดียวต่อคู่ provider ต่อ session — ยังไม่ได้ทำ guard ที่ปฏิเสธ assign และการให้ pane ทดแทน self-verify งาน UI
+- **CodeQL #67:** เทส redact ไม่ใช้การเช็ก URL แบบ substring อีก
+
 ## [v2.2.60] - 2026-11-21
 
 ปิด issue ที่เปิดอยู่ทั้ง 13 ใบ (#1035–#1047) — รายงานถึง Codex Lead ค้างใน queue ท้ายเทิร์น, UI ค้างจาก I/O บน main thread, ใบงานส่วนใหญ่ไม่ได้ project context, impact plan ทำให้งานที่เสร็จถูกบันทึกเป็น FAILED, opencode 3 ใบ

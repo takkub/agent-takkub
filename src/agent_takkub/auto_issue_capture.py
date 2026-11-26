@@ -114,6 +114,33 @@ def _scrub_home(text: str) -> str:
     return text
 
 
+# `C:\Users\<name>`, `c:/users/<name>`, `/home/<name>`, `/Users/<name>` — any
+# separator run (a repr'd traceback doubles its backslashes), any case. The
+# name stops at a separator, whitespace or a character no path component
+# carries, so an already-scrubbed `<user>` is left alone.
+_USER_PATH_RE = re.compile(
+    r"((?:\b[a-z]:)?[\\/]+(?:users|home)[\\/]+)([^\\/\s\"'<>|:*?`]+)",
+    re.IGNORECASE,
+)
+
+
+def _scrub_user_paths(text: str) -> str:
+    """Replace the account name in ANY user-profile path with ``<user>``.
+
+    ``_scrub_home`` only knows the home of whoever runs the cockpit. A
+    traceback or log line can name another account's profile (a second
+    Windows user, a service account, a path pasted from another machine),
+    and that name went to a public issue as is. Run after ``_scrub_home``.
+    """
+    return _USER_PATH_RE.sub(lambda m: m.group(1) + "<user>", text)
+
+
+def scrub_paths(text: str) -> str:
+    """``_scrub_home`` then ``_scrub_user_paths`` — every title and body goes
+    through this before it leaves the machine."""
+    return _scrub_user_paths(_scrub_home(text))
+
+
 def _signature(exc_type: type[BaseException], exc_tb) -> str:
     """Short signature: exception class + last agent_takkub frame (file:line).
 
@@ -274,6 +301,23 @@ def capture_cockpit_crash(exc_type, exc_value, exc_tb, *, source: str) -> None:
     """
     if _auto_issue_suppressed():
         return
+    # #1063: "the machine ran out of memory" is not a cockpit bug. It stays in
+    # boot.log (the caller wrote it) and events.log, never in the tracker.
+    from .resource_errors import is_resource_exhaustion
+
+    if is_resource_exhaustion(exc_value):
+        try:
+            from .orchestrator_text import _log_event
+
+            _log_event(
+                "resource_exhaustion_exception",
+                exc=getattr(exc_type, "__name__", "?"),
+                winerror=getattr(exc_value, "winerror", None),
+                source=str(source)[:80],
+            )
+        except Exception:
+            pass
+        return
     try:
         sig = _signature(exc_type, exc_tb)
         now = time.time()
@@ -289,9 +333,9 @@ def capture_cockpit_crash(exc_type, exc_value, exc_tb, *, source: str) -> None:
             _recent.update(pruned)
 
         tb_text = "".join(traceback.format_exception(exc_type, exc_value, exc_tb))
-        tb_text = _redact(_scrub_home(tb_text))[-_MAX_TB_CHARS:]
+        tb_text = _redact(scrub_paths(tb_text))[-_MAX_TB_CHARS:]
         exc_name = exc_type.__name__
-        exc_msg = _redact(_scrub_home(str(exc_value)))[:_MAX_MSG_CHARS]
+        exc_msg = _redact(scrub_paths(str(exc_value)))[:_MAX_MSG_CHARS]
     except Exception:
         return
 
@@ -354,6 +398,12 @@ def capture_cockpit_crash(exc_type, exc_value, exc_tb, *, source: str) -> None:
                 f"version: {__version__}\n\n"
                 f"```\n{tb_text}\n```"
             )
+            # Last gate before the network: the assembled title and body, not
+            # only the pieces scrubbed above. (`_redact` already ran on the
+            # free text; it is not run on the title, whose only content is a
+            # class name and `file.py:line` — its 20+ character catch-all
+            # would blank a long module name.)
+            title, body = scrub_paths(title), scrub_paths(body)
             issues.new_issue(
                 title,
                 body,

@@ -220,6 +220,14 @@ def _build_pane_env(project_ns: str | None = None) -> dict[str, str]:
     _apply_color_term(env)
     if project_ns is not None:
         _apply_artifacts_dir(env, project_ns)
+    # #1064: this machine's per-pane worker budget, for any tool that reads
+    # its worker count from the environment.
+    try:
+        from .machine_load import apply_worker_budget_env
+
+        apply_worker_budget_env(env)
+    except Exception:
+        pass
     return env
 
 

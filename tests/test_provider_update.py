@@ -322,6 +322,8 @@ class TestNpmSerialisation:
 
         def fake_run(argv, timeout):
             nonlocal inflight, overlapped
+            if argv[1] == "ls":  # read-only legacy-package probe (#1049): unlocked
+                return subprocess.CompletedProcess(args=argv, returncode=1, stdout="", stderr="")
             inflight += 1
             if inflight > 1:
                 overlapped = True
@@ -341,7 +343,7 @@ class TestNpmSerialisation:
             t.join(timeout=20)
         assert not any(t.is_alive() for t in threads)
         assert overlapped is False
-        assert sorted(seen) == ["@openai/codex", "opencode-ai"]
+        assert sorted(seen) == ["@openai/codex", "@opencode/cli"]
 
     def test_uv_provider_does_not_take_the_npm_lock(self, monkeypatch: pytest.MonkeyPatch) -> None:
         name = _register_uv_provider(monkeypatch)

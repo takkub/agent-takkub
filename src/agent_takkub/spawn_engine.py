@@ -993,6 +993,10 @@ class PaneState:
     assign_ts: float = 0.0
     # Per-task hard elapsed-time limit (#655512b2); no token cap (user 2026-10-24).
     task_budget_halted: bool = False
+    # Seconds of the current task the machine spent asleep (#1059) — taken
+    # off the elapsed time the budget compares against its cap. `assign_ts`
+    # itself is never shifted: the evidence scan needs the real dispatch time.
+    task_asleep_s: float = 0.0
     budget_task_text: str = ""
     task_spec_confirmation_digest: str = ""
     lead_cached_compact_marker: int = 0
@@ -3797,6 +3801,12 @@ class SpawnEngineMixin:
         autonomy_argv = list(
             spec.autonomy_flags.get(sys.platform, spec.autonomy_flags.get("default", []))
         )
+        if spec.runtime_argv is not None:
+            # Flags that depend on the CLI version actually installed (#1056).
+            try:
+                autonomy_argv.extend(spec.runtime_argv())
+            except Exception:
+                _log.exception("runtime_argv failed for %s; spawning without it", spec.name)
         if _is_lead:
             # A Codex Lead runs with the same autonomy flags as every
             # Codex pane. The #842 OS sandbox for a restricted Lead was
@@ -3886,6 +3896,23 @@ class SpawnEngineMixin:
             provider_model = _ps_initial.model_override or (
                 effective_model_for_v2(settings_role, spec.name, project=project_ns) or ""
             )
+            if (
+                provider_model
+                and spec.model_id_pattern
+                and not re.fullmatch(spec.model_id_pattern, provider_model)
+            ):
+                # #1056: an id this CLI cannot resolve (opencode needs
+                # `provider/model`) would be handed over as is and the pane
+                # would come up on some other model, or not at all. Leave the
+                # CLI on its own default and say so.
+                _log_event(
+                    "spawn_model_id_rejected",
+                    role=role_name,
+                    project=project_ns,
+                    provider=spec.name,
+                    model=provider_model,
+                )
+                provider_model = ""
             if provider_model and spec.model_config_env:
                 # #1036: this CLI's TUI takes its model from config, not argv.
                 from .pane_instructions import merge_config_value

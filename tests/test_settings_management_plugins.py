@@ -152,9 +152,16 @@ class TestGet:
     def test_get_governable_plugin_lists_allowed_roles(
         self, redirect_stores: _FakeRegistry
     ) -> None:
+        from agent_takkub import pane_tools_policy
+
+        # 2.2.61: no role gets an optional marketplace by default…
+        assert plugins_repo.get("github@claude-plugins-official").allowed_roles == ()
+        # …only through its own override.
+        assert pane_tools_policy.set_role_items(
+            "frontend", "plugins", ["pordee", "claude-plugins-official"]
+        )
         detail = plugins_repo.get("github@claude-plugins-official")
         assert detail.governable is True
-        # frontend defaults to _DESIGN_PLUGINS which includes claude-plugins-official
         assert "frontend" in detail.allowed_roles
 
     def test_get_ungovernable_marketplace_has_no_allowed_roles(

@@ -1151,6 +1151,15 @@ def _build_main_window():
             _boot_log(f"removed-integration cleanup: {cleaned}")
     except Exception as e:  # pragma: no cover - defensive, must never block boot
         _boot_log(f"removed-integration cleanup errored: {type(e).__name__}: {e}")
+    try:
+        # An enabled start-at-sign-in entry follows the venv this cockpit
+        # runs from (reinstall / moved install). No-op when the switch is off.
+        from . import autostart
+
+        if autostart.refresh_if_stale():
+            _boot_log("autostart entry re-pointed at the current interpreter")
+    except Exception as e:  # pragma: no cover - defensive, must never block boot
+        _boot_log(f"autostart refresh errored: {type(e).__name__}: {e}")
     return MainWindow()
 
 

@@ -139,6 +139,10 @@ class ProviderSpec:
     # First token is resolved via shutil.which at run time (npm → npm.cmd on
     # Windows), so keep it a bare program name.
     install_command: list[str] | None = None
+    # npm package names this provider used to be published under. They ship
+    # the same bin name, so install/update removes one that is still
+    # installed globally before running `install_command` (#1049).
+    legacy_npm_packages: tuple[str, ...] = ()
     # One-time post-install step the cockpit can NOT do for the user
     # (interactive login/OAuth). Shown after a successful install.
     post_install_note: str = ""
@@ -348,6 +352,12 @@ class ProviderSpec:
     # and `model_flag` is NOT put on its argv (it still marks "this provider
     # has per-role models" and is what one-shot subcommands take).
     model_config_env: str | None = None
+    # #1056: regex a model id must fully match for this CLI to resolve it
+    # (opencode: `provider/model`). An id that does not is not passed at all.
+    model_id_pattern: str | None = None
+    # #1056: argv that depends on the CLI version installed on this machine,
+    # resolved at spawn (opencode 2.x: a private server per pane).
+    runtime_argv: Callable[[], list[str]] | None = None
     tools_flag: str | None = None
     autocompact_flag: str | None = None
     # Slash command the idle-compact watchdog types to compact this CLI's
@@ -641,6 +651,12 @@ def _discover_opencode() -> str | None:
     from .opencode_helper import find_opencode_executable
 
     return find_opencode_executable()
+
+
+def _opencode_runtime_argv() -> list[str]:
+    from .opencode_helper import private_server_argv
+
+    return private_server_argv()
 
 
 def _discover_cursor() -> str | None:
@@ -1493,10 +1509,14 @@ opencode_spec = ProviderSpec(
     native_subagent_hint='task tool subagent_type="general" (opencode agent list มี general/explore)',
     native_subagent_dispatch="the task tool with subagent_type='general'",
     install_instructions=(
-        "opencode binary not on PATH. Install with `npm install -g opencode-ai`, "
+        "opencode binary not on PATH. Install with `npm install -g @opencode/cli`, "
         "then run `opencode auth login` once to connect a model provider."
     ),
-    install_command=["npm", "install", "-g", "opencode-ai"],
+    # opencode 2.x is published as `@opencode/cli`; `opencode-ai` is the
+    # frozen 1.x line. Both ship a bin named `opencode`, so the old package
+    # is removed before the new one goes in (#1049).
+    install_command=["npm", "install", "-g", "@opencode/cli"],
+    legacy_npm_packages=("opencode-ai",),
     post_install_note="run `opencode auth login` once to connect a model provider",
     custom_discovery_fn=_discover_opencode,
     # `--auto` = auto-approve permissions not explicitly denied (opencode
@@ -1561,12 +1581,18 @@ opencode_spec = ProviderSpec(
     model_flag="--model",  # `-m provider/model` — per-role model selection hook
     # #1036: opencode 2.3.2 moved `--model` under `opencode run`; the TUI
     # exits 1 on it ("Unrecognized flag: --model"), twice, then respawn-capped.
-    # The config `model` key works on both lines — verified on 1.19.5
-    # (`opencode debug config` shows the env value merged) and is what 2.x
-    # documents. Not verified live on 2.3.2: no 2.x binary on the dev machine.
+    # The config `model` key works on both lines — verified on 1.19.5 and on
+    # 2.4.2 (`opencode debug config` shows the env value merged). On 2.x it
+    # only reaches a server the pane starts itself, hence `runtime_argv`
+    # (#1056, docs/audit/2026-11-26-opencode-2x-model-effort.md).
     model_config_env="OPENCODE_CONFIG_CONTENT",
-    # GAP (#103): opencode 1.18.4 `opencode --help` exposes no reasoning-effort
-    # flag. Keep None so the generic spawn path cannot pass an invented option.
+    model_id_pattern=r"[^/\s]+/\S+",
+    runtime_argv=_opencode_runtime_argv,
+    # GAP (#103/#1052): no reasoning-effort flag on 1.19.5 or 2.4.2. 2.x
+    # `opencode run -m provider/model#variant` names a variant syntax, but
+    # `opencode models` lists no `#variant` for any model (2.4.2, 2026-11-26),
+    # so there is nothing verified to offer. Keep None so the generic spawn
+    # path cannot pass an invented option.
     effort_flag=None,
     produces_jsonl_transcript=False,
     # #103 (2026-08-31): confirmed real `message.data.tokens` block
@@ -2318,6 +2344,19 @@ def effort_levels_for(provider: str, model: str | None) -> tuple[str, ...]:
     if model and model.strip() in _MODELS_WITHOUT_EFFORT.get(provider, frozenset()):
         return ()
     return spec.effort_levels
+
+
+def effort_unsupported_reason(provider: str, model: str | None) -> str:
+    """Why `effort_levels_for` is empty: ``"provider"`` (the CLI takes no
+    effort argument for any model — changing the model will not help),
+    ``"model"`` (only this model lacks it), or ``""`` when effort is
+    selectable. Lets the Settings label say which one it is (#1053)."""
+    if effort_levels_for(provider, model):
+        return ""
+    spec = PROVIDER_REGISTRY.get(provider)
+    if spec is None or not spec.effort_flag:
+        return "provider"
+    return "model"
 
 
 # ── close-time scaffolding filter (#272) ────────────────────────────────────

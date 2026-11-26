@@ -142,17 +142,27 @@ class SkillLearningMixin:
     def _on_skill_learning_report(self, project_ns: str, line: str) -> None:
         """Qt thread. Digest-able (not a blocking notice) — Lead sees it batched."""
         _log_event("skill_learning_report", project=project_ns, line=line[:200])
+
         # #816: link a just-landed project skill into the project's
         # `.claude/skills/` now — panes already running would otherwise only
         # see it after a respawn ("Unknown skill" in the Skill tool).
-        try:
-            from .lead_context import _allowed_project_roots
-            from .skill_scan import ensure_project_skill_links
+        # #1061: off the Qt thread — one `lstat` per skill held the UI 10.1 s.
+        def _link(p=project_ns) -> None:
+            try:
+                from .lead_context import _allowed_project_roots
+                from .skill_scan import ensure_project_skill_links
 
-            for root in _allowed_project_roots(project_ns):
-                ensure_project_skill_links(root, project_ns)
-        except Exception as exc:
-            _log_event("skill_learning_link_error", project=project_ns, error=str(exc)[:200])
+                for root in _allowed_project_roots(p):
+                    ensure_project_skill_links(root, p)
+            except Exception as exc:
+                _log_event("skill_learning_link_error", project=p, error=str(exc)[:200])
+
+        try:
+            from . import bg_pool
+
+            bg_pool.submit(_link)
+        except Exception:
+            _link()
         self._notify_lead(
             project_ns,
             line,

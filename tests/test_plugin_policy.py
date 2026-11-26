@@ -6,10 +6,10 @@ addy-agent-skills alone ships 44 skills + 7 agents (~3-5k tokens) that
 duplicate the role `.md` prompts + takkub's own role panes, so it was pure
 context bloat on every pane. The role policy trims what each pane receives:
 
-  * lead       → pordee only (orchestrates, doesn't implement)
-  * teammates  → superpowers-dev + pordee (TDD/debug/brainstorm for real work)
-  * addy-agent-skills → dropped for every role
-  * no role    → full _SAFE_PLUGINS set (back-compat for direct callers)
+  * every role → pordee only (2.2.61: the base is the same on every machine)
+  * optional marketplaces → only through a role's own Settings override
+  * addy-agent-skills → not grantable at all
+  * no role    → the governable set found on disk (direct callers)
 """
 
 from __future__ import annotations
@@ -70,59 +70,50 @@ def isolate_profiles(
 
 
 class TestRolePluginPolicy:
-    def test_lead_gets_only_pordee(self, fake_cache: pathlib.Path) -> None:
-        joined = " ".join(_default_plugin_dirs("lead"))
-        assert "pordee" in joined
-        assert "superpowers-dev" not in joined
-        assert "addy-agent-skills" not in joined
+    """2.2.61: one base for every role — pordee. The fake cache still holds
+    the retired marketplaces, as a machine that was provisioned earlier does."""
 
-    def test_teammate_gets_superpowers_and_pordee_not_addy(self, fake_cache: pathlib.Path) -> None:
-        joined = " ".join(_default_plugin_dirs("backend"))
-        assert "superpowers-dev" in joined
-        assert "pordee" in joined
-        assert "addy-agent-skills" not in joined
+    ALL_ROLES = (
+        "lead",
+        "frontend",
+        "backend",
+        "mobile",
+        "devops",
+        "qa",
+        "reviewer",
+        "critic",
+        "designer",
+        "some-new-role",
+    )
 
-    def test_addy_dropped_from_every_role(self, fake_cache: pathlib.Path) -> None:
-        for role in (
-            "lead",
-            "frontend",
-            "backend",
-            "mobile",
-            "devops",
-            "qa",
-            "reviewer",
-            "critic",
-            "designer",
-        ):
-            assert "addy-agent-skills" not in " ".join(_default_plugin_dirs(role))
+    def test_every_role_gets_only_the_base(self, fake_cache: pathlib.Path) -> None:
+        for role in self.ALL_ROLES:
+            joined = " ".join(_default_plugin_dirs(role))
+            assert "pordee" in joined, role
+            for retired in ("superpowers-dev", "addy-agent-skills", "ui-ux-pro-max-skill"):
+                assert retired not in joined, (role, retired)
 
-    def test_no_role_is_backcompat_full_set(self, fake_cache: pathlib.Path) -> None:
-        """Direct callers with no role still get the full discovered set."""
+    def test_a_role_override_can_still_grant_an_optional_marketplace(
+        self, fake_cache: pathlib.Path
+    ) -> None:
+        from agent_takkub import pane_tools_policy
+
+        assert pane_tools_policy.set_role_items(
+            "frontend", "plugins", ["pordee", "superpowers-dev"]
+        )
+        joined = " ".join(_default_plugin_dirs("frontend"))
+        assert "superpowers-dev" in joined and "pordee" in joined
+        assert "superpowers-dev" not in " ".join(_default_plugin_dirs("backend"))
+
+    def test_addy_is_not_grantable_at_all(self, fake_cache: pathlib.Path) -> None:
+        """Dead since long before 2.2.61 — not even in the governable list."""
+        assert "addy-agent-skills" not in " ".join(_default_plugin_dirs())
+
+    def test_no_role_is_the_governable_set_on_disk(self, fake_cache: pathlib.Path) -> None:
+        """Direct callers with no role (doctor, smoke tests) see what is
+        installed and governable."""
         joined = " ".join(_default_plugin_dirs())
-        assert "superpowers-dev" in joined
-        assert "pordee" in joined
-        assert "addy-agent-skills" in joined
-
-    def test_unknown_role_falls_back_to_teammate_set(self, fake_cache: pathlib.Path) -> None:
-        """A future/unclassified role is treated as a teammate, not lead."""
-        joined = " ".join(_default_plugin_dirs("some-new-role"))
-        assert "superpowers-dev" in joined
-        assert "pordee" in joined
-        assert "addy-agent-skills" not in joined
-
-    def test_design_roles_get_ui_ux_pro_max(self, fake_cache: pathlib.Path) -> None:
-        """frontend/critic/designer inject the UI/UX Pro Max design skill."""
-        for role in ("frontend", "critic", "designer"):
-            joined = " ".join(_default_plugin_dirs(role))
-            assert "ui-ux-pro-max-skill" in joined, role
-            # still get the normal teammate set too
-            assert "superpowers-dev" in joined
-
-    def test_non_design_roles_do_not_get_ui_ux(self, fake_cache: pathlib.Path) -> None:
-        """backend/qa/devops must NOT pay for the design skill's context."""
-        for role in ("backend", "qa", "devops", "reviewer", "lead"):
-            joined = " ".join(_default_plugin_dirs(role))
-            assert "ui-ux-pro-max-skill" not in joined, role
+        assert "pordee" in joined and "superpowers-dev" in joined
 
 
 class TestCustomProfilePluginDirs:
@@ -136,7 +127,7 @@ class TestCustomProfilePluginDirs:
         with_project = " ".join(_default_plugin_dirs("backend", project="unregistered-proj"))
         without_project = " ".join(_default_plugin_dirs("backend"))
         assert with_project == without_project
-        assert "superpowers-dev" in with_project
+        assert "pordee" in with_project
 
     def test_custom_profile_project_uses_its_own_cache(
         self, isolate_profiles, tmp_path: pathlib.Path
@@ -171,7 +162,7 @@ class TestCustomProfilePluginDirs:
         isolate_profiles.set_profile("myproj", "work")
 
         joined = " ".join(_default_plugin_dirs("backend", project="other-proj"))
-        assert "superpowers-dev" in joined
+        assert "pordee" in joined
         assert str(custom_config_dir) not in joined
 
 

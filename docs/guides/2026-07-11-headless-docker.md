@@ -40,8 +40,11 @@ This builds the image from the repo's `Dockerfile` and mounts:
   `agents/`, `remote.json`, everything else `config.DATA_HOME`/
   `SETTINGS_HOME` touches, so it survives container restarts.
 
-The container exposes port `8899` (the remote-control HTTP server the PWA
-talks to — see `src/agent_takkub/remote/config.py`'s `bind_port`). `cli_server`'s own TCP
+The container publishes port `8899` on the host's `127.0.0.1` only (the
+remote-control HTTP server the PWA talks to — see
+`src/agent_takkub/remote/config.py`'s `bind_port`). To reach it from another
+machine use an authenticating reverse proxy or a VPN, never a directly
+published port (see `SECURITY.md`). `cli_server`'s own TCP
 protocol (the `takkub` CLI) binds loopback-only and is only reachable from
 inside the container.
 

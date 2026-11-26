@@ -50,12 +50,78 @@ class _BackendBase:
         return self._proc.exitstatus
 
 
+from .resource_errors import is_resource_exhaustion  # noqa: E402
+
+_READER_MAX_RESOURCE_RETRIES = 600  # x up to 0.5 s back-off = ~5 min of starvation
+
+
+def _resilient_read_in_thread(address, pty, blocking: bool) -> None:
+    """pywinpty's pane reader loop, surviving a starved machine (#1063).
+
+    Upstream's loop ends with a bare ``time.sleep(1e-3)`` outside its ``try``
+    and treats every read error as the end of the stream. With RAM/CPU at
+    100% that sleep raised ``OSError: [WinError 1450]`` and the thread died:
+    the pane's process kept running but nothing it printed reached the
+    cockpit again — the pane and its task were simply gone. Same protocol as
+    upstream; resource-exhaustion errors are waited out instead."""
+    import socket
+    import time
+
+    client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    client.connect(address)
+    starved = 0
+    while True:
+        try:
+            data = pty.read(blocking=blocking) or "0011Ignore"
+            try:
+                client.send(bytes(data, "utf-8"))
+            except OSError:
+                break
+            if pty.iseof():
+                try:
+                    client.send(b"")
+                except OSError:
+                    pass
+                break
+            starved = 0
+            time.sleep(1e-3)
+        except BaseException as exc:
+            if not is_resource_exhaustion(exc):
+                break
+            starved += 1
+            if starved > _READER_MAX_RESOURCE_RETRIES:
+                break
+            try:
+                time.sleep(min(0.5, 0.01 * starved))
+            except BaseException:
+                pass  # the sleep itself can be the call that fails
+    try:
+        client.close()
+    except OSError:
+        pass
+
+
+def _install_resilient_winpty_reader() -> None:
+    """Swap pywinpty's reader for ours. ``PtyProcess`` looks the function up
+    in its module at thread start, so one assignment covers every later
+    spawn. Best-effort: a pywinpty that moved it keeps its own reader."""
+    try:
+        from winpty import ptyprocess as _winpty_ptyprocess
+
+        if hasattr(_winpty_ptyprocess, "_read_in_thread"):
+            _winpty_ptyprocess._read_in_thread = _resilient_read_in_thread
+    except Exception:
+        pass
+
+
 class _WinptyBackend(_BackendBase):
     """pywinpty (ConPTY) backend. ``read`` yields ``str``; normalise to bytes."""
 
     @classmethod
     def spawn(cls, argv: Sequence[str], cwd, env, rows: int, cols: int) -> _WinptyBackend:
         import winpty  # `pywinpty` package, imported module name is `winpty`
+
+        _install_resilient_winpty_reader()
 
         # L1 (cross-platform audit 2026-07-10, repro'd on this machine): pass
         # argv as a LIST, never a pre-joined cmdline string. pywinpty's own

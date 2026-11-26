@@ -381,6 +381,46 @@ class TestSpinnerBlindspotsFixed:
         _check_stuck(fake, now)
         assert fake.recover_calls == [("backend", "p")]
 
+    def test_task_stopped_by_time_cap_is_never_recovered_1048(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Same wedged-looking pane, but the cockpit itself stopped its task
+        at the time cap: it must stay put (it used to be closed and respawned
+        with the task every STUCK_THRESHOLD_S)."""
+
+        class _Shot:
+            @staticmethod
+            def singleShot(ms, fn):
+                fn()
+
+        monkeypatch.setattr("agent_takkub.orchestrator.QTimer", _Shot)
+        fake = _FakeOrchForContentDelta()
+        now = 2_000_000.0
+        pane = MagicMock()
+        pane.state = "working"
+        pane._session_cwd = "/proj"
+        pane._last_output_ts = now - 1
+        sess = MagicMock()
+        sess.is_alive = True
+        sess.is_blocked_on_tty_prompt.return_value = None
+        sess.is_blocked_on_permission_prompt.return_value = None
+        sess.is_at_update_splash.return_value = False
+        sess.display_lines.return_value = ["⠋ 5:12  esc to interrupt"]
+        pane.session = sess
+        fake._panes_by_project["p"] = {"backend": pane}
+        ps = fake._ps("p::backend")
+        ps.last_content_hash = _EMPTY_FILTERED_HASH
+        ps.last_content_change_ts = now - STUCK_THRESHOLD_S - 5
+        ps.task_budget_halted = True
+
+        _check_stuck(fake, now)
+        assert fake.recover_calls == []
+        # and the recover entry point itself refuses, whoever calls it
+        closed: list = []
+        fake.close = lambda *a, **k: closed.append(a) or (True, "ok")  # type: ignore[method-assign]
+        Orchestrator._auto_recover_stuck(fake, "backend", "p", pane, now)  # type: ignore[arg-type]
+        assert closed == []
+
     def test_real_content_change_resets_stuck_clock(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """When non-spinner content changes the watchdog must NOT recover the pane."""
 

@@ -699,15 +699,23 @@ def list_issues(
                 )
             except RuntimeError:
                 local_backlog = []
-            if local_backlog:
+            # #1054: a local record the user already closed is settled — it
+            # needs no GitHub twin, so it is still listed but never warned
+            # about (the warning told people to run the close they had just
+            # run, forever).
+            still_open = [
+                i for i in local_backlog if str(i.get("status", "open")).lower() == "open"
+            ]
+            if still_open:
                 local_path = _actual_local_issues_path(local_cwd)
                 print(
-                    f"⚠ takkub issue: {len(local_backlog)} unreconciled local issue(s) found in "
-                    f"{local_path} (not on GitHub) — included below; close with "
-                    "'takkub issue close --local N' or reconcile manually.",
+                    f"⚠ takkub issue: {len(still_open)} open local issue(s) in "
+                    f"{local_path} never reached GitHub — included below. Re-file each "
+                    "with 'takkub issue new' (same title = linked automatically on the "
+                    "next list), or drop it with 'takkub issue close --local N'.",
                     file=sys.stderr,
                 )
-                results.extend(local_backlog)
+            results.extend(local_backlog)
             return results
         except RuntimeError:
             use_local = True

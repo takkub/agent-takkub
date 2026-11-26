@@ -113,7 +113,6 @@ def test_discover_marketplaces_intersects_safe_plugins(tmp_path):
     # Marketplace names (not name@marketplace), deduped, ∩ _SAFE_PLUGINS, sorted.
     # claude-obsidian-marketplace is dropped — pane injection can never load it.
     assert discover_marketplaces(installed) == [
-        "addy-agent-skills",
         "claude-plugins-official",
         "pordee",
         "superpowers-dev",

@@ -677,7 +677,7 @@ def _open_codex_rollout(pid: int) -> tuple[str, str] | None:
 
 # #1005: how long one poll tick may wait for its transcript read before
 # leaving it to a later tick (the read itself runs on `_tail_io`).
-_TAIL_IO_WAIT_S = 0.05
+_TAIL_IO_WAIT_S = 0.0  # #1061: poll only — the next 200 ms tick takes the result
 
 
 def _read_tail_delta(path: Path, offset: int) -> bytes | None:

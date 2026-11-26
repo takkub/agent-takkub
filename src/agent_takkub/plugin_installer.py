@@ -49,11 +49,21 @@ class RecommendedPlugin:
     pane_loaded: bool = True
 
 
-# The dev-team set. Order = display order. superpowers has its own marketplace;
-# the rest share Anthropic's official one. security-guidance + remember register
-# SessionStart command hooks, so they're installed + user-enabled but NOT pushed
-# into every pane (pane_loaded=False) — see lead_context._PANE_PLUGIN_DENYLIST.
-RECOMMENDED: tuple[RecommendedPlugin, ...] = (
+# What the cockpit installs for every user. Empty since 2.2.61: the base is
+# pordee alone (config._SAFE_PLUGINS), and the set below — the old "dev-team
+# set" — is RETIRED: no longer installed, and uninstalled once from machines
+# an earlier version provisioned (`removed_integrations.cleanup_retired_plugins`).
+RECOMMENDED: tuple[RecommendedPlugin, ...] = ()
+
+RETIRED: tuple[RecommendedPlugin, ...] = (
+    RecommendedPlugin(
+        "agent-skills",
+        "addy-agent-skills",
+        "addyosmani/agent-skills",
+        "Agent Skills",
+        "dropped from every role long before 2.2.61",
+        pane_loaded=False,
+    ),
     RecommendedPlugin(
         "superpowers",
         "superpowers-dev",

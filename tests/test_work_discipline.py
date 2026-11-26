@@ -252,6 +252,57 @@ def test_task_budget_watchdog_interrupts_and_logs_once(monkeypatch, tmp_path):
     assert len(rows) == 1
 
 
+def test_task_time_cap_counts_awake_time_only(monkeypatch, tmp_path):
+    """#1059: a machine that slept 13h mid-task woke to "task exceeded 120
+    minutes" after 42 minutes of real work."""
+    from agent_takkub import config
+    from agent_takkub import orchestrator as orch_mod
+
+    writes = []
+    pane = SimpleNamespace(
+        provider="claude",
+        model=SimpleNamespace(provider_name="claude"),
+        session=SimpleNamespace(is_alive=True, write=lambda d: writes.append(d) or True),
+        _last_output_ts=0.0,
+    )
+    state = SimpleNamespace(
+        last_assigned_task="ongoing",
+        task_budget_halted=False,
+        assign_ts=1000.0,
+        task_asleep_s=0.0,
+        last_assigned_scope="tiny",
+        last_content_change_ts=None,
+        last_send_ts=0.0,
+        last_tool_marker_seen_ts=0.0,
+        last_stream_tokens_ts=0.0,
+    )
+    orch = SimpleNamespace(
+        _panes_by_project={"proj": {"backend": pane}},
+        _pane_state={"proj::backend": state},
+        _ps=lambda key: state,
+        _notify_lead=lambda *args, **kwargs: None,
+        taskBudgetNotice=SimpleNamespace(emit=lambda *args: None),
+        _watchdog_last_tick_wall_ts=1030.0,
+    )
+    monkeypatch.setattr(config, "SETTINGS_HOME", tmp_path)
+    monkeypatch.setattr(orch_mod, "EVENTS_LOG", tmp_path / "events.log")
+    (tmp_path / "work-discipline.json").write_text(
+        json.dumps({"limits": {"tiny": {"minutes": 1}}}), encoding="utf-8"
+    )
+    monkeypatch.setenv("TAKKUB_EVENTS_LOG_SYNC", "1")
+
+    woke = 1030.0 + 46_000  # 30s of work, then the machine slept ~12.8h
+    orch_mod.Orchestrator._absorb_watchdog_sleep_gap(orch, woke)
+    assert state.task_asleep_s == 46_000
+    assert state.assign_ts == 1000.0  # evidence scan still sees the real dispatch time
+    orch_mod.Orchestrator._check_task_work_limits(orch, now=woke + 5)
+    assert writes == [] and not state.task_budget_halted  # 35s awake < 60s cap
+    orch_mod.Orchestrator._check_task_work_limits(orch, now=woke + 40)
+    assert writes == ["\x03"] and state.task_budget_halted  # 70s awake
+    row = json.loads((tmp_path / "events.log").read_text(encoding="utf-8").splitlines()[-1])
+    assert row["event"] == "task_work_budget_exceeded" and row["elapsed_seconds"] == 70
+
+
 def test_budget_resume_uses_a_real_qt_signal_receiver():
     from PyQt6.QtCore import QObject
 

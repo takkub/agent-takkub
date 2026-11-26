@@ -383,7 +383,12 @@ _EVIDENCE_STAT_RETRY_SLEEP_SEC = 0.05
 _EVIDENCE_SCAN_BUDGET_SEC = 3.0
 _EVIDENCE_SCAN_TIMED_OUT = object()
 # #1044: per-project budget for the idle tick's `role_messages` read.
-_ROLE_MESSAGES_READ_BUDGET_SEC = 0.25
+# #1061: 0 = poll only. Even a 0.25 s wait was the commonest stall stack on
+# 2.2.60 — with worker threads busy, waking from the wait took seconds.
+_ROLE_MESSAGES_READ_BUDGET_SEC = 0.0
+# #1061: how long the idle tick trusts its last "is this account in overage"
+# answer before asking the disk again (off-thread).
+_OVERAGE_STATE_TTL_SEC = 60.0
 # Cap how many paths get pasted into a done notice — a shot-happy QA run can
 # produce dozens; Lead only needs the most recent handful.
 _EVIDENCE_MAX_FILES = 10
@@ -4242,6 +4247,49 @@ class Orchestrator(
         else:
             self._dispatch_next_assignment(project, role)
 
+    def _redispatch_assign(
+        self, role_name: str, cwd: str | None, task: str, *, _attempt: int = 1, **kwargs
+    ) -> None:
+        """Run the `_assign_dispatch` a close→respawn step scheduled on a
+        timer, and never let it end without a word (#1055).
+
+        The CLI acked "task queued" long before this runs and nothing reads a
+        timer callback's return value: a refusal or an exception here left the
+        role closed, the backlog card "กำลังทำ" and the Lead untold for 20
+        minutes. One retry (the old session may still be exiting), then the
+        Lead is told the task did not land — unless the dispatch already said
+        so itself."""
+        project_ns = self._resolve_project(kwargs.get("project"))
+        warned_before = getattr(self, "_spawn_failed_warn_seq", 0)
+        try:
+            result = self._assign_dispatch(role_name, cwd, task, **kwargs)
+            ok = not (isinstance(result, tuple) and result and result[0] is False)
+            reason = str(result[1]) if isinstance(result, tuple) and len(result) > 1 else ""
+        except Exception as e:
+            ok, reason = False, f"{type(e).__name__}: {e}"
+        if ok:
+            return
+        _log_event(
+            "assign_redispatch_failed",
+            role=role_name,
+            project=project_ns,
+            attempt=_attempt,
+            reason=reason[:200],
+        )
+        if getattr(self, "_spawn_failed_warn_seq", 0) != warned_before:
+            return  # the dispatch reported its own failure
+        if _attempt < 2:
+            QTimer.singleShot(
+                2_000,
+                lambda: Orchestrator._redispatch_assign(
+                    self, role_name, cwd, task, _attempt=_attempt + 1, **kwargs
+                ),
+            )
+            return
+        warn = getattr(self, "_warn_lead_spawn_failed", None)
+        if callable(warn):
+            warn(role_name, project_ns, f"เปิด pane ใหม่หลังปิดตัวเดิมไม่สำเร็จ: {reason[:160]}")
+
     def _close_keeping_resource_slot(self, role_name: str, project_ns: str, **close_kwargs) -> None:
         """Close a pane that `_assign_dispatch` re-spawns itself a moment
         later for the SAME admitted task (provider/cwd switch, post-done
@@ -4418,7 +4466,8 @@ class Orchestrator(
             )
             QTimer.singleShot(
                 2_000,
-                lambda: self._assign_dispatch(
+                lambda: Orchestrator._redispatch_assign(
+                    self,
                     role_name,
                     cwd,
                     task,
@@ -4647,7 +4696,8 @@ class Orchestrator(
             )
             QTimer.singleShot(
                 2_000,
-                lambda: self._assign_dispatch(
+                lambda: Orchestrator._redispatch_assign(
+                    self,
                     role_name,
                     cwd,
                     task,
@@ -4755,7 +4805,8 @@ class Orchestrator(
             if substitute is not None:
                 QTimer.singleShot(
                     1_500,
-                    lambda: self._assign_dispatch(
+                    lambda: Orchestrator._redispatch_assign(
+                        self,
                         role_name,
                         cwd,
                         raw_task_for_ledger,
@@ -4828,6 +4879,7 @@ class Orchestrator(
         # over from a previous assignment to the same pane (issue #5).
         ps_assign.assign_ts = time.time()
         ps_assign.task_budget_halted = False
+        ps_assign.task_asleep_s = 0.0
         # Task Ledger (A7): write-on-assign — every task, not just long ones,
         # so a role that never calls `takkub done` leaves a visible `[~]` row
         # behind. Degrades on failure (never blocks the assign itself).
@@ -5029,15 +5081,24 @@ class Orchestrator(
                     from_provider=sub_from,
                     to_provider=sub_to,
                 )
-                self._notify_lead(
-                    project_ns,
-                    f"⚠️ [{role_name}] {sub_from} ใช้ไม่ได้ (ปิดใน Settings หรือไม่ได้ติดตั้ง) "
-                    f"→ ใช้ {sub_to} แทน · ถ้าไม่ต้องการให้สลับ ให้ปิด {sub_to} ใน Settings "
-                    f"หรือแก้ provider ของ role นี้",
-                    from_role=role_name,
-                    note="provider_unavailable_substitution",
-                    kind="provider-substitution",
-                )
+                # #1058: said once per project per provider pair, not on every
+                # assign (13 copies reached the user in one session); the
+                # event above still records each one.
+                _sub_seen = self.__dict__.setdefault("_substitution_notified", set())
+                _sub_key = (project_ns, sub_from, sub_to)
+                if _sub_key not in _sub_seen:
+                    _sub_seen.add(_sub_key)
+                    self._notify_lead(
+                        project_ns,
+                        f"⚠️ [{role_name}] {sub_from} ใช้ไม่ได้ (ปิดใน Settings หรือไม่ได้ติดตั้ง) "
+                        f"→ ใช้ {sub_to} แทน (แจ้งครั้งเดียวต่อ session) · slot นี้ไม่ใช่มือเพิ่มของ "
+                        f"role ที่ไม่ว่าง: งานของ role อื่นให้เข้าคิว role นั้น หรือเปิดตัวที่สองด้วย "
+                        f"--isolation worktree · ถ้าไม่ต้องการให้สลับ ให้ปิด {sub_to} ใน Settings "
+                        f"หรือแก้ provider ของ role นี้",
+                        from_role=role_name,
+                        note="provider_unavailable_substitution",
+                        kind="provider-substitution",
+                    )
         if effective_provider == CODEX:
             task = _rewrite_task_for_codex(task)
         task = _append_verify_fail_hint(task, base_role_a)
@@ -15425,8 +15486,10 @@ class Orchestrator(
         tick. The governor sample + atomic write run off the Qt main thread
         (#587 B2's reasoning applies here too), coalesced the same way.
         """
+        # `role@project` (#1064): the file is machine-wide, and `takkub status`
+        # shows it to a Lead who can only see its own project's panes.
         working_panes = sorted(
-            role
+            f"{role}@{project}" if project else role
             for project, panes in self._panes_by_project.items()
             for role, pane in panes.items()
             if pane.state == "working"
@@ -15657,6 +15720,16 @@ class Orchestrator(
                         self._idle_state.pop(key, None)
                         continue
                     if pane.session is None or not pane.session.is_alive:
+                        self._idle_state.pop(key, None)
+                        continue
+                    # #1048: the time cap stopped this task — no reminder,
+                    # nudge or re-submit until the user approves more.
+                    if (
+                        getattr(
+                            getattr(self, "_pane_state", {}).get(key), "task_budget_halted", False
+                        )
+                        is True
+                    ):
                         self._idle_state.pop(key, None)
                         continue
 
@@ -16732,8 +16805,10 @@ class Orchestrator(
                     continue
                 scope = getattr(ps, "last_assigned_scope", None) or "normal"
                 limits = task_limits(scope)
+                # Awake time only (#1059) — see `_absorb_watchdog_sleep_gap`.
+                elapsed = max(0.0, now - started - (getattr(ps, "task_asleep_s", 0.0) or 0.0))
                 reason = cap_reason(
-                    elapsed_s=max(0.0, now - started),
+                    elapsed_s=elapsed,
                     minutes=limits.minutes,
                 )
                 if reason is None:
@@ -16753,7 +16828,7 @@ class Orchestrator(
                     role=role,
                     provider=_pane_provider(pane),
                     reason=reason,
-                    elapsed_seconds=round(max(0.0, now - started)),
+                    elapsed_seconds=round(elapsed),
                     time_cap_minutes=limits.minutes,
                 )
                 notice = (
@@ -16765,7 +16840,7 @@ class Orchestrator(
                     project_name,
                     role,
                     reason,
-                    round(max(0.0, now - started)),
+                    round(elapsed),
                 )
                 if role != LEAD.name:
                     self._notify_lead(
@@ -16775,6 +16850,38 @@ class Orchestrator(
                         note="task_work_budget_exceeded",
                         kind="task-budget-exceeded",
                     )
+
+    def _project_in_overage_cached(self, project_name: str, now: float) -> bool:
+        """Whether *project_name*'s account is in usage overage, without the
+        Qt thread touching the disk (#1061: `usage_shared.read_record` here,
+        every 5 s tick, was 42 of 404 stalls in a day on 2.2.60).
+
+        The record is read on the shared pool and kept `_OVERAGE_STATE_TTL_SEC`;
+        while a read is still out, the previous answer stands (False before
+        the first one lands — the non-overage threshold is the longer, safe
+        one)."""
+        cache = self.__dict__.setdefault("_overage_state_cache", {})
+        known = cache.get(project_name)
+        if known is not None and now - known[0] < _OVERAGE_STATE_TTL_SEC:
+            return known[1]
+
+        def _read(p=project_name) -> bool:
+            from .limit_status import is_in_overage, load_shared_state
+            from .user_profile import config_dir_for
+
+            return bool(is_in_overage(load_shared_state(config_dir_for(p))["data"]))
+
+        from . import bg_pool
+
+        # A refresh is a pure poll; only the first read for a project gets a
+        # short wait, so the first decision is not made blind.
+        answer = bg_pool.call_bounded(
+            ("overage-state", project_name), _read, timeout=0.0 if known is not None else 0.2
+        )
+        if answer is None:
+            return known[1] if known is not None else False
+        cache[project_name] = (now, bool(answer))
+        return bool(answer)
 
     def _check_proactive_compact(self, now: float) -> None:
         """Inject `/compact` into a Claude pane that's been continuously idle
@@ -17082,12 +17189,9 @@ class Orchestrator(
                         continue
                     idle_for = now - ps.proactive_compact_idle_since
                     if not _overage_loaded:
-                        try:
-                            _project_in_overage = is_in_overage(
-                                load_shared_state(config_dir_for(project_name))["data"]
-                            )
-                        except Exception:
-                            _project_in_overage = False
+                        _project_in_overage = Orchestrator._project_in_overage_cached(
+                            self, project_name, now
+                        )
                         _overage_loaded = True
                     threshold = (
                         PROACTIVE_COMPACT_OVERAGE_IDLE_AFTER_S
@@ -17341,6 +17445,11 @@ class Orchestrator(
                 ps.last_tool_marker_seen_ts += gap
             if ps.last_stream_tokens_ts > 0.0:
                 ps.last_stream_tokens_ts += gap
+            # #1059: the task time cap counts awake time only — a task left
+            # running overnight was stopped as "13.5h" on wake after 42 min
+            # of real work.
+            if (getattr(ps, "assign_ts", 0.0) or 0.0) > 0.0:
+                ps.task_asleep_s = (getattr(ps, "task_asleep_s", 0.0) or 0.0) + gap
         for project_panes in self._panes_by_project.values():
             for pane in project_panes.values():
                 last_out = getattr(pane, "_last_output_ts", 0.0)
@@ -17469,6 +17578,12 @@ class Orchestrator(
                         _ps_quota.rate_limited_until > now
                         or getattr(_ps_quota, "limit_parked", False) is True
                     ):
+                        continue
+                    # #1048: a task the time cap stopped is silent because the
+                    # cockpit interrupted it. Recovering it (close → respawn →
+                    # re-inject the task, every STUCK_THRESHOLD_S) burned
+                    # tokens and risked the pane carrying on unapproved.
+                    if getattr(_ps_quota, "task_budget_halted", False) is True:
                         continue
                     last_out = getattr(pane, "_last_output_ts", 0.0)
                     if not isinstance(last_out, (int, float)) or last_out <= 0:
@@ -18063,6 +18178,13 @@ class Orchestrator(
                     if session is None or not session.is_alive:
                         continue
                     key = f"{project_name}::{role}"
+                    if (
+                        getattr(
+                            getattr(self, "_pane_state", {}).get(key), "task_budget_halted", False
+                        )
+                        is True
+                    ):
+                        continue  # #1048: stopped by the time cap, not wedged
                     provider = effective_provider_for(role, project=project_name)
                     try:
                         marker = session.tool_running_marker(provider)
@@ -18274,6 +18396,10 @@ class Orchestrator(
 
         # Snapshot fields that close() will pop so _do_respawn can restore them.
         _ps_snap = self._pane_state.get(key)
+        if getattr(_ps_snap, "task_budget_halted", False) is True:
+            # #1048: stopped by the time cap — stays put until the user decides.
+            _log_event("stuck_recover_skipped_budget_halted", project=project, role=role)
+            return
         snap_uuid = _ps_snap.session_uuid if _ps_snap is not None else None
         snap_uuid_cwd = _ps_snap.session_uuid_cwd if _ps_snap is not None else ""
         snap_task = _ps_snap.last_assigned_task if _ps_snap is not None else None

@@ -96,11 +96,16 @@ def parse_version(text: str) -> str | None:
     """Pull a dotted version out of arbitrary CLI output.
 
     `claude --version` prints e.g. `2.1.156 (Claude Code)`; `npm view`
-    prints a bare `2.1.156`. Returns the first `N.N.N`-ish token, or None.
+    prints a bare `2.1.156`; `opencode --version` prints `opencode v2.3.2`.
+    Returns the first `N.N.N`-ish token, or None.
+
+    The token may not start mid-number or right after a dot, but a letter in
+    front is fine — a word boundary there skipped the `2` of `v2.3.2` and
+    returned `3.2` (#1050).
     """
     if not text:
         return None
-    m = re.search(r"\b(\d+(?:\.\d+){1,3})\b", text)
+    m = re.search(r"(?<![\d.])(\d+(?:\.\d+){1,3})(?!\d)", text)
     return m.group(1) if m else None
 
 

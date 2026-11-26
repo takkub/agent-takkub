@@ -647,6 +647,10 @@ def test_learning_report_links_new_skill_into_every_project_path_816(tmp_path, m
     web.mkdir()
     monkeypatch.setattr(lead_context, "_allowed_project_roots", lambda _ns: [api, web])
     _land([_create_intent(name="local-e2e-verify")])
+    # #1061: the linking runs on the shared pool — inline here.
+    from agent_takkub import bg_pool
+
+    monkeypatch.setattr(bg_pool, "submit", lambda fn, *a, **k: fn(*a, **k))
 
     class _Orch(mix.SkillLearningMixin):
         def _notify_lead(self, *a, **kw):

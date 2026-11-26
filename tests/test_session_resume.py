@@ -691,7 +691,7 @@ class TestMaybeWriteMachineState:
         Orchestrator._maybe_write_machine_state(fake, now=1000.0)  # type: ignore[arg-type]
         assert isolated_machine_state_file.is_file()
         saved = json.loads(isolated_machine_state_file.read_text(encoding="utf-8"))
-        assert saved["working_panes"] == ["backend"]
+        assert saved["working_panes"] == ["backend@p"]  # #1064: role@project
         assert saved["overloaded"] is False
         assert fake._machine_state_writing is False
 

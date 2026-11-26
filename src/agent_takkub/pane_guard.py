@@ -795,13 +795,24 @@ _NARROW_FLAG = re.compile(
 )
 
 
+_REDIRECTION = re.compile(r"(?<![\w=])\d*[<>]{1,2}\s*\S*")
+_NOT_AN_ARGUMENT = re.compile(r"^\.[cm]?js$")
+
+
 def _tail_is_narrow(tail: str) -> bool:
     """True when *tail* (the text after the test-runner invocation) carries
     a real path/node-id argument or an explicit filter flag (`-k`/`-m` match
     `_NARROW_FLAG` as a bare token — pytest always takes the expression as a
     separate token, never `-kEXPR`) — see the `_FULL_SUITE_*` block above for
     the full contract."""
+    # #1064: a redirection and its target are not arguments (`> out.txt`,
+    # `2> err.log`; `2>&1` is cut at its `&` and arrives as a bare `2>`), nor
+    # is the `.js` left over from `node …/jest/bin/jest.js`. Reading any of
+    # them as a path made a whole-suite run look targeted.
+    tail = _REDIRECTION.sub(" ", tail)
     for tok in tail.split():
+        if _NOT_AN_ARGUMENT.match(tok):
+            continue
         if tok.startswith("-"):
             if _NARROW_FLAG.match(tok):
                 return True
@@ -815,7 +826,26 @@ _PYTEST_INVOKE = re.compile(
     rf"{_CMD_START}(?:pytest|py\.test|python3?\s+-m\s+pytest)(?![\w-])(?P<tail>[^\n|;&]*)",
     re.I | re.M,
 )
-_PM_RUNNER_PREFIX = r"(?:(?:npx|bunx)\s+|(?:npm|pnpm|yarn|bun)\s+(?:exec|dlx)\s+)?"
+# Every way a package runner puts a tool in front of the shell (#1064). The
+# old prefix knew only `npx <tool>` / `<pm> exec <tool>`, so one flag in
+# between — `npx --no-install jest --silent --ci`, the command that filled a
+# 40 GB machine with 15 workers — walked past both the full-suite rule and
+# the busy-machine gate. Covered as a set, not one spelling at a time:
+#   npx|bunx|pnpx [flags] <tool>        (--no-install, --yes, -y, --)
+#   npm|pnpm|yarn|bun exec|dlx|x [flags] [--] <tool>
+#   pnpm|yarn|bun <tool>                (bin run by name)
+#   node [flags] <path>/<tool>[.js]     (node_modules/jest/bin/jest.js)
+#   <path>/.bin/<tool>                  (./node_modules/.bin/jest)
+_RUNNER_FLAGS = r"(?:--?[\w-]+(?:=\S+)?\s+)*"
+_PM_RUNNER_PREFIX = (
+    r"(?:"
+    rf"(?:npx|bunx|pnpx)\s+{_RUNNER_FLAGS}"
+    rf"|(?:npm|pnpm|yarn|bun)\s+(?:exec|dlx|x)\s+{_RUNNER_FLAGS}"
+    r"|(?:pnpm|yarn|bun)\s+"
+    rf"|node\s+{_RUNNER_FLAGS}\S*[\\/]"
+    r"|\S*[\\/]\.bin[\\/]"
+    r")?"
+)
 _VITEST_RUN_INVOKE = re.compile(
     rf"{_CMD_START}{_PM_RUNNER_PREFIX}vitest(?![\w-]){_SAME_CMD}\brun\b(?P<tail>[^\n|;&]*)",
     re.I | re.M,
@@ -941,7 +971,23 @@ def strip_takkub_text_payload(cmd: str) -> str:
 
 # #846: heavy kinds that verify ONE project (not a whole suite).
 _SINGLE_TARGET_VERIFY = frozenset(
-    {"tsc_typecheck", "tsc_project", "next_build", "vite_build", "pm_build"}
+    {
+        "tsc_typecheck",
+        "tsc_project",
+        "next_build",
+        "vite_build",
+        "pm_build",
+        # #1064: other toolchains' builds — deferred by real RAM/CPU pressure
+        # only, like the ones above ("another pane is working" is true almost
+        # always in a multi-project cockpit and would deny them for good).
+        "docker_build",
+        "turbo_build",
+        "nx_many",
+        "cargo",
+        "go",
+        "jvm_build",
+        "dotnet",
+    }
 )
 
 
@@ -962,11 +1008,13 @@ def _is_heavy_build_or_suite(cmd: str) -> tuple[bool, str]:
     )
     if m_build:
         return True, "pm_build"
-    if re.search(rf"{_CMD_START}(?:npx\s+)?next\s+build\b", cmd, re.I | re.M):
+    if re.search(rf"{_CMD_START}{_PM_RUNNER_PREFIX}next\s+build\b", cmd, re.I | re.M):
         return True, "next_build"
-    if re.search(rf"{_CMD_START}(?:npx\s+)?vite\s+build\b", cmd, re.I | re.M):
+    if re.search(rf"{_CMD_START}{_PM_RUNNER_PREFIX}vite\s+build\b", cmd, re.I | re.M):
         return True, "vite_build"
-    m_tsc = re.search(rf"{_CMD_START}(?:npx\s+)?tsc(?![\w-])(?P<tail>[^\n|;&]*)", cmd, re.I | re.M)
+    m_tsc = re.search(
+        rf"{_CMD_START}{_PM_RUNNER_PREFIX}tsc(?![\w-])(?P<tail>[^\n|;&]*)", cmd, re.I | re.M
+    )
     if m_tsc:
         tail = m_tsc.group("tail")
         if re.search(r"\b-(?:b|p|-build|-project)\b", tail, re.I) or not re.search(
@@ -974,11 +1022,91 @@ def _is_heavy_build_or_suite(cmd: str) -> tuple[bool, str]:
         ):
             return True, "tsc_typecheck" if re.search(r"--noEmit\b", tail, re.I) else "tsc_project"
     m_pw = re.search(
-        rf"{_CMD_START}(?:npx\s+)?playwright\s+test\b(?P<tail>[^\n|;&]*)", cmd, re.I | re.M
+        rf"{_CMD_START}{_PM_RUNNER_PREFIX}playwright\s+test\b(?P<tail>[^\n|;&]*)",
+        cmd,
+        re.I | re.M,
     )
     if m_pw and not _tail_is_narrow(m_pw.group("tail")):
         return True, "playwright_test"
+    # #1064: the other things that take every core by default.
+    for kind, pattern in _OTHER_HEAVY_PATTERNS:
+        m = pattern.search(cmd)
+        if m and not _tail_is_narrow(m.groupdict().get("tail") or ""):
+            return True, kind
     return False, ""
+
+
+# Runners whose default worker count is the machine's core count, and the
+# flags that say the caller picked one instead (#1064).
+_WORKER_CAPPED_RUNNERS = frozenset({"jest", "vitest-run", "vitest"})
+_WORKER_CAP_FLAG = re.compile(
+    r"(?<![\w-])(?:--maxWorkers|--max-workers|-w|--runInBand|-i|--workers|--pool|"
+    r"--poolOptions\S*|--concurrency|--no-file-parallelism|--fileParallelism)(?![\w-])",
+)
+
+
+# Whole-project builds/suites of other toolchains (#1064) — busy-machine gate
+# only (never the role-level full-suite deny). A *tail* group, when present,
+# lets a narrowed run (`cargo test my_case`, `go test ./pkg/x`) through.
+_OTHER_HEAVY_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
+    (
+        "vitest",
+        re.compile(
+            rf"{_CMD_START}{_PM_RUNNER_PREFIX}vitest(?![\w-])"
+            r"(?!\s+(?:run|list|init|related|bench|--version|-v|--help|-h)\b)(?P<tail>[^\n|;&]*)",
+            re.I | re.M,
+        ),
+    ),
+    (
+        "docker_build",
+        re.compile(
+            rf"{_CMD_START}docker(?![\w-])\s+(?:buildx\s+)?(?:build|bake)\b"
+            rf"|{_CMD_START}docker(?:\s+|-)compose\b[^\n|;&]*\s(?:build\b|up\b[^\n|;&]*--build\b)",
+            re.I | re.M,
+        ),
+    ),
+    (
+        "turbo_build",
+        re.compile(
+            rf"{_CMD_START}{_PM_RUNNER_PREFIX}turbo(?![\w-]){_SAME_CMD}\b(?:run\s+)?build\b"
+            r"(?![^\n|;&]*--filter)",
+            re.I | re.M,
+        ),
+    ),
+    (
+        "nx_many",
+        re.compile(
+            rf"{_CMD_START}{_PM_RUNNER_PREFIX}nx(?![\w-])\s+(?:run-many|affected)\b", re.I | re.M
+        ),
+    ),
+    (
+        "cargo",
+        re.compile(
+            rf"{_CMD_START}cargo(?![\w-])\s+(?:\+\S+\s+)?(?:build|test|check|clippy)\b"
+            r"(?![^\n|;&]*\s(?:-p|--package)\b)(?P<tail>[^\n|;&]*)",
+            re.I | re.M,
+        ),
+    ),
+    (
+        "go",
+        re.compile(
+            rf"{_CMD_START}go(?![\w-])\s+(?:build|test|vet)\b[^\n|;&]*\s\./\.\.\.(?=\s|$)",
+            re.I | re.M,
+        ),
+    ),
+    (
+        "jvm_build",
+        re.compile(
+            rf"{_CMD_START}(?:\./)?(?:gradlew?|mvnw?)(?:\.bat|\.cmd)?(?![\w-])\s+[^\n|;&]*"
+            r"\b(?:build|assemble\w*|test|package|install|verify)\b",
+            re.I | re.M,
+        ),
+    ),
+    (
+        "dotnet",
+        re.compile(rf"{_CMD_START}dotnet(?![\w-])\s+(?:build|test|publish)\b", re.I | re.M),
+    ),
+)
 
 
 def _load_fresh_busy_snapshot(path: pathlib.Path) -> dict | None:
@@ -4668,6 +4796,26 @@ def classify(
     # and unknown/empty role (human outside cockpit) are exempt.
     if name and name != "shell":
         is_heavy, heavy_type = _is_heavy_build_or_suite(cmd)
+        cap_verdict = None
+        if is_heavy and heavy_type in _WORKER_CAPPED_RUNNERS:
+            # #1064: a whole suite on the runner's default worker count is
+            # "every core" — 15 workers x ~2 GB on a 16-thread machine. Idle
+            # machine or not, it must name its own cap. (Returned after the
+            # busy check below, so a busy machine still answers "busy".)
+            if not _WORKER_CAP_FLAG.search(strip_takkub_text_payload(cmd)):
+                from .machine_load import worker_flag_hint
+
+                hint = worker_flag_hint(heavy_type)
+                cap_verdict = Verdict(
+                    False,
+                    rule=f"worker_cap:{heavy_type}",
+                    reason=(
+                        f"role `{name}`: รัน {heavy_type} ทั้งชุดโดยไม่จำกัด worker ไม่ได้ — ค่า default "
+                        "ใช้ทุก core จนเครื่องเต็ม (#1064). ใส่ "
+                        f"`{hint}` (งบ worker ของเครื่องนี้ต่อ pane; ดู $TAKKUB_WORKER_BUDGET) "
+                        "หรือระบุไฟล์/pattern ให้แคบลง"
+                    ),
+                )
         if is_heavy:
             busy, busy_reason = _is_machine_busy_from_snapshot(
                 name,
@@ -4687,6 +4835,8 @@ def classify(
                         "ใช้ targeted test/typecheck ไฟล์เดียว หรือรอให้เครื่องว่างก่อน"
                     ),
                 )
+    else:
+        cap_verdict = None
 
     # #633: Cross-cockpit protection & app boot guard.
     # Default-deny for EVERY role including Lead and shell.
@@ -4697,6 +4847,9 @@ def classify(
             return inst_verdict
 
     if not name or name in _UNGUARDED_ROLES:
+        # #1064: the Lead may run a whole suite — with a worker cap.
+        if name and cap_verdict is not None:
+            return cap_verdict
         return Verdict(True)
 
     # #585: When task scope is tiny, deny takkub qa-gate and full-suite test runs.
@@ -4799,6 +4952,8 @@ def classify(
     # specifically to run the raw, un-narrowed test runner on a pane of its
     # own instead of every other role reaching for one in parallel — so it is
     # exempt from this one rule while every other guarded role stays denied.
+    if name == "tester" and cap_verdict is not None:
+        return cap_verdict  # #1064: the raw suite, but never on every core
     if name != "tester":
         full_suite = _full_suite_rule(cmd)
         if full_suite is not None:

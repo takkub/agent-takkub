@@ -31,6 +31,10 @@ body:
     id: what
     attributes:
       label: เกิดอะไรขึ้น
-      description: ขั้นตอนที่ทำ, สิ่งที่เห็น, สิ่งที่ควรเป็น (แนบ log / notice / screenshot ได้)
+      description: >-
+        ขั้นตอนที่ทำ, สิ่งที่เห็น, สิ่งที่ควรเป็น (แนบ log / notice / screenshot ได้)
+        — issue นี้เป็นสาธารณะ: ก่อนวาง log ให้แทนชื่อผู้ใช้ในพาธเป็น <user>
+        (เช่น C:\Users\<user>\..., /home/<user>/..., /Users/<user>/...)
+        และลบ token / รหัสผ่านออกก่อน
     validations:
       required: true

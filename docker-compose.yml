@@ -16,8 +16,12 @@
 services:
   agent-takkub:
     build: .
+    # Loopback only. The remote-control server must never be published
+    # straight onto the LAN or the internet — to reach it from another
+    # machine put an authenticating reverse proxy or a VPN in front (see
+    # SECURITY.md).
     ports:
-      - "8899:8899"
+      - "127.0.0.1:8899:8899"
     environment:
       - AGENT_TAKKUB_HOME=/data
       - HOME=/root
@@ -39,10 +43,16 @@ services:
     environment:
       - AGENT_TAKKUB_HOME=/data
       - HOME=/root
-      - TAKKUB_SIM_PASSWORD=${TAKKUB_SIM_PASSWORD:-sandbox}
+      # No default: a well-known password on a remote-control endpoint is a
+      # hole the moment the port is reachable. Set it in .env (.env.example);
+      # docker/seed_sim.py refuses to start the sandbox without one. Not
+      # `${VAR:?…}` here: compose interpolates every service, so that form
+      # also fails a plain `docker compose up` of the service above.
+      - TAKKUB_SIM_PASSWORD=${TAKKUB_SIM_PASSWORD:-}
       - TAKKUB_SIM_PUBLIC_URL=${TAKKUB_SIM_PUBLIC_URL:-http://localhost:${TAKKUB_BIND_PORT:-8899}}
+    # Loopback only — same rule as the service above.
     ports:
-      - "${TAKKUB_BIND_PORT:-8899}:8899"
+      - "127.0.0.1:${TAKKUB_BIND_PORT:-8899}:8899"
     volumes:
       - ./volumes/data:/data
       # config.provider_home_env("codex") = DATA_HOME/codex-home (#455) — NOT

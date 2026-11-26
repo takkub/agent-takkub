@@ -103,17 +103,60 @@ def _seed_claude_onboarding() -> None:
         )
 
 
+# Passwords this sandbox shipped or documented at some point — public
+# knowledge, so never acceptable.
+_KNOWN_PASSWORDS = frozenset(
+    {"sandbox", "change-me", "changeme", "password", "replace-with-your-own-password"}
+)
+_MIN_PASSWORD_LEN = 8
+
+
+def _required_password() -> str:
+    """The operator's own TAKKUB_SIM_PASSWORD, or exit: the sandbox used to
+    fall back to the well-known ``sandbox`` on a remote-control endpoint."""
+    password = os.environ.get("TAKKUB_SIM_PASSWORD", "").strip()
+    problem = ""
+    if not password:
+        problem = "ยังไม่ได้ตั้ง"
+    elif password.lower() in _KNOWN_PASSWORDS:
+        problem = "เป็นค่าตัวอย่างที่ใครก็รู้"
+    elif len(password) < _MIN_PASSWORD_LEN:
+        problem = f"สั้นกว่า {_MIN_PASSWORD_LEN} ตัวอักษร"
+    if problem:
+        print(
+            f"seed_sim: TAKKUB_SIM_PASSWORD {problem} — ตั้ง TAKKUB_SIM_PASSWORD ใน .env ก่อน "
+            "(ดู .env.example) แล้ว `docker compose --profile sim up -d` ใหม่",
+            file=sys.stderr,
+        )
+        raise SystemExit(78)  # EX_CONFIG
+    return password
+
+
 def _seed_remote() -> None:
-    from agent_takkub.remote.auth import hash_password
+    from agent_takkub.remote.auth import hash_password, verify_password
     from agent_takkub.remote.config import RemoteConfig
 
     cfg = RemoteConfig.load()
     if cfg.enabled and cfg.secret_path and cfg.token:
         print("seed_sim: remote.json already configured — skipping", file=sys.stderr)
+        try:
+            weak = any(verify_password(p, cfg.password_hash) for p in _KNOWN_PASSWORDS)
+        except Exception:
+            weak = False
+        if weak:
+            # A sandbox seeded before the default was removed. Not rewritten
+            # here (never overwrite state a human may have changed) — said
+            # loudly instead.
+            print(
+                "seed_sim: WARNING — this sandbox still uses a well-known password. "
+                "Change it in the PWA settings, or reset volumes/data and set "
+                "TAKKUB_SIM_PASSWORD in .env.",
+                file=sys.stderr,
+            )
         print(f"seed_sim: pairing URL: {cfg.pairing_url()}", file=sys.stderr)
         return
 
-    password = os.environ.get("TAKKUB_SIM_PASSWORD", "sandbox")
+    password = _required_password()
     public_url = os.environ.get("TAKKUB_SIM_PUBLIC_URL", "http://localhost:8899")
 
     cfg.enabled = True
@@ -129,10 +172,7 @@ def _seed_remote() -> None:
     )
     cfg.save()
 
-    print(
-        "seed_sim: remote-control enabled — password from TAKKUB_SIM_PASSWORD (default 'sandbox')",
-        file=sys.stderr,
-    )
+    print("seed_sim: remote-control enabled — password from TAKKUB_SIM_PASSWORD", file=sys.stderr)
     print(f"seed_sim: pairing URL: {cfg.pairing_url()}", file=sys.stderr)
 
 

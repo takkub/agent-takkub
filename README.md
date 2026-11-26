@@ -174,6 +174,8 @@ sequenceDiagram
 - **🎛️ View vs. control** — read-only by default; flip to control mode to send prompts or open projects remotely.
 - **🔒 Three-factor, off by default** — secret path + bearer token (never in the QR) + a password gate, on a loopback-only server behind a Cloudflare/ngrok tunnel, with per-client sessions & brute-force lockout. Data-minimized: never ships raw tool output, commands, or filesystem paths. Turn it on from the cockpit's **🌐 Remote** chip.
 
+> **Docker / headless:** `docker-compose.yml` publishes the remote-control port on `127.0.0.1` only, and the sandbox (`--profile sim`) will not start until you set your own `TAKKUB_SIM_PASSWORD` in `.env`. If another machine has to reach it, put an **authenticating reverse proxy** or a **VPN** in front — never publish the port straight to the internet. See [SECURITY.md](SECURITY.md).
+
 ---
 
 ## 🛠️ Everyday Commands

@@ -390,6 +390,33 @@ def _update_claude() -> UpdateOutcome:
     return UpdateOutcome("claude", STATUS_UPDATED, f"v{current} → v{latest}")
 
 
+def _remove_legacy_npm_packages(name: str, spec, program: str) -> UpdateOutcome | None:
+    """Uninstall a still-installed package this provider used to be published
+    under (`spec.legacy_npm_packages`), so the current package can claim the
+    shared bin name instead of failing with EEXIST — or, worse, the old name
+    being "updated" back over the new one (#1049). None = nothing in the way."""
+    for legacy in getattr(spec, "legacy_npm_packages", ()) or ():
+        try:
+            # Read-only probe: exit 0 only when the package is installed globally.
+            probe = _run([program, "ls", "-g", "--depth=0", legacy], timeout=60.0)
+        except (subprocess.TimeoutExpired, OSError):
+            continue
+        if probe.returncode != 0 or legacy not in (probe.stdout or ""):
+            continue
+        removed = _run_update_command(name, program, ["npm", "uninstall", "-g", legacy])
+        if isinstance(removed, UpdateOutcome):
+            return removed
+        if removed.returncode != 0:
+            excerpt = _error_excerpt(removed.stderr or removed.stdout or "")
+            return UpdateOutcome(
+                name,
+                STATUS_FAILED,
+                f"could not remove the old package `{legacy}` (exit {removed.returncode})"
+                + (f": {excerpt}" if excerpt else ""),
+            )
+    return None
+
+
 def _update_generic(name: str) -> UpdateOutcome:
     from .provider_spec import PROVIDER_REGISTRY
 
@@ -405,6 +432,11 @@ def _update_generic(name: str) -> UpdateOutcome:
     program = shutil.which(argv[0])
     if program is None:
         return UpdateOutcome(name, STATUS_FAILED, f"`{argv[0]}` not found on PATH")
+
+    if argv[0] == "npm":
+        blocked = _remove_legacy_npm_packages(name, spec, program)
+        if blocked is not None:
+            return blocked
 
     result = _run_update_command(name, program, argv)
     if isinstance(result, UpdateOutcome):

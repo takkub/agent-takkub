@@ -331,3 +331,41 @@ class TestOscColorReplies:
         assert _OSC_COLOR_REPLY.sub("", late) == ""
         # a real keystroke sharing the batch must survive
         assert _OSC_COLOR_REPLY.sub("", late + "a") == "a"
+
+
+class TestLinkEventLog1062:
+    """A clicked link is one JSON event, and never carries a query string."""
+
+    def test_report_key_is_not_logged(self):
+        from agent_takkub.terminal_widget import _loggable_link
+
+        logged = _loggable_link("https://reports.example/abc/r/proj/report.html?k=SECRETKEY#top")
+        assert "SECRETKEY" not in logged
+        assert logged == "https://reports.example/abc/r/proj/report.html?…"
+
+    def test_userinfo_is_dropped_and_plain_values_kept(self):
+        from agent_takkub.terminal_widget import _loggable_link
+
+        assert _loggable_link("https://user:pw@host.example/x") == "https://host.example/x"
+        assert _loggable_link("http://127.0.0.1:8123") == "http://127.0.0.1:8123"
+        assert _loggable_link(r"C:\work\notes?.txt") == r"C:\work\notes?.txt"
+
+    def test_event_line_is_json(self, tmp_path, monkeypatch):
+        import json
+        import sys
+        from types import SimpleNamespace
+
+        import agent_takkub.config as config_mod
+        import agent_takkub.terminal_widget as terminal_mod
+
+        log = tmp_path / "events.log"
+        monkeypatch.setattr(config_mod, "EVENTS_LOG", log)
+        monkeypatch.setattr(config_mod, "ensure_runtime", lambda: None)
+        monkeypatch.setitem(sys.modules, "agent_takkub.orchestrator", None)
+        terminal_mod.TerminalWidget._log_link_event(
+            SimpleNamespace(), "open_url", "https://h.example/r.html?k=SECRETKEY"
+        )
+        rows = [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()]
+        assert rows[0]["event"] == "open_url"
+        assert rows[0]["target"] == "https://h.example/r.html?…"
+        assert "SECRETKEY" not in log.read_text(encoding="utf-8")

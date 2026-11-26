@@ -163,8 +163,9 @@ class TestCredentialInsideASentence:
         text = f"creds prod https://app.example.test — Username: someone  Password: {self.VALUE}  (ห้ามเขียนลงไฟล์)"
         out, names = redact_secrets(text)
         assert self.VALUE not in out
-        assert "Password: <redacted:credential>" in out
-        assert "Username: someone" in out and "https://app.example.test" in out
+        # Whole-string compare: everything except the password survives as is
+        # (and no URL substring check for CodeQL to read as a sanitizer).
+        assert out == text.replace(self.VALUE, "<redacted:credential>")
         assert names == ["password"]
 
     def test_thai_label_quotes_and_other_labels(self) -> None:
