@@ -197,6 +197,16 @@ def test_pane_env_carries_the_budget():
     assert int(pane_env._build_pane_env()["TAKKUB_WORKER_BUDGET"]) >= 1
 
 
+def test_lead_env_carries_the_budget_too():
+    """Found on the first real run of 2.2.61: the Lead's env is assembled by
+    its own function and came up without the budget."""
+    from agent_takkub import pane_env
+
+    env = pane_env._build_lead_env()
+    assert int(env["TAKKUB_WORKER_BUDGET"]) >= 1
+    assert env["VITEST_MAX_THREADS"] == env["TAKKUB_WORKER_BUDGET"]
+
+
 # ── a starved machine must not kill the pane reader or file a bug ────────
 def _winerror(code):
     exc = OSError(code, "Insufficient system resources")

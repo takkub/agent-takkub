@@ -4,6 +4,12 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 
 ## [vNEXT]
 
+## [v2.2.62] - 2026-11-26
+
+### Fixed (แก้ไข)
+
+- **pane ของ Lead ไม่ได้รับงบ worker (#1064 ต่อ):** 2.2.61 ส่ง `TAKKUB_WORKER_BUDGET` และตัวแปรจำกัด worker ของ vitest / pytest-xdist / cargo ให้เฉพาะ pane ของ teammate — env ของ Lead ถูกประกอบคนละฟังก์ชันจึงตกไป เจอจากการลองบน cockpit จริงหลังปล่อย ตอนนี้ทั้งสองทางใช้ตัวเดียวกัน
+
 ## [v2.2.61] - 2026-11-26
 
 เปิดโปรแกรมเองเมื่อเปิดเครื่อง (สวิตช์ใน Settings) + issue ที่เปิดอยู่ 16 ใบ (#1048–#1064), CodeQL alert #67 และความปลอดภัย 2 เรื่อง (ชื่อผู้ใช้ใน issue สาธารณะ, พอร์ต Docker)
