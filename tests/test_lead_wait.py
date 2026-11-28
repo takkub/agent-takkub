@@ -269,6 +269,21 @@ class TestPollWait:
         assert result["failed"] == {"qa": "delivered"}
         assert not result["done"]
 
+    def test_cancelled_role_is_its_own_bucket_not_done(self, orch: Orchestrator) -> None:
+        """#1068 S-4: `takkub wait` must never print a cancelled task as done."""
+        _register_working(orch, "backend")
+        begin = orch.begin_wait(PROJECT, ["backend"], 60.0)
+
+        orch._wait_done_events[(PROJECT, "backend")] = {
+            "ts": time.time(),
+            "failed": False,
+            "cancelled": True,
+        }
+        result = orch.poll_wait(PROJECT, begin["wait_id"])
+
+        assert result["cancelled"] == {"backend": "delivered"}
+        assert not result["done"] and not result["failed"] and not result["pending"]
+
     def test_completion_before_wait_started_is_ignored(self, orch: Orchestrator) -> None:
         """#241-style staleness rule: wait only reacts to NEW completions."""
         _register_working(orch, "backend")

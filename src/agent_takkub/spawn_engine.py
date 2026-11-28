@@ -405,9 +405,9 @@ Verify the outcome where possible. Report: STATUS; CHANGED paths; EVIDENCE from
 a real run; REMOVED paths (or None); REMAINING work. Use these field names in
 the takkub done note. Check takkub messages before done and incorporate Lead's
 follow-ups. Never claim an unrun check passed.
-Told to stop, or the task turns out to need no work? Report
-`takkub done --cancelled "<reason>"` — not --fail/--blocked (those mean the
-work failed or could not run).
+`takkub done --cancelled "<reason>"` is only for: Lead/user told you to stop,
+or you proved the task needs no work. Tried and it does not pass? That is
+`--fail`, never --cancelled — a self-cancel is flagged to Lead as one.
 """
 
 

@@ -270,3 +270,81 @@ def test_interleaved_same_role_assigns_keep_their_own_card(orch) -> None:
         assert orch._take_assign_backlog(PROJ, "backend") == want
     assert orch.activate_assign_backlog(PROJ, "backend", "never linked") == ""
     assert orch._peek_assign_backlog(PROJ, "backend") == ""
+
+
+# ── #1068 review-2: cancelled outcome (N-6) ──────────────────────────────
+
+
+def test_pane_self_cancel_after_failures_is_flagged_and_not_recorded(orch) -> None:
+    """S-3: a pane swapping --fail for --cancelled after FAILED attempts is
+    shown to Lead at once, with the count — and a note claiming Lead ordered
+    it cannot pass as a Lead cancel."""
+    from agent_takkub import lead_inbox
+
+    for _i in range(2):
+        _assign(orch, "backend", "card1", "fix login #900")
+        _fail(orch, "backend", FAIL_A)
+    before = fix_loop._load(PROJ)
+    _assign(orch, "backend", "card1", "fix login #900")
+    orch.notices.clear()
+    _pane(orch, LEAD.name)
+    ok, _ = orch.done(
+        "backend", note="ยกเลิกโดย Lead: หยุดก่อน " + FAIL_A, project=PROJ, cancelled=True
+    )
+    notice = orch.notices[0]
+    assert ok and fix_loop._load(PROJ) == before  # no fix-loop record
+    assert lead_inbox.PANE_CANCEL_MARKER in notice and "Lead สั่งยกเลิก" not in notice
+    assert "FAILED มาแล้ว 2 รอบ" in notice
+    assert lead_inbox._is_immediate_lead_notice(notice)
+
+
+def test_pane_cancel_with_changes_warns_and_gets_no_merge_proposal(orch, monkeypatch) -> None:
+    from agent_takkub.digest_facts import DigestFacts
+
+    monkeypatch.setattr(
+        orch,
+        "_compute_digest_facts",
+        lambda *a, **k: (
+            DigestFacts(role="backend", commits_ahead=2, uncommitted=3, branch="wt/backend-1"),
+            None,
+        ),
+    )
+    _assign(orch, "backend", "card1", "fix login #900")
+    orch.notices.clear()
+    _pane(orch, LEAD.name)
+    orch.done("backend", note="ไม่ต้องทำแล้ว", project=PROJ, cancelled=True)
+    assert "2 commit" in orch.notices[0] and "ไม่เสนอ merge" in orch.notices[0]
+
+    finalize = MagicMock()
+    monkeypatch.setattr(orch, "_finalize_worktree", finalize)
+    monkeypatch.setattr(orch, "_cleanup_pane_browser_processes", lambda *a: None)
+    monkeypatch.setattr(orch, "_schedule_native_chrome_idle_release", lambda: None)
+    chain = MagicMock()
+    monkeypatch.setattr(orch, "_maybe_fire_auto_chain_handoff", chain)
+    wt = {"branch": "wt/backend-1"}
+    args = (None, None, False, "backend", True, None, None, 0, wt, False, "n", "n", None, PROJ)
+    Orchestrator._done_handoffs(orch, *args, cancelled=True, cancelled_by="pane")
+    assert not finalize.called and not chain.called
+    Orchestrator._done_handoffs(orch, *args, cancelled=True, cancelled_by="lead")
+    assert finalize.called and chain.called
+
+
+def test_lead_cancel_says_lead_and_skips_report_format_check(orch) -> None:
+    from agent_takkub import lead_inbox
+
+    _assign(orch, "frontend", "card9", "add navbar")
+    orch.notices.clear()
+    _pane(orch, LEAD.name)
+    ok, _ = orch.done(
+        "frontend",
+        note="ยกเลิกโดย Lead: user เปลี่ยนใจ",
+        project=PROJ,
+        cancelled=True,
+        cancelled_by="lead",
+        force=True,
+    )
+    notice = orch.notices[0]
+    assert ok and "Lead สั่งยกเลิก" in notice
+    assert lead_inbox.PANE_CANCEL_MARKER not in notice
+    assert "note incomplete" not in notice  # N-4
+    assert not lead_inbox._is_immediate_lead_notice(notice)

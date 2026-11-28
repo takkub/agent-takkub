@@ -25,10 +25,13 @@ eval loop จำ **วิธีตรวจที่รันซ้ำได้*
 ```
 takkub eval add "<title>" --check "<cmd>" [--expected ..] [--cwd ..] [--timeout 300] [--backlog ID] [--issue #N] [--fix-loop KEY]
 takkub eval list [--all] · show <id> · set <id> [--check ..] [--cwd ..] [--expected ..] · retire <id>
-takkub eval run [--id ev-001 ...]
+takkub eval run [--id ev-001 ...]                       # แผน + token เท่านั้น ไม่รันอะไร
+takkub eval run [--id ev-001 ...] --confirm <token>     # รันจริง เฉพาะเมื่อแผนยังตรง token
 ```
 
-`run` พิมพ์ **id + cwd + check ของทุกเคสก่อนเริ่มรัน** และบรรทัด `REFUSED <id>: <เหตุ>` ของเคสที่ไม่ยอมรัน
+`run` เป็น **สองจังหวะ** (S-1): `eval run` พิมพ์ **id + cwd + check ของทุกเคส** + token (= sha256 ของ project + `id/check/cwd` ทุกเคสที่จะรัน)
+แล้ว**จบโดยไม่รันอะไร** · `eval run --confirm <token>` โหลดไฟล์ใหม่ คำนวณ token ซ้ำ ไม่ตรง (มีเคสถูกเพิ่ม/แก้ check/cwd หลังดูแผน)
+→ `PlanChanged` ไม่รันสักเคส exit ≠ 0 · ตรง → พิมพ์แผนซ้ำแล้วรัน · บรรทัด `REFUSED <id>: <เหตุ>` ของเคสที่ไม่ยอมรัน
 (draft — ขาด check/cwd, retired, check ว่าง, cwd อยู่นอกโปรเจค) แล้วพิมพ์ต่อเคส: ผล (`pass`/`FAIL`/`TIMEOUT`), การเปลี่ยนจากรอบก่อน (`new`/`same`/`fixed`/`REGRESSED`),
 revision, เวลา — `REGRESSED` (ผ่าน→ไม่ผ่าน) มี `<<< ผ่าน→ไม่ผ่าน` ท้ายบรรทัดและอยู่ในบรรทัดสรุป · exit code ≠ 0 ถ้ามีเคสไม่ผ่าน **หรือถูกปฏิเสธ**
 (รวม `--id` ที่ชี้ draft/retired — ไม่ข้ามเงียบ)
@@ -43,8 +46,9 @@ revision, เวลา — `REGRESSED` (ผ่าน→ไม่ผ่าน) �
 - process ของ check ไม่รอด `eval run` ที่ตาย: Ctrl+C / exception ใดๆ → ฆ่าทั้ง tree แล้วโยนต่อ ·
   Windows: shell อยู่ใน Job Object `KILL_ON_JOB_CLOSE` (`job_object_manager`, ctypes ไม่มี dependency) ⇒
   `eval run` โดน TerminateProcess (Bash tool timeout) → OS ฆ่า tree ให้ · **gap:** ผูก job หลัง shell เริ่มแล้ว
-  หลานที่เกิดในเสี้ยววินาทีแรกอาจหลุด · macOS: Ctrl+C ฆ่า tree ได้ แต่ `kill -9` ที่ตัว `eval run` ทิ้ง check ค้าง
-  (`start_new_session` แยก process group)
+  หลานที่เกิดในเสี้ยววินาทีแรกอาจหลุด · macOS/POSIX (G2): ระหว่างที่ check รัน SIGTERM/SIGHUP ถูกแปลงเป็น
+  `SystemExit` (ติด handler เฉพาะ main thread, คืน handler เดิมหลังจบเคส) → ทาง BaseException `killpg` ทั้ง group ·
+  **gap:** SIGKILL (`kill -9`) ดักไม่ได้ ⇒ group ของ check (`start_new_session`) ยังค้างเป็น orphan
 - **timeout รวมอาจเกิน 2 นาที** (ต่อเคส default 300s × จำนวนเคส) — Lead เรียก `takkub eval run` ผ่าน Bash tool
   ต้องตั้ง `timeout` ≥ ผลรวม `timeout_s` ของเคส หรือใช้ `run_in_background` ไม่งั้น tool ฆ่ากลางทาง (ไม่บันทึกผล)
 - `cases.json` เขียนได้จากหลาย process (GUI ร่าง draft + CLI) → read-modify-write ครอบด้วย lock ข้าม process
@@ -62,12 +66,13 @@ revision, เวลา — `REGRESSED` (ผ่าน→ไม่ผ่าน) �
 
 - **กันได้:** check ที่ cwd อยู่นอก path ที่ลงทะเบียนของโปรเจค (`projects.json` → `paths`, resolve symlink/junction
   ก่อนเทียบ) ถูกปฏิเสธทั้งตอน `add`/`set` และตอน `run` · โปรเจคที่ไม่มี path ลงทะเบียน = ปฏิเสธทุกเคส ·
-  `run` พิมพ์ check+cwd ทุกเคส**ก่อน**รัน ทำให้คำสั่งที่ถูกสอดเข้ามาโผล่ใน output ที่ Lead อ่าน
-- **กันไม่ได้:** คำสั่งอันตรายที่ cwd อยู่ในโปรเจค (`git push --force`, `git reset --hard`, ลบไฟล์) ยังรันได้ —
-  cwd จำกัดแค่ "รันที่ไหน" ไม่ได้จำกัด "ทำอะไร" และ output ถูกพิมพ์ก่อนก็จริง แต่ Lead ผ่าน Bash tool
-  เห็นมันพร้อมผลหลังรันเสร็จ (ไม่มีจังหวะยืนยัน) · คำสั่งเหล่านี้ข้าม `pane_guard`/permission gate ของ Lead
-  เพราะ hook เห็นแค่ `takkub eval run` ⇒ **ก่อนสั่ง `run` ทั้งชุด ให้ Lead `takkub eval list`/`show` ดู check ของ
-  เคสที่ตัวเองไม่ได้ใส่เอง** (โดยเฉพาะเคสที่ไม่ได้มาจาก `eval add`/`set` ของ Lead)
+  `run` แบบสองจังหวะ (ด้านล่าง) ทำให้คำสั่งที่ถูกสอดเข้ามาโผล่ในแผนที่ Lead อ่าน**ก่อน**มีอะไรรัน
+- **กันไม่ได้ด้วยตัวระบบ:** คำสั่งอันตรายที่ cwd อยู่ในโปรเจค (`git push --force`, `git reset --hard`, ลบไฟล์) —
+  cwd จำกัดแค่ "รันที่ไหน" ไม่ได้จำกัด "ทำอะไร" · เมื่อ confirm แล้วคำสั่งเหล่านี้ข้าม `pane_guard`/permission gate
+  ของ Lead เพราะ hook เห็นแค่ `takkub eval run` ⇒ ด่านเดียวคือ Lead อ่านแผน
+- **จังหวะยืนยัน (S-1):** เพราะ Lead เห็น output หลังคำสั่งจบเท่านั้น `eval run` เฉยๆ จึงไม่รันอะไร — แผนคือ gate ·
+  Lead ต้องอ่าน check ทุกบรรทัดก่อนพิมพ์ `--confirm <token>` · pane ที่เขียนเคสเพิ่ม/แก้ check **หลัง** Lead ดูแผน
+  ทำให้ token ไม่ตรง → ไม่รัน · ยังกันไม่ได้: Lead ที่ copy token ไปยืนยันโดยไม่อ่านแผน
 
 ## Draft อัตโนมัติจาก fix-loop
 

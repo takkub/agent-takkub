@@ -749,6 +749,7 @@ class LeadWaitMixin:
 
         done: dict[str, str] = {}
         failed: dict[str, str] = {}
+        cancelled: dict[str, str] = {}
         gone: dict[str, str] = {}
         pending: dict[str, str] = {}
         for role in client_roles:
@@ -758,7 +759,8 @@ class LeadWaitMixin:
             if kind == "done":
                 done[role] = "delivered"
             elif kind == "cancelled":
-                done[role] = "cancelled"
+                # S-4: its own bucket — never printed as `done:`.
+                cancelled[role] = "delivered"
             elif kind == "failed":
                 failed[role] = "delivered"
             elif kind == "gone":
@@ -795,6 +797,7 @@ class LeadWaitMixin:
             "msg": "resolved" if not pending else f"{len(pending)} role(s) still pending",
             "done": done,
             "failed": failed,
+            "cancelled": cancelled,
             "gone": gone,
             "pending": pending,
             "elapsed": elapsed,

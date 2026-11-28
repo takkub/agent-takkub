@@ -16,6 +16,7 @@ Provider-neutral: plain CLI + files, no pane or provider involved.
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import json
 import os
 import signal
@@ -289,6 +290,34 @@ def _kill_tree(proc: subprocess.Popen) -> None:
         pass
 
 
+@contextlib.contextmanager
+def _term_raises() -> Iterator[None]:
+    """POSIX + main thread: SIGTERM/SIGHUP → SystemExit for the duration, so
+    run_check's BaseException handler kills the check's process group."""
+    if sys.platform == "win32" or threading.current_thread() is not threading.main_thread():
+        yield
+        return
+
+    def _raise(signum, _frame):
+        raise SystemExit(128 + signum)
+
+    sigs = [getattr(signal, n) for n in ("SIGTERM", "SIGHUP") if hasattr(signal, n)]
+    old = {}
+    for sig in sigs:
+        try:
+            old[sig] = signal.signal(sig, _raise)
+        except (OSError, ValueError):
+            pass
+    try:
+        yield
+    finally:
+        for sig, handler in old.items():
+            try:
+                signal.signal(sig, handler)
+            except (OSError, ValueError):
+                pass
+
+
 def _decode_output(raw: bytes) -> str:
     """Check output is whatever the shell's programs wrote: UTF-8 on macOS;
     on Windows cmd.exe builtins and most console tools write the OEM code
@@ -317,7 +346,13 @@ def run_check(case: dict) -> dict:
     The check's tree never outlives this call: timeout or any exception here
     (Ctrl+C = KeyboardInterrupt) kills it by PID, and on Windows the shell is
     in a kill-on-close Job Object so even a hard-killed `takkub eval run`
-    (TerminateProcess from a tool timeout) takes the tree with it."""
+    (TerminateProcess from a tool timeout) takes the tree with it.
+
+    POSIX (G2): the check runs in its own session/process group, so it would
+    outlive a SIGTERM'd `eval run`; while a check runs SIGTERM/SIGHUP raise
+    SystemExit here (main thread only — signal.signal elsewhere is illegal)
+    and the BaseException path killpg's the group. Gap: SIGKILL cannot be
+    caught, so `kill -9` of `eval run` still orphans the check's group."""
     started = time.monotonic()
     timeout = int(case.get("timeout_s") or DEFAULT_TIMEOUT_S)
     timed_out, code, tail = False, None, ""
@@ -330,7 +365,7 @@ def run_check(case: dict) -> dict:
             "tail": "empty check — not run (an empty command exits 0)",
         }
     job = JobObjectManager()  # no-op off Windows
-    with tempfile.TemporaryFile() as out:
+    with tempfile.TemporaryFile() as out, _term_raises():
         try:
             proc = subprocess.Popen(
                 case["check"],
@@ -410,16 +445,42 @@ def plan_run(project: str, ids: list[str] | None = None) -> tuple[list[dict], li
     return targets, refused
 
 
+def plan_token(project: str, targets: list[dict]) -> str:
+    """Hash of exactly what a run would execute (id + check + cwd of every
+    target). `eval run` prints the plan + this token without running;
+    `eval run --confirm <token>` runs only while the file still hashes the
+    same, so a case written after the Lead read the plan cannot slip in."""
+    blob = json.dumps(
+        [project, [[c["id"], c.get("check") or "", c.get("cwd") or ""] for c in targets]],
+        ensure_ascii=False,
+    )
+    return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:16]
+
+
+class PlanChanged(ValueError):
+    """`--confirm` token no longer matches cases.json — nothing was run."""
+
+
 def run_cases(
     project: str,
     ids: list[str] | None = None,
     runner=run_check,
     announce: Callable[[list[dict], list[dict]], None] | None = None,
+    confirm: str | None = None,
 ) -> dict:
     """Run active cases (or exactly *ids*), record each result + git revision
     on the case and append the run to runs.jsonl. *announce(targets, refused)*
-    is called before any check starts, so the caller can show what will run."""
+    is called before any check starts, so the caller can show what will run.
+    *confirm* is required: the plan_token the caller showed — missing or a
+    mismatch raises PlanChanged before any check starts."""
     targets, refused = plan_run(project, ids)
+    if not confirm:
+        raise PlanChanged("eval run needs --confirm <token> from the printed plan — nothing ran")
+    if confirm.strip() != plan_token(project, targets):
+        raise PlanChanged(
+            "eval cases changed since the plan was shown (token mismatch) — nothing ran; "
+            "run `takkub eval run` again and read the new plan"
+        )
     if announce is not None:
         announce(targets, refused)
     run_at = _now()

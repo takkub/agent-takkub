@@ -24,6 +24,12 @@ def _check(code: int) -> str:
     return f'"{sys.executable}" -c "raise SystemExit({code})"'
 
 
+def _run(ids=None, **kw):
+    """run_cases with the token of the plan as it stands (what `--confirm` carries)."""
+    token = eval_cases.plan_token(PROJ, eval_cases.plan_run(PROJ, ids)[0])
+    return eval_cases.run_cases(PROJ, ids, confirm=token, **kw)
+
+
 def test_add_list_retire_keeps_case(tmp_path):
     a = eval_cases.add_case(PROJ, title="t1", expected="e", check=_check(0), cwd=str(tmp_path))
     b = eval_cases.add_case(PROJ, title="t2", expected="e", check=_check(0), cwd=str(tmp_path))
@@ -55,7 +61,7 @@ def test_run_records_change_against_previous_run(tmp_path):
             "tail": "",
         }
 
-    changes = [eval_cases.run_cases(PROJ, runner=fake)["results"][0]["change"] for _ in range(4)]
+    changes = [_run(runner=fake)["results"][0]["change"] for _ in range(4)]
     assert changes == ["new", "same", "REGRESSED", "fixed"]
     runs = (tmp_path / "eval" / PROJ / "runs.jsonl").read_text(encoding="utf-8").splitlines()
     assert len(runs) == 4
@@ -83,7 +89,7 @@ def test_draft_from_fix_loop_is_not_run_until_given_a_check(tmp_path):
     assert eval_cases.draft_from_fix_loop(PROJ, "ref:#7", seqs, "qa") is None  # one per identity
     assert eval_cases.draft_from_fix_loop(PROJ, "ref:#8", [{"attempts": []}], "qa") is None
     calls = []
-    eval_cases.run_cases(PROJ, runner=lambda c: calls.append(c))
+    _run(runner=lambda c: calls.append(c))
     assert calls == []
     assert (
         eval_cases.update_case(PROJ, d["id"], check=_check(0), cwd=str(tmp_path))["status"]
@@ -159,9 +165,7 @@ def test_cwd_outside_project_refused_s4(tmp_path, monkeypatch):
     store["cases"][ok["id"]]["cwd"] = str(outside)
     eval_cases._save(PROJ, store)
     seen = []
-    out = eval_cases.run_cases(
-        PROJ, runner=lambda c: 1 / 0, announce=lambda t, r: seen.append((t, r))
-    )
+    out = _run(runner=lambda c: 1 / 0, announce=lambda t, r: seen.append((t, r)))
     assert out["results"] == [] and seen[0][0] == []
     assert "outside" in out["refused"][0]["reason"]
     monkeypatch.setattr(eval_cases, "_project_roots", lambda p: [])
@@ -202,3 +206,20 @@ def test_output_decoded_in_the_os_code_page_n6():
             assert eval_cases._decode_output(raw) == sample
             return
     pytest.skip(f"no non-ASCII sample encodable in {cp}")
+
+
+# ── review-2 regressions ─────────────────────────────────────────────────
+
+
+def test_run_needs_the_token_of_the_plan_it_runs_s1(tmp_path):
+    marker = tmp_path / "INJECTED.txt"
+    c = eval_cases.add_case(PROJ, title="t", expected="", check=_check(0), cwd=str(tmp_path))
+    token = eval_cases.plan_token(PROJ, eval_cases.plan_run(PROJ)[0])
+    # Lead read that plan; a pane then rewrites the check in cases.json
+    store = eval_cases._load(PROJ)
+    store["cases"][c["id"]]["check"] = f"\"{sys.executable}\" -c \"open(r'{marker}','w')\""
+    eval_cases._save(PROJ, store)
+    for bad in (None, "", token):
+        with pytest.raises(eval_cases.PlanChanged):
+            eval_cases.run_cases(PROJ, confirm=bad)
+    assert not marker.exists()

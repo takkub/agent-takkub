@@ -1126,8 +1126,17 @@ def _add_eval(sub: Any, c: ModuleType) -> None:
     evset.add_argument("--check", default=None)
     evset.add_argument("--cwd", default=None)
     evset.add_argument("--timeout", type=int, default=None)
-    evr = ev_sub.add_parser("run", help="run active cases' checks and compare with the last run")
+    evr = ev_sub.add_parser(
+        "run",
+        help="print the plan + a token (runs nothing); --confirm <token> runs the checks",
+    )
     evr.add_argument("--id", action="append", default=[], help="only this case (repeatable)")
+    evr.add_argument(
+        "--confirm",
+        default=None,
+        metavar="TOKEN",
+        help="run - only while the cases still hash to the token the plan printed",
+    )
     evt = ev_sub.add_parser("retire", help="stop running a case (kept, never deleted)")
     evt.add_argument("id")
     ev.set_defaults(func=c.cmd_eval)

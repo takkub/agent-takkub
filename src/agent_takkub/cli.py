@@ -3296,7 +3296,23 @@ def cmd_eval(args: argparse.Namespace) -> dict:
                     _utf8_print(f"  REFUSED {r['id']}: {r['reason']}")
                 sys.stdout.flush()
 
-            out = ev.run_cases(project, args.id or None, announce=_announce)
+            ids = args.id or None
+            confirm = getattr(args, "confirm", None)
+            if not confirm:
+                # S-1: step 1 never runs anything — a Bash-tool caller only
+                # sees output after the command ends, so the plan IS the gate.
+                targets, refused = ev.plan_run(project, ids)
+                _announce(targets, refused)
+                if not targets:
+                    return {"ok": not refused, "msg": f"nothing to run ({project})"}
+                token = ev.plan_token(project, targets)
+                id_args = "".join(f" --id {i}" for i in (args.id or []))
+                return {
+                    "ok": True,
+                    "msg": "plan only — nothing ran. Read every check above, then: "
+                    f"takkub eval run{id_args} --confirm {token}",
+                }
+            out = ev.run_cases(project, ids, announce=_announce, confirm=confirm)
             rows = out["results"]
             for r in rows:
                 state = "pass" if r["passed"] else ("TIMEOUT" if r["timed_out"] else "FAIL")
@@ -3797,6 +3813,7 @@ def cmd_wait(args: argparse.Namespace) -> dict:
 
     done = last.get("done") or {}
     failed = last.get("failed") or {}
+    cancelled = last.get("cancelled") or {}
     gone = last.get("gone") or {}
     pending = last.get("pending") or {}
     elapsed = int(last.get("elapsed") or (time.time() - start))
@@ -3806,6 +3823,8 @@ def cmd_wait(args: argparse.Namespace) -> dict:
         print(f"  done: {', '.join(sorted(done))}")
     if failed:
         print(f"  FAILED: {', '.join(sorted(failed))}")
+    if cancelled:
+        print(f"  cancelled (not done — read its CANCELLED report): {', '.join(sorted(cancelled))}")
     if gone:
         print("  gone (will never report — never spawned or pane already closed):")
         for role, reason in sorted(gone.items()):
@@ -3851,6 +3870,7 @@ def cmd_wait(args: argparse.Namespace) -> dict:
         "exit_code": 0 if ok else (_WAIT_EXIT_ERROR if never_spawned else 1),
         "done": done,
         "failed": failed,
+        "cancelled": cancelled,
         "gone": gone,
         "pending": pending,
         "interrupt": interrupted_by,
