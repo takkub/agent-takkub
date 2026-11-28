@@ -66,6 +66,7 @@ def read_cached(
     *,
     missing: Any = None,
     encoding: str = "utf-8",
+    stale_ok: bool = False,
 ) -> Any:
     """Return ``parse(text_of(path))``, reusing the last parsed value while
     the file's stat signature is unchanged.
@@ -83,6 +84,44 @@ def read_cached(
         hit = _cache.get(key)
     if hit is not None and not hit[3] and mono - hit[2] < _STAT_TTL_S:
         return hit[1]
+    if stale_ok and hit is not None:
+        # #1061: callers on the Qt main thread (status header -> profile_for)
+        # still paid the expired-TTL `os.stat` (~1 s each on a wedged disk).
+        # Serve the last parse and revalidate on the shared pool; in-process
+        # writers' `invalidate()` drops the entry, so their saves still read
+        # synchronously on the next call.
+        _revalidate_async(key, path_key, parse, missing, encoding)
+        return hit[1]
+    return _read_now(key, path_key, parse, missing, encoding, hit, mono)
+
+
+_inflight: set[tuple[str, str]] = set()
+
+
+def _revalidate_async(key, path_key, parse, missing, encoding) -> None:
+    with _lock:
+        if key in _inflight:
+            return
+        _inflight.add(key)
+
+    def _run() -> None:
+        try:
+            with _lock:
+                hit = _cache.get(key)
+            _read_now(key, path_key, parse, missing, encoding, hit, time.monotonic())
+        except Exception:
+            with _lock:
+                _cache.pop(key, None)  # next call re-reads and raises to its caller
+        finally:
+            with _lock:
+                _inflight.discard(key)
+
+    from . import bg_pool
+
+    bg_pool.submit(_run)
+
+
+def _read_now(key, path_key, parse, missing, encoding, hit, mono) -> Any:
     try:
         st = os.stat(path_key)
     except FileNotFoundError:
