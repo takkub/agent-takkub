@@ -1082,6 +1082,39 @@ def _add_backlog(sub: Any, c: ModuleType) -> None:
     bl.set_defaults(func=c.cmd_backlog)
 
 
+def _add_eval(sub: Any, c: ModuleType) -> None:
+
+    ev = sub.add_parser(
+        "eval", help="past failures kept as re-runnable checks: add/list/show/set/run/retire"
+    )
+    ev_sub = ev.add_subparsers(dest="ev_cmd")
+    eva = ev_sub.add_parser("add", help="add a case (check = command whose exit code 0 = pass)")
+    eva.add_argument("title")
+    eva.add_argument("--check", required=True, help="shell command; exit 0 = pass")
+    eva.add_argument("--expected", default="", help="behavior that must hold")
+    eva.add_argument("--cwd", default=None, help="where the check runs (default: current dir)")
+    eva.add_argument("--timeout", type=int, default=300, help="seconds before the check is killed")
+    eva.add_argument("--backlog", default="", help="source backlog card id")
+    eva.add_argument("--issue", default="", help="source issue ref (e.g. #123)")
+    eva.add_argument("--fix-loop", default="", help="source fix-loop identity")
+    evl = ev_sub.add_parser("list", help="list cases (drafts included; --all adds retired)")
+    evl.add_argument("--all", action="store_true")
+    evs = ev_sub.add_parser("show", help="one case in full")
+    evs.add_argument("id")
+    evset = ev_sub.add_parser("set", help="edit a case; giving a draft a check makes it active")
+    evset.add_argument("id")
+    evset.add_argument("--title", default=None)
+    evset.add_argument("--expected", default=None)
+    evset.add_argument("--check", default=None)
+    evset.add_argument("--cwd", default=None)
+    evset.add_argument("--timeout", type=int, default=None)
+    evr = ev_sub.add_parser("run", help="run active cases' checks and compare with the last run")
+    evr.add_argument("--id", action="append", default=[], help="only this case (repeatable)")
+    evt = ev_sub.add_parser("retire", help="stop running a case (kept, never deleted)")
+    evt.add_argument("id")
+    ev.set_defaults(func=c.cmd_eval)
+
+
 def _add_hook(sub: Any, c: ModuleType) -> None:
 
     # Internal — wired as the Stop/Notification hook `command` for every
@@ -2224,6 +2257,7 @@ def build_parser(c: ModuleType) -> argparse.ArgumentParser:
     _add_messages(sub, c)
     _add_task(sub, c)
     _add_backlog(sub, c)
+    _add_eval(sub, c)
     _add_hook(sub, c)
     _add_session_report(sub, c)
     _add_context(sub, c)

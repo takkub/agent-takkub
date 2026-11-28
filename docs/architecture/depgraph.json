@@ -1,6 +1,6 @@
 {
   "generated_by": "grimp 3.14",
-  "module_count": 378,
+  "module_count": 379,
   "modules": [
     {
       "module": "agent_takkub",
@@ -76,6 +76,7 @@
         "agent_takkub.core.secrets.backends.keychain_backend",
         "agent_takkub.doctor",
         "agent_takkub.editor_widget",
+        "agent_takkub.eval_cases",
         "agent_takkub.git_changes_service",
         "agent_takkub.git_status",
         "agent_takkub.graft_autobuild",
@@ -121,7 +122,7 @@
         "agent_takkub.verify",
         "agent_takkub.worktree_manager"
       ],
-      "fan_in": 53,
+      "fan_in": 54,
       "fan_out": 0
     },
     {
@@ -335,6 +336,7 @@
       "imported_by": [
         "agent_takkub.backlog_dialog",
         "agent_takkub.cli",
+        "agent_takkub.eval_cases",
         "agent_takkub.fix_loop",
         "agent_takkub.lead_inbox",
         "agent_takkub.orchestrator",
@@ -342,7 +344,7 @@
         "agent_takkub.pm_report",
         "agent_takkub.worktree_reuse"
       ],
-      "fan_in": 8,
+      "fan_in": 9,
       "fan_out": 3
     },
     {
@@ -587,6 +589,7 @@
         "agent_takkub.disk_usage",
         "agent_takkub.docs_verify",
         "agent_takkub.doctor",
+        "agent_takkub.eval_cases",
         "agent_takkub.impact_contract",
         "agent_takkub.lead_context",
         "agent_takkub.lead_readiness",
@@ -633,7 +636,7 @@
         "agent_takkub.__main__"
       ],
       "fan_in": 1,
-      "fan_out": 65
+      "fan_out": 66
     },
     {
       "module": "agent_takkub.cli_parser",
@@ -850,6 +853,7 @@
         "agent_takkub.decide",
         "agent_takkub.disk_usage",
         "agent_takkub.doctor",
+        "agent_takkub.eval_cases",
         "agent_takkub.exec_mode",
         "agent_takkub.fix_loop",
         "agent_takkub.git_status",
@@ -942,7 +946,7 @@
         "agent_takkub.worktree_manager",
         "agent_takkub.worktree_reuse"
       ],
-      "fan_in": 129,
+      "fan_in": 130,
       "fan_out": 3
     },
     {
@@ -2838,6 +2842,21 @@
       "fan_out": 6
     },
     {
+      "module": "agent_takkub.eval_cases",
+      "imports": [
+        "agent_takkub._win_console",
+        "agent_takkub.backlog",
+        "agent_takkub.config",
+        "agent_takkub.path_safe"
+      ],
+      "imported_by": [
+        "agent_takkub.cli",
+        "agent_takkub.orchestrator"
+      ],
+      "fan_in": 2,
+      "fan_out": 4
+    },
+    {
       "module": "agent_takkub.exec_mode",
       "imports": [
         "agent_takkub.config",
@@ -3519,6 +3538,7 @@
         "agent_takkub.design_actions",
         "agent_takkub.digest_facts",
         "agent_takkub.disk_usage",
+        "agent_takkub.eval_cases",
         "agent_takkub.exec_mode",
         "agent_takkub.fix_loop",
         "agent_takkub.graft_autobuild",
@@ -3581,7 +3601,7 @@
         "agent_takkub.user_actions"
       ],
       "fan_in": 6,
-      "fan_out": 72
+      "fan_out": 73
     },
     {
       "module": "agent_takkub.orchestrator_text",
@@ -3766,6 +3786,7 @@
       "imports": [],
       "imported_by": [
         "agent_takkub.backlog",
+        "agent_takkub.eval_cases",
         "agent_takkub.fix_loop",
         "agent_takkub.project_memory",
         "agent_takkub.project_nav",
@@ -3773,7 +3794,7 @@
         "agent_takkub.task_ledger",
         "agent_takkub.worktree_reuse"
       ],
-      "fan_in": 7,
+      "fan_in": 8,
       "fan_out": 0
     },
     {

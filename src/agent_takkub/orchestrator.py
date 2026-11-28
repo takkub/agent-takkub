@@ -9161,11 +9161,29 @@ class Orchestrator(
         if _split_shard(from_role)[0] not in fix_loop.VERIFY_ROLES:
             return
         try:
-            fix_loop.reset(
-                project_ns, fix_loop.identity_for(ps.backlog_id, ps.last_assigned_task or "")
-            )
+            identity = fix_loop.identity_for(ps.backlog_id, ps.last_assigned_task or "")
+            closed = fix_loop.sequences_for(project_ns, identity)
+            fix_loop.reset(project_ns, identity)
         except Exception:
             _log_event("fix_loop_reset_error", role=from_role, project=project_ns)
+            return
+        # Failed ≥1 time, now verified clean → draft eval case for Lead to give
+        # a check. Audit log only — never a popup to the user (#464).
+        try:
+            from . import eval_cases
+
+            draft = eval_cases.draft_from_fix_loop(project_ns, identity, closed, from_role)
+            if draft is not None:
+                _log_event(
+                    "eval_draft_created",
+                    project=project_ns,
+                    role=from_role,
+                    id=draft["id"],
+                    identity=identity,
+                    failures=len(draft.get("failures", [])),
+                )
+        except Exception:
+            _log_event("eval_draft_error", role=from_role, project=project_ns)
 
     def _fix_loop_hook(
         self,

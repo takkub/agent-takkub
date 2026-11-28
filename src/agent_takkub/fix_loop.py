@@ -240,6 +240,12 @@ def decision_scope(scope: str) -> str:
     return s if s in ("tiny", "normal", "deep") else "normal"
 
 
+def sequences_for(project: str, identity: str) -> list[dict]:
+    """Open sequences of *identity* (read-only copy, for the eval-case draft)."""
+    with _LOCK:
+        return [s for s in _load(project)["sequences"].values() if s.get("identity") == identity]
+
+
 def reset(project: str, identity: str) -> int:
     """A passed verification closes every sequence of *identity*; returns how
     many were cleared. Other identities are untouched."""
