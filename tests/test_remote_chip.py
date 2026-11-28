@@ -127,7 +127,12 @@ class TestOnRemoteChipClicked:
                 captured["on_logout_all"] = on_logout_all
                 captured["on_stop_tunnel"] = on_stop_tunnel
 
-            def exec(self):
+            class finished:
+                @staticmethod
+                def connect(cb):
+                    captured["on_finished"] = cb
+
+            def show(self):
                 captured["exec_called"] = True
 
         monkeypatch.setattr("agent_takkub.remote.settings_dialog.RemoteSettingsDialog", _FakeDialog)

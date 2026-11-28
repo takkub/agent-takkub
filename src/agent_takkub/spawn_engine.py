@@ -749,6 +749,8 @@ _TOCTOU_RESAMPLE_N = 3
 # Dedup spawn_still_blocked log entries: only emit once per episode, then once
 # every SPAWN_BLOCK_WARN_AFTER_S seconds while the block persists (#64).
 SPAWN_BLOCK_WARN_AFTER_S = 5.0
+# #1066: after this long parked behind the gate, Lead gets one notice + cause.
+SPAWN_BLOCK_NOTIFY_AFTER_S = 60.0
 
 # #313: SpawnTargetCorrupt retry/backoff. An npm self-update finishes
 # rewriting a provider binary in low single-digit seconds; linear backoff
@@ -1843,6 +1845,12 @@ class SpawnEngineMixin:
 
         return is_spawn_blocked(getattr(self, "_spawn_gate_pred", None))
 
+    def spawn_block_reason(self) -> str:
+        """#1066: why spawns are parked right now ("" when the gate is clear)."""
+        from .spawn_gate import describe_spawn_block
+
+        return describe_spawn_block(getattr(self, "_spawn_gate_pred", None))
+
     def _preserve_pending_spawn_initial_task(self, role_name: str, project_ns: str) -> None:
         """Keep an accepted one-shot payload pending across queue callbacks.
 
@@ -1942,6 +1950,24 @@ class SpawnEngineMixin:
             if deferred_key not in _bts or (_now - _bts[deferred_key]) >= SPAWN_BLOCK_WARN_AFTER_S:
                 _log_event("spawn_still_blocked", role=role_name, project=project_ns)
                 _bts[deferred_key] = _now
+            # #1066: a parked spawn used to stay silent forever (30+ min with a
+            # dialog left open). Tell Lead once per episode, with the cause.
+            _since: dict = self.__dict__.setdefault("_spawn_block_since", {})
+            _first = _since.setdefault(deferred_key, [_now, False])
+            _notify = getattr(self, "_notify_lead", None)
+            if not _first[1] and _now - _first[0] >= SPAWN_BLOCK_NOTIFY_AFTER_S and _notify:
+                _first[1] = True
+                reason = SpawnEngineMixin.spawn_block_reason(self) or "spawn gate ปิดอยู่"
+                _log_event("spawn_blocked_notified", role=role_name, project=project_ns)
+                _notify(
+                    project_ns,
+                    f"⚠️ [spawn-blocked] pane {role_name} ยังไม่เปิดมา "
+                    f"{int(_now - _first[0])}s — {reason} · งานยังรอคิวอยู่ "
+                    "จะ spawn เองทันทีที่ปิด",
+                    from_role=role_name,
+                    note="spawn_blocked",
+                    kind="spawn-blocked",
+                )
             QTimer.singleShot(
                 50,
                 lambda r=role_name, c=cwd, p=project, a=_from_auto_respawn, s=_shard_total, u=resume_uuid: (
@@ -1954,6 +1980,7 @@ class SpawnEngineMixin:
         _bts2: dict | None = getattr(self, "_spawn_blocked_first_ts", None)  # type: ignore[assignment]
         if _bts2 is not None:
             _bts2.pop(deferred_key, None)
+        self.__dict__.get("_spawn_block_since", {}).pop(deferred_key, None)
 
         # Gate cleared: wait ~35 ms (1 event-loop turn) then re-check to
         # close the check-to-call race, then re-enter spawn() which verifies once more.

@@ -736,6 +736,11 @@ class UserActionsMixin:
             self._refresh_remote_chip()
             return
 
+        existing = getattr(self, "_remote_settings_dialog", None)
+        if existing is not None:
+            existing.raise_()
+            existing.activateWindow()
+            return
         dlg = _dialog_mod.RemoteSettingsDialog(
             self,
             is_live=getattr(self, "_remote", None) is not None,
@@ -745,11 +750,16 @@ class UserActionsMixin:
             on_stop_tunnel=self._stop_remote_tunnel_only,
         )
         self._remote_settings_dialog = dlg
-        try:
-            dlg.exec()
-        finally:
+
+        # #1066: modeless on purpose. exec() made it Qt's activeModalWidget,
+        # which closes the ConPTY spawn gate (spawn_gate layer 1) — a dialog
+        # left open parked every assign/spawn silently for 30+ min.
+        def _closed(_result: int = 0) -> None:
             self._remote_settings_dialog = None
-        self._refresh_remote_chip()
+            self._refresh_remote_chip()
+
+        dlg.finished.connect(_closed)
+        dlg.show()
 
     def _on_remote_auto_suspended(self) -> None:
         """#252: `RemoteControl`'s idle watchdog already tore its own server
