@@ -1,0 +1,85 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 330" width="960" height="330" role="img" aria-labelledby="t d">
+  <title id="t">agent-takkub workflow</title>
+  <desc id="d">You prompt the Lead; the Lead plans and assigns specialist panes that run in parallel on their own worktrees; QA, reviewer and critic verify with evidence; failures loop back as fixes; verified work is merged and shipped.</desc>
+  <defs>
+    <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0 0 L10 5 L0 10 z" fill="#6366F1"/>
+    </marker>
+    <marker id="arrw" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0 0 L10 5 L0 10 z" fill="#F59E0B"/>
+    </marker>
+  </defs>
+  <style>
+    text { font-family: "Segoe UI", -apple-system, BlinkMacSystemFont, Helvetica, Arial, sans-serif; }
+    .h { fill: #F3F4F6; font-size: 15px; font-weight: 600; }
+    .s { fill: #9CA3AF; font-size: 11.5px; }
+    .k { fill: #6B7280; font-size: 10.5px; letter-spacing: 1.2px; font-weight: 600; }
+    .chip { fill: #F3F4F6; font-size: 11.5px; font-weight: 600; }
+    .card { fill: #181B22; stroke: #262B36; stroke-width: 1; }
+  </style>
+
+  <rect x="0.5" y="0.5" width="959" height="329" rx="16" fill="#111318" stroke="#262B36"/>
+
+  <!-- step labels -->
+  <text class="k" x="40"  y="40">01 · ASK</text>
+  <text class="k" x="214" y="40">02 · PLAN</text>
+  <text class="k" x="400" y="40">03 · BUILD IN PARALLEL</text>
+  <text class="k" x="616" y="40">04 · VERIFY</text>
+  <text class="k" x="808" y="40">05 · SHIP</text>
+
+  <!-- 01 You -->
+  <rect class="card" x="28" y="112" width="150" height="96" rx="12"/>
+  <circle cx="52" cy="140" r="6" fill="#9CA3AF"/>
+  <text class="h" x="66" y="145">You</text>
+  <text class="s" x="44" y="172">one prompt in the</text>
+  <text class="s" x="44" y="189">cockpit or your phone</text>
+
+  <!-- 02 Lead -->
+  <rect class="card" x="204" y="112" width="160" height="96" rx="12"/>
+  <rect x="204" y="112" width="4" height="96" rx="2" fill="#E3B341"/>
+  <circle cx="228" cy="140" r="6" fill="#E3B341"/>
+  <text class="h" x="242" y="145">Lead</text>
+  <text class="s" x="222" y="172">sizes the job, picks</text>
+  <text class="s" x="222" y="189">roles, writes the brief</text>
+
+  <!-- 03 Specialists -->
+  <rect class="card" x="390" y="58" width="196" height="214" rx="12"/>
+  <g>
+    <rect x="404" y="72"  width="168" height="30" rx="8" fill="#0D0F14" stroke="#262B36"/>
+    <circle cx="420" cy="87" r="5" fill="#34B7AC"/><text class="chip" x="432" y="91">frontend</text><text class="s" x="512" y="91">wt/branch</text>
+    <rect x="404" y="110" width="168" height="30" rx="8" fill="#0D0F14" stroke="#262B36"/>
+    <circle cx="420" cy="125" r="5" fill="#4E86F7"/><text class="chip" x="432" y="129">backend</text><text class="s" x="512" y="129">wt/branch</text>
+    <rect x="404" y="148" width="168" height="30" rx="8" fill="#0D0F14" stroke="#262B36"/>
+    <circle cx="420" cy="163" r="5" fill="#A472F0"/><text class="chip" x="432" y="167">mobile</text><text class="s" x="512" y="167">wt/branch</text>
+    <rect x="404" y="186" width="168" height="30" rx="8" fill="#0D0F14" stroke="#262B36"/>
+    <circle cx="420" cy="201" r="5" fill="#43B562"/><text class="chip" x="432" y="205">devops</text><text class="s" x="512" y="205">wt/branch</text>
+  </g>
+  <text class="s" x="404" y="244">live panes · any provider</text>
+  <text class="s" x="404" y="261">own git worktree each</text>
+
+  <!-- 04 Verify -->
+  <rect class="card" x="612" y="96" width="168" height="128" rx="12"/>
+  <circle cx="636" cy="122" r="5" fill="#E39A3C"/><text class="chip" x="648" y="126">qa · e2e</text>
+  <circle cx="636" cy="146" r="5" fill="#F26D6D"/><text class="chip" x="648" y="150">reviewer</text>
+  <circle cx="636" cy="170" r="5" fill="#F0619A"/><text class="chip" x="648" y="174">critic · ui</text>
+  <text class="s" x="628" y="200">evidence-gated: a run,</text>
+  <text class="s" x="628" y="216">a file, an exit code</text>
+
+  <!-- 05 Ship -->
+  <rect class="card" x="806" y="112" width="128" height="96" rx="12"/>
+  <rect x="930" y="112" width="4" height="96" rx="2" fill="#10B981"/>
+  <circle cx="830" cy="140" r="6" fill="#10B981"/>
+  <text class="h" x="844" y="145">Ship</text>
+  <text class="s" x="822" y="172">merge branches</text>
+  <text class="s" x="822" y="189">one push · CI</text>
+
+  <!-- arrows -->
+  <line x1="180" y1="160" x2="200" y2="160" stroke="#6366F1" stroke-width="2" marker-end="url(#arr)"/>
+  <line x1="366" y1="160" x2="386" y2="160" stroke="#6366F1" stroke-width="2" marker-end="url(#arr)"/>
+  <line x1="588" y1="160" x2="608" y2="160" stroke="#6366F1" stroke-width="2" marker-end="url(#arr)"/>
+  <line x1="782" y1="160" x2="802" y2="160" stroke="#6366F1" stroke-width="2" marker-end="url(#arr)"/>
+
+  <!-- fix loop -->
+  <path d="M696 226 C 696 304, 500 304, 500 276" fill="none" stroke="#F59E0B" stroke-width="1.6" stroke-dasharray="5 4" marker-end="url(#arrw)"/>
+  <text x="606" y="314" fill="#F59E0B" font-size="11.5" font-weight="600" text-anchor="middle" font-family="Segoe UI, -apple-system, Helvetica, Arial, sans-serif">fix-loop: failed check goes back with the evidence</text>
+</svg>

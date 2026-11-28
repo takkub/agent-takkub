@@ -1,214 +1,171 @@
 <div align="center">
 
-# 🛩️ agent-takkub
+<img src="https://raw.githubusercontent.com/takkub/agent-takkub/main/assets/icon.png" alt="agent-takkub" width="96">
 
-### Your AI dev team — in one desktop cockpit.
+# agent-takkub
 
-**Prompt one _Lead_ agent. It plans the work, splits it across specialist teammates, runs them in parallel as real `claude` processes, and verifies the result — while you watch and steer.**
+**Your AI dev team in one desktop cockpit.**<br>
+You talk to one *Lead* agent. It plans the work, runs specialist agents side by side, checks their results and brings back a finished change.
 
-[![NPM Version](https://img.shields.io/npm/v/agent-takkub?style=for-the-badge&color=cb3837&logo=npm)](https://www.npmjs.com/package/agent-takkub)
-[![Downloads](https://img.shields.io/npm/dm/agent-takkub?style=for-the-badge&color=cb3837&logo=npm&label=installs)](https://www.npmjs.com/package/agent-takkub)
-[![License](https://img.shields.io/badge/license-MIT-brightgreen?style=for-the-badge)](https://github.com/takkub/agent-takkub/blob/main/LICENSE)
-[![Platform](https://img.shields.io/badge/Windows%20%7C%20macOS-0078D6?style=for-the-badge&logo=apple)](https://github.com/takkub/agent-takkub)
+[![npm](https://img.shields.io/npm/v/agent-takkub?style=flat-square&color=6366F1&logo=npm&label=npm)](https://www.npmjs.com/package/agent-takkub)
+[![CI](https://img.shields.io/github/actions/workflow/status/takkub/agent-takkub/ci.yml?branch=main&style=flat-square&label=CI&logo=githubactions&logoColor=white)](https://github.com/takkub/agent-takkub/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-10B981?style=flat-square)](https://github.com/takkub/agent-takkub/blob/main/LICENSE)
+[![Platform](https://img.shields.io/badge/Windows%20%C2%B7%20macOS-181B22?style=flat-square&logo=windows&logoColor=white)](https://github.com/takkub/agent-takkub#-get-started)
+[![Providers](https://img.shields.io/badge/providers-5-E3B341?style=flat-square)](https://github.com/takkub/agent-takkub#-five-providers-one-team)
 
 ```bash
 npm install -g agent-takkub
 ```
 
-<sub>100% local · runs on **your** logged-in Claude Code CLI · no SaaS middleware</sub>
+<sub>Runs on your machine with the agent CLIs you already use · no extra server</sub>
 
 </div>
 
----
-
-## 🖥️ The Desktop Cockpit
-
-![Takkub Cockpit — Lead + specialist teammates working in parallel](https://raw.githubusercontent.com/takkub/agent-takkub/main/assets/cockpit-main.png)
-
-<div align="center"><i>One window: you talk to the <b>Lead</b>, and it spawns and drives specialist teammates (frontend · backend · qa · reviewer · devops · …) as live Claude Code panes.</i></div>
-
----
-
-## ✨ Why agent-takkub?
-
-A single AI agent hits a wall on big work: context fills up, sub-tasks collide, and everything runs one-at-a-time. `agent-takkub` runs it like a **real engineering team** — a **Lead** you talk to, and specialist teammates it delegates to, each in its own isolated `claude` process, working **concurrently**.
-
-### Orchestration
-
-|  |  |
-| :-- | :-- |
-| 🧠 **Orchestrated teammates** | Converse with the Lead; it spawns, tasks, and manages specialist panes (`frontend`, `backend`, `qa`, `reviewer`, `devops`, `mobile`, …) on demand — only the roles a job actually needs. |
-| 🔀 **True parallelism** | `frontend` and `backend` build a feature at the same time; QA always verifies **last**, against the real running stack. |
-| 🌿 **Branch & worktree isolation** | Parallel teammates each work on their own git branch in an isolated worktree — no commit races, no dirty-state collisions. You merge when ready. |
-| 👥 **Fleet mode** | One toggle scales a role into a fleet (`frontend#1…#K`) sized to your machine — for many independent features or sharded test suites at once. |
-| 🧭 **Plan-first shards** | `takkub assign --role qa --plan --shards N` — a planner splits a big browser-QA sweep into N buckets before fanning out, instead of guessing an even split. |
-| 🖥️ **Steerable, always** | Every pane is a live `claude` shell. Watch output in real time, interrupt, or type straight into any teammate. |
-| 🗂️ **Multi-project tabs** | One isolated Lead per project — no cross-talk. |
-| 🔒 **100% local** | No SaaS middleware. Everything runs on your machine, on your logged-in Claude Code CLI. |
-
-### Token efficiency & memory
-
-|  |  |
-| :-- | :-- |
-| 📥 **Pull-on-demand context** | Reference docs, patterns, and CLI cheatsheets live outside the Lead's default prompt — it reads them only when a task needs them, instead of paying for them on every turn. |
-| 🧾 **Per-role memory + L2 archive** | Each teammate keeps a short, token-budgeted "learned notes" file; entries that get trimmed for space are archived (not deleted) to a searchable sibling file instead of being lost. |
-| 🔎 **BM25 search (`takkub search`)** | Full-text search over session logs and role-memory archives, ranked with Okapi BM25 — tokenizes both English words and Thai character trigrams, no external segmenter. |
-| ✅ **Evidence-gated QA/review** | A verify role's "done" report is checked for actual evidence (a file, a test run, an exit code) — reports with no evidence cited get flagged for the Lead instead of trusted at face value. |
-| 🧬 **Structural code-intelligence (`graft`)** | Symbol search, call-graph tracing, and signatures-only file views wired into code-reading roles (frontend/backend/mobile/devops/qa/reviewer/critic) — no LLM call, ~92% smaller than reading a large file whole. Fully optional: install with `takkub doctor --fix` (needs Node ≥ 20); a pane never gets the extra tools unless a project's graph has actually finished building. The graph lives outside the repo (`~/.agent-takkub/graft-graphs`, never committed); disable entirely with `TAKKUB_SKIP_GRAFT_BUILD=1`. |
-
-### Reliability & diagnostics
-
-|  |  |
-| :-- | :-- |
-| 🩺 **`takkub doctor --live`** | Checks the running cockpit's spawn queue, CPU/RAM governor, resource waits, PTY queue depth, stale-write drops, and remote mirror — catches live wedges that config-only checks cannot see. |
-| 🛡️ **Reliability v2** | Delivery IDs, pane-session generations, TTL, single-flight submission, bounded priority PTY queues, fair heavy-work admission, adaptive hidden-pane rendering, durable completion dedupe, and Windows Job Object cleanup. |
-| ⌨️ **Multiline input that just works** | Shift+Enter / Alt+Enter add a newline instead of submitting, provider-aware (works on claude/gemini panes; skipped where the underlying TUI would misinterpret it) — includes a macOS IME fix for Thai/CJK input dropped after switching input languages. <sub>(community contribution by [@than-aa](https://github.com/than-aa))</sub> |
-
----
-
-## 🧠 One team, many model "brains"
-
-Model diversity beats a single point of view. Takkub lets the Lead pull in a **second, third — or sixth** brain for planning, review, and cross-checks, and it never breaks if you don't have them installed.
-
-| Brain | Backed by | Great at |
-| :-- | :-- | :-- |
-| 🟣 **Claude** | Claude Code CLI | The Lead + every specialist — build, test, review |
-| 🟢 **Codex** | OpenAI Codex CLI | Second opinion · refactor patterns · cross-checking a plan |
-| 🔵 **Gemini** | Google Antigravity (`agy`) | Long-context planning (reads the whole repo) · a third perspective |
-| 🟠 **OpenCode** | sst OpenCode | One CLI, 75+ model backends (GLM · DeepSeek · local Ollama …) |
-| ⚫ **Cursor** | Cursor CLI (`cursor-agent`) | Pick per-task from Cursor's own model roster |
-
-**Pick the model, not just the CLI.** Every provider — and every *role* — can be pinned to a specific model from **Settings → Providers & Roles**, or from the terminal:
-
-```bash
-takkub provider model gemini "Gemini 3.1 Pro (High)"   # this CLI spawns with that model
-takkub provider list                                    # who's installed, and on which model
-```
-
-A role's own model wins over the provider default, so `backend` can run Codex on `gpt-5.6` while `reviewer` runs it on something cheaper.
-
-> **Never a hard dependency.** If a provider isn't installed (or you've toggled it off), the Lead keeps the role — **Claude transparently stands in**, and tells you you've traded away model diversity. No refusals, no dead ends.
-
-> ⚠️ **Cursor is new in 1.0.27** — they spawn and take tasks, but its idle/busy screen markers are not calibrated yet, so prefer Claude/Codex/Gemini/OpenCode for roles you leave unattended.
-
----
-
-## ⚡ Quick Start
-
-```bash
-# 1. Install the cockpit, plus Claude and Codex CLIs if missing
-npm install -g agent-takkub
-
-# 2. Authenticate with your Claude and OpenAI accounts
-claude login
-codex login
-
-# 3. Provision recommended plugins + browser-automation tools (idempotent)
-takkub provision
-```
-
-> ⚠️ **Install it globally — the `-g` flag matters.** It provisions the isolated runtime and the Desktop launcher. A plain `npm install agent-takkub` (no `-g`) will **not** set the app up.
-
-Then **double-click “Takkub Cockpit”** on your Desktop — or launch from a terminal:
-
-```bash
-agent-takkub
-```
-
-<table>
-<tr><td>
-
-**Requirements** — Node.js ≥ 18 and Python ≥ 3.11 already on your system. The installer creates an isolated Python runtime and Desktop launcher, and installs missing Claude and Codex CLIs into your npm global prefix. Existing provider installations are reused. Authenticate with `claude login` and `codex login` before using those providers.
-
-**Optional: `graft` code-intelligence** needs Node ≥ 20 — stricter than the cockpit's own Node ≥ 18 floor. It's off until you run `takkub doctor --fix`; without it (or on Node 18–19), the cockpit runs exactly the same, just without the extra structural-search tools for code-reading roles.
-
-</td></tr>
-</table>
-
----
-
-## 🚦 Two ways to run: 1:1 or a whole team
-
-A chip in the status bar flips how the Lead works:
-
-- **👤 1:1 (default)** — one agent per role, one feature at a time. Focused and predictable.
-- **👥 Multi** — hand the Lead several independent features and it **fans out** into multiple instances per role (`frontend#1…#K`, `backend#1…#K`) running at once, like a team of several devs per position. Finishes fast.
-
-Dependent work stays sequential automatically; **QA is always the final gate**, run against the real stack.
-
----
-
-## 🔄 Orchestration Flow
-
-```mermaid
-sequenceDiagram
-    actor User
-    participant Lead as Lead Agent
-    participant Cockpit as Cockpit Engine
-    participant Spec as Specialist Pane(s)
-    participant Git as Git Repository
-
-    User->>Lead: "Build the login feature"
-    Lead->>Cockpit: takkub assign --role frontend / backend (parallel)
-    Cockpit->>Git: create isolated branch + worktree (optional)
-    Cockpit->>Spec: spawn claude pane + inject task
-    Note over Spec: teammates code & test independently
-    Spec->>Cockpit: takkub done "report"
-    Cockpit->>Lead: done notice → verify sequence (devops → QA last)
-    Lead->>Git: review + merge branches, propose ship
-```
-
----
-
-## 📱 Mobile Remote Control (PWA)
-
 <p align="center">
-  <img src="https://raw.githubusercontent.com/takkub/agent-takkub/main/assets/mobile-remote.png" alt="Takkub Remote — drive your Lead from your phone" width="300">
+  <img src="https://raw.githubusercontent.com/takkub/agent-takkub/main/assets/cockpit-main.png" alt="The Takkub cockpit: the Lead pane next to specialist panes working in parallel" width="100%">
 </p>
 
-<div align="center"><i>Step away from the desk — pair your phone once (link / QR) and watch <b>and steer</b> the Lead from anywhere, through an install-free PWA.</i></div>
+## ✨ What it does
 
-- **📲 Install-free PWA** — open the paired link, *Add to Home Screen*, done. Offline-capable app shell, no store.
-- **💬 Live Lead console** — the Lead's replies stream to your phone in real time (with a "still working…" indicator); type back to steer it.
-- **📊 Pulse** — a glanceable, project-grouped view of which teammates are running and for how long.
-- **🎛️ View vs. control** — read-only by default; flip to control mode to send prompts or open projects remotely.
-- **🔒 Three-factor, off by default** — secret path + bearer token (never in the QR) + a password gate, on a loopback-only server behind a Cloudflare/ngrok tunnel, with per-client sessions & brute-force lockout. Data-minimized: never ships raw tool output, commands, or filesystem paths. Turn it on from the cockpit's **🌐 Remote** chip.
+| | |
+| :-- | :-- |
+| 🧠 **One Lead, a whole team** | You give the Lead a task. It decides which roles the job needs (frontend, backend, mobile, devops, qa, reviewer, critic and more) and briefs each one. |
+| 🔀 **Parallel work** | Each teammate is a live agent pane. Frontend and backend build at the same time, and each one works on its own git branch and worktree. |
+| ✅ **Checks with evidence** | QA, reviewer and critic go last, against the real build. A report that cites no test run, file or exit code is flagged for the Lead. |
+| 🔁 **Fix loop** | A failed check goes back to the teammate with the evidence until it passes. |
+| 🖥️ **You stay in control** | Watch every pane live, interrupt it, or type straight into it. One tab per project, each with its own Lead. |
+| 📱 **Phone remote** | Pair your phone once and follow or steer the Lead from an install-free web app. It is off by default and needs a password. |
 
-> **Docker / headless:** `docker-compose.yml` publishes the remote-control port on `127.0.0.1` only, and the sandbox (`--profile sim`) will not start until you set your own `TAKKUB_SIM_PASSWORD` in `.env`. If another machine has to reach it, put an **authenticating reverse proxy** or a **VPN** in front — never publish the port straight to the internet. See [SECURITY.md](SECURITY.md).
+## 🗺️ How it works
 
----
+<p align="center">
+  <img src="https://raw.githubusercontent.com/takkub/agent-takkub/main/assets/readme/workflow.svg" alt="Workflow: You → Lead plans → specialist panes build in parallel → qa / reviewer / critic verify → ship; failed checks loop back" width="100%">
+</p>
 
-## 🛠️ Everyday Commands
+## 🧩 Five providers, one team
 
-| Command | Purpose |
-| :--- | :--- |
-| `takkub assign --role backend "…"` | Spawn a specialist and assign a task |
-| `takkub assign --role frontend --isolation worktree "…"` | Task on an isolated git branch + worktree |
-| `takkub assign --role qa --plan --shards 4 "…"` | Plan-first parallel browser QA (auto fan-out) |
-| `takkub worktree list / merge / clean` | Review + merge isolated branches |
-| `takkub send --to qa "…"` | Message a teammate (Lead CC’d) |
-| `takkub search "…"` | BM25-ranked search over session logs + role-memory archives (Thai + English) |
-| `takkub goal "…"` | Set a session goal injected into every task |
-| `takkub restart` | Restart the whole cockpit from the terminal |
-| `takkub doctor --fix` | Diagnose the environment + auto-repair (add `--install-providers` to also install missing provider CLIs) |
-| `takkub doctor --live` | Same checks, plus a live look at the running cockpit's spawn queue |
-| `takkub provider list` | Show every provider CLI, whether it's installed, and its model |
-| `takkub provider install <name>` | Install one provider CLI (Codex / OpenCode) |
-| `takkub provider model <name> [<model>]` | Show or set the model a provider spawns with (`--clear` to reset) |
-| `takkub provision` | Install / repair plugins + browser tools |
+Any role can run on any of these CLIs. If one isn't installed, **Claude stands in** and the Lead tells you.
 
----
+| Provider | CLI | Good for |
+| :-- | :-- | :-- |
+| ![Claude](https://img.shields.io/badge/-Claude-d97757?style=flat-square) | Claude Code (`claude`) | The Lead and every specialist role |
+| ![Codex](https://img.shields.io/badge/-Codex-10a37f?style=flat-square) | OpenAI Codex (`codex`) | A second opinion, refactors, checking a plan |
+| ![Gemini](https://img.shields.io/badge/-Gemini-4285f4?style=flat-square) | Google Antigravity (`agy`) | Long-context planning across the whole repo |
+| ![OpenCode](https://img.shields.io/badge/-OpenCode-f97316?style=flat-square) | OpenCode (`opencode`) | Many model backends from one CLI |
+| ![Cursor](https://img.shields.io/badge/-Cursor-38bdf8?style=flat-square) | Cursor (`cursor-agent`) | Choosing from Cursor's own model list |
 
-## 📖 Deep Dives & Resources
+You can pin a model per provider or per role in **Settings → Providers & Roles**, or with `takkub provider model <name> "<model>"`.
 
-- 🏗️ **Architecture & design** — [Architecture Guide](https://github.com/takkub/agent-takkub/blob/main/docs/ARCHITECTURE.md)
-- ⚙️ **System overview & flow diagrams** — [docs/system-overview](https://github.com/takkub/agent-takkub/tree/main/docs/system-overview)
-- 🛡️ **Performance & Reliability v2** — [configuration, invariants, diagnostics, and rollback](docs/performance-reliability.md)
-- 🔧 **From source / one-shot installer** (Chrome, gh, Codex, Antigravity, rtk, …) — [INSTALL.md](https://github.com/takkub/agent-takkub/blob/main/docs/INSTALL.md)
-- 🐙 **GitHub** — [takkub/agent-takkub](https://github.com/takkub/agent-takkub)
+## 🆕 What's new, and what we removed
+
+| | Version | Change |
+| :-- | :-- | :-- |
+| ⏳ | *next (pending merge)* | `takkub eval add / list / show / run / retire`: keep cases that failed before and re-run their checks, with pass→fail changes shown first |
+| ➕ | 2.2.61 | Start the cockpit when the computer starts (switch in Settings → General, off by default) |
+| ➕ | 2.2.61 | Machine-load guard: a per-pane worker budget, and `takkub status` shows a `[machine]` line |
+| ➕ | 2.2.54 | The cockpit installs the `graft` code-graph CLI at boot |
+| ➕ | 2.2.49 | Docker compose stacks that a pane started are stopped when the work ends |
+| ➕ | 2.2.47 | `takkub mcp add <name> --url <URL>` for HTTP MCP servers |
+| ➕ | 2.2.35 · 2.2.45 | **🧭 PM** tab: one chat across all projects (`takkub pm summary / send`) |
+| ➖ | 2.2.61 | Default plugin set cut to `pordee` only. The others are still available to install. |
+| ➖ | 2.2.53 | **ccc** semantic search removed: 0 calls in 90 days, but it cost tokens in every pane |
+| ➖ | 2.2.53 | `takkub gemini` one-shot command removed |
+| ➖ | 2.2.26 | **Figma** integration removed, with leftovers cleaned at boot in 2.2.32 and 2.2.53 |
+| ➖ | 2.2.31 | ~3,200 lines of dead code and the unused per-task token cap removed |
+
+<details>
+<summary>More history</summary>
+
+<br>
+
+- **2.2.34**: `takkub report check <file.html>` captures a report at 360/390/768/1440 px and checks for overflow. Also adds `takkub --version`.
+- **2.2.32**: `takkub backups list | prune` shows and clears what the cockpit set aside instead of deleting it.
+- **2.2.24**: `ccc` added as a pilot. It was removed again in 2.2.53, as shown above.
+- **2.2.22**: New project → **🔗 Clone from repo**.
+
+Every release is listed in [CHANGELOG.md](https://github.com/takkub/agent-takkub/blob/main/CHANGELOG.md), with 168 versions so far.
+
+</details>
+
+## 🚀 Get started
+
+```bash
+npm install -g agent-takkub   # app + isolated Python runtime + Desktop launcher
+claude login                  # sign in to the providers you use
+codex login
+takkub provision              # recommended plugins + browser tools (safe to re-run)
+agent-takkub                  # or double-click "Takkub Cockpit" on the Desktop
+```
+
+> ⚠️ Install with **`-g`**. A plain `npm install agent-takkub` does not set the app up.
+
+<details>
+<summary>Requirements</summary>
+
+<br>
+
+- **Node.js ≥ 18** and **Python ≥ 3.11** already installed.
+- The installer creates its own Python runtime and Desktop launcher. It installs the Claude and Codex CLIs into your npm global prefix if they are missing, and reuses any provider CLIs you already have.
+- Optional **`graft`** code intelligence needs Node ≥ 20. Without it the cockpit works the same, minus the structural-search tools.
+- From source, Docker/headless and the one-shot installer: [docs/INSTALL.md](https://github.com/takkub/agent-takkub/blob/main/docs/INSTALL.md)
+
+</details>
+
+## ⌨️ Main commands
+
+| Command | What it does |
+| :-- | :-- |
+| `takkub assign --role backend "…"` | Give a task to a specialist |
+| `takkub assign --role frontend --isolation worktree "…"` | Run the task on its own branch and worktree |
+| `takkub worktree list / merge / clean` | Review and merge isolated branches |
+| `takkub status` | Progress of every pane, plus machine load |
+| `takkub doctor --fix` | Check the setup and repair what it can |
+
+<details>
+<summary>More commands</summary>
+
+<br>
+
+| Command | What it does |
+| :-- | :-- |
+| `takkub assign --role qa --plan --shards 4 "…"` | Plan-first parallel browser QA |
+| `takkub send --to qa "…"` | Message a teammate (Lead is CC'd) |
+| `takkub search "…"` | BM25 search over session logs and role memory (Thai + English) |
+| `takkub goal "…"` | Session goal added to every task |
+| `takkub doctor --live` | Same checks, plus the running cockpit's queues |
+| `takkub provider list / install <name> / model <name> [<model>]` | Provider CLIs, install them and set their models |
+| `takkub pm summary --days N` | Read-only overview across all projects |
+| `takkub restart` | Restart the cockpit from the terminal |
+
+Full reference: [docs/lead/cli-reference.md](https://github.com/takkub/agent-takkub/blob/main/docs/lead/cli-reference.md)
+
+</details>
+
+## 📱 Phone remote
+
+<details>
+<summary>Watch and steer the Lead from your phone</summary>
+
+<br>
+
+<p align="center"><img src="https://raw.githubusercontent.com/takkub/agent-takkub/main/assets/mobile-remote.png" alt="Takkub Remote on a phone" width="280"></p>
+
+Turn it on from the cockpit's **🌐 Remote** chip, pair the phone by link or QR code and add it to your home screen. The Lead's replies stream to the phone. It starts read-only, and you switch to control mode to send prompts. Access needs a secret path, a bearer token and a password, on a local-only server behind a tunnel. Security details are in [SECURITY.md](https://github.com/takkub/agent-takkub/blob/main/SECURITY.md).
+
+</details>
+
+## 📚 Docs
+
+| | |
+| :-- | :-- |
+| 📖 [Feature reference](https://github.com/takkub/agent-takkub/blob/main/docs/FEATURES.md) | The full feature tour: orchestration, token efficiency, reliability, providers and the remote |
+| 🏗️ [Architecture](https://github.com/takkub/agent-takkub/blob/main/docs/ARCHITECTURE.md) | How the cockpit is put together |
+| ⚙️ [System overview](https://github.com/takkub/agent-takkub/tree/main/docs/system-overview) | Flow diagrams |
+| 🛡️ [Performance & reliability](https://github.com/takkub/agent-takkub/blob/main/docs/performance-reliability.md) | Settings, diagnostics and rollback |
+| 🔧 [Install guide](https://github.com/takkub/agent-takkub/blob/main/docs/INSTALL.md) | From source, Docker and headless |
 
 ---
 
 <div align="center">
-  <sub>Windows &amp; macOS • built on PyQt6 • powered by the Claude Code CLI • MIT-licensed</sub>
+<sub>Windows &amp; macOS · PyQt6 · MIT licensed · <a href="https://github.com/takkub/agent-takkub">github.com/takkub/agent-takkub</a></sub>
 </div>
