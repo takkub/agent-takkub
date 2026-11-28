@@ -155,6 +155,12 @@ class HeadlessWindow(QObject):
         if project_name in self._tabs:
             return
         set_active_project(project_name)
+        try:  # #1069: same recall-index warm as main_window's tab switch
+            from .core.brain.facade import warm_context_index_async
+
+            warm_context_index_async(project_name)
+        except Exception:
+            pass
         tab = _HeadlessTab(project_name)
         self._tabs[project_name] = tab
         lead = HeadlessPane(LEAD)
