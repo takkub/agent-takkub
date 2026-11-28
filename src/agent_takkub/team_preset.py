@@ -642,6 +642,40 @@ REVIEWER_MODE_ROLES: tuple[str, ...] = ("reviewer", "qa", "critic")
 #: a read-only "second opinion" glance instead (`_build_secondary_brains_panel`).
 SECONDARY_BRAIN_ROLES: tuple[str, ...] = ("codex", "gemini", "opencode", "cursor")
 
+
+def can_use_substitute_slot(
+    role: str, task: str, project: str | None = None, provider_override: str | None = None
+) -> tuple[bool, str]:
+    """#1058 items 3+4: a provider slot (codex/gemini/opencode/cursor) whose
+    provider is switched off / not installed runs on a substitute CLI — Lead
+    must not use it as an extra pair of hands for an enabled owner role's
+    implementation work. Cross-check / review / analysis tasks (the slot's
+    intended use) pass. Classification is `routing_planner.substitute_slot_owner`
+    (the existing route table) — no second classifier here."""
+    base = role.split("#", 1)[0].strip().lower()
+    if base not in SECONDARY_BRAIN_ROLES or not (task or "").strip() or provider_override:
+        return True, ""
+    from .provider_config import provider_unavailable_substitution_info
+
+    sub = provider_unavailable_substitution_info(base, project=project)
+    if sub is None:
+        return True, ""
+    from .pipeline_config import is_role_enabled
+    from .routing_planner import substitute_slot_owner
+
+    owner = substitute_slot_owner(base, task)
+    if owner is None or not is_role_enabled(owner, project):
+        return True, ""
+    return False, (
+        f"slot {base} ใช้ {sub[1]} แทน {sub[0]} (ปิดใน Settings/ไม่ได้ติดตั้ง) — ไม่ใช่มือเพิ่มของ "
+        f"role {owner} (#1058) · งานนี้เป็นงานของ {owner}: ไฟล์ชุดเดิม → "
+        f'`takkub send --to {owner} "..."` ต่อท้าย · คนละไฟล์ → '
+        f"`takkub assign --role {owner} --isolation worktree ...` · ไม่งั้น "
+        f"`takkub assign --role {owner} ...` (เข้าคิวเอง) · ส่ง {base} ได้เฉพาะงาน "
+        "cross-check/review/วิเคราะห์"
+    )
+
+
 #: Human labels shared by Roles and Pipeline; each role has its own settings.
 REVIEWER_MODE_LABELS: dict[str, str] = {
     "reviewer": "Reviewer",

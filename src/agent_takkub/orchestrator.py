@@ -3273,6 +3273,14 @@ class Orchestrator(
         _team_spawn_ok, _team_spawn_msg = _team_can_spawn(role_name, role_check_project_ns)
         if not _team_spawn_ok:
             return False, _team_spawn_msg
+        from .team_preset import can_use_substitute_slot
+
+        _slot_ok, _slot_msg = can_use_substitute_slot(
+            role_name, task, role_check_project_ns, provider
+        )
+        if not _slot_ok:
+            _log_event("substitute_slot_refused", role=role_name, project=role_check_project_ns)
+            return False, _slot_msg
 
         if team is not None:
             if role_name != LEAD.name:
