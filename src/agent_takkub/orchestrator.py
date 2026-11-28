@@ -2905,9 +2905,11 @@ class Orchestrator(
         project: str | None = None,
         failed: bool = False,
         cancelled: bool = False,
+        cancelled_by: str = "",
     ) -> tuple[bool, str]:
         """Complete a pending native child through done-equivalent sinks (#268).
-        `cancelled` (#1068) follows `done(cancelled=True)`: not a FAILED."""
+        `cancelled` (#1068) follows `done(cancelled=True)`: not a FAILED;
+        `cancelled_by` is "lead" only from cancel_task (server-set)."""
         try:
             role_name = validate_name(role_name, "role")
         except ValueError as exc:
@@ -3029,8 +3031,16 @@ class Orchestrator(
             if (failed or cancelled)
             else self._condense_done_note(note, note, "", session_path)
         )
+        if cancelled and cancelled_by == "lead":
+            cancel_notice = (
+                f"[{role_name} CANCELLED] 🚫 Lead สั่งยกเลิก (subagent · ไม่นับเป็นความล้มเหลว) — {note}"
+            )
+        else:
+            from .lead_inbox import PANE_CANCEL_MARKER
+
+            cancel_notice = f"[{role_name} CANCELLED] 🚫 {PANE_CANCEL_MARKER} (subagent) — {note}"
         notice = (
-            f"[{role_name} CANCELLED] 🚫 งานถูกยกเลิก (subagent · ไม่นับเป็นความล้มเหลว) — {note}"
+            cancel_notice
             if cancelled
             else self._build_verify_fail_handoff(
                 role_name,
@@ -7858,11 +7868,18 @@ class Orchestrator(
             return False, "lead has no task to cancel"
         note = f"ยกเลิกโดย Lead: {(reason or '').strip() or 'ไม่ระบุเหตุผล'}"
         if (project_ns, role_name) in getattr(self, "_subagent_assignments", {}):
-            return self.subagent_done(role_name, note=note, project=project_ns, cancelled=True)
+            return self.subagent_done(
+                role_name, note=note, project=project_ns, cancelled=True, cancelled_by="lead"
+            )
         pane = self._project_panes(project_ns).get(role_name)
         if pane is not None and f"{project_ns}::{role_name}" in getattr(self, "_pane_state", {}):
             ok, msg = self.done(
-                role_name, note=note, project=project_ns, cancelled=True, force=True
+                role_name,
+                note=note,
+                project=project_ns,
+                cancelled=True,
+                cancelled_by="lead",
+                force=True,
             )
             if not ok:
                 return False, msg
@@ -9261,21 +9278,43 @@ class Orchestrator(
             return
         # Failed ≥1 time, now verified clean → draft eval case for Lead to give
         # a check. Audit log only — never a popup to the user (#464).
-        try:
+        # N-7: off the GUI thread (cases.lock waits ≤2s), and a busy lock is
+        # retried instead of dropping the draft.
+        if not any(s.get("attempts") for s in closed):
+            return
+
+        def _draft() -> None:
             from . import eval_cases
 
-            draft = eval_cases.draft_from_fix_loop(project_ns, identity, closed, from_role)
-            if draft is not None:
-                _log_event(
-                    "eval_draft_created",
-                    project=project_ns,
-                    role=from_role,
-                    id=draft["id"],
-                    identity=identity,
-                    failures=len(draft.get("failures", [])),
-                )
-        except Exception:
-            _log_event("eval_draft_error", role=from_role, project=project_ns)
+            for attempt in range(1, 4):
+                try:
+                    draft = eval_cases.draft_from_fix_loop(project_ns, identity, closed, from_role)
+                except TimeoutError:
+                    if attempt < 3:
+                        time.sleep(attempt)
+                        continue
+                    _log_event(
+                        "eval_draft_error",
+                        role=from_role,
+                        project=project_ns,
+                        reason="cases.lock busy after 3 tries",
+                    )
+                    return
+                except Exception:
+                    _log_event("eval_draft_error", role=from_role, project=project_ns)
+                    return
+                if draft is not None:
+                    _log_event(
+                        "eval_draft_created",
+                        project=project_ns,
+                        role=from_role,
+                        id=draft["id"],
+                        identity=identity,
+                        failures=len(draft.get("failures", [])),
+                    )
+                return
+
+        bg_pool.submit(_draft)
 
     def _fix_loop_hook(
         self,
@@ -9963,6 +10002,7 @@ class Orchestrator(
         force: bool = False,
         git_facts: dict | None = None,
         cancelled: bool = False,
+        cancelled_by: str = "",
     ) -> tuple[bool, str]:
         """`blocked=True` (#296) means the work could not RUN — something
         outside the codebase is missing. It still counts as not-done (callers
@@ -9980,6 +10020,12 @@ class Orchestrator(
             return False, str(exc)
         if cancelled:
             failed = blocked = False
+            # #1068 S-3: who called it off is set by the server (cancel_task →
+            # "lead"); anything else — `done --cancelled` — is the pane's own
+            # call. Never read from the note text, which the pane writes.
+            cancelled_by = "lead" if cancelled_by == "lead" else "pane"
+        else:
+            cancelled_by = ""
         if from_role == LEAD.name:
             return False, "lead cannot call done on itself"
         project_ns = self._resolve_project(project)
@@ -10379,6 +10425,7 @@ class Orchestrator(
                 raw_note,
                 session_md_path,
                 cancelled=cancelled,
+                cancelled_by=cancelled_by,
             )
         )
 
@@ -10407,6 +10454,7 @@ class Orchestrator(
             raw_note,
             session_md_path,
             cancelled=cancelled,
+            cancelled_by=cancelled_by,
         )
 
         Orchestrator._done_handoffs(
@@ -10426,6 +10474,7 @@ class Orchestrator(
             pane,
             project_ns,
             cancelled=cancelled,
+            cancelled_by=cancelled_by,
         )
 
         # mark pane done, auto-close after a delay so user can see it.
@@ -10977,6 +11026,74 @@ class Orchestrator(
             )
         return _note_path, session_md_path
 
+    def _pane_cancel_warnings(
+        self,
+        project_ns,
+        from_role,
+        _ps_done,
+        *,
+        git_facts,
+        had_worktree,
+        pane,
+        had_assign_base_sha,
+        had_assign_git_root,
+        had_assign_dirty_snapshot,
+        had_assign_non_git,
+    ) -> list[str]:
+        """#1068 S-3: what a pane's own `done --cancelled` hides — earlier
+        FAILED attempts of the same work (open fix-loop sequences) and work
+        it leaves behind (commits / changed files). Same git facts the digest
+        uses, never an auto-commit snapshot."""
+        out: list[str] = []
+        try:
+            from . import fix_loop
+
+            identity = fix_loop.identity_for(
+                getattr(_ps_done, "backlog_id", None),
+                getattr(_ps_done, "last_assigned_task", None) or "",
+            )
+            failures = sum(
+                len(s.get("attempts") or []) for s in fix_loop.sequences_for(project_ns, identity)
+            )
+        except Exception:
+            failures = 0
+        if failures:
+            out.append(
+                f"งานนี้ FAILED มาแล้ว {failures} รอบใน fix-loop เดียวกันก่อน pane ยกเลิกเอง — "
+                "อาจเป็นการเลี่ยง --fail ตรวจก่อนรับ"
+            )
+        try:
+            facts, _ = self._compute_digest_facts(
+                from_role,
+                None,
+                "",
+                None,
+                had_worktree,
+                getattr(pane, "_session_cwd", None),
+                had_assign_base_sha,
+                had_assign_git_root,
+                had_assign_dirty_snapshot,
+                assign_non_git=had_assign_non_git,
+                git_facts=git_facts,
+            )
+        except Exception:
+            facts = None
+        parts = []
+        if facts is not None:
+            if getattr(facts, "commits_ahead", None):
+                parts.append(f"{facts.commits_ahead} commit")
+            if getattr(facts, "uncommitted", None):
+                parts.append(f"{facts.uncommitted} ไฟล์ยังไม่ commit")
+            if getattr(facts, "files_touched", None) and not parts:
+                parts.append(f"แก้ {facts.files_touched} ไฟล์")
+        if parts:
+            where = f" (branch {facts.branch})" if getattr(facts, "branch", None) else ""
+            out.append(
+                f"ยกเลิกทั้งที่มีงานค้าง: {' · '.join(parts)}{where} — ไม่เสนอ merge อัตโนมัติ "
+                "ไฟล์/worktree ยังอยู่ ตรวจ diff เองก่อนตัดสินใจ"
+            )
+        return out
+
     def _done_build_lead_notice(
         self,
         _assigned_scope,
@@ -11002,6 +11119,7 @@ class Orchestrator(
         session_md_path,
         *,
         cancelled=False,
+        cancelled_by="",
     ):
         """Build the Lead-facing done notice (digest facts, ref badge, condensation) (extracted from `done`, 2026-10-24)."""
         _worktree_digest_precomputed = None
@@ -11036,11 +11154,39 @@ class Orchestrator(
             # not a verified fix (no close, so no eval-case draft) and not a
             # failure for role memory. One plain notice of its own kind.
             notice_body = note
-            notice = (
-                f"[{from_role} CANCELLED] {ref_tag}🚫 งานถูกยกเลิก (ไม่นับเป็นความล้มเหลว) — {note}"
-            ).rstrip()
+            if cancelled_by == "lead":
+                notice = (
+                    f"[{from_role} CANCELLED] {ref_tag}🚫 Lead สั่งยกเลิก (ไม่นับเป็นความล้มเหลว) — {note}"
+                ).rstrip()
+            else:
+                # S-3: the pane stopped its own task. Lead never ordered it,
+                # so say so, show what it leaves behind and whether it had
+                # already been failing — a cancel can be a FAILED in disguise.
+                from .lead_inbox import PANE_CANCEL_MARKER
+
+                warnings = Orchestrator._pane_cancel_warnings(
+                    self,
+                    project_ns,
+                    from_role,
+                    _ps_done,
+                    git_facts=git_facts,
+                    had_worktree=had_worktree,
+                    pane=pane,
+                    had_assign_base_sha=had_assign_base_sha,
+                    had_assign_git_root=had_assign_git_root,
+                    had_assign_dirty_snapshot=had_assign_dirty_snapshot,
+                    had_assign_non_git=had_assign_non_git,
+                )
+                notice = (
+                    f"[{from_role} CANCELLED] {ref_tag}🚫 {PANE_CANCEL_MARKER} — {note}".rstrip()
+                )
+                notice += "".join(f"\n⚠️ {w}" for w in warnings)
             _log_event(
-                "done_cancelled", project=project_ns, role=from_role, note=(note or "")[:200]
+                "done_cancelled",
+                project=project_ns,
+                role=from_role,
+                by=cancelled_by,
+                note=(note or "")[:200],
             )
             return _worktree_digest_precomputed, digest_facts, notice, notice_body
         if failed:
@@ -11331,6 +11477,7 @@ class Orchestrator(
         session_md_path,
         *,
         cancelled=False,
+        cancelled_by="",
     ):
         """Fold watchdog observations, check report quality/delivery, route the notice to Lead (extracted from `done`, 2026-10-24)."""
         merge_folded_into_notice = None
@@ -11347,8 +11494,14 @@ class Orchestrator(
         # success. Keep these warnings visible even in a condensed digest.
         from .orchestrator_text import done_report_warnings
 
-        review_warnings = done_report_warnings(raw_note, report_path=session_md_path)
-        if had_assign_ts:
+        # N-4: Lead's own `close --cancel` note is written by the server, not
+        # a report — checking it for CHANGED/EVIDENCE is noise.
+        review_warnings = (
+            []
+            if cancelled_by == "lead"
+            else done_report_warnings(raw_note, report_path=session_md_path)
+        )
+        if had_assign_ts and cancelled_by != "lead":
             try:
                 from . import role_messages
 
@@ -11536,6 +11689,7 @@ class Orchestrator(
         project_ns,
         *,
         cancelled=False,
+        cancelled_by="",
     ):
         """Background-tab emit, worktree merge, auto-chain, plan fan-out, shard aggregate, pipeline hop (extracted from `done`, 2026-10-24)."""
         # Fix A: when this done event belongs to a background tab, emit a
@@ -11551,7 +11705,12 @@ class Orchestrator(
         # Worktree isolation (issue #81): the pane ran in its own git worktree.
         # If its branch has commits, send Lead a MERGE PROPOSAL (never auto);
         # otherwise safe-remove the empty worktree.
-        if had_worktree:
+        # S-3: a pane that cancelled its own task gets no merge proposal — its
+        # notice already warns what it left; the worktree is kept, Lead decides.
+        pane_cancelled = cancelled and cancelled_by != "lead"
+        if had_worktree and pane_cancelled:
+            _log_event("worktree_kept_pane_cancelled", role=from_role, project=project_ns)
+        elif had_worktree:
             self._finalize_worktree(
                 project_ns,
                 from_role,
@@ -11591,7 +11750,8 @@ class Orchestrator(
         # assign time, and it was the LAST pending auto-chain pane in
         # the project, inject a pre-authorisation prompt so Lead fires
         # verify (qa+reviewer) without proposing/confirming.
-        self._maybe_fire_auto_chain_handoff(project_ns, had_auto_chain)
+        if not pane_cancelled:
+            self._maybe_fire_auto_chain_handoff(project_ns, had_auto_chain)
 
         # Plan-then-fan-out: this pane was a planner (--plan). Read the bucket
         # plan it just wrote and spawn the QA shards (each with its bucket).
@@ -11651,7 +11811,29 @@ class Orchestrator(
             pl_run = self._pipeline_runs.get(pipeline_key)
             if pl_run and not pl_run.closed:
                 pl_run.hop_pending.discard(from_role)
-                if not pl_run.hop_pending:
+                if pane_cancelled:
+                    # S-3: the hop did not finish — stop the run here (a
+                    # sibling's later done must not fire the next hop
+                    # either) and let Lead decide what runs next.
+                    pl_run.hop_failed.add(from_role)
+                    pl_run.closed = True
+                    self._pipeline_runs.pop(pipeline_key, None)
+                    self._notify_lead(
+                        project_ns,
+                        f"{self._pipeline_tag(pl_run)}หยุดที่ hop {pl_run.current_hop + 1}: "
+                        f"{from_role} ยกเลิกงานเอง (Lead ไม่ได้สั่ง) — ไม่เดิน hop ถัดไป "
+                        "ตรวจรายงาน CANCELLED แล้วสั่งต่อเอง",
+                        from_role=from_role,
+                        note="",
+                        kind="pipeline-held",
+                    )
+                    _log_event(
+                        "pipeline_hop_held_pane_cancelled",
+                        project=project_ns,
+                        role=from_role,
+                        run_id=had_pipeline_run_id,
+                    )
+                elif not pl_run.hop_pending:
                     self._advance_pipeline(project_ns, pipeline_key, pl_run)
 
     def progress(

@@ -403,6 +403,13 @@ def _inbox_digest_window_ms() -> int:
 # non-blocking done path — it is a completion report, not a FAILED.
 _DONE_NOTICE_RE = re.compile(r"^\[([^\]\r\n]+?)\s+(?:done|CANCELLED)\](?:\s+(.*))?$", re.DOTALL)
 _CANCELLED_NOTICE_RE = re.compile(r"^\[[^\]\r\n]+?\s+CANCELLED\]")
+# #1068 S-3: the server-written header of a cancel the PANE chose itself
+# (`done --cancelled`), never one Lead ordered (`close --cancel`). Lead must
+# see it at once, not folded into a digest — it may be a failure in disguise.
+PANE_CANCEL_MARKER = "pane ยกเลิกเอง — Lead ไม่ได้สั่ง"
+_PANE_CANCEL_NOTICE_RE = re.compile(
+    r"^\[[^\]\r\n]+?\s+CANCELLED\]\s*(?:\[ref [^\]\r\n]*\]\s*)?🚫 " + re.escape(PANE_CANCEL_MARKER)
+)
 # (#680) every `[role done]` / `[role FAILED]` tag ANYWHERE in a delivered
 # body (a combined digest carries several) — feeds `_mark_done_notices_delivered`.
 _DONE_NOTICE_TAG_RE = re.compile(r"\[([\w][\w#-]*)\s+(?:done|FAILED|CANCELLED)\]", re.IGNORECASE)
@@ -569,7 +576,11 @@ def _lead_input_waits_for_turn_end(lead) -> bool:
 
 def _is_immediate_lead_notice(body: str) -> bool:
     """True for notices that require Lead action or sequencing immediately."""
-    return _is_blocking_lead_notice(body) or "[auto-chain handoff]" in body.lower()
+    return (
+        _is_blocking_lead_notice(body)
+        or "[auto-chain handoff]" in body.lower()
+        or bool(_PANE_CANCEL_NOTICE_RE.match(body.strip()))
+    )
 
 
 def _is_blocking_lead_notice(body: str) -> bool:

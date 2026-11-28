@@ -50,6 +50,8 @@ _FILTERS: tuple[tuple[str, str], ...] = (
     ("blocked", "ติดอยู่"),
     ("deferred", "พักไว้"),
     ("done", "เสร็จ"),
+    ("wont", "ไม่ทำ"),
+    ("cancelled", "ยกเลิก"),
 )
 
 
@@ -866,7 +868,7 @@ class BacklogDialog(cockpit_theme.CockpitDialog):
             "": total,
             "open": sum(1 for it in all_items if it.get("status") in backlog._OPEN_STATUSES),
         }
-        for st in ("todo", "doing", "review", "waiting", "blocked", "deferred", "done"):
+        for st in (v for v, _ in _FILTERS if v not in ("", "open")):
             counts[st] = sum(1 for it in all_items if it.get("status") == st)
 
         for v, b in self._filter_btns.items():
