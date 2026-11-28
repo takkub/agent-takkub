@@ -4,6 +4,8 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 
 ## [vNEXT]
 
+- **#1070 impact gate: cwd เป็นโฟลเดอร์แม่ที่มีหลาย git repo ส่ง done ไม่ได้:** `git_revision` ของ cwd ที่ไม่อยู่ใน git tree รวม revision ของ repo ย่อยเป็น `repos:<hash>` (เรียงตาม path แบบ posix · ใช้ `paths` ใน projects.json ใต้ cwd ก่อน ไม่งั้นสแกนลึก 3 ชั้น ข้าม hidden/symlink/node_modules/worktrees) — แก้ repo ย่อยไหน revision ก็เปลี่ยน · single repo ได้ค่าเดิมทุกไบต์ · ไม่เจอ repo เลย = `no-git` พร้อม `revision_note` บอกว่าหาที่ไหน · `subagent-done` อ่าน revision นอก Qt thread เหมือน `done`
+
 ## [v2.2.63] - 2026-11-28
 
 เก็บเคสที่เคยพลาดไว้รันซ้ำ (`takkub eval`) + สถานะ "ยกเลิก" แยกจาก FAILED + issue ที่เปิดอยู่ 8 ใบ (#1055 #1058 #1061 #1065–#1069) + README ใหม่

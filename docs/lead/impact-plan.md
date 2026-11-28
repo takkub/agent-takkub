@@ -97,3 +97,11 @@ check บังคับที่ยัง pending ทำให้ done ไม�
 หรือ `takkub subagent-done --role <role> --impact-evidence-file <evidence.json>`
 ระบบตรวจ task ID, แผน, revision และผลทุก check ก่อนเปลี่ยน ledger เป็น `ok`
 หาก Git revision อ่านไม่ได้ งานยังค้างให้ตรวจสภาพ repository และรายงานข้อจำกัด
+
+**revision ของ cwd ที่เป็นโฟลเดอร์แม่ (#1070):** ถ้า cwd ของ task อยู่ใน git repo → `git:<hash>`
+(HEAD + ไฟล์ที่เปลี่ยน/untracked ของ repo นั้น) ถ้า cwd ไม่อยู่ใน git repo ใดเลยแต่มี repo ย่อย →
+`repos:<hash>` รวม `git:<hash>` ของทุก repo ย่อยเรียงตาม path (แก้ repo ไหนก็ต้องเอา revision ใหม่)
+repo ย่อยมาจาก `paths` ใน projects.json ที่อยู่ใต้ cwd ก่อน ถ้าไม่มีจึงสแกนลึกไม่เกิน 3 ชั้น
+(ข้ามโฟลเดอร์ซ่อน, symlink, `node_modules`/`worktrees`/`venv`/`dist`/`build` ฯลฯ) ถ้าไม่เจอ repo เลย
+revision เป็น `no-git` (`task impact` แสดง `revision_note` ว่าหาที่ไหนแล้ว) evidence ใส่ `no-git` หรือ null ได้
+`task impact`, `done` และ `subagent-done` ใช้ฟังก์ชันเดียวกัน (`impact_contract.git_revision`)

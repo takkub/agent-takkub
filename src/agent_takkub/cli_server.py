@@ -1580,7 +1580,7 @@ class CliServer(QObject):
                 # returns a truthy mock here and must stay on the inline path.
                 if (isinstance(_git_inputs, dict) and _git_inputs) or _impact_active:
 
-                    def _collect(_inp=_git_inputs, _impact=_impact_active):
+                    def _collect(_inp=_git_inputs, _impact=_impact_active, _proj=from_project):
                         facts = {}
                         if isinstance(_inp, dict) and _inp:
                             from .worktree_manager import WorktreeManager
@@ -1589,7 +1589,7 @@ class CliServer(QObject):
                         if _impact:
                             from .impact_contract import git_revision
 
-                            facts["impact_revision"] = git_revision(_impact["cwd"]) or ""
+                            facts["impact_revision"] = git_revision(_impact["cwd"], _proj) or ""
                         return facts
 
                     def _finish(facts, _sock=sock, _role=_done_role, _kw=_done_kwargs):
@@ -1603,13 +1603,48 @@ class CliServer(QObject):
                     return
                 ok, msg = self._orch.done(_done_role, **_done_kwargs)
             elif cmd == "subagent-done":
-                ok, msg = self._orch.subagent_done(
-                    req.get("role") or "",
+                _sa_role = req.get("role") or ""
+                _sa_kwargs = dict(
                     note=req.get("note", ""),
                     project=from_project,
                     failed=bool(req.get("failed", False)),
                     **({"cancelled": True} if req.get("cancelled") else {}),
                 )
+                # #1070: the impact revision may scan sub-repos — read it off
+                # the Qt thread (#1061) with the same git_revision `done` uses.
+                _sa_cwd = ""
+                if not req.get("failed") and not req.get("cancelled"):
+                    try:
+                        from .task_ledger import open_impact
+
+                        _sa_active = open_impact(from_project, _sa_role)
+                        if isinstance(_sa_active, dict) and isinstance(
+                            _sa_active.get("impact"), dict
+                        ):
+                            _sa_cwd = str(_sa_active.get("cwd") or "")
+                    except Exception:
+                        _sa_cwd = ""
+                if _sa_cwd:
+
+                    def _sa_collect(_cwd=_sa_cwd, _proj=from_project):
+                        from .impact_contract import git_revision
+
+                        return git_revision(_cwd, _proj) or ""
+
+                    def _sa_finish(rev, _sock=sock, _role=_sa_role, _kw=_sa_kwargs):
+                        try:
+                            ok, msg = self._orch.subagent_done(
+                                _role,
+                                **({"impact_revision": rev} if rev is not None else {}),
+                                **_kw,
+                            )
+                        except Exception as exc:
+                            ok, msg = False, f"subagent-done failed: {exc}"
+                        self._reply(_sock, ok=ok, msg=msg)
+
+                    self._run_off_thread(_sa_collect, _sa_finish)
+                    return
+                ok, msg = self._orch.subagent_done(_sa_role, **_sa_kwargs)
             elif cmd == "progress":
                 # #234: status update that does NOT schedule the pane's
                 # teardown — see Orchestrator.progress() docstring.

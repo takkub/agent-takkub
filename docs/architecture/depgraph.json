@@ -867,6 +867,7 @@
         "agent_takkub.headless",
         "agent_takkub.headless_window",
         "agent_takkub.hook_wiring",
+        "agent_takkub.impact_contract",
         "agent_takkub.issues",
         "agent_takkub.lead_context",
         "agent_takkub.lead_inbox",
@@ -951,7 +952,7 @@
         "agent_takkub.worktree_manager",
         "agent_takkub.worktree_reuse"
       ],
-      "fan_in": 130,
+      "fan_in": 131,
       "fan_out": 3
     },
     {
@@ -3048,7 +3049,8 @@
     {
       "module": "agent_takkub.impact_contract",
       "imports": [
-        "agent_takkub._win_console"
+        "agent_takkub._win_console",
+        "agent_takkub.config"
       ],
       "imported_by": [
         "agent_takkub.cli",
@@ -3057,7 +3059,7 @@
         "agent_takkub.task_ledger"
       ],
       "fan_in": 4,
-      "fan_out": 1
+      "fan_out": 2
     },
     {
       "module": "agent_takkub.issues",
