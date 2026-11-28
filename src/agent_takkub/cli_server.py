@@ -981,6 +981,15 @@ class CliServer(QObject):
                 if not _team_ok:
                     self._reply(sock, ok=False, msg=_team_msg)
                     return
+                if cmd == "assign":
+                    from .team_preset import can_use_substitute_slot
+
+                    _slot_ok, _slot_msg = can_use_substitute_slot(
+                        str(role), str(req.get("task") or ""), project_ns_role, req.get("provider")
+                    )
+                    if not _slot_ok:
+                        self._reply(sock, ok=False, msg=_slot_msg)
+                        return
                 # #143: cwd escaping the project's configured paths used to be
                 # caught only inside spawn() — which runs AFTER the "task
                 # queued" ack below (async, next event-loop tick). The Lead

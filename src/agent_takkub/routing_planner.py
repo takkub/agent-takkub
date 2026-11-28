@@ -789,6 +789,32 @@ def _derive_primary_role(msg: str) -> str:
     return "backend"  # safest default for ambiguous actionable tasks
 
 
+#: #1058: intents a provider slot is legitimately sent (second opinion /
+#: analysis) that the route table has no row for.
+_CROSS_CHECK_INTENT = re.compile(
+    r"cross.?check|second.opinion|analy[sz]|วิเคราะห์|ตรวจ|ความเห็น|เทียบ|ทวน",
+    re.IGNORECASE,
+)
+_OWNER_ROLES = frozenset({"frontend", "backend", "devops", "mobile"})
+
+
+def substitute_slot_owner(slot_role: str, task: str) -> str | None:
+    """#1058: the owner role whose implementation work *task* is, when it was
+    sent to provider slot *slot_role* — or None when the task is the slot's
+    intended use (route table names the slot as primary/cross-check, a
+    reviewer mode, review/analysis intent, or nothing actionable)."""
+    msg = task or ""
+    if _CROSS_CHECK_INTENT.search(msg) or not _is_actionable(msg):
+        return None
+    routing = _route(msg)
+    if routing.get("mode") or slot_role in (routing.get("cross_check") or []):
+        return None
+    roles = routing.get("roles") or [routing.get("role")]
+    if slot_role in roles:
+        return None
+    return next((r for r in roles if r in _OWNER_ROLES), None)
+
+
 def _sub_note(role: str) -> str:
     """Reason fragment when a disabled codex/gemini role is routed anyway.
 
