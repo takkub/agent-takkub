@@ -180,6 +180,13 @@ class TestNoteScrub:
         body = _render_decision_note("p", "r", "  ทำ /login endpoint เสร็จแล้ว  ", dt.datetime.now())
         assert "## Note\n\nทำ /login endpoint เสร็จแล้ว\n" in body
 
+    def test_headings_demoted_but_not_inside_code_fence(self) -> None:
+        # review-1 N3: `# comment` inside ``` is shell, not a heading.
+        note = "## STATUS\nok\n```bash\n# install deps\n## two\n```\n# after"
+        body = _render_decision_note("p", "r", note, dt.datetime.now())
+        sec = body.split("## Note\n\n", 1)[1]
+        assert sec.startswith("### STATUS\nok\n```bash\n# install deps\n## two\n```\n### after")
+
 
 class TestJunkFilters:
     """Notes / projects that look like throwaway stubs are dropped from

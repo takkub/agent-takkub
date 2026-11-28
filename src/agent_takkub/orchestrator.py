@@ -194,6 +194,7 @@ from .vault_mirror import (  # re-exported for test + script imports
     _is_dedup_note,
     _is_junk_note,
     _is_junk_project,
+    _note_section_text,
     _render_decision_note,
     _resolve_vault_dir,
     distill_session_facts,
@@ -11971,7 +11972,7 @@ class Orchestrator(
             f"---\n\n"
             f"# lead session end · {iso}\n\n"
             f"**Role:** lead\n\n"
-            f"## Note\n\n{note.strip()}\n"
+            f"## Note\n\n{_note_section_text(note)}\n"
         )
         if done_files:
             body += "\n## Teammate done events\n\n"

@@ -2849,14 +2849,16 @@
         "agent_takkub._win_console",
         "agent_takkub.backlog",
         "agent_takkub.config",
-        "agent_takkub.path_safe"
+        "agent_takkub.job_object_manager",
+        "agent_takkub.path_safe",
+        "agent_takkub.usage_shared"
       ],
       "imported_by": [
         "agent_takkub.cli",
         "agent_takkub.orchestrator"
       ],
       "fan_in": 2,
-      "fan_out": 4
+      "fan_out": 6
     },
     {
       "module": "agent_takkub.exec_mode",
@@ -3073,9 +3075,10 @@
       "module": "agent_takkub.job_object_manager",
       "imports": [],
       "imported_by": [
+        "agent_takkub.eval_cases",
         "agent_takkub.pty_session"
       ],
-      "fan_in": 1,
+      "fan_in": 2,
       "fan_out": 0
     },
     {
@@ -6134,13 +6137,14 @@
         "agent_takkub.config"
       ],
       "imported_by": [
+        "agent_takkub.eval_cases",
         "agent_takkub.limit_autoresume",
         "agent_takkub.limit_status",
         "agent_takkub.provider_usage",
         "agent_takkub.settings_usage",
         "agent_takkub.usage_meter"
       ],
-      "fan_in": 5,
+      "fan_in": 6,
       "fan_out": 1
     },
     {

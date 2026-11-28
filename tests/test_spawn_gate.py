@@ -295,6 +295,24 @@ class TestRetryDeferredSpawn:
 
         assert not spawn_calls, "must not respawn an already-live pane"
 
+    @pytest.mark.parametrize("alive", [True, False])
+    def test_early_return_ends_block_episode(self, qapp, monkeypatch, alive):
+        """review-1 S5: pane alive / pane gone used to leave the episode keys
+        behind → next episode notified at once with a stale age, or never."""
+        orch = _make_orchestrator(qapp, monkeypatch)
+        key = f"{TEST_PROJECT}::backend"
+        if alive:
+            pane = _make_dead_pane("backend")
+            pane.session = MagicMock(is_alive=True)
+            orch._panes_by_project[TEST_PROJECT] = {"backend": pane}
+        else:
+            orch._panes_by_project[TEST_PROJECT] = {}
+        orch._spawn_block_since = {key: [0.0, True]}
+        orch._spawn_blocked_first_ts = {key: 0.0}
+        orch._retry_deferred_spawn("backend", None, TEST_PROJECT, False, 0)
+        assert key not in orch._spawn_block_since
+        assert key not in orch._spawn_blocked_first_ts
+
 
 class TestFifoArbiter:
     """FIFO: second spawn while in-progress is queued and drained in order."""
