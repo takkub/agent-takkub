@@ -459,6 +459,12 @@ def _add_close(sub: Any, c: ModuleType) -> None:
     sc = sub.add_parser("close", help="close a running pane")
     sc.add_argument("role_pos", nargs="?", default=None, metavar="ROLE", help="role name to close")
     sc.add_argument("--role", default=None, help="role name to close")
+    sc.add_argument(
+        "--cancel",
+        action="store_true",
+        help="(Lead) call the role's task off: record it cancelled (not FAILED), then close — #1068",
+    )
+    sc.add_argument("--reason", default="", help="why the task was cancelled (with --cancel)")
     sc.set_defaults(func=c.cmd_close)
 
 
@@ -503,6 +509,15 @@ def _add_done(sub: Any, c: ModuleType) -> None:
         ),
     )
     sd.add_argument(
+        "--cancelled",
+        action="store_true",
+        help=(
+            "report the task CANCELLED — Lead/the owner told you to stop, or the task "
+            "turned out to need no work. Not a failure: no fix loop, the backlog card "
+            "closes as ยกเลิก (#1068)"
+        ),
+    )
+    sd.add_argument(
         "--force",
         action="store_true",
         help=(
@@ -525,6 +540,9 @@ def _add_subagent_done(sub: Any, c: ModuleType) -> None:
         "--impact-evidence-file", default=None, help="JSON results for the assigned impact checks"
     )
     ssd.add_argument("--fail", action="store_true")
+    ssd.add_argument(
+        "--cancelled", action="store_true", help="the task was called off — not a failure (#1068)"
+    )
     ssd.set_defaults(func=c.cmd_subagent_done)
 
 
@@ -1048,7 +1066,7 @@ def _add_backlog(sub: Any, c: ModuleType) -> None:
     bll.add_argument(
         "--status",
         default="",
-        help="filter: todo/doing/review/waiting/blocked/deferred/done/wont, "
+        help="filter: todo/doing/review/waiting/blocked/deferred/done/wont/cancelled, "
         "'open' (active) or 'pending' (everything not done/wont)",
     )
     bls = bl_sub.add_parser("show", help="show one item's full detail")

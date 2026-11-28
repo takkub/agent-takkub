@@ -399,10 +399,13 @@ def _inbox_digest_window_ms() -> int:
         return _INBOX_DIGEST_WINDOW_MS
 
 
-_DONE_NOTICE_RE = re.compile(r"^\[([^\]\r\n]+?)\s+done\](?:\s+(.*))?$", re.DOTALL)
+# #1068: `[role CANCELLED]` (a task stopped on purpose) travels the same
+# non-blocking done path — it is a completion report, not a FAILED.
+_DONE_NOTICE_RE = re.compile(r"^\[([^\]\r\n]+?)\s+(?:done|CANCELLED)\](?:\s+(.*))?$", re.DOTALL)
+_CANCELLED_NOTICE_RE = re.compile(r"^\[[^\]\r\n]+?\s+CANCELLED\]")
 # (#680) every `[role done]` / `[role FAILED]` tag ANYWHERE in a delivered
 # body (a combined digest carries several) — feeds `_mark_done_notices_delivered`.
-_DONE_NOTICE_TAG_RE = re.compile(r"\[([\w][\w#-]*)\s+(?:done|FAILED)\]", re.IGNORECASE)
+_DONE_NOTICE_TAG_RE = re.compile(r"\[([\w][\w#-]*)\s+(?:done|FAILED|CANCELLED)\]", re.IGNORECASE)
 # #703: the shape a done report takes once `_flush_lead_digest` has rendered
 # it — `_format_digest_item` prints "• [HH:MM:SS · 3s ago][backend] done:
 # …" and `format_digest_fact_line` prints "• [stamp][qa] PASS [ref #641] ·
@@ -419,7 +422,7 @@ _DIGEST_DONE_LINE_RE = re.compile(
     # #948: a fact line names the provider inside the tag ("[frontend · claude]
     # done"); missing it made a delivered digest look lost, so it was re-sent.
     r"^\s*•\s*(?:\[[^\]\r\n]*\]\s*)?\[([\w][\w#-]*)(?:\s*·[^\]\r\n]*)?\]\s+"
-    r"(?:done|FAILED|PASS|FAIL|BLOCKED)\b",
+    r"(?:done|FAILED|PASS|FAIL|BLOCKED|CANCELLED)\b",
     re.IGNORECASE | re.MULTILINE,
 )
 _DIGEST_READ_LINE_RE = re.compile(
@@ -751,7 +754,8 @@ def _format_digest_item(
     if done_match:
         role, detail = done_match.groups()
         suffix = f": {detail.strip()}" if detail and detail.strip() else ""
-        return f"• {stamp}[{role.strip()}] done{suffix}"
+        verb = "CANCELLED" if _CANCELLED_NOTICE_RE.match(stripped) else "done"
+        return f"• {stamp}[{role.strip()}] {verb}{suffix}"
 
     cc_match = _CC_NOTICE_RE.match(stripped)
     if cc_match:

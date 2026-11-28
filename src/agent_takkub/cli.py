@@ -1279,6 +1279,9 @@ def _note_with_impact_evidence(args: argparse.Namespace) -> tuple[str, str]:
 
 
 def cmd_subagent_done(args: argparse.Namespace) -> dict:
+    conflict = _outcome_flag_conflict(args)
+    if conflict:
+        return {"ok": False, "msg": conflict}
     note, error = _note_with_impact_evidence(args)
     if error:
         return {"ok": False, "msg": error}
@@ -1290,6 +1293,7 @@ def cmd_subagent_done(args: argparse.Namespace) -> dict:
                 "role": args.role,
                 "note": note,
                 "failed": bool(getattr(args, "fail", False)),
+                "cancelled": bool(getattr(args, "cancelled", False)),
             }
         )
     )
@@ -1812,7 +1816,11 @@ def cmd_close(args: argparse.Namespace) -> dict:
     if err:
         return {"ok": False, "msg": err}
     _warn_deprecated_role(role)
-    return _request(_with_project({"cmd": "close", "role": role, "from": _from_role()}))
+    req = {"cmd": "close", "role": role, "from": _from_role()}
+    if getattr(args, "cancel", False):
+        # #1068: close AND record the task as cancelled (not FAILED).
+        req.update(cancel=True, reason=getattr(args, "reason", "") or "")
+    return _request(_with_project(req))
 
 
 def cmd_close_all(_: argparse.Namespace) -> dict:
@@ -1881,10 +1889,20 @@ def _send_done(note: str, args: argparse.Namespace) -> dict:
                 "failed": bool(getattr(args, "fail", False))
                 or bool(getattr(args, "blocked", False)),
                 "blocked": bool(getattr(args, "blocked", False)),
+                # #1068: stopped on purpose — neither done nor FAILED.
+                "cancelled": bool(getattr(args, "cancelled", False)),
                 "force": bool(getattr(args, "force", False)),
             }
         ),
     )
+
+
+def _outcome_flag_conflict(args: argparse.Namespace) -> str:
+    if getattr(args, "cancelled", False) and (
+        getattr(args, "fail", False) or getattr(args, "blocked", False)
+    ):
+        return "--cancelled cannot be combined with --fail/--blocked (pick one outcome)"
+    return ""
 
 
 def _probe_keep_reason(usage) -> str:
@@ -1909,6 +1927,9 @@ def _probe_keep_reason(usage) -> str:
 
 
 def cmd_done(args: argparse.Namespace) -> dict:
+    conflict = _outcome_flag_conflict(args)
+    if conflict:
+        return {"ok": False, "msg": conflict}
     base_note, error = _done_note_from_args(args)
     if error:
         return {"ok": False, "msg": error}
@@ -1932,6 +1953,7 @@ def cmd_done(args: argparse.Namespace) -> dict:
         if saved is not None:
             flags = " --fail" if getattr(args, "fail", False) else ""
             flags += " --blocked" if getattr(args, "blocked", False) else ""
+            flags += " --cancelled" if getattr(args, "cancelled", False) else ""
             resp = {
                 **resp,
                 "msg": f"{resp.get('msg')} — the note is saved at {saved}. Check "

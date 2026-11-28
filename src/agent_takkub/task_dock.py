@@ -64,6 +64,7 @@ _STATUS_GLYPH: dict[str, tuple[str, str]] = {
     "fail": ("✕", "STATE_ERROR"),  # ✕ red
     "closed": ("➖", "TEXT_MUTED"),  # ➖ gray
     "superseded": ("›", "PARALLEL_CHIP_TEXT"),  # › purple
+    "cancelled": ("⊘", "TEXT_MUTED"),  # ⊘ gray — stopped on purpose (#1068)
 }
 # Any status the ledger doesn't emit yet (e.g. a future "queued" row) falls
 # back to an empty checkbox in neutral gray instead of crashing render.
@@ -340,7 +341,7 @@ def feature_emoji(feature: dict) -> str:
         return "\U0001f528"  # 🔨
     if "fail" in statuses:
         return "⚠️"  # ⚠️
-    if statuses <= {"ok", "closed", "superseded"}:
+    if statuses <= {"ok", "closed", "superseded", "cancelled"}:
         return "✅"  # ✅
     return "⏳"  # ⏳
 

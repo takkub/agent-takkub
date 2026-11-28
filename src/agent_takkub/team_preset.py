@@ -555,8 +555,8 @@ def _can_spawn_from_cfg(role: str, cfg: dict, project: str | None = None) -> tup
         if cfg["preset"] in ("solo-lead", "pair") and base != "shell":
             return False, (
                 f"role {base} ไม่เปิดใน team preset '{label(cfg['preset'])}' ของโปรเจคนี้ — "
-                "preset นี้ให้ Lead ทำเองโดยไม่ spawn teammate · เปลี่ยน preset ที่ Settings "
-                "หรือ `takkub assign --role lead --team full` override เฉพาะงานนี้"
+                "preset นี้ให้ Lead ทำเองโดยไม่ spawn teammate · เปลี่ยน preset ด้วย "
+                "`takkub team set full` หรือที่ Settings"
             )
         return True, ""
     if base in CHECKER_ROLES.values():
@@ -586,14 +586,14 @@ def _can_spawn_from_cfg(role: str, cfg: dict, project: str | None = None) -> tup
         allowed = bool(cfg["roles"].get(base, False))
     if allowed:
         return True, ""
-    # #905: only point at `--team full` when that override would actually
+    # #905: only point at the `full` preset when switching to it would actually
     # let this role through — never for a project already on `full`, and
     # never for the extra positions every built-in preset leaves off.
     full_allows = cfg["preset"] != "full" and bool(
         BUILTIN_PRESETS["full"]["roles"].get(base) or BUILTIN_PRESETS["full"]["checker"] == base
     )
     how = (
-        "เปลี่ยน preset ที่ Settings หรือ `takkub assign --role lead --team full` override เฉพาะงานนี้"
+        "เปลี่ยน preset ด้วย `takkub team set full` หรือที่ Settings"
         if full_allows
         else f"เปิด {base} ที่ Settings → Roles & ตำแหน่ง ของโปรเจคนี้ แล้ว assign ใหม่"
     )
