@@ -60,7 +60,8 @@ You can pin a model per provider or per role in **Settings → Providers & Roles
 
 | | Version | Change |
 | :-- | :-- | :-- |
-| ⏳ | *next (pending merge)* | `takkub eval add / list / show / run / retire`: keep cases that failed before and re-run their checks, with pass→fail changes shown first |
+| ➕ | 2.2.63 | `takkub eval add / list / show / set / run / retire`: keep cases that failed before and re-run their checks, with pass→fail changes shown first. `eval run` prints the plan first and runs only with `--confirm <token>` |
+| ➕ | 2.2.63 | A task that was called off is recorded as cancelled (`takkub done --cancelled`, `takkub close --role X --cancel`), not as FAILED |
 | ➕ | 2.2.61 | Start the cockpit when the computer starts (switch in Settings → General, off by default) |
 | ➕ | 2.2.61 | Machine-load guard: a per-pane worker budget, and `takkub status` shows a `[machine]` line |
 | ➕ | 2.2.54 | The cockpit installs the `graft` code-graph CLI at boot |
@@ -83,7 +84,7 @@ You can pin a model per provider or per role in **Settings → Providers & Roles
 - **2.2.24**: `ccc` added as a pilot. It was removed again in 2.2.53, as shown above.
 - **2.2.22**: New project → **🔗 Clone from repo**.
 
-Every release is listed in [CHANGELOG.md](https://github.com/takkub/agent-takkub/blob/main/CHANGELOG.md), with 168 versions so far.
+Every release is listed in [CHANGELOG.md](https://github.com/takkub/agent-takkub/blob/main/CHANGELOG.md).
 
 </details>
 
