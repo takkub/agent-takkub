@@ -672,7 +672,8 @@ def can_use_substitute_slot(
         f'`takkub send --to {owner} "..."` ต่อท้าย · คนละไฟล์ → '
         f"`takkub assign --role {owner} --isolation worktree ...` · ไม่งั้น "
         f"`takkub assign --role {owner} ...` (เข้าคิวเอง) · ส่ง {base} ได้เฉพาะงาน "
-        "cross-check/review/วิเคราะห์"
+        "cross-check/review/วิเคราะห์ · ถ้าเป็นงานตรวจจริง (ไม่แก้โค้ด) ใส่ "
+        f"`--provider <x>` ให้ {base} ระบุ provider เอง"
     )
 
 

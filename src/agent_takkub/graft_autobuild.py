@@ -1018,6 +1018,13 @@ _live_resync_lock = threading.Lock()
 _last_live_resync: dict[str, float] = {}
 # raw cwd string -> resolved key in `_last_live_resync` (#1044 pre-throttle).
 _resolved_cwd_keys: dict[str, str] = {}
+# review-2 S-5 (#1061): resyncs run on their own 1-worker executor, never the
+# shared `bg_pool` — a resync stuck on a wedged disk (5-18 s per read) must
+# not hold the workers `done()`'s `call_bounded` evidence scans wait on.
+# Created once (lazily), so no per-tick `Thread.start()` on the Qt thread.
+# `_resync_inflight` keeps one queued/running `_do` per key.
+_resync_executor = None
+_resync_inflight: set[str] = set()
 # Per-target fingerprint of the work tree as of the last live resync
 # (2026-08-28 prod py-spy: `_sync_staging` + `_stat_or_none` owned 32% of
 # ALL samples — every pane's 5s idle tick, throttled to 15s per cwd, walked
@@ -1185,9 +1192,17 @@ def resync_staging_only(cwd: str | None) -> None:
     now = time.monotonic()
     with _live_resync_lock:
         last = _last_live_resync.get(key, 0.0)
-        if now - last < _LIVE_RESYNC_MIN_INTERVAL_S:
+        if now - last < _LIVE_RESYNC_MIN_INTERVAL_S or key in _resync_inflight:
             return
         _last_live_resync[key] = now
+        _resync_inflight.add(key)
+
+    def _run() -> None:
+        try:
+            _do()
+        finally:
+            with _live_resync_lock:
+                _resync_inflight.discard(key)
 
     def _do() -> None:
         fp = _tree_fingerprint(target)
@@ -1254,11 +1269,24 @@ def resync_staging_only(cwd: str | None) -> None:
             if raw is not None and entries is not None:
                 _last_tree_listing[key] = (raw[0], entries, now_set)
 
-    # #1061: `Thread.start()` waits for the new thread to run — 13 stalls /
-    # 13 s on the Qt thread under GIL contention. Pool workers already exist.
-    from . import bg_pool
+    _submit_resync(_run)
 
-    bg_pool.submit(_do)
+
+def _submit_resync(fn) -> None:
+    """Queue *fn* on the dedicated resync executor (see `_resync_executor`).
+    #1061: `Thread.start()` waits for the new thread to run — 13 stalls /
+    13 s on the Qt thread under GIL contention; the executor's one worker
+    exists after the first submit."""
+    global _resync_executor
+    if _resync_executor is None:
+        from concurrent.futures import ThreadPoolExecutor
+
+        with _live_resync_lock:
+            if _resync_executor is None:
+                _resync_executor = ThreadPoolExecutor(
+                    max_workers=1, thread_name_prefix="graft-resync"
+                )
+    _resync_executor.submit(fn)
 
 
 def schedule_rebuild_after_done(cwd: str | None) -> None:

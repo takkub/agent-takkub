@@ -33,6 +33,7 @@ from pathlib import Path
 from . import cached_read
 from .config import SETTINGS_HOME as _BASE_DIR
 from .config import default_claude_config_dir as _default_claude_config_dir
+from .core.storage.jsonl_store import REPLACE_RETRY_DELAYS as _REPLACE_RETRY_DELAYS
 
 _REGISTRY_PATH = _BASE_DIR / "user-profiles.json"
 # Installed builds isolate this under DATA_HOME (~/.agent-takkub/claude-config);
@@ -59,7 +60,8 @@ def _project_profile_path(project: str) -> Path:
 # same registry off the main thread — #518) still has it open for read. A
 # short bounded retry absorbs that race without the caller ever seeing it —
 # same shape as `config.py`'s `_write_json_atomic` / `editor_service.py`.
-_REPLACE_RETRY_DELAYS: tuple[float, ...] = (0.0, 0.02, 0.05, 0.1, 0.2)
+# The schedule lives in the storage layer now (shared with `JsonlStore.append`):
+# `_REPLACE_RETRY_DELAYS` is imported from `core.storage.jsonl_store` above.
 
 
 def _atomic_write(path: Path, data: object) -> None:

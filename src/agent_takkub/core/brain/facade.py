@@ -98,6 +98,14 @@ def warm_context_index_async(project: str | None) -> None:
     An already-warm index costs one `stat`. Never raises."""
     if not v2_context_enabled():
         return
+    from .retrieval import _index_is_warm
+
+    try:
+        stores = [BrainStore(p) for p in (project, None)]
+        if all(_index_is_warm(s) for s in stores):
+            return  # review-2 S-6: warm tab switch = a stat per store, no thread
+    except Exception:
+        return
     key = project or ""
     with _WARMING_LOCK:
         if key in _WARMING:
@@ -108,16 +116,20 @@ def warm_context_index_async(project: str | None) -> None:
         try:
             from .retrieval import _index_for
 
-            for p in (project, None):
-                _index_for(BrainStore(p))
+            for s in stores:
+                _index_for(s)
         except Exception:
             _log.debug("core.brain.facade: index warm failed project=%r", project, exc_info=True)
         finally:
             with _WARMING_LOCK:
                 _WARMING.discard(key)
 
+    # review-2 S-6: `Thread.start()` on the Qt thread is the stall `bg_pool`
+    # exists to avoid (#658/#1061); its workers already run.
     try:
-        threading.Thread(target=_run, daemon=True, name="brain-index-warm").start()
+        from agent_takkub import bg_pool
+
+        bg_pool.submit(_run)
     except Exception:
         with _WARMING_LOCK:
             _WARMING.discard(key)

@@ -1073,6 +1073,7 @@ def _isolate_runtime(monkeypatch: pytest.MonkeyPatch, tmp_path):
         gab._debounce_timers.clear()
         gab._last_build_failed.clear()
         gab._last_live_resync.clear()
+        gab._resync_inflight.clear()
         gab._pending_escalation.clear()
         gab._unresolvable_rels.clear()
 

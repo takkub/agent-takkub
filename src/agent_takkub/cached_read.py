@@ -34,7 +34,8 @@ from __future__ import annotations
 import os
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -49,6 +50,16 @@ _RECENT_WRITE_S = 2.0
 # call `invalidate()` so their own saves are visible immediately, and a
 # write from another process (the `takkub` CLI) shows up within this bound.
 _STAT_TTL_S = 3.0
+
+# review-2 #1061(a): `stale_ok` serves the last parse only while a stat
+# confirmed it at most this long ago; past that the read is synchronous, so
+# a write from another process (second instance, hand edit) is never hidden
+# for an unbounded time behind one stale read.
+_STALE_MAX_S = 10.0
+
+# Per-thread "no stale reads" scope (`sync_reads()`): spawn-path env building
+# must see the account/provider on disk now, not the last background parse.
+_tls = threading.local()
 
 # Bounded so a long-running cockpit that touches many per-project files can't
 # grow this without limit. Way above the real working set (a few dozen).
@@ -84,7 +95,12 @@ def read_cached(
         hit = _cache.get(key)
     if hit is not None and not hit[3] and mono - hit[2] < _STAT_TTL_S:
         return hit[1]
-    if stale_ok and hit is not None:
+    if (
+        stale_ok
+        and hit is not None
+        and mono - hit[2] < _STALE_MAX_S
+        and not getattr(_tls, "sync", 0)
+    ):
         # #1061: callers on the Qt main thread (status header -> profile_for)
         # still paid the expired-TTL `os.stat` (~1 s each on a wedged disk).
         # Serve the last parse and revalidate on the shared pool; in-process
@@ -93,6 +109,16 @@ def read_cached(
         _revalidate_async(key, path_key, parse, missing, encoding)
         return hit[1]
     return _read_now(key, path_key, parse, missing, encoding, hit, mono)
+
+
+@contextmanager
+def sync_reads() -> Iterator[None]:
+    """Within this block (calling thread only) `stale_ok` is ignored."""
+    _tls.sync = getattr(_tls, "sync", 0) + 1
+    try:
+        yield
+    finally:
+        _tls.sync -= 1
 
 
 _inflight: set[tuple[str, str]] = set()

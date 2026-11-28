@@ -792,7 +792,9 @@ def _derive_primary_role(msg: str) -> str:
 #: #1058: intents a provider slot is legitimately sent (second opinion /
 #: analysis) that the route table has no row for.
 _CROSS_CHECK_INTENT = re.compile(
-    r"cross.?check|second.opinion|analy[sz]|วิเคราะห์|ตรวจ|ความเห็น|เทียบ|ทวน",
+    r"cross.?check|second.opinion|analy[sz]|วิเคราะห์|ตรวจ|ความเห็น|เทียบ|ทวน"
+    r"|รีวิว|review|verify|double.?check|look over|investigate|root cause"
+    r"|report only|ไม่ต้องแก้|อย่าแก้|don'?t (?:change|edit)|design doc",
     re.IGNORECASE,
 )
 _OWNER_ROLES = frozenset({"frontend", "backend", "devops", "mobile"})

@@ -1477,3 +1477,49 @@ class TestScopeBudgetClassification:
         action = classify("implement user profile page")
         assert action.scope == "normal"
         assert action.scope_reason
+
+
+# #1058 S-2 (review-2): a substituted provider slot must accept review /
+# investigation work (Thai + English) and still refuse owner implementation.
+_SLOT_REVIEW_TASKS = [
+    "รีวิวโค้ดที่ backend แก้ใน api/orders.py",
+    "รีวิว diff ที่แก้บั๊ก login",
+    "verify the fix for the memory leak in worker.py",
+    "double-check the migration fix before release",
+    "look over frontend's fix of the navbar and tell me what's wrong",
+    "หา root cause ว่าทำไม login fail แล้วเสนอวิธีแก้ (ไม่ต้องแก้)",
+    "investigate why the build fails on CI, report only",
+    "debug why checkout returns 500 — report findings, don't change code",
+    "write a design doc for the new cache layer",
+]
+_SLOT_IMPLEMENT_TASKS = [
+    "fix the login bug in src/api/auth.py",
+    "แก้ bug หน้า login ให้กด submit ได้",
+    "implement the /orders endpoint",
+    "add dark mode toggle to the navbar component",
+    "update the Dockerfile to use node 20",
+]
+
+
+class TestSubstituteSlotIntent:
+    @staticmethod
+    def _gate(monkeypatch, task: str):
+        from agent_takkub import pipeline_config, provider_config, team_preset
+
+        monkeypatch.setattr(
+            provider_config,
+            "provider_unavailable_substitution_info",
+            lambda b, project=None: (b, "claude"),
+        )
+        monkeypatch.setattr(pipeline_config, "is_role_enabled", lambda r, project=None: True)
+        return team_preset.can_use_substitute_slot("codex", task, "proj", None)
+
+    def test_review_tasks_pass(self, monkeypatch) -> None:
+        for task in _SLOT_REVIEW_TASKS:
+            assert self._gate(monkeypatch, task) == (True, ""), task
+
+    def test_implement_tasks_refused_with_provider_hint(self, monkeypatch) -> None:
+        for task in _SLOT_IMPLEMENT_TASKS:
+            ok, msg = self._gate(monkeypatch, task)
+            assert not ok, task
+            assert "--provider" in msg
