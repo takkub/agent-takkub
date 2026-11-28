@@ -1254,7 +1254,11 @@ def resync_staging_only(cwd: str | None) -> None:
             if raw is not None and entries is not None:
                 _last_tree_listing[key] = (raw[0], entries, now_set)
 
-    threading.Thread(target=_do, name=f"graft-live-resync-{target.name}", daemon=True).start()
+    # #1061: `Thread.start()` waits for the new thread to run — 13 stalls /
+    # 13 s on the Qt thread under GIL contention. Pool workers already exist.
+    from . import bg_pool
+
+    bg_pool.submit(_do)
 
 
 def schedule_rebuild_after_done(cwd: str | None) -> None:
