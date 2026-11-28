@@ -154,6 +154,21 @@ class TestEndSession:
         body = files[0].read_text(encoding="utf-8")
         assert "session ended" in body
 
+    def test_markdown_note_stays_inside_note_section(
+        self, orch: Orchestrator, monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
+    ) -> None:
+        """review-1 N4: a Lead summary with `## ` headings must not end the
+        `## Note` section early (same render as teammate done notes)."""
+        runtime = tmp_path / "runtime"
+        monkeypatch.setattr("agent_takkub.orchestrator.RUNTIME_DIR", runtime)
+        monkeypatch.setattr("agent_takkub.orchestrator._resolve_vault_dir", lambda: None)
+
+        ok, _ = orch.end_session(project=TEST_PROJECT, note="intro\n## Shipped\n- x\x1b[31m")
+        assert ok is True
+        body = next((runtime / "sessions").rglob("lead-*.md")).read_text(encoding="utf-8")
+        assert "## Note\n\nintro\n### Shipped\n- x[31m\n" in body
+        assert "\n## Shipped" not in body
+
     def test_vault_absent_graceful(
         self, orch: Orchestrator, monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
     ) -> None:

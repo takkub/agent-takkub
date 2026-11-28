@@ -3233,7 +3233,7 @@ def cmd_eval(args: argparse.Namespace) -> dict:
             )
             return {"ok": True, "msg": f"{case['id']} added ({project})"}
         if sub == "list":
-            cases = ev.list_cases(project, include_retired=args.all)
+            cases = ev.list_cases(project, include_retired=getattr(args, "all", False))
             for c in cases:
                 last = c.get("last_result")
                 res = "-" if not last else ("pass" if last["passed"] else "FAIL")
@@ -3255,12 +3255,26 @@ def cmd_eval(args: argparse.Namespace) -> dict:
                 cwd=args.cwd,
                 timeout_s=args.timeout,
             )
-            return {"ok": True, "msg": f"{case['id']} updated (status {case['status']})"}
+            msg = f"{case['id']} updated (status {case['status']})"
+            if case["status"] == "draft":
+                lacking = [k for k in ("check", "cwd") if not case.get(k)]
+                msg += f" — still a draft: missing {' and '.join(lacking)}"
+            return {"ok": True, "msg": msg}
         if sub == "retire":
             ev.retire_case(project, args.id)
             return {"ok": True, "msg": f"{args.id} retired (kept)"}
         if sub == "run":
-            out = ev.run_cases(project, args.id or None)
+
+            def _announce(targets: list[dict], refused: list[dict]) -> None:
+                # S4: cases.json is a plain file — show exactly what is about
+                # to execute (and where) before anything runs.
+                for c in targets:
+                    _utf8_print(f"  run {c['id']}  cwd={c['cwd']}\n      $ {c['check']}")
+                for r in refused:
+                    _utf8_print(f"  REFUSED {r['id']}: {r['reason']}")
+                sys.stdout.flush()
+
+            out = ev.run_cases(project, args.id or None, announce=_announce)
             rows = out["results"]
             for r in rows:
                 state = "pass" if r["passed"] else ("TIMEOUT" if r["timed_out"] else "FAIL")
@@ -3274,10 +3288,13 @@ def cmd_eval(args: argparse.Namespace) -> dict:
             msg = f"{len(rows) - len(failed)}/{len(rows)} passed ({project}, {out['at']})"
             if regressed:
                 msg += f" — REGRESSED: {', '.join(regressed)}"
-            return {"ok": not failed, "msg": msg}
+            refused = [r["id"] for r in out["refused"]]
+            if refused:
+                msg += f" — refused: {', '.join(refused)}"
+            return {"ok": not failed and not refused, "msg": msg}
     except KeyError as e:
         return {"ok": False, "msg": f"no such case: {e.args[0]}"}
-    except ValueError as e:
+    except (ValueError, OSError) as e:
         return {"ok": False, "msg": str(e)}
     return {"ok": False, "msg": f"unknown eval subcommand: {sub}"}
 

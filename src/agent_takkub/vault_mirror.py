@@ -130,7 +130,8 @@ def _is_junk_project(project: str) -> bool:
 # `cat`-ed, nor smuggle a CSI/OSC introducer past markdown (sec-w1).
 _NOTE_CONTROL = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]")
 _NOTE_MAX = 8000
-_NOTE_HEADING = re.compile(r"^#{1,2}[ \t]+", re.M)
+_NOTE_HEADING = re.compile(r"^#{1,2}[ \t]+")
+_NOTE_FENCE = re.compile(r"^ {0,3}(```|~~~)")
 
 
 def _scrub_note(note: str) -> str:
@@ -147,6 +148,26 @@ def _scrub_note(note: str) -> str:
     if len(text) > _NOTE_MAX:
         text = text[:_NOTE_MAX].rstrip() + "\n\n…(note truncated)"
     return text
+
+
+def _note_section_text(note: str) -> str:
+    """Scrubbed note ready to sit under a ``## Note`` heading. #1065: a
+    markdown note ("## STATUS" / "## CHANGED", codex's habit) closed the
+    section early — every reader stops at the next ``##`` — so in-note h1/h2
+    become h3. Lines inside a fenced code block are left alone (a ``# comment``
+    in a bash snippet is not a heading)."""
+    out, fence = [], ""
+    for line in _scrub_note(note).split("\n"):
+        m = _NOTE_FENCE.match(line)
+        if m:
+            if not fence:
+                fence = m.group(1)
+            elif m.group(1) == fence:
+                fence = ""
+        elif not fence:
+            line = _NOTE_HEADING.sub("### ", line)
+        out.append(line)
+    return "\n".join(out)
 
 
 def _render_decision_note(
@@ -181,11 +202,7 @@ def _render_decision_note(
         listing it bare under "recent teammate done".
     """
     iso = now.isoformat(timespec="seconds")
-    # #1065: a markdown note ("## STATUS" / "## CHANGED", codex's habit) closed
-    # the `## Note` section early — every reader stops at the next `##`, so the
-    # report's Note held only the line before the first heading (a screenshot
-    # path). Demote in-note h1/h2 to h3 so the whole note stays in the section.
-    scrubbed = _NOTE_HEADING.sub("### ", _scrub_note(note))
+    scrubbed = _note_section_text(note)
     meta = NoteMetadata.new(
         project_id=_safe_project_id(project),
         source="takkub-done",

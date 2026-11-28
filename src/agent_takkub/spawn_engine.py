@@ -1929,11 +1929,22 @@ class SpawnEngineMixin:
         if _deferred is not None:
             _deferred.discard(deferred_key)
 
+        def _end_block_episode() -> None:
+            # Every exit that is not "still blocked" ends the episode (#1066):
+            # a key left behind made the next episode notify at once with a
+            # stale age, or never again once its flag was already set.
+            _bts2: dict | None = getattr(self, "_spawn_blocked_first_ts", None)  # type: ignore[assignment]
+            if _bts2 is not None:
+                _bts2.pop(deferred_key, None)
+            self.__dict__.get("_spawn_block_since", {}).pop(deferred_key, None)
+
         pane = self._project_panes(project_ns).get(role_name)
         if pane is not None and pane.session is not None and pane.session.is_alive:
+            _end_block_episode()
             _log_event("spawn_deferred_already_alive", role=role_name, project=project_ns)
             return
         if pane is None:
+            _end_block_episode()
             _log_event("spawn_deferred_pane_gone", role=role_name, project=project_ns)
             return
         self._preserve_pending_spawn_initial_task(role_name, project_ns)
@@ -1977,10 +1988,7 @@ class SpawnEngineMixin:
             return
 
         # Gate cleared: clear the block-episode tracker for this key.
-        _bts2: dict | None = getattr(self, "_spawn_blocked_first_ts", None)  # type: ignore[assignment]
-        if _bts2 is not None:
-            _bts2.pop(deferred_key, None)
-        self.__dict__.get("_spawn_block_since", {}).pop(deferred_key, None)
+        _end_block_episode()
 
         # Gate cleared: wait ~35 ms (1 event-loop turn) then re-check to
         # close the check-to-call race, then re-enter spawn() which verifies once more.
