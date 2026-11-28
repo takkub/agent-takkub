@@ -4,11 +4,9 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 
 ## [vNEXT]
 
-- **#1070 impact gate: cwd เป็นโฟลเดอร์แม่ที่มีหลาย git repo ส่ง done ไม่ได้:** `git_revision` ของ cwd ที่ไม่อยู่ใน git tree รวม revision ของ repo ย่อยเป็น `repos:<hash>` (เรียงตาม path แบบ posix · ใช้ `paths` ใน projects.json ใต้ cwd ก่อน ไม่งั้นสแกนลึก 3 ชั้น ข้าม hidden/symlink/node_modules/worktrees) — แก้ repo ย่อยไหน revision ก็เปลี่ยน · single repo ได้ค่าเดิมทุกไบต์ · ไม่เจอ repo เลย = `no-git` พร้อม `revision_note` บอกว่าหาที่ไหน · `subagent-done` อ่าน revision นอก Qt thread เหมือน `done`
-
 ## [v2.2.63] - 2026-11-28
 
-เก็บเคสที่เคยพลาดไว้รันซ้ำ (`takkub eval`) + สถานะ "ยกเลิก" แยกจาก FAILED + issue ที่เปิดอยู่ 8 ใบ (#1055 #1058 #1061 #1065–#1069) + README ใหม่
+เก็บเคสที่เคยพลาดไว้รันซ้ำ (`takkub eval`) + สถานะ "ยกเลิก" แยกจาก FAILED + issue ที่เปิดอยู่ 9 ใบ (#1055 #1058 #1061 #1065–#1070) + README ใหม่
 
 ### Added (เพิ่ม)
 
@@ -18,6 +16,7 @@ All notable changes to agent-takkub. Format loosely follows [Keep a Changelog](h
 
 ### Fixed (แก้ไข)
 
+- **impact gate: cwd เป็นโฟลเดอร์แม่ที่มีหลาย git repo ส่ง done ไม่ได้ (#1070):** `git_revision` ของ cwd ที่ไม่อยู่ใน git tree รวม revision ของ repo ย่อยเป็น `repos:<hash>` (เรียงตาม path แบบ posix · ใช้ `paths` ใน projects.json ใต้ cwd ก่อน ไม่งั้นสแกนลึก 3 ชั้น ข้าม hidden/symlink/node_modules/worktrees) — แก้ repo ย่อยไหน revision ก็เปลี่ยน · single repo ได้ค่าเดิมทุกไบต์ · ไม่เจอ repo เลย = `no-git` พร้อม `revision_note` บอกว่าหาที่ไหน · `subagent-done` อ่าน revision นอก Qt thread เหมือน `done`
 - **pane ไม่เปิดแบบเงียบเมื่อมีหน้าต่างค้าง (#1066, #1055):** หน้าต่างตั้งค่า Remote ไม่บล็อกทั้งแอปแล้ว · spawn ที่ถูกพักเกิน 60 วินาทีแจ้ง Lead พร้อมชื่อหน้าต่างที่ต้องปิด และคำตอบของ `assign`/`spawn` บอกเหตุทันที
 - **ใบงานเริ่มโดยไม่มี context ของโปรเจค (#1069):** ดัชนี recall อ่านเฉพาะส่วนที่ต่อท้ายเพิ่มแทนอ่านทั้งไฟล์ (คลัง 5 MB: 567 ms → 21 ms) และอุ่นไว้ตอนเปิดแท็บ · การเขียนคลังบน Windows ลองซ้ำเมื่อไฟล์ถูกเปิดอ่านอยู่ · ยังหลุดได้ตอนเครื่องหนักมาก
 - **UI ค้าง (#1061):** การอ่าน profile บน main thread ใช้ค่าล่าสุดไปก่อน (อายุไม่เกิน 10 วินาที, เส้นทาง spawn อ่านตรง) และ graft resync ใช้ worker ของตัวเองตัวเดียว · จุดรับข้อมูลจากจอ pane ยังไม่ได้แก้
