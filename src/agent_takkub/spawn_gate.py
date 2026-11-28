@@ -54,6 +54,29 @@ def is_spawn_blocked(modal_pred: Callable[[], bool] | None) -> bool:
     return is_in_send_blocked()
 
 
+def describe_spawn_block(modal_pred: Callable[[], bool] | None) -> str:
+    """#1066: human-readable cause of a current block, "" when not blocked.
+
+    Names the open window (its title) so Lead/user know what to close —
+    a modal dialog left open on the desktop parks every spawn silently.
+    """
+    if modal_pred is not None and modal_pred():
+        title = ""
+        try:
+            from PyQt6.QtWidgets import QApplication
+
+            w = QApplication.activeModalWidget() or QApplication.activePopupWidget()
+            if w is not None:
+                title = (w.windowTitle() or type(w).__name__).strip()
+        except Exception:
+            pass
+        what = f"หน้าต่าง '{title}'" if title else "หน้าต่าง dialog/เมนู"
+        return f"{what} เปิดค้างอยู่ใน cockpit — ปิดก่อน pane ถึงจะเปิดได้"
+    if is_in_send_blocked():
+        return "Windows กำลังอยู่ใน input-synchronous call (ลาก/resize หน้าต่างค้าง?)"
+    return ""
+
+
 def is_in_send_stable(n: int = 3) -> bool:
     """True when is_in_send_blocked() returns False for all n immediate samples.
 

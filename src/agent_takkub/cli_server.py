@@ -207,6 +207,16 @@ class CliServer(QObject):
         base = raw.split("#", 1)[0]
         return base in browser_chrome.BROWSER_ROLES
 
+    def _spawn_block_note(self) -> str:
+        """#1066: suffix for an assign/spawn ack when the spawn gate is
+        already closed, so the caller is not told a bare "ok"."""
+        fn = getattr(self._orch, "spawn_block_reason", None)
+        try:
+            reason = fn() if callable(fn) else ""
+        except Exception:
+            reason = ""
+        return f"\n⚠️ spawn ถูกพักไว้: {reason}" if isinstance(reason, str) and reason else ""
+
     def _next_spawn_delay_ms(self, role: str | None, project: str | None = None) -> int:
         """Reserve the next spawn time slot and return the delay (ms) until it.
 
@@ -1305,7 +1315,11 @@ class CliServer(QObject):
                         delay,
                         lambda: self._orch.spawn(role, cwd=req.get("cwd"), project=from_project),
                     )
-                    self._reply(sock, ok=True, msg=f"spawning {role} (async, +{delay}ms)")
+                    self._reply(
+                        sock,
+                        ok=True,
+                        msg=f"spawning {role} (async, +{delay}ms){self._spawn_block_note()}",
+                    )
                 else:
                     if awaiting_spec:
                         self._pending_spec_assigns.add(fp)
@@ -1417,6 +1431,7 @@ class CliServer(QObject):
                         f"รอผู้ใช้ยืนยัน spec ในหน้าต่าง cockpit ก่อนส่งงานให้ {role}"
                         if awaiting_spec
                         else f"task queued for {role} (spawning async, +{delay}ms)"
+                        + self._spawn_block_note()
                     )
                     target_role = role
                     if (role or "").strip().lower() == "reviewer" and mode in {"code", "e2e", "ui"}:
