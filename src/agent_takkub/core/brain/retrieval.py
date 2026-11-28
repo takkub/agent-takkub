@@ -187,28 +187,47 @@ class _IndexState:
     docs: dict[str, tuple[dict[str, int], frozenset[str], int]]
     df: dict[str, int]
     index: _StoreIndex
+    tail: bytes = b""  # the `_HEAD_BYTES` right before `offset` (N-1)
 
 
 _INDEX_CACHE: dict[str, _IndexState] = {}
-_INDEX_LOCK = threading.Lock()
+# review-2 N-8: one lock per store path — a cold ~1 s warm of project A must
+# not queue project B's `_inject_v2_context` past its 300 ms budget.
+_INDEX_LOCKS: dict[str, threading.Lock] = {}
+_INDEX_LOCKS_GUARD = threading.Lock()
 
 
-def _read_new_rows(path: str, state: _IndexState | None) -> tuple[list[dict], int, bytes, bool]:
-    """Rows after `state.offset` when the file still starts with what was
-    indexed (same head, a line break right before the offset), else every
-    row. Returns `(rows, new_offset, head, appended_only)`. Only complete
+def _index_lock(key: str) -> threading.Lock:
+    with _INDEX_LOCKS_GUARD:
+        lock = _INDEX_LOCKS.get(key)
+        if lock is None:
+            lock = _INDEX_LOCKS[key] = threading.Lock()
+        return lock
+
+
+def _read_new_rows(
+    path: str, state: _IndexState | None
+) -> tuple[list[dict], int, bytes, bool, bytes]:
+    """Rows after `state.offset` when the file still starts AND, up to the
+    offset, ends with what was indexed (same head, same `_HEAD_BYTES` right
+    before the offset — that tail ends in the line break), else every row.
+    Returns `(rows, new_offset, head, appended_only, tail)`. Only complete
     lines are consumed — a write is an atomic `os.replace`, so a partial line
     is corruption and is skipped exactly like `JsonlStore.read_all` skips it."""
     with open(path, "rb") as f:
         head = f.read(_HEAD_BYTES)
         start = 0
         if state is not None and state.offset > 0 and head == state.head[: len(head)]:
-            f.seek(state.offset - 1)
-            if f.read(1) == b"\n":
+            # review-2 N-1: a rewrite with the same head and a `\n` at
+            # offset-1 used to pass as an append; the tail must match too.
+            back = min(state.offset, _HEAD_BYTES)
+            f.seek(state.offset - back)
+            if f.read(back) == state.tail:
                 start = state.offset
         f.seek(start)
         raw = f.read()
     end = raw.rfind(b"\n") + 1
+    tail = ((state.tail if start else b"") + raw[:end])[-_HEAD_BYTES:]
     rows: list[dict] = []
     for line in raw[:end].decode("utf-8", errors="replace").split("\n"):
         if not line.strip():
@@ -219,7 +238,7 @@ def _read_new_rows(path: str, state: _IndexState | None) -> tuple[list[dict], in
             continue
         if isinstance(row, dict):
             rows.append(row)
-    return rows, start + end, head, start > 0
+    return rows, start + end, head, start > 0, tail
 
 
 def _apply_rows(state: _IndexState, rows: list[dict]) -> None:
@@ -273,6 +292,17 @@ def _materialize(state: _IndexState) -> _StoreIndex:
     return _StoreIndex(records, token_sets, doc_len, tfs, dict(state.df))
 
 
+def _index_is_warm(store: BrainStore) -> bool:
+    """One `stat`: True when `_index_for(store)` would be a cache hit (or the
+    store file does not exist — nothing to build)."""
+    try:
+        st = os.stat(store.path)
+    except OSError:
+        return True
+    hit = _INDEX_CACHE.get(str(store.path))
+    return hit is not None and hit.sig == (st.st_mtime_ns, st.st_size)
+
+
 def _index_for(store: BrainStore) -> _StoreIndex:
     path = getattr(store, "path", None)
     st = None
@@ -288,21 +318,25 @@ def _index_for(store: BrainStore) -> _StoreIndex:
     hit = _INDEX_CACHE.get(key)
     if hit is not None and hit.sig == sig:
         return hit.index
-    with _INDEX_LOCK:
+    with _index_lock(key):
         hit = _INDEX_CACHE.get(key)
         if hit is not None and hit.sig == sig:
             return hit.index
-        rows, offset, head, appended = _read_new_rows(key, hit)
+        rows, offset, head, appended, tail = _read_new_rows(key, hit)
         state = hit
         if state is None or not appended:
             state = _IndexState(sig, 0, b"", {}, {}, {}, _StoreIndex([], [], [], [], {}))
         _apply_rows(state, rows)
-        state.sig, state.offset, state.head = sig, offset, head
-        state.index = _materialize(state)
+        index = _materialize(state)
+        # review-2 N-2: publish the index before the sig — a lock-free reader
+        # that sees the new sig must never get the previous index.
+        state.offset, state.head, state.tail = offset, head, tail
+        state.index = index
+        state.sig = sig
         if key not in _INDEX_CACHE and len(_INDEX_CACHE) >= _INDEX_CACHE_MAX:
             _INDEX_CACHE.clear()
         _INDEX_CACHE[key] = state
-        return state.index
+        return index
 
 
 def _bm25_scores(docs_tokens: list[list[str]], query_tokens: list[str]) -> list[float]:

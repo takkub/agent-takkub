@@ -17,7 +17,6 @@ from pathlib import Path
 import pytest
 from PyQt6.QtCore import QCoreApplication
 
-from agent_takkub import bg_pool as gab_bg_pool
 from agent_takkub import graft_autobuild as gab
 from agent_takkub.graft_autobuild import (
     build_all_projects_async as _real_build_all_projects_async,
@@ -115,7 +114,7 @@ def _install_env(monkeypatch, tmp_path, *, node_major=22, npm="npm", result=(Tru
 
     monkeypatch.delenv("TAKKUB_SKIP_GRAFT_BUILD", raising=False)
     monkeypatch.setattr(gab.threading, "Thread", _SyncThread)
-    monkeypatch.setattr(gab_bg_pool, "submit", lambda fn, *a, **k: fn(*a, **k))  # #1061
+    monkeypatch.setattr(gab, "_submit_resync", lambda fn: fn())  # #1061 S-5
     monkeypatch.setattr(gab, "cli_install_marker_path", lambda: tmp_path / "s" / "cli-install.json")
     monkeypatch.setattr(gab, "_node_major", lambda: node_major)
     monkeypatch.setattr(gab.shutil, "which", lambda name: npm if name.startswith("npm") else None)
@@ -1068,7 +1067,7 @@ def test_resync_staging_only_noop_when_env_set(tmp_path, monkeypatch):
     calls = []
     monkeypatch.setattr(gab, "_git_nonignored_files", lambda t: calls.append(t) or None)
     monkeypatch.setattr(gab.threading, "Thread", _SyncThread)
-    monkeypatch.setattr(gab_bg_pool, "submit", lambda fn, *a, **k: fn(*a, **k))  # #1061
+    monkeypatch.setattr(gab, "_submit_resync", lambda fn: fn())  # #1061 S-5
 
     gab.resync_staging_only(str(tmp_path))
 
@@ -1080,7 +1079,7 @@ def test_resync_staging_only_noop_without_cwd(monkeypatch):
     calls = []
     monkeypatch.setattr(gab, "_git_nonignored_files", lambda t: calls.append(t) or None)
     monkeypatch.setattr(gab.threading, "Thread", _SyncThread)
-    monkeypatch.setattr(gab_bg_pool, "submit", lambda fn, *a, **k: fn(*a, **k))  # #1061
+    monkeypatch.setattr(gab, "_submit_resync", lambda fn: fn())  # #1061 S-5
 
     gab.resync_staging_only(None)
     gab.resync_staging_only("")
@@ -1101,7 +1100,7 @@ def test_resync_staging_only_noop_when_graft_cli_missing(tmp_path, monkeypatch):
     calls = []
     monkeypatch.setattr(gab, "_git_nonignored_files", lambda t: calls.append(t) or None)
     monkeypatch.setattr(gab.threading, "Thread", _SyncThread)
-    monkeypatch.setattr(gab_bg_pool, "submit", lambda fn, *a, **k: fn(*a, **k))  # #1061
+    monkeypatch.setattr(gab, "_submit_resync", lambda fn: fn())  # #1061 S-5
 
     gab.resync_staging_only(str(tmp_path))
 
@@ -1120,7 +1119,7 @@ def test_resync_staging_only_noop_for_missing_dir(tmp_path, monkeypatch):
     calls = []
     monkeypatch.setattr(gab, "_git_nonignored_files", lambda t: calls.append(t) or None)
     monkeypatch.setattr(gab.threading, "Thread", _SyncThread)
-    monkeypatch.setattr(gab_bg_pool, "submit", lambda fn, *a, **k: fn(*a, **k))  # #1061
+    monkeypatch.setattr(gab, "_submit_resync", lambda fn: fn())  # #1061 S-5
 
     gab.resync_staging_only(str(tmp_path / "does-not-exist"))
 
@@ -1142,7 +1141,7 @@ def test_resync_staging_only_syncs_staging_mirror(tmp_path, monkeypatch):
     # test counting only `graft build` calls.
     monkeypatch.setattr(gab, "_tree_fingerprint", lambda t: None)
     monkeypatch.setattr(gab.threading, "Thread", _SyncThread)
-    monkeypatch.setattr(gab_bg_pool, "submit", lambda fn, *a, **k: fn(*a, **k))  # #1061
+    monkeypatch.setattr(gab, "_submit_resync", lambda fn: fn())  # #1061 S-5
     target = tmp_path / "target-repo"
     target.mkdir()
     (target / "main.py").write_text("version two", encoding="utf-8")
@@ -1270,7 +1269,7 @@ def test_resync_staging_only_escalates_to_full_build_for_new_file(tmp_path, monk
     # test counting only `graft build` calls.
     monkeypatch.setattr(gab, "_tree_fingerprint", lambda t: None)
     monkeypatch.setattr(gab.threading, "Thread", _SyncThread)
-    monkeypatch.setattr(gab_bg_pool, "submit", lambda fn, *a, **k: fn(*a, **k))  # #1061
+    monkeypatch.setattr(gab, "_submit_resync", lambda fn: fn())  # #1061 S-5
     monkeypatch.setattr(gab, "_graft_cli", lambda: r"C:\fake\graft.cmd")
     target = tmp_path / "target-repo"
     target.mkdir()
@@ -1311,7 +1310,7 @@ def test_resync_staging_only_throttled_per_directory(tmp_path, monkeypatch):
     monkeypatch.delenv("TAKKUB_SKIP_GRAFT_BUILD", raising=False)
     monkeypatch.setattr(gab, "_graft_cli", lambda: r"C:\fake\graft.cmd")
     monkeypatch.setattr(gab.threading, "Thread", _SyncThread)
-    monkeypatch.setattr(gab_bg_pool, "submit", lambda fn, *a, **k: fn(*a, **k))  # #1061
+    monkeypatch.setattr(gab, "_submit_resync", lambda fn: fn())  # #1061 S-5
     target = tmp_path / "target-repo"
     target.mkdir()
     calls = []
@@ -1336,7 +1335,7 @@ def test_resync_staging_only_skips_dir_with_full_build_in_flight(tmp_path, monke
     monkeypatch.delenv("TAKKUB_SKIP_GRAFT_BUILD", raising=False)
     monkeypatch.setattr(gab, "_graft_cli", lambda: r"C:\fake\graft.cmd")
     monkeypatch.setattr(gab.threading, "Thread", _SyncThread)
-    monkeypatch.setattr(gab_bg_pool, "submit", lambda fn, *a, **k: fn(*a, **k))  # #1061
+    monkeypatch.setattr(gab, "_submit_resync", lambda fn: fn())  # #1061 S-5
     target = tmp_path / "target-repo"
     target.mkdir()
     calls = []
@@ -1379,7 +1378,7 @@ def _arm_live_resync(monkeypatch, tmp_path):
     monkeypatch.delenv("TAKKUB_SKIP_GRAFT_BUILD", raising=False)
     monkeypatch.setattr(gab, "_graft_cli", lambda: r"C:ake\graft.cmd")
     monkeypatch.setattr(gab.threading, "Thread", _SyncThread)
-    monkeypatch.setattr(gab_bg_pool, "submit", lambda fn, *a, **k: fn(*a, **k))  # #1061
+    monkeypatch.setattr(gab, "_submit_resync", lambda fn: fn())  # #1061 S-5
     target = tmp_path / "live-repo"
     target.mkdir()
     (target / "main.py").write_text("pass", encoding="utf-8")

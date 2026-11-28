@@ -55,9 +55,9 @@ def test_second_recall_reads_nothing_until_the_store_file_changes(tmp_path, monk
     real_read = retrieval._read_new_rows
 
     def _counting(path, state):
-        rows, offset, head, appended = real_read(path, state)
-        reads.append(len(rows))
-        return rows, offset, head, appended
+        out = real_read(path, state)
+        reads.append(len(out[0]))
+        return out
 
     monkeypatch.setattr(retrieval, "_read_new_rows", _counting)
     engine = RetrievalEngine(BrainStore("proj"))

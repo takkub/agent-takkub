@@ -45,6 +45,7 @@ with existing test imports.
 
 from __future__ import annotations
 
+import functools
 import os
 import re
 import subprocess
@@ -525,6 +526,22 @@ def apply_default_model(env: dict[str, str], model: str) -> None:
         env["ANTHROPIC_DEFAULT_MODEL"] = model
 
 
+def _sync_profile_reads(fn):
+    """review-2 #1061(a): the spawn path resolves the account/provider home
+    from disk now — `user_profile`'s `stale_ok` cache is for the Qt-thread
+    status header, not for what a new pane is launched with."""
+
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        from .cached_read import sync_reads
+
+        with sync_reads():
+            return fn(*args, **kwargs)
+
+    return wrapper
+
+
+@_sync_profile_reads
 def inject_user_profile_env(env: dict[str, str], project: str, account: str | None = None) -> None:
     """Set ``CLAUDE_CONFIG_DIR`` in *env* when it should differ from a plain
     ``claude`` default invocation.
@@ -557,6 +574,7 @@ def inject_user_profile_env(env: dict[str, str], project: str, account: str | No
         pass
 
 
+@_sync_profile_reads
 def inject_curated_claude_config_dir(
     env: dict[str, str], project: str, account: str | None = None
 ) -> None:
@@ -708,6 +726,7 @@ def _claude_version(executable: str) -> str | None:
 _PROFILE_HOME_VAR: dict[str, str] = {"codex": "CODEX_HOME"}
 
 
+@_sync_profile_reads
 def inject_provider_home_env(
     env: dict[str, str], provider: str, project: str = "", account: str | None = None
 ) -> None:

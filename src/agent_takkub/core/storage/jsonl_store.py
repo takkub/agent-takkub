@@ -21,6 +21,7 @@ from __future__ import annotations
 import json
 import os
 import threading
+import time
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, NamedTuple
@@ -40,6 +41,28 @@ def path_lock(path: Path) -> threading.Lock:
 
 def unique_tmp(path: Path) -> Path:
     return path.with_name(f"{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+
+
+# Windows rejects a rename onto a file another thread/process still has open
+# for read (PermissionError) — a short bounded retry absorbs that race.
+# Shared with `user_profile._atomic_write` (moved down here, review-2 N-3).
+REPLACE_RETRY_DELAYS: tuple[float, ...] = (0.0, 0.02, 0.05, 0.1, 0.2)
+
+
+def replace_with_retry(tmp: Path | str, path: Path | str) -> None:
+    """`os.replace(tmp, path)`, retried over `REPLACE_RETRY_DELAYS`; the last
+    `OSError` is raised if *path* stays locked."""
+    last_exc: OSError | None = None
+    for delay in REPLACE_RETRY_DELAYS:
+        if delay:
+            time.sleep(delay)
+        try:
+            os.replace(tmp, path)
+            return
+        except OSError as exc:
+            last_exc = exc
+    assert last_exc is not None
+    raise last_exc
 
 
 class ReadResult(NamedTuple):
@@ -77,7 +100,11 @@ class JsonlStore:
                 f.write(existing)
                 f.write(line.encode("utf-8"))
                 f.write(b"\n")
-            os.replace(tmp, self._path)
+            try:
+                replace_with_retry(tmp, self._path)  # review-2 N-3: a reader held it open
+            except OSError:
+                tmp.unlink(missing_ok=True)
+                raise
 
     def read_all(self) -> ReadResult:
         if not self._path.exists():
