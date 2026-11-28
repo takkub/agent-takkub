@@ -7,6 +7,7 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
+from pathlib import Path
 
 from agent_takkub.core.storage.jsonl_store import JsonlStore
 from agent_takkub.core.storage.legacy_reader import (
@@ -46,7 +47,9 @@ def test_append_is_atomic_via_os_replace(tmp_path, monkeypatch):
 
     monkeypatch.setattr("agent_takkub.core.storage.jsonl_store.os.replace", spy_replace)
     store.append({"id": "b"})
-    assert len(calls) == 1
+    # `os.replace` is patched process-wide: count only this store's rename, not
+    # background writers left running by earlier tests (2.2.63 CI: 4 calls).
+    assert len([c for c in calls if Path(c[1]) == path]) == 1
     assert not list(tmp_path.glob("*.tmp"))
 
 
