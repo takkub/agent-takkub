@@ -1865,6 +1865,12 @@ class MainWindow(
             ensure_project_graph_async(tab.project_name)
         except Exception:
             pass
+        try:  # #1069: first assign after a start finds the recall index warm
+            from .core.brain.facade import warm_context_index_async
+
+            warm_context_index_async(tab.project_name)
+        except Exception:
+            pass
         if set_active_project(tab.project_name):
             self._refresh_rtk_button()
             from . import user_profile as _up_sw

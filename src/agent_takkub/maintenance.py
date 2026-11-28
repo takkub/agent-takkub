@@ -132,6 +132,13 @@ def _idle_thread_entry(entry: str) -> bool:
     return any(marker in top for marker in _IDLE_THREAD_FRAMES)
 
 
+# #1069: share of assigns whose task went out without project context because
+# the builder missed its 300 ms. 30 % on 2.2.62 (64 % before #1045); with the
+# incremental recall index it should be the first assign per project after a
+# start at most. Below 10 assigns a single cold miss would read as a rate.
+_CTX_TIMEOUT_RATE_MAX = 0.10
+_CTX_TIMEOUT_MIN_ASSIGNS = 10
+
 # Stall durations at or above this are worth naming individually rather than
 # just counting — below it, a stall is background noise on a busy box.
 _STALL_CALLOUT_MS = 2000
@@ -608,6 +615,8 @@ def scan_events(log_path: Path, since_hours: float = 24.0, now: datetime | None 
     recover_reasons: Counter[str] = Counter()  # #422: `<event>:<reason>` buckets
     routine: Counter[str] = Counter()  # #870: `<event>:<reason>` not counted as 🔴/🟡
     whole_process_stalls: list[int] = []  # #871: duration_ms of process-wide pauses
+    assigns = 0  # #1069: denominator of the context-builder timeout rate
+    ctx_timeouts: Counter[str] = Counter()  # per project
     # #884-#887: stalls next to a sleep-gap marker are the same pause.
     pause_marks = collect_pause_marks(log_path, cutoff)
     total = 0
@@ -626,6 +635,10 @@ def scan_events(log_path: Path, since_hours: float = 24.0, now: datetime | None 
                     continue
                 total += 1
                 name = str(rec.get("event") or "")
+                if name == "assign":
+                    assigns += 1
+                elif name == "context_builder_timeout":
+                    ctx_timeouts[str(rec.get("project") or "-")] += 1
                 # #871: the watchdog itself was paused too — the process as a
                 # whole stopped (sleep / OS throttling / native GIL hold), so
                 # no thread snapshot taken on wake names a culprit. #884-#887:
@@ -703,7 +716,17 @@ def scan_events(log_path: Path, since_hours: float = 24.0, now: datetime | None 
         details.append(f"ส่วนใหญ่ค้างที่ {frame} (×{count}/{sum(stall_top_frames.values())})")
     if worst_stall:
         details.append(f"UI ค้างนานสุด {worst_stall / 1000:.1f}s")
-    status = "attention" if (severe or warn) else "ok"
+    ctx_timeout_total = sum(ctx_timeouts.values())
+    ctx_rate = ctx_timeout_total / assigns if assigns else 0.0
+    ctx_rate_high = assigns >= _CTX_TIMEOUT_MIN_ASSIGNS and ctx_rate > _CTX_TIMEOUT_RATE_MAX
+    if ctx_rate_high:
+        details.append(
+            f"🟡 ใบงานไม่ได้ project context (builder เกิน 300 ms) {ctx_timeout_total}/{assigns}"
+            f" assign = {ctx_rate:.0%} (เกณฑ์ {_CTX_TIMEOUT_RATE_MAX:.0%}) — "
+            + " · ".join(f"{p} ×{n}" for p, n in ctx_timeouts.most_common(3))
+            + " · ดู `context_builder_late.elapsed_ms` (#1069)"
+        )
+    status = "attention" if (severe or warn or ctx_rate_high) else "ok"
     summary = (
         f"{total} event / {since_hours:.0f} ชม. — "
         f"หนัก {sum(severe.values())} · เตือน {sum(warn.values())}"
@@ -721,6 +744,8 @@ def scan_events(log_path: Path, since_hours: float = 24.0, now: datetime | None 
             "warn": dict(warn),
             "worst_stall_ms": worst_stall,
             "process_paused": len(whole_process_stalls),
+            "assigns": assigns,
+            "context_builder_timeouts": ctx_timeout_total,
         },
     )
 

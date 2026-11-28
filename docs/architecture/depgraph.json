@@ -1147,9 +1147,11 @@
         "agent_takkub.core.resilience.circuit_breaker"
       ],
       "imported_by": [
+        "agent_takkub.headless_window",
+        "agent_takkub.main_window",
         "agent_takkub.orchestrator"
       ],
-      "fan_in": 1,
+      "fan_in": 3,
       "fan_out": 16
     },
     {
@@ -3009,6 +3011,7 @@
         "agent_takkub.cli_server",
         "agent_takkub.cockpit_theme",
         "agent_takkub.config",
+        "agent_takkub.core.brain.facade",
         "agent_takkub.headless_pane",
         "agent_takkub.orchestrator",
         "agent_takkub.roles",
@@ -3018,7 +3021,7 @@
         "agent_takkub.headless"
       ],
       "fan_in": 1,
-      "fan_out": 7
+      "fan_out": 8
     },
     {
       "module": "agent_takkub.hook_wiring",
@@ -3312,6 +3315,7 @@
         "agent_takkub.cli_server",
         "agent_takkub.cockpit_theme",
         "agent_takkub.config",
+        "agent_takkub.core.brain.facade",
         "agent_takkub.editor_widget",
         "agent_takkub.graft_autobuild",
         "agent_takkub.lead_composer_host",
@@ -3342,7 +3346,7 @@
         "agent_takkub.app"
       ],
       "fan_in": 1,
-      "fan_out": 30
+      "fan_out": 31
     },
     {
       "module": "agent_takkub.maintenance",

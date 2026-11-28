@@ -86,6 +86,43 @@ def recall(
     return result
 
 
+_WARMING: set[str] = set()
+_WARMING_LOCK = threading.Lock()
+
+
+def warm_context_index_async(project: str | None) -> None:
+    """#1069: build the recall index of *project*'s store (and the global one)
+    on a background thread when its tab opens, so the first assign after a
+    cockpit start finds it warm. Cold, a 3,883-record store took ~1 s — over
+    `_inject_v2_context`'s 300 ms, so that task went out without context.
+    An already-warm index costs one `stat`. Never raises."""
+    if not v2_context_enabled():
+        return
+    key = project or ""
+    with _WARMING_LOCK:
+        if key in _WARMING:
+            return
+        _WARMING.add(key)
+
+    def _run() -> None:
+        try:
+            from .retrieval import _index_for
+
+            for p in (project, None):
+                _index_for(BrainStore(p))
+        except Exception:
+            _log.debug("core.brain.facade: index warm failed project=%r", project, exc_info=True)
+        finally:
+            with _WARMING_LOCK:
+                _WARMING.discard(key)
+
+    try:
+        threading.Thread(target=_run, daemon=True, name="brain-index-warm").start()
+    except Exception:
+        with _WARMING_LOCK:
+            _WARMING.discard(key)
+
+
 def submit(candidate: MemoryCandidate, *, project: str | None = None) -> SubmitResult | None:
     if not v2_brain_enabled():
         return None

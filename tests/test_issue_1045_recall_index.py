@@ -1,7 +1,9 @@
-"""#1045: recall keeps what it derives from a store until the store changes."""
+"""#1045/#1069: recall keeps what it derives from a store until the store
+changes, and a store that only grew is read from where it left off."""
 
 from __future__ import annotations
 
+import dataclasses
 import os
 
 from agent_takkub.core.brain import retrieval
@@ -11,6 +13,7 @@ from agent_takkub.core.models.memory import (
     Confidence,
     MemoryKind,
     MemoryRecord,
+    RecordStatus,
     Scope,
     Trust,
 )
@@ -29,6 +32,18 @@ def _record(i: int, content: str) -> MemoryRecord:
     )
 
 
+def _bump_mtime(path) -> None:
+    st = os.stat(path)
+    os.utime(path, ns=(st.st_atime_ns, st.st_mtime_ns + 5_000_000))
+
+
+def _same_as_full_rebuild(store: BrainStore) -> None:
+    got = retrieval._index_for(store)
+    want = retrieval._build_index(store.load_active())
+    assert [r.id for r in got.records] == [r.id for r in want.records]
+    assert got.tfs == want.tfs and got.df == want.df and got.doc_len == want.doc_len
+
+
 def test_second_recall_reads_nothing_until_the_store_file_changes(tmp_path, monkeypatch):
     monkeypatch.setattr("agent_takkub.core.brain.store.core_home", lambda: tmp_path)
     monkeypatch.setattr(retrieval, "_INDEX_CACHE", {})
@@ -36,27 +51,50 @@ def test_second_recall_reads_nothing_until_the_store_file_changes(tmp_path, monk
     store.append_event(_record(1, "payment webhook retries use exponential backoff"))
     store.append_event(_record(2, "login page uses the shared form component"))
 
-    loads = []
-    real_load = BrainStore.load_active
-    monkeypatch.setattr(BrainStore, "load_active", lambda self: loads.append(1) or real_load(self))
+    reads: list[int] = []
+    real_read = retrieval._read_new_rows
+
+    def _counting(path, state):
+        rows, offset, head, appended = real_read(path, state)
+        reads.append(len(rows))
+        return rows, offset, head, appended
+
+    monkeypatch.setattr(retrieval, "_read_new_rows", _counting)
     engine = RetrievalEngine(BrainStore("proj"))
     first = engine.recall("payment webhook backoff", scope=Scope.PROJECT)
     again = RetrievalEngine(BrainStore("proj")).recall(
         "payment webhook backoff", scope=Scope.PROJECT
     )
     assert [r.id for r in first] == [r.id for r in again] == ["r1"]
-    assert len(loads) == 1, "an unchanged store must not be re-read and re-counted"
+    assert reads == [2], "an unchanged store must not be re-read and re-counted"
 
     store.append_event(_record(3, "payment webhook signature is checked before the retry"))
-    st = os.stat(store.path)
-    os.utime(store.path, ns=(st.st_atime_ns, st.st_mtime_ns + 5_000_000))
+    _bump_mtime(store.path)
     found = engine.recall("payment webhook signature", scope=Scope.PROJECT)
-    assert "r3" in [r.id for r in found] and len(loads) == 2
+    assert "r3" in [r.id for r in found]
+    assert reads == [2, 1], "#1069: a grown store is read from the last offset only"
 
 
-def test_indexed_scores_match_the_plain_bm25():
-    docs = [["a", "b", "b"], ["c"], ["a", "c", "d"]]
-    tfs, df = retrieval._term_counts(docs)
-    assert retrieval._bm25_from_counts(
-        tfs, df, [len(d) for d in docs], ["a", "b"]
-    ) == retrieval._bm25_scores(docs, ["a", "b"])
+def test_incremental_index_matches_a_full_rebuild_through_supersede_and_rewrite(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr("agent_takkub.core.brain.store.core_home", lambda: tmp_path)
+    monkeypatch.setattr(retrieval, "_INDEX_CACHE", {})
+    store = BrainStore("proj")
+    r1 = _record(1, "payment webhook retries use exponential backoff")
+    store.append_event(r1)
+    store.append_event(_record(2, "login page uses the shared form component"))
+    _same_as_full_rebuild(store)
+
+    store.append_event(dataclasses.replace(r1, status=RecordStatus.SUPERSEDED))
+    store.append_event(_record(3, "payment webhook signature is checked"))
+    _bump_mtime(store.path)
+    _same_as_full_rebuild(store)
+    assert "r1" not in [r.id for r in retrieval._index_for(store).records]
+
+    # Not an append: the file was replaced with different content.
+    store.path.write_bytes(b"")
+    store.append_event(_record(9, "a different store entirely"))
+    _bump_mtime(store.path)
+    _same_as_full_rebuild(store)
+    assert [r.id for r in retrieval._index_for(store).records] == ["r9"]

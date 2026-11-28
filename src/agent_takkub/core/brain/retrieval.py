@@ -34,16 +34,24 @@ unrelated record). Fixing that needs word segmentation, not a threshold.
 
 from __future__ import annotations
 
+import json
 import math
 import os
+import threading
 import time
 from dataclasses import dataclass
 
 from agent_takkub.bm25_search import tokenize
-from agent_takkub.core.models.memory import Confidence, MemoryRecord, Scope, Trust
+from agent_takkub.core.models.memory import (
+    Confidence,
+    MemoryRecord,
+    RecordStatus,
+    Scope,
+    Trust,
+)
 from agent_takkub.token_estimate import estimate_tokens as _token_cost
 
-from .store import BrainStore
+from .store import BrainStore, _record_from_dict
 
 _BM25_K1 = 1.5
 _BM25_B = 0.75
@@ -133,7 +141,6 @@ class _StoreIndex:
     df: dict[str, int]
 
 
-_INDEX_CACHE: dict[str, tuple[tuple[int, int], _StoreIndex]] = {}
 _INDEX_CACHE_MAX = 64
 
 
@@ -158,26 +165,144 @@ def _build_index(records: list[MemoryRecord]) -> _StoreIndex:
     )
 
 
+_HEAD_BYTES = 256
+
+
+@dataclass(slots=True)
+class _IndexState:
+    """#1069: what `_index_for` keeps per store so a changed store costs only
+    its new lines. The store is an append-only event log (`JsonlStore.append`
+    rewrites it as old bytes + one line), and every `done()` appends — so with
+    #1045's whole-file rebuild on each change, a 5.1 MB / 3,883-record store
+    (saas_admin_amb, measured 2026-11-28) paid ~220 ms idle (~1 s with a cold
+    token cache) on nearly every assign and missed the 300 ms budget on 30 %.
+    `latest` keeps every id's newest row in first-seen order (exactly
+    `BrainStore.load_latest`'s order); `docs` holds term counts for the ACTIVE
+    ones only, and `df` is kept in step with `docs`."""
+
+    sig: tuple[int, int]
+    offset: int
+    head: bytes
+    latest: dict[str, MemoryRecord]
+    docs: dict[str, tuple[dict[str, int], frozenset[str], int]]
+    df: dict[str, int]
+    index: _StoreIndex
+
+
+_INDEX_CACHE: dict[str, _IndexState] = {}
+_INDEX_LOCK = threading.Lock()
+
+
+def _read_new_rows(path: str, state: _IndexState | None) -> tuple[list[dict], int, bytes, bool]:
+    """Rows after `state.offset` when the file still starts with what was
+    indexed (same head, a line break right before the offset), else every
+    row. Returns `(rows, new_offset, head, appended_only)`. Only complete
+    lines are consumed — a write is an atomic `os.replace`, so a partial line
+    is corruption and is skipped exactly like `JsonlStore.read_all` skips it."""
+    with open(path, "rb") as f:
+        head = f.read(_HEAD_BYTES)
+        start = 0
+        if state is not None and state.offset > 0 and head == state.head[: len(head)]:
+            f.seek(state.offset - 1)
+            if f.read(1) == b"\n":
+                start = state.offset
+        f.seek(start)
+        raw = f.read()
+    end = raw.rfind(b"\n") + 1
+    rows: list[dict] = []
+    for line in raw[:end].decode("utf-8", errors="replace").split("\n"):
+        if not line.strip():
+            continue
+        try:
+            row = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(row, dict):
+            rows.append(row)
+    return rows, start + end, head, start > 0
+
+
+def _apply_rows(state: _IndexState, rows: list[dict]) -> None:
+    recs: list[MemoryRecord] = []
+    for row in rows:
+        try:
+            recs.append(_record_from_dict(row))
+        except (KeyError, ValueError, TypeError):
+            continue  # corrupt/foreign row — same skip as `BrainStore.load_latest`
+    active = [r for r in recs if r.status == RecordStatus.ACTIVE]
+    tokens_by_rec = dict(
+        zip(map(id, active), _doc_tokens([r.content for r in active]), strict=True)
+    )
+    df = state.df
+    for rec in recs:
+        old = state.docs.pop(rec.id, None)
+        if old is not None:
+            for t in old[0]:
+                n = df[t] - 1
+                if n:
+                    df[t] = n
+                else:
+                    del df[t]
+        state.latest[rec.id] = rec
+        toks = tokens_by_rec.get(id(rec))
+        if toks is None:
+            continue
+        counts: dict[str, int] = {}
+        for t in toks:
+            counts[t] = counts.get(t, 0) + 1
+        for t in counts:
+            df[t] = df.get(t, 0) + 1
+        state.docs[rec.id] = (counts, frozenset(toks), len(toks))
+
+
+def _materialize(state: _IndexState) -> _StoreIndex:
+    records: list[MemoryRecord] = []
+    token_sets: list[frozenset[str]] = []
+    doc_len: list[int] = []
+    tfs: list[dict[str, int]] = []
+    for rid, rec in state.latest.items():
+        doc = state.docs.get(rid)
+        if doc is None:
+            continue
+        records.append(rec)
+        tfs.append(doc[0])
+        token_sets.append(doc[1])
+        doc_len.append(doc[2])
+    # `df` is copied: the live dict keeps changing under the next append
+    # while a recall on another thread may still be scoring with this index.
+    return _StoreIndex(records, token_sets, doc_len, tfs, dict(state.df))
+
+
 def _index_for(store: BrainStore) -> _StoreIndex:
     path = getattr(store, "path", None)
-    sig: tuple[int, int] | None = None
+    st = None
     if path is not None:
         try:
             st = os.stat(path)
-            sig = (st.st_mtime_ns, st.st_size)
         except OSError:
-            sig = None
+            st = None
+    if st is None:
+        return _build_index(store.load_active())
+    sig = (st.st_mtime_ns, st.st_size)
     key = str(path)
-    if sig is not None:
+    hit = _INDEX_CACHE.get(key)
+    if hit is not None and hit.sig == sig:
+        return hit.index
+    with _INDEX_LOCK:
         hit = _INDEX_CACHE.get(key)
-        if hit is not None and hit[0] == sig:
-            return hit[1]
-    index = _build_index(store.load_active())
-    if sig is not None:
-        if len(_INDEX_CACHE) >= _INDEX_CACHE_MAX:
+        if hit is not None and hit.sig == sig:
+            return hit.index
+        rows, offset, head, appended = _read_new_rows(key, hit)
+        state = hit
+        if state is None or not appended:
+            state = _IndexState(sig, 0, b"", {}, {}, {}, _StoreIndex([], [], [], [], {}))
+        _apply_rows(state, rows)
+        state.sig, state.offset, state.head = sig, offset, head
+        state.index = _materialize(state)
+        if key not in _INDEX_CACHE and len(_INDEX_CACHE) >= _INDEX_CACHE_MAX:
             _INDEX_CACHE.clear()
-        _INDEX_CACHE[key] = (sig, index)
-    return index
+        _INDEX_CACHE[key] = state
+        return state.index
 
 
 def _bm25_scores(docs_tokens: list[list[str]], query_tokens: list[str]) -> list[float]:
