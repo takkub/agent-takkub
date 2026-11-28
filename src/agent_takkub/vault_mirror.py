@@ -130,6 +130,7 @@ def _is_junk_project(project: str) -> bool:
 # `cat`-ed, nor smuggle a CSI/OSC introducer past markdown (sec-w1).
 _NOTE_CONTROL = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]")
 _NOTE_MAX = 8000
+_NOTE_HEADING = re.compile(r"^#{1,2}[ \t]+", re.M)
 
 
 def _scrub_note(note: str) -> str:
@@ -180,7 +181,11 @@ def _render_decision_note(
         listing it bare under "recent teammate done".
     """
     iso = now.isoformat(timespec="seconds")
-    scrubbed = _scrub_note(note)
+    # #1065: a markdown note ("## STATUS" / "## CHANGED", codex's habit) closed
+    # the `## Note` section early — every reader stops at the next `##`, so the
+    # report's Note held only the line before the first heading (a screenshot
+    # path). Demote in-note h1/h2 to h3 so the whole note stays in the section.
+    scrubbed = _NOTE_HEADING.sub("### ", _scrub_note(note))
     meta = NoteMetadata.new(
         project_id=_safe_project_id(project),
         source="takkub-done",
