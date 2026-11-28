@@ -67,6 +67,7 @@ LEAD_ONLY_COMMANDS = frozenset(
         "tail",  # reads recent transcript output of other panes — #541
         "lead-edits",  # inspect / reset lead direct-edit counters — #585 round 4
         "backlog",  # #684: project backlog is Lead/owner's planning surface
+        "eval",  # runs stored commands — Lead/terminal decides when
     }
 )
 
@@ -3202,6 +3203,83 @@ def cmd_backlog(args: argparse.Namespace) -> dict:
             print(f"นำเข้า {resp.get('count', 0)} รายการจาก {args.file}")
         return resp
     return {"ok": False, "msg": f"unknown backlog subcommand: {sub}"}
+
+
+def cmd_eval(args: argparse.Namespace) -> dict:
+    """`takkub eval add|list|show|set|run|retire` — eval cases (docs/architecture/
+    eval-loop.md). Direct file I/O + checks run in THIS process (no IPC, never
+    the GUI thread); checks run only when someone types `eval run`."""
+    from . import eval_cases as ev
+
+    project = _from_project()
+    if not project:
+        try:
+            project, _ = config.active_project()
+        except Exception:
+            project = None
+    project = project or "default"
+    sub = args.ev_cmd or "list"
+    try:
+        if sub == "add":
+            source = {"backlog": args.backlog, "issue": args.issue, "fix_loop": args.fix_loop}
+            case = ev.add_case(
+                project,
+                title=args.title,
+                expected=args.expected,
+                check=args.check,
+                cwd=args.cwd or os.getcwd(),
+                source=source,
+                timeout_s=args.timeout,
+            )
+            return {"ok": True, "msg": f"{case['id']} added ({project})"}
+        if sub == "list":
+            cases = ev.list_cases(project, include_retired=args.all)
+            for c in cases:
+                last = c.get("last_result")
+                res = "-" if not last else ("pass" if last["passed"] else "FAIL")
+                _utf8_print(f"  {c['id']}  {c['status']:<7} {res:<4}  {c['title']}")
+            return {"ok": True, "msg": f"{len(cases)} case(s) in {project}"}
+        if sub == "show":
+            case = ev.get_case(project, args.id)
+            if case is None:
+                return {"ok": False, "msg": f"no case {args.id} in {project}"}
+            _utf8_print(json.dumps(case, ensure_ascii=False, indent=1))
+            return {"ok": True, "msg": args.id}
+        if sub == "set":
+            case = ev.update_case(
+                project,
+                args.id,
+                title=args.title,
+                expected=args.expected,
+                check=args.check,
+                cwd=args.cwd,
+                timeout_s=args.timeout,
+            )
+            return {"ok": True, "msg": f"{case['id']} updated (status {case['status']})"}
+        if sub == "retire":
+            ev.retire_case(project, args.id)
+            return {"ok": True, "msg": f"{args.id} retired (kept)"}
+        if sub == "run":
+            out = ev.run_cases(project, args.id or None)
+            rows = out["results"]
+            for r in rows:
+                state = "pass" if r["passed"] else ("TIMEOUT" if r["timed_out"] else "FAIL")
+                mark = "  <<< ผ่าน→ไม่ผ่าน" if r["change"] == "REGRESSED" else ""
+                _utf8_print(
+                    f"  {r['id']}  {state:<7} {r['change']:<9} {r['rev'] or '-':<16} "
+                    f"{r['duration_s']:>7}s  {out['titles'].get(r['id'], '')}{mark}"
+                )
+            failed = [r["id"] for r in rows if not r["passed"]]
+            regressed = [r["id"] for r in rows if r["change"] == "REGRESSED"]
+            msg = f"{len(rows) - len(failed)}/{len(rows)} passed ({project}, {out['at']})"
+            if regressed:
+                msg += f" — REGRESSED: {', '.join(regressed)}"
+            return {"ok": not failed, "msg": msg}
+    except KeyError as e:
+        return {"ok": False, "msg": f"no such case: {e.args[0]}"}
+    except ValueError as e:
+        return {"ok": False, "msg": str(e)}
+    return {"ok": False, "msg": f"unknown eval subcommand: {sub}"}
 
 
 def cmd_list(_: argparse.Namespace) -> dict:

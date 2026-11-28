@@ -248,6 +248,20 @@ forbidden_modules = [
 ]
 
 [[tool.importlinter.contracts]]
+name = "eval-cases-leaf"
+type = "forbidden"
+# Eval cases (docs/architecture/eval-loop.md) are a file store + check runner
+# used by the CLI and called by the orchestrator — never the other way round.
+source_modules = ["agent_takkub.eval_cases"]
+forbidden_modules = [
+    "agent_takkub.orchestrator",
+    "agent_takkub.main_window",
+    "agent_takkub.app",
+    "agent_takkub.cli",
+    "agent_takkub.cli_server",
+]
+
+[[tool.importlinter.contracts]]
 name = "skill-learning-layer"
 type = "forbidden"
 # Skill Learning (2c6cb77c) is Qt-free and runs on its own worker thread: it

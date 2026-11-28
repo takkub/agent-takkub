@@ -53,6 +53,7 @@ takkub backlog pending                                  # (#714) ใบที่
 takkub assign ... --backlog <id>                        # (#714) ผูกงานกับใบที่มีอยู่ · ไม่ใส่ = ระบบสร้างใบจาก task ให้เอง
 takkub assign ... --ack-ceiling "<reason>"                # (#762) override fix-loop ceiling refusal — only after user approval
 takkub assign ... --isolation worktree --fresh-worktree      # force a new worktree (default: reuse this role's unmerged one for the same --backlog card)
+takkub eval add "<title>" --check "<cmd>" [--expected ..] [--cwd ..] [--backlog/--issue ..] · list · show <id> · set <id> --check .. · run [--id ..] · retire <id>   # เคสที่เคยพลาด + check ที่รันซ้ำได้ (exit 0 = ผ่าน) · run เทียบรอบก่อน (REGRESSED เด่น) · draft มาจาก fix-loop ที่ปิดสะอาด → เติม check ด้วย set · ดู docs/architecture/eval-loop.md
 takkub backlog import <file.md>                         # นำเข้าตาราง markdown (| title | detail | ... |) เป็นใบ backlog
 takkub close --role qa                                 # ปิด pane เดียว — 2.1.17: pane ไม่ปิดเองหลัง done แล้ว (นั่งรอ 30 นาที) assign role เดิมซ้ำ = paste เข้า session เดิม ไม่ boot ใหม่ · close เองเฉพาะจะเปลี่ยน provider/model หรือเลิกใช้ (เปลี่ยน worktree ระบบปิด+เปิดใหม่ให้เอง)
 takkub close-all                                       # ปิด teammate ทั้งหมด (Lead รอด)
