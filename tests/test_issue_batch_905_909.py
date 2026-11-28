@@ -65,11 +65,13 @@ def test_extra_position_deny_does_not_suggest_team_full() -> None:
     cfg = {**team_preset.BUILTIN_PRESETS["full"], "preset": "full"}
     ok, msg = team_preset._can_spawn_from_cfg("docs", cfg)
     assert not ok
-    assert "--team full" not in msg and "Settings" in msg
+    assert "team set full" not in msg and "Settings" in msg
 
 
 def test_core_position_under_pair_still_suggests_team_full() -> None:
     cfg = {**team_preset.BUILTIN_PRESETS["full"], "preset": "custom"}
     cfg["roles"] = dict.fromkeys(cfg["roles"], False)
     ok, msg = team_preset._can_spawn_from_cfg("backend", cfg)
-    assert not ok and "--team full" in msg
+    assert not ok and "takkub team set full" in msg
+    # #1067: `assign --role lead --team full` is refused from the Lead pane
+    assert "--team full" not in msg

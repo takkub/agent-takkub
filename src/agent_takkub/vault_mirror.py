@@ -156,6 +156,7 @@ def _render_decision_note(
     now: datetime,
     transcript_path: str | None = None,
     failed: bool = False,
+    cancelled: bool = False,
 ) -> str:
     """Render the markdown body shared by the local session log and the
     vault mirror. Single source of truth so the two copies don't drift.
@@ -178,7 +179,8 @@ def _render_decision_note(
         `done(failed=True)` report (synthetic boot-timeout included) never
         looks like ordinary finished work to `lead_context._recent_session_brief`,
         which reads this line back and tags the snippet with ❌ instead of
-        listing it bare under "recent teammate done".
+        listing it bare under "recent teammate done". `outcome: cancelled`
+        (#1068) marks a task stopped on purpose — neither done nor FAILED.
     """
     iso = now.isoformat(timespec="seconds")
     # #1065: a markdown note ("## STATUS" / "## CHANGED", codex's habit) closed
@@ -200,7 +202,7 @@ def _render_decision_note(
         f"project: {project}\n"
         f"date: {iso}\n"
         f"tags: [session, {role}, {project}]\n"
-        + ("outcome: failed\n" if failed else "")
+        + ("outcome: cancelled\n" if cancelled else "outcome: failed\n" if failed else "")
         + "".join(f"{line}\n" for line in meta.frontmatter_lines())
         + "---\n\n"
         f"# {role} done · {iso}\n\n"

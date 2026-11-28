@@ -174,6 +174,16 @@ def _note_is_failed(text: str) -> bool:
     return bool(_NOTE_FAILED_RE.search(text))
 
 
+# #1068: a task stopped on purpose — neither finished work nor a FAILED.
+_NOTE_CANCELLED_RE = re.compile(r"^outcome:\s*cancelled\s*$", re.MULTILINE)
+
+
+def _note_outcome_tag(text: str) -> str:
+    if _NOTE_CANCELLED_RE.search(text):
+        return "🚫 **[ยกเลิก]** "
+    return "❌ **[FAILED]** " if _note_is_failed(text) else ""
+
+
 def _extract_note_body(text: str) -> str:
     """Pull the substantive note text out of a session-mirror markdown file.
 
@@ -251,7 +261,7 @@ def _recent_session_brief(project: str) -> str | None:
             note = _extract_note_body(raw_text)
             if _is_junk_note(note):
                 continue
-            recent_notes.append((day_dir.name, f.stem, note, _note_is_failed(raw_text)))
+            recent_notes.append((day_dir.name, f.stem, note, _note_outcome_tag(raw_text)))
             if len(recent_notes) >= _BRIEF_MAX_NOTES:
                 break
         if len(recent_notes) >= _BRIEF_MAX_NOTES:
@@ -293,13 +303,12 @@ def _recent_session_brief(project: str) -> str | None:
     if recent_notes:
         lines.append("### recent teammate done (newest first)")
         lines.append("")
-        for day, stem, note, failed in recent_notes:
+        for day, stem, note, tag in recent_notes:
             snippet = note if len(note) <= _BRIEF_NOTE_CAP else note[:_BRIEF_NOTE_CAP] + "…"
             # Collapse newlines/runs of whitespace so each note stays one line.
             snippet = " ".join(snippet.split())
             # #448: a failed report (synthetic boot-timeout close included)
-            # must never read like finished work in this list.
-            tag = "❌ **[FAILED]** " if failed else ""
+            # must never read like finished work in this list (`tag`).
             lines.append(f"- `{day}` **{stem}** — {tag}{snippet}")
         lines.append("")
 

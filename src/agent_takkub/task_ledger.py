@@ -67,9 +67,10 @@ _ROW_SYMBOL = {
     "fail": "!",
     "closed": "-",
     "superseded": ">",
+    "cancelled": "/",  # #1068: stopped on purpose — not a FAILED
 }
-_VALID_STATUSES = ("ok", "fail", "closed")
-_TERMINAL_STATUSES = frozenset({"ok", "closed", "superseded"})
+_VALID_STATUSES = ("ok", "fail", "closed", "cancelled")
+_TERMINAL_STATUSES = frozenset({"ok", "closed", "superseded", "cancelled"})
 _STATUS_LINE_RE = re.compile(r"(?m)^status: \w+\n")
 
 
@@ -675,7 +676,8 @@ def mark_done(
     """Flip the currently-open ledger row for *role* to *status*.
 
     `status` is one of ``"ok"`` (clean done), ``"fail"`` (`takkub done
-    --fail`), or ``"closed"`` (pane closed without ever calling done).
+    --fail`), ``"cancelled"`` (`takkub done --cancelled` / `close --cancel`,
+    #1068), or ``"closed"`` (pane closed without ever calling done).
     Looks up the role's open row via the state's `open` index (set by
     `create_assignment`) — a role with no open row (ledger write failed
     earlier, or this is a second close after done already flipped it) is a
@@ -837,6 +839,8 @@ def _status_suffix(row: dict) -> str:
         if row.get("reason") == "verdict":  # #1047: review done, result negative
             return f"🔎 ตรวจเสร็จ — ผลไม่ผ่าน `{done_hhmm}`"
         return f"❌ FAILED `{done_hhmm}`"
+    if status == "cancelled":
+        return f"🚫 ยกเลิก `{done_hhmm}`"
     if status == "closed":
         reason = row.get("reason")
         tag = " (orphaned — session ไม่มีแล้ว)" if reason == "orphaned" else ""
@@ -894,7 +898,7 @@ def _regen_index(project: str, state: dict) -> None:
         "> สารบัญงานทั้งหมด · เปิดไฟล์เดียวเห็นว่า **สั่งอะไร · ใครทำ · เสร็จยัง** · "
         "คลิกชื่อไฟล์อ่าน detail เต็ม\n"
         "> สถานะ: `[ ]` รอคิว · `[~]` กำลังทำ · `[x]` เสร็จ · `[!]` FAILED · "
-        "`[-]` ปิด/ยกเลิก · `[>]` แทนที่ด้วยงานใหม่ (re-assign ก่อน done)\n\n"
+        "`[/]` ยกเลิก · `[-]` ปิดโดยไม่มี done · `[>]` แทนที่ด้วยงานใหม่ (re-assign ก่อน done)\n\n"
         "---\n\n"
     )
     body = "\n---\n\n".join(_render_group(g) for g in state.get("groups", []))

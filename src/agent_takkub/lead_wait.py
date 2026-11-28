@@ -110,6 +110,13 @@ _GONE_ALREADY_REPORTED_DETAIL = (
 )
 
 
+def _event_kind(event: dict) -> str:
+    """#1068: a cancelled task resolves the wait, but never as "failed"."""
+    if event.get("cancelled"):
+        return "cancelled"
+    return "failed" if event.get("failed") else "done"
+
+
 class LeadWaitMixin:
     """Provides `begin_wait` / `poll_wait` / `end_wait` on `Orchestrator`.
 
@@ -403,7 +410,7 @@ class LeadWaitMixin:
         if fresh:
             if self._has_pending_lead_notice(project_ns, role):
                 return "pending", "รายงานถูกสร้างแล้ว กำลังรอส่งเข้า Lead (ยังไม่ถึง pane)"
-            return ("failed" if event.get("failed") else "done"), None
+            return _event_kind(event), None
 
         if subagent_state is not None:
             return "pending", "native subagent ยังทำงานอยู่ (ไม่มี pane ตาม --mode subagent)"
@@ -466,7 +473,7 @@ class LeadWaitMixin:
             if covers_active_assign:
                 if self._has_pending_lead_notice(project_ns, role):
                     return "pending", "รายงานถูกสร้างแล้ว กำลังรอส่งเข้า Lead (ยังไม่ถึง pane)"
-                return ("failed" if event.get("failed") else "done"), None
+                return _event_kind(event), None
             if event is not None:
                 # A newer assign superseded this event — the pane just
                 # hasn't flipped out of its previous terminal state yet
@@ -750,6 +757,8 @@ class LeadWaitMixin:
             )
             if kind == "done":
                 done[role] = "delivered"
+            elif kind == "cancelled":
+                done[role] = "cancelled"
             elif kind == "failed":
                 failed[role] = "delivered"
             elif kind == "gone":

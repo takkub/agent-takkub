@@ -2898,9 +2898,15 @@ class Orchestrator(
         )
 
     def subagent_done(
-        self, role_name: str, note: str = "", project: str | None = None, failed: bool = False
+        self,
+        role_name: str,
+        note: str = "",
+        project: str | None = None,
+        failed: bool = False,
+        cancelled: bool = False,
     ) -> tuple[bool, str]:
-        """Complete a pending native child through done-equivalent sinks (#268)."""
+        """Complete a pending native child through done-equivalent sinks (#268).
+        `cancelled` (#1068) follows `done(cancelled=True)`: not a FAILED."""
         try:
             role_name = validate_name(role_name, "role")
         except ValueError as exc:
@@ -2911,7 +2917,9 @@ class Orchestrator(
         if state is None:
             return False, f"no pending subagent assignment for {role_name}"
         note = (note or "").strip()
-        if not failed:
+        if cancelled:
+            failed = False
+        if not failed and not cancelled:
             from .task_ledger import check_impact_completion
 
             impact_error = check_impact_completion(
@@ -2928,7 +2936,12 @@ class Orchestrator(
         try:
             from .task_ledger import mark_done
 
-            warning = mark_done(project_ns, role_name, "fail" if failed else "ok", ts=now)
+            warning = mark_done(
+                project_ns,
+                role_name,
+                "cancelled" if cancelled else "fail" if failed else "ok",
+                ts=now,
+            )
             if warning:
                 self._notify_lead(
                     project_ns, warning, from_role=role_name, note="", kind="ledger-warning"
@@ -2939,7 +2952,27 @@ class Orchestrator(
                 "ledger_hook_error", role=role_name, project=project_ns, stage="subagent-done"
             )
 
-        session_path = self._save_decision_note(project_ns, role_name, note, now=now, failed=failed)
+        session_path = self._save_decision_note(
+            project_ns,
+            role_name,
+            note,
+            now=now,
+            failed=failed,
+            **({"cancelled": True} if cancelled else {}),
+        )
+        if cancelled:
+            try:
+                from . import backlog
+
+                backlog.on_ledger_cancelled(
+                    project_ns,
+                    str(state.get("task_id") or ""),
+                    item_id=str(state.get("backlog_id") or "") or None,
+                    role=role_name,
+                    reason=(note.splitlines() or [""])[0],
+                )
+            except Exception:
+                _log_event("backlog_cancel_error", role=role_name, project=project_ns)
 
         # Core V2 Conversation hook (#309 Phase 6) — see done()'s identical
         # comment. Subagents have no pane/PTY, so there is no cwd/session_id
@@ -2974,7 +3007,7 @@ class Orchestrator(
         try:
             from .core.brain.flag import v2_brain_enabled
 
-            if v2_brain_enabled():
+            if v2_brain_enabled() and not cancelled:
                 import threading
 
                 from .core.brain.facade import on_pane_done as _brain_on_pane_done
@@ -2990,9 +3023,15 @@ class Orchestrator(
                 "brain_v2_hook_error", role=role_name, project=project_ns, stage="subagent-done"
             )
 
-        body = note if failed else self._condense_done_note(note, note, "", session_path)
+        body = (
+            note
+            if (failed or cancelled)
+            else self._condense_done_note(note, note, "", session_path)
+        )
         notice = (
-            self._build_verify_fail_handoff(
+            f"[{role_name} CANCELLED] 🚫 งานถูกยกเลิก (subagent · ไม่นับเป็นความล้มเหลว) — {note}"
+            if cancelled
+            else self._build_verify_fail_handoff(
                 role_name,
                 note,
                 fix_loop_hook=self._fix_loop_hook(
@@ -3010,9 +3049,13 @@ class Orchestrator(
         shard_total = int(state.get("shard_total", 0) or 0)
         # Match pane done semantics: clean shard reports are consolidated;
         # failures surface immediately as blocking notices.
-        if failed or shard_total == 0:
+        if failed or cancelled or shard_total == 0:
             self._notify_lead(
-                project_ns, notice, from_role=role_name, note=note, kind="subagent-done"
+                project_ns,
+                notice,
+                from_role=role_name,
+                note=note,
+                kind="cancelled" if cancelled else "subagent-done",
             )
         if state.get("requires_commit") and not state.get("worktree") and state.get("cwd"):
             self._check_uncommitted_async(project_ns, role_name, state["cwd"])
@@ -3028,9 +3071,9 @@ class Orchestrator(
             group_key = f"{project_ns}::{base_role}"
             group = self._shard_groups.get(group_key)
             if group and not group.closed:
-                if failed:
+                if failed or cancelled:
                     group.failed.add(role_name)
-                    group.failed_notes[role_name] = body
+                    group.failed_notes[role_name] = f"🚫 ยกเลิก — {body}" if cancelled else body
                 else:
                     group.done[role_name] = body
                 if group.settled():
@@ -3044,6 +3087,7 @@ class Orchestrator(
         getattr(self, "_wait_done_events", {})[(project_ns, role_name)] = {
             "ts": now.timestamp(),
             "failed": bool(failed),
+            "cancelled": bool(cancelled),
         }
         self._write_hot_md()
         self.agentDone.emit(project_ns, role_name, note)
@@ -7789,6 +7833,45 @@ class Orchestrator(
             is_done=is_done,
         )
 
+    def cancel_task(
+        self, role_name: str, project: str | None = None, reason: str = ""
+    ) -> tuple[bool, str]:
+        """`takkub close --role X --cancel` (#1068): Lead calls a task off.
+
+        The task is recorded as cancelled — ledger `cancelled`, backlog card
+        ยกเลิก, a `[role CANCELLED]` report — never FAILED, and the pane closes.
+        A role with no live task still gets its open ledger row/card closed."""
+        if _split_shard((role_name or "").strip().lower())[0] != "reviewer":
+            role_name = self.resolve_pane_role(role_name, project)
+        role_name = (role_name or "").lower().strip()
+        project_ns = self._resolve_project(project)
+        if role_name == LEAD.name:
+            return False, "lead has no task to cancel"
+        note = f"ยกเลิกโดย Lead: {(reason or '').strip() or 'ไม่ระบุเหตุผล'}"
+        if (project_ns, role_name) in getattr(self, "_subagent_assignments", {}):
+            return self.subagent_done(role_name, note=note, project=project_ns, cancelled=True)
+        pane = self._project_panes(project_ns).get(role_name)
+        if pane is not None and f"{project_ns}::{role_name}" in getattr(self, "_pane_state", {}):
+            ok, msg = self.done(
+                role_name, note=note, project=project_ns, cancelled=True, force=True
+            )
+            if not ok:
+                return False, msg
+            _ok, close_msg = self.close(role_name, project=project_ns)
+            return True, f"{role_name}: task cancelled · {close_msg}"
+        try:
+            from . import backlog, task_ledger
+
+            task_ledger.mark_done(project_ns, role_name, "cancelled")
+            backlog.reconcile_ended_tasks(project_ns, task_ledger.task_statuses(project_ns))
+            self.ledgerChanged.emit(project_ns)
+        except Exception:
+            _log_event("ledger_hook_error", role=role_name, project=project_ns, stage="cancel")
+        if pane is not None:
+            self.close(role_name, project=project_ns)
+        _log_event("task_cancelled_no_live_task", role=role_name, project=project_ns)
+        return True, f"{role_name}: no live task — open ledger row/backlog card marked cancelled"
+
     def close(
         self,
         role_name: str,
@@ -9870,15 +9953,24 @@ class Orchestrator(
         blocked: bool = False,
         force: bool = False,
         git_facts: dict | None = None,
+        cancelled: bool = False,
     ) -> tuple[bool, str]:
         """`blocked=True` (#296) means the work could not RUN — something
         outside the codebase is missing. It still counts as not-done (callers
         pass `failed=True` alongside it), but the Lead-facing handoff asks the
-        owner for the missing thing instead of proposing a fix loop."""
+        owner for the missing thing instead of proposing a fix loop.
+
+        `cancelled=True` (#1068) means the task was stopped on purpose (Lead
+        or the owner called it off, or it turned out to need no work). It is
+        neither a success nor a FAILED: ledger `cancelled`, backlog card
+        closed as ยกเลิก, a `[role CANCELLED]` notice, and no fix-loop attempt,
+        eval draft, failure memory or skill-learning pass."""
         try:
             from_role = validate_name(from_role, "role")
         except ValueError as exc:
             return False, str(exc)
+        if cancelled:
+            failed = blocked = False
         if from_role == LEAD.name:
             return False, "lead cannot call done on itself"
         project_ns = self._resolve_project(project)
@@ -9947,7 +10039,7 @@ class Orchestrator(
                 _assigned_scope = _task_ledger_scope.get_open_scope(project_ns, from_role)
             except Exception:
                 _assigned_scope = None
-        if not force and not failed and not blocked:
+        if not force and not failed and not blocked and not cancelled:
             _is_worktree = bool(getattr(_ps_done, "worktree", None))
             _touched_files = None
             if not _is_worktree and _ps_done is not None:
@@ -9993,7 +10085,11 @@ class Orchestrator(
         if not force:
             _dedup_assign_ts = getattr(_ps_done, "assign_ts", 0.0) or 0.0
             _dedup_msg = self._evidence_dedup_gate(
-                project_ns, from_role, _dedup_assign_ts, note, allow_reject=not (failed or blocked)
+                project_ns,
+                from_role,
+                _dedup_assign_ts,
+                note,
+                allow_reject=not (failed or blocked or cancelled),
             )
             if _dedup_msg:
                 _log_event("done_rejected_evidence_dedup", role=from_role, project=project_ns)
@@ -10022,7 +10118,7 @@ class Orchestrator(
 
         # Verify before releasing the resource token or acknowledging delivery.
         # A rejected report must leave the task runnable for another check.
-        if not failed and not blocked:
+        if not failed and not blocked and not cancelled:
             from .task_ledger import check_impact_completion
 
             active_ps = getattr(self, "_pane_state", {}).get(key)
@@ -10183,7 +10279,15 @@ class Orchestrator(
                 f"again with [task {cur_tid}] (or no task tag) to report the active task",
             )
         backlog_review_line = Orchestrator._done_move_backlog_card(
-            self, _ps_done, blocked, failed, from_role, had_task_id, project_ns
+            self,
+            _ps_done,
+            blocked,
+            failed,
+            from_role,
+            had_task_id,
+            project_ns,
+            cancelled=cancelled,
+            note=note,
         )
         # #244: the issue/task ref shown to Lead must come from the ORIGINAL
         # assign spec Lead itself sent (last_assigned_task), never from the
@@ -10223,6 +10327,7 @@ class Orchestrator(
                 note,
                 pane,
                 project_ns,
+                cancelled=cancelled,
             )
         )
         _note_path, session_md_path = Orchestrator._done_save_note_and_conversation(
@@ -10237,6 +10342,7 @@ class Orchestrator(
             project_ns,
             raw_note,
             transcript_path,
+            cancelled=cancelled,
         )
 
         _worktree_digest_precomputed, digest_facts, notice, notice_body = (
@@ -10263,12 +10369,14 @@ class Orchestrator(
                 project_ns,
                 raw_note,
                 session_md_path,
+                cancelled=cancelled,
             )
         )
 
-        Orchestrator._done_brain_hook(
-            self, digest_facts, failed, from_role, had_task_id, project_ns, raw_note
-        )
+        if not cancelled:
+            Orchestrator._done_brain_hook(
+                self, digest_facts, failed, from_role, had_task_id, project_ns, raw_note
+            )
 
         digest_facts, merge_folded_into_notice = Orchestrator._done_route_lead_notice(
             self,
@@ -10289,6 +10397,7 @@ class Orchestrator(
             project_ns,
             raw_note,
             session_md_path,
+            cancelled=cancelled,
         )
 
         Orchestrator._done_handoffs(
@@ -10307,6 +10416,7 @@ class Orchestrator(
             notice_body,
             pane,
             project_ns,
+            cancelled=cancelled,
         )
 
         # mark pane done, auto-close after a delay so user can see it.
@@ -10546,7 +10656,8 @@ class Orchestrator(
         # Skill Learning (2c6cb77c): queue the learning pass — a queue append,
         # the reflection itself runs on its own worker. getattr: test doubles
         # that borrow done() don't carry the mixin.
-        _sl_hook = getattr(self, "_skill_learning_on_done", None)
+        # #1068: a cancelled task taught nothing about the work — no pass.
+        _sl_hook = None if cancelled else getattr(self, "_skill_learning_on_done", None)
         if callable(_sl_hook):
             from .skill_learning_mixin import claude_session_dirs
 
@@ -10576,12 +10687,13 @@ class Orchestrator(
         getattr(self, "_wait_done_events", {})[(project_ns, from_role)] = {
             "ts": now.timestamp(),
             "failed": bool(failed),
+            "cancelled": bool(cancelled),
         }
         # Refresh hot.md immediately so Obsidian shows the done event
         # without waiting up to a minute for the periodic tick.
         self._write_hot_md()
         self._maybe_auto_down_after_prod_deploy(
-            project_ns, from_role, note, failed, task_started_at=had_assign_ts
+            project_ns, from_role, note, failed or cancelled, task_started_at=had_assign_ts
         )
         self.agentDone.emit(project_ns, from_role, note)
         _msg = f"{from_role} reported done"
@@ -10589,10 +10701,36 @@ class Orchestrator(
         return True, _msg
 
     def _done_move_backlog_card(
-        self, _ps_done, blocked, failed, from_role, had_task_id, project_ns
+        self,
+        _ps_done,
+        blocked,
+        failed,
+        from_role,
+        had_task_id,
+        project_ns,
+        *,
+        cancelled=False,
+        note="",
     ):
         """Move the task's backlog card to review (ok) or keep it open (failed) (extracted from `done`, 2026-10-24)."""
         backlog_review_line = None
+        if cancelled:
+            # #1068: the card closes as ยกเลิก — a cancelled task never leaves
+            # it "กำลังทำ" with no pane working on it.
+            try:
+                from . import backlog
+
+                reason = ((note or "").strip().splitlines() or [""])[0]
+                backlog.on_ledger_cancelled(
+                    project_ns,
+                    had_task_id,
+                    item_id=getattr(_ps_done, "backlog_id", None) or None,
+                    role=from_role,
+                    reason=reason,
+                )
+            except Exception:
+                _log_event("backlog_cancel_error", role=from_role, project=project_ns)
+            return None
         if getattr(_ps_done, "plan_fanout", None):
             # #1017: a QA planner's done means "the plan is written" — not one
             # test has run. Its card stays active for the shards it fans out
@@ -10642,6 +10780,8 @@ class Orchestrator(
         note,
         pane,
         project_ns,
+        *,
+        cancelled=False,
     ):
         """Attach screenshot evidence, flip the Task Ledger row, log #585 metrics (extracted from `done`, 2026-10-24)."""
         evidence_line = None
@@ -10657,13 +10797,19 @@ class Orchestrator(
         # Bounded: past the budget the report goes out without the list.
         from . import bg_pool
 
-        evidence_line = bg_pool.call_bounded(
-            ("done-evidence", project_ns, from_role, had_assign_ts, raw_note, failed),
-            lambda: self._scan_done_evidence(
-                project_ns, from_role, had_assign_ts, raw_note, failed=failed
-            ),
-            timeout=_EVIDENCE_SCAN_BUDGET_SEC,
-            default=_EVIDENCE_SCAN_TIMED_OUT,
+        # #1068: a cancelled task has nothing to show — no scan, no
+        # "no evidence cited" warning.
+        evidence_line = (
+            None
+            if cancelled
+            else bg_pool.call_bounded(
+                ("done-evidence", project_ns, from_role, had_assign_ts, raw_note, failed),
+                lambda: self._scan_done_evidence(
+                    project_ns, from_role, had_assign_ts, raw_note, failed=failed
+                ),
+                timeout=_EVIDENCE_SCAN_BUDGET_SEC,
+                default=_EVIDENCE_SCAN_TIMED_OUT,
+            )
         )
         if evidence_line is _EVIDENCE_SCAN_TIMED_OUT:
             _log_event("done_evidence_scan_timeout", role=from_role, project=project_ns)
@@ -10694,7 +10840,7 @@ class Orchestrator(
             ledger_warning = mark_done(
                 project_ns,
                 from_role,
-                "fail" if failed else "ok",
+                "cancelled" if cancelled else "fail" if failed else "ok",
                 ts=now,
                 reason="verdict" if verdict else None,
             )
@@ -10752,6 +10898,8 @@ class Orchestrator(
         project_ns,
         raw_note,
         transcript_path,
+        *,
+        cancelled=False,
     ):
         """File the decision note and run the Core V2 Conversation hook (extracted from `done`, 2026-10-24)."""
         _note_path = None
@@ -10764,7 +10912,13 @@ class Orchestrator(
             project_ns, getattr(pane, "_session_cwd", None), from_role
         )
         session_md_path = self._save_decision_note(
-            note_project, from_role, note, now=now, transcript_path=transcript_path, failed=failed
+            note_project,
+            from_role,
+            note,
+            now=now,
+            transcript_path=transcript_path,
+            failed=failed,
+            **({"cancelled": True} if cancelled else {}),
         )
         _note_path = session_md_path  # Item 2 (#635): store for deferred-close append
 
@@ -10837,6 +10991,8 @@ class Orchestrator(
         project_ns,
         raw_note,
         session_md_path,
+        *,
+        cancelled=False,
     ):
         """Build the Lead-facing done notice (digest facts, ref badge, condensation) (extracted from `done`, 2026-10-24)."""
         _worktree_digest_precomputed = None
@@ -10866,6 +11022,18 @@ class Orchestrator(
         digest_facts = None
         _worktree_digest_precomputed = None
         _fl_hook = None
+        if cancelled:
+            # #1068: stopped on purpose — not a fix-loop attempt (no record),
+            # not a verified fix (no close, so no eval-case draft) and not a
+            # failure for role memory. One plain notice of its own kind.
+            notice_body = note
+            notice = (
+                f"[{from_role} CANCELLED] {ref_tag}🚫 งานถูกยกเลิก (ไม่นับเป็นความล้มเหลว) — {note}"
+            ).rstrip()
+            _log_event(
+                "done_cancelled", project=project_ns, role=from_role, note=(note or "")[:200]
+            )
+            return _worktree_digest_precomputed, digest_facts, notice, notice_body
         if failed:
             # #762: shard failures of one fan-out are ONE attempt (token =
             # group generation); otherwise one attempt per assignment.
@@ -11152,6 +11320,8 @@ class Orchestrator(
         project_ns,
         raw_note,
         session_md_path,
+        *,
+        cancelled=False,
     ):
         """Fold watchdog observations, check report quality/delivery, route the notice to Lead (extracted from `done`, 2026-10-24)."""
         merge_folded_into_notice = None
@@ -11224,7 +11394,7 @@ class Orchestrator(
         # Planner panes: suppress too — the "[qa plan ready] fan-out …" message
         # from _fire_qa_plan_fanout is the meaningful one Lead acts on.
         # Non-shard, non-planner panes use the normal notice path.
-        will_send_notice = failed or (had_shard_total == 0 and not had_plan_fanout)
+        will_send_notice = failed or cancelled or (had_shard_total == 0 and not had_plan_fanout)
         # #519: fold the merge-readiness bit straight into THIS notice
         # instead of `_finalize_worktree` sending a second, separate
         # `worktree-proposal` ping a few lines below that only repeats
@@ -11328,7 +11498,7 @@ class Orchestrator(
                     note=note,
                     pane_token=origin_pane_token,
                     digest_facts=digest_facts,
-                    kind="failed" if failed else "done",
+                    kind="cancelled" if cancelled else "failed" if failed else "done",
                 )
             else:
                 _log_event(
@@ -11355,6 +11525,8 @@ class Orchestrator(
         notice_body,
         pane,
         project_ns,
+        *,
+        cancelled=False,
     ):
         """Background-tab emit, worktree merge, auto-chain, plan fan-out, shard aggregate, pipeline hop (extracted from `done`, 2026-10-24)."""
         # Fix A: when this done event belongs to a background tab, emit a
@@ -11414,7 +11586,7 @@ class Orchestrator(
 
         # Plan-then-fan-out: this pane was a planner (--plan). Read the bucket
         # plan it just wrote and spawn the QA shards (each with its bucket).
-        if had_plan_fanout and not failed:
+        if had_plan_fanout and not failed and not cancelled:
             base_role_p, _ = _split_shard(from_role)
             self._fire_qa_plan_fanout(project_ns, base_role_p, had_plan_fanout, planner_note=note)
 
@@ -11428,9 +11600,13 @@ class Orchestrator(
             group_key = f"{project_ns}::{base_role_d}"
             group = self._shard_groups.get(group_key)
             if group and not group.closed:
-                if failed:
+                if failed or cancelled:
+                    # #1068: a cancelled shard produced no result either; the
+                    # aggregate names it as cancelled, not as a defect.
                     group.failed.add(from_role)
-                    group.failed_notes[from_role] = notice_body
+                    group.failed_notes[from_role] = (
+                        f"🚫 ยกเลิก — {notice_body}" if cancelled else notice_body
+                    )
                 else:
                     group.done[from_role] = notice_body
                 if group.settled():
@@ -11834,6 +12010,7 @@ class Orchestrator(
         now: datetime | None = None,
         transcript_path: str | None = None,
         failed: bool = False,
+        cancelled: bool = False,
     ) -> str | None:
         """Persist a teammate's `takkub done` note as a small markdown
         file under `runtime/sessions/<YYYY-MM-DD>/<project>/<role>-<HHMMSS>.md`,
@@ -11875,7 +12052,13 @@ class Orchestrator(
         if now is None:
             now = datetime.now()
         body = _render_decision_note(
-            project, role, note, now, transcript_path=transcript_path, failed=failed
+            project,
+            role,
+            note,
+            now,
+            transcript_path=transcript_path,
+            failed=failed,
+            cancelled=cancelled,
         )
         try:
             safe_project = validate_name(project, "project")
@@ -12208,8 +12391,8 @@ class Orchestrator(
         pipeline, instead of trusting pane-registry membership alone (#163).
         """
         tag = re.compile(
-            rf"\[{re.escape(role_name)}\s+(?:done|FAILED)\]"
-            rf"|^•\s*\[{re.escape(role_name)}\]\s*done",
+            rf"\[{re.escape(role_name)}\s+(?:done|FAILED|CANCELLED)\]"
+            rf"|^•\s*\[{re.escape(role_name)}\]\s*(?:done|CANCELLED)",
             re.IGNORECASE | re.MULTILINE,
         )
 

@@ -1503,6 +1503,11 @@ class CliServer(QObject):
                 ok, msg = self._orch.answer_picker(
                     req.get("key_sequence", ""), project=from_project
                 )
+            elif cmd == "close" and req.get("cancel"):
+                # #1068: Lead calls the task off — recorded as cancelled, not FAILED.
+                ok, msg = self._orch.cancel_task(
+                    req["role"], project=from_project, reason=str(req.get("reason") or "")
+                )
             elif cmd == "close":
                 ok, msg = self._orch.close(req["role"], project=from_project)
             elif cmd == "close-all":
@@ -1538,6 +1543,8 @@ class CliServer(QObject):
                     blocked=bool(req.get("blocked", False)),
                     force=bool(req.get("force", False)),
                 )
+                if req.get("cancelled"):
+                    _done_kwargs["cancelled"] = True
                 # #408: gather the git facts done() needs on a worker thread
                 # first, then run done() itself (fast, state-only) on the Qt
                 # thread and reply. Orchestrators without the hook (test
@@ -1592,6 +1599,7 @@ class CliServer(QObject):
                     note=req.get("note", ""),
                     project=from_project,
                     failed=bool(req.get("failed", False)),
+                    **({"cancelled": True} if req.get("cancelled") else {}),
                 )
             elif cmd == "progress":
                 # #234: status update that does NOT schedule the pane's

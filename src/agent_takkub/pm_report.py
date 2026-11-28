@@ -24,6 +24,7 @@ from . import backlog, config, task_ledger
 # Ledger row statuses (task_ledger): working = assigned, no done yet.
 _OPEN_ROW = "working"
 _FAILED_ROW = "fail"
+_CANCELLED_ROW = "cancelled"  # #1068: stopped on purpose — never counted as FAILED
 _DONE_ROWS = frozenset({"ok"})
 _NOTE_FIELD_RE = re.compile(
     r"\b(STATUS|REMAINING|BLOCKED|NEXT)\s*:\s*(.+?)(?=;\s*[A-Z_]{4,}\s*:|$)", re.S
@@ -77,6 +78,7 @@ class ProjectReport:
     name: str
     open_tasks: list[TaskRow] = field(default_factory=list)
     failed_tasks: list[TaskRow] = field(default_factory=list)
+    cancelled_tasks: list[TaskRow] = field(default_factory=list)
     done_count: int = 0
     other_count: int = 0
     open_cards: list[dict] = field(default_factory=list)
@@ -88,6 +90,7 @@ class ProjectReport:
         return bool(
             self.open_tasks
             or self.failed_tasks
+            or self.cancelled_tasks
             or self.done_count
             or self.other_count
             or self.notes
@@ -241,6 +244,9 @@ def project_report(project: str, days: int, today: date | None = None) -> Projec
                 if status == _FAILED_ROW:
                     task.summary = _row_headline(project, row)
                     rep.failed_tasks.append(task)
+                elif status == _CANCELLED_ROW:
+                    task.summary = _row_headline(project, row)
+                    rep.cancelled_tasks.append(task)
                 elif status in _DONE_ROWS:
                     rep.done_count += 1
                 else:
@@ -285,12 +291,12 @@ def render(
     if not reports:
         return head + "\n\nไม่มีโปรเจคที่มีงานในช่วงนี้" + (" ที่ค้างอยู่" if pending_only else "")
     lines = [head, ""]
-    lines.append("| โปรเจค | ล่าสุด | done | ค้าง (กำลังทำ) | fail | backlog เปิด |")
-    lines.append("|---|---|---|---|---|---|")
+    lines.append("| โปรเจค | ล่าสุด | done | ค้าง (กำลังทำ) | fail | ยกเลิก | backlog เปิด |")
+    lines.append("|---|---|---|---|---|---|---|")
     for r in reports:
         lines.append(
             f"| {r.name} | {r.last_day or '-'} | {r.done_count} | {len(r.open_tasks)} | "
-            f"{len(r.failed_tasks)} | {len(r.open_cards)} |"
+            f"{len(r.failed_tasks)} | {len(r.cancelled_tasks)} | {len(r.open_cards)} |"
         )
     for r in reports:
         lines += ["", f"## {r.name}"]
@@ -301,6 +307,12 @@ def render(
             lines.append("**งานที่ FAILED ในช่วงนี้**")
             lines += [
                 f"- {t.day} {t.done or t.assigned} [{t.role}] {t.summary}" for t in r.failed_tasks
+            ]
+        if r.cancelled_tasks and not pending_only:
+            lines.append("**งานที่ยกเลิกในช่วงนี้ (ไม่ใช่ FAILED)**")
+            lines += [
+                f"- {t.day} {t.done or t.assigned} [{t.role}] {t.summary}"
+                for t in r.cancelled_tasks
             ]
         left = [n for n in r.notes if n.remaining]
         if left:

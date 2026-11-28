@@ -794,7 +794,7 @@ def _other_cockpit_events_log(this_log: Path) -> Path | None:
 
 
 # lead_notice kinds that exist once per assigned task (a pane reporting back).
-_PER_TASK_KINDS = frozenset({"done", "failed"})
+_PER_TASK_KINDS = frozenset({"done", "failed", "cancelled"})
 
 
 def _per_task_allowance(assigned: int) -> int:

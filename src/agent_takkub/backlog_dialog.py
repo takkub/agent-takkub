@@ -76,6 +76,7 @@ _STATUS_RANK: dict[str, int] = {
     "deferred": 5,
     "done": 6,
     "wont": 7,
+    "cancelled": 8,
 }
 _SEV_RANK: dict[str, int] = {"high": 0, "med": 1, "low": 2}
 

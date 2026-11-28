@@ -47,9 +47,20 @@ SCHEMA_VERSION = 1
 #   deferred พักไว้         — owner parked it deliberately
 #   done     เสร็จ         — confirmed complete
 #   wont     ตั้งใจไม่ทำ    — decided not to do (reason required)
-STATUSES = ("todo", "doing", "review", "waiting", "blocked", "deferred", "done", "wont")
+#   cancelled ยกเลิก       — its task was stopped (`done --cancelled`, #1068)
+STATUSES = (
+    "todo",
+    "doing",
+    "review",
+    "waiting",
+    "blocked",
+    "deferred",
+    "done",
+    "wont",
+    "cancelled",
+)
 _OPEN_STATUSES = frozenset({"todo", "doing", "review", "waiting", "blocked"})
-_TERMINAL_STATUSES = frozenset({"done", "wont"})
+_TERMINAL_STATUSES = frozenset({"done", "wont", "cancelled"})
 STATUS_LABELS = {
     "todo": "ยังไม่ทำ",
     "doing": "กำลังทำ",
@@ -59,6 +70,7 @@ STATUS_LABELS = {
     "deferred": "พักไว้",
     "done": "เสร็จ",
     "wont": "ตั้งใจไม่ทำ",
+    "cancelled": "ยกเลิก",
 }
 IMPACTS = ("customer", "internal")
 SEVERITIES = ("low", "med", "high")
@@ -296,6 +308,52 @@ def on_ledger_done(
     return None
 
 
+def on_ledger_cancelled(
+    project: str,
+    ledger_task_id: str,
+    *,
+    item_id: str | None = None,
+    role: str | None = None,
+    reason: str = "",
+) -> dict | None:
+    """#1068: the task a card triggered was cancelled (`done --cancelled` /
+    `close --cancel`). Its link ends; once no linked pane is still running the
+    card closes as `cancelled` — or, when another pane did finish its part,
+    takes the normal finished path. Returns the card when it changed."""
+    if not ledger_task_id and not item_id:
+        return None
+    store = load(project)
+    for it in store["items"]:
+        if it.get("status") != "doing":
+            continue
+        if item_id and it.get("id") != item_id:
+            continue
+        links = it.get("links") or []
+        hit = next((ln for ln in links if ln.get("task_id") == ledger_task_id), None)
+        if hit is None and item_id and role:
+            hit = next(
+                (ln for ln in reversed(links) if ln.get("role") == role and not ln.get("done")),
+                None,
+            )
+        if hit is None and it.get("ledger_task_id") != ledger_task_id:
+            continue
+        if hit is not None:
+            hit["ended"] = True
+            hit["cancelled"] = True
+        live = [ln for ln in links if ln.get("role") != "lead"]
+        if all(ln.get("done") or ln.get("superseded") or ln.get("ended") for ln in live):
+            if any(ln.get("done") for ln in live):
+                _finish_card(it)
+            else:
+                it["status"] = "cancelled"
+                it["review_since"] = None
+                it["reason"] = (reason or "").strip()[:200] or "ยกเลิก"
+        it["updated_ts"] = _now()
+        _save(project, store)
+        return it
+    return None
+
+
 def _finish_card(it: dict) -> None:
     """Every pane linked to *it* has finished. #953: a card that `takkub assign`
     created on its own (``auto_task``) closes itself — nobody wrote it, so
@@ -337,8 +395,10 @@ def reconcile_ended_tasks(project: str, task_status: dict[str, str]) -> list[dic
             if status == "ok":
                 ln["done"] = True
                 touched = True
-            elif status in ("closed", "superseded"):
+            elif status in ("closed", "superseded", "cancelled"):
                 ln["ended"] = True
+                if status == "cancelled":
+                    ln["cancelled"] = True
                 touched = True
         if not touched or not links:
             continue
@@ -346,6 +406,10 @@ def reconcile_ended_tasks(project: str, task_status: dict[str, str]) -> list[dic
             continue
         if any(ln.get("done") for ln in links):
             _finish_card(it)
+        elif any(ln.get("cancelled") for ln in links):
+            it["status"] = "cancelled"
+            it["review_since"] = None
+            it["reason"] = it.get("reason") or "ยกเลิก"
         else:
             it["status"] = "review"
             it["review_since"] = _now()
@@ -613,8 +677,8 @@ def remove(project: str, item_id: str) -> bool:
 
 
 def progress(project: str) -> tuple[int, int]:
-    """(#done, #total) across non-`wont` items — the owner's "10/22" glance."""
-    items = [it for it in load(project)["items"] if it.get("status") != "wont"]
+    """(#done, #total) across non-`wont`/`cancelled` items — the owner's "10/22" glance."""
+    items = [it for it in load(project)["items"] if it.get("status") not in ("wont", "cancelled")]
     done = sum(1 for it in items if it.get("status") == "done")
     return done, len(items)
 
