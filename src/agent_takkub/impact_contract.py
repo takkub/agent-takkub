@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import subprocess
 from pathlib import Path
@@ -264,7 +265,9 @@ def validate_evidence(
             f"(evidence {evidence.get('plan_digest')}, active {plan_digest(plan)}){refresh}"
         )
     if not revision or evidence.get("revision") != revision:
-        return "impact evidence revision differs from the current working tree"
+        return "impact evidence revision differs from the current working tree" + (
+            f" (current revision {revision}: {NO_GIT_HINT})" if no_git else ""
+        )
     results = evidence.get("checks")
     if not isinstance(results, list):
         return "impact evidence needs checks"
@@ -335,24 +338,128 @@ def _outside_any_git_tree(cwd: str | Path) -> bool:
     return not any((d / ".git").exists() for d in (here, *here.parents))
 
 
-def git_revision(cwd: str | Path | None) -> str | None:
+# #1070: a multi-repo parent folder (cwd outside any git tree) pins the git
+# repos under it instead. Bounded: projects.json `paths` under the cwd first;
+# otherwise a scan of at most _SUBREPO_DEPTH levels / _SUBREPO_MAX_DIRS dirs,
+# skipping hidden dirs, symlinks and the heavy trees below. Callers run this off
+# the GUI thread (CLI process / cli_server done worker, #1061).
+_SUBREPO_DEPTH = 3
+_SUBREPO_MAX_DIRS = 2000
+_SUBREPO_SKIP = frozenset(
+    {"node_modules", "worktrees", "venv", "env", "__pycache__", "dist", "build", "target", "vendor"}
+)
+NO_GIT_HINT = (
+    f"no git repo at the task cwd, its parent folders, its projects.json paths, "
+    f"or its sub-folders up to depth {_SUBREPO_DEPTH} "
+    f"(hidden dirs, symlinks and {', '.join(sorted(_SUBREPO_SKIP))} skipped)"
+)
+
+
+def _git(args: list[str]) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        ["git", *args], capture_output=True, timeout=5, creationflags=SUBPROCESS_NO_WINDOW
+    )
+
+
+def _registered_repos(base: Path, project: str | None) -> list[Path]:
+    """Git roots of the project's projects.json ``paths`` that sit under *base*."""
+    if not project:
+        return []
+    try:
+        from . import config
+
+        paths = (config.load_projects().get("projects", {}).get(project) or {}).get("paths") or {}
+    except Exception:
+        return []
+    roots: set[Path] = set()
+    for raw in paths.values() if isinstance(paths, dict) else ():
+        if not isinstance(raw, str) or not raw:
+            continue
+        try:
+            path = Path(raw).expanduser().resolve()
+        except OSError:
+            continue
+        if path == base or not path.is_relative_to(base) or not path.is_dir():
+            continue
+        top = _git(["-C", str(path), "rev-parse", "--show-toplevel"])
+        if top.returncode != 0:
+            continue
+        root = Path(top.stdout.decode("utf-8", errors="replace").strip()).resolve()
+        if root != base and root.is_relative_to(base):
+            roots.add(root)
+    return sorted(roots)
+
+
+def _scan_repos(base: Path) -> list[Path]:
+    """Dirs with a ``.git`` entry under *base* (not descending into a repo)."""
+    found: list[Path] = []
+    level = [base]
+    visited = 0
+    for _depth in range(_SUBREPO_DEPTH):
+        nxt: list[Path] = []
+        for here in level:
+            try:
+                entries = sorted(os.scandir(here), key=lambda e: e.name)
+            except OSError:
+                continue
+            for entry in entries:
+                name = entry.name
+                if name.startswith(".") or name.lower() in _SUBREPO_SKIP:
+                    continue
+                try:
+                    if entry.is_symlink() or not entry.is_dir():
+                        continue
+                except OSError:
+                    continue
+                visited += 1
+                if visited > _SUBREPO_MAX_DIRS:
+                    return found
+                path = Path(entry.path)
+                if (path / ".git").exists():
+                    found.append(path)
+                else:
+                    nxt.append(path)
+        level = nxt
+    return found
+
+
+def git_revision(cwd: str | Path | None, project: str | None = None) -> str | None:
     """Hash HEAD plus the content of changed and untracked files, including deletions.
 
-    ``NO_GIT_REVISION`` when *cwd* is an existing directory git says is not a
-    repository; ``None`` when the revision could not be read (git missing,
-    timeout, bad cwd) — that stays a hard reject."""
+    Inside a git tree: ``git:<hash>`` of that tree. Outside any (#1070): the
+    git repos under *cwd* (*project*'s registered paths first, else a bounded
+    scan) combined as ``repos:<hash>`` over ``<posix rel path> + git:<hash>``
+    sorted by path — any sub-repo change moves it. ``NO_GIT_REVISION`` when no
+    repo is found (see ``NO_GIT_HINT``); ``None`` when a revision could not be
+    read (git missing, timeout, bad cwd) — that stays a hard reject.
+    The single function `task impact` and the done/subagent-done gate share."""
     if not cwd:
         return None
     try:
-        top = subprocess.run(
-            ["git", "-C", str(cwd), "rev-parse", "--show-toplevel"],
-            capture_output=True,
-            timeout=5,
-            creationflags=SUBPROCESS_NO_WINDOW,
-        )
-        if top.returncode != 0:
-            return NO_GIT_REVISION if _outside_any_git_tree(cwd) else None
-        root = top.stdout.decode("utf-8", errors="replace").strip()
+        top = _git(["-C", str(cwd), "rev-parse", "--show-toplevel"])
+        if top.returncode == 0:
+            return _repo_revision(top.stdout.decode("utf-8", errors="replace").strip())
+        if not _outside_any_git_tree(cwd):
+            return None
+        base = Path(cwd).resolve()
+        repos = _registered_repos(base, project) or _scan_repos(base)
+        if not repos:
+            return NO_GIT_REVISION
+        digest = hashlib.sha256(b"repos\0")
+        for rel, root in sorted((r.relative_to(base).as_posix(), r) for r in repos):
+            rev = _repo_revision(str(root))
+            if rev is None:
+                return None
+            digest.update(rel.encode("utf-8", errors="surrogateescape") + b"\0")
+            digest.update(rev.encode("ascii") + b"\0")
+        return "repos:" + digest.hexdigest()[:20]
+    except (OSError, ValueError, subprocess.SubprocessError, UnicodeError):
+        return None
+
+
+def _repo_revision(root: str) -> str | None:
+    """``git:<hash>`` of one work tree (#833 format, unchanged by #1070)."""
+    try:
         head = subprocess.run(
             ["git", "-C", root, "rev-parse", "HEAD"],
             capture_output=True,

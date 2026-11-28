@@ -283,6 +283,116 @@ def test_revision_tracks_modified_and_untracked_files(tmp_path: Path) -> None:
     assert first and second and third and len({first, second, third}) == 3
 
 
+def _pre_1070_revision(root: Path) -> str:
+    """The #833 single-repo algorithm, restated: #1070 must not change it."""
+    import hashlib
+
+    def run(*args: str) -> bytes:
+        return subprocess.run(["git", *args], cwd=root, check=True, capture_output=True).stdout
+
+    digest = hashlib.sha256(run("rev-parse", "HEAD").strip())
+    names = run("diff", "--name-only", "-z", "HEAD") + run(
+        "ls-files", "--others", "--exclude-standard", "-z"
+    )
+    for raw in sorted(set(names.split(b"\0")) - {b""}):
+        digest.update(raw + b"\0")
+        path = root / raw.decode()
+        digest.update(path.read_bytes() if path.is_file() else b"<deleted>")
+    return "git:" + digest.hexdigest()[:20]
+
+
+def _multi_parent(tmp_path: Path) -> Path:
+    parent = tmp_path / "blueparking"
+    for rel in ("pos", "engines/cloud-engine-master"):
+        (parent / rel).mkdir(parents=True)
+        _repo(parent / rel)
+    if any((d / ".git").exists() for d in (parent.resolve(), *parent.resolve().parents)):
+        pytest.skip("tmp dir sits inside a git tree on this machine")
+    return parent
+
+
+def test_single_repo_revision_unchanged_by_1070(tmp_path: Path) -> None:
+    _repo(tmp_path)
+    (tmp_path / "app.txt").write_text("changed", encoding="utf-8")
+    (tmp_path / "new.txt").write_text("new", encoding="utf-8")
+    (tmp_path / "sub").mkdir()
+    assert git_revision(tmp_path) == _pre_1070_revision(tmp_path)
+    assert git_revision(tmp_path / "sub", "any-project") == _pre_1070_revision(tmp_path)
+
+
+def test_multi_repo_parent_pins_every_sub_repo_1070(tmp_path: Path, monkeypatch) -> None:
+    """#1070: a non-git parent with sub-repos gave `no-git`, so evidence was
+    rejected every round. The revision now combines each sub-repo's, sorted
+    by posix rel path (same on Windows/macOS), and moves when any one moves."""
+    import hashlib
+
+    parent = _multi_parent(tmp_path)
+    (parent / "node_modules" / "dep").mkdir(parents=True)
+    _repo(parent / "node_modules" / "dep")  # skipped: changes here never count
+    first = git_revision(parent)
+    expected = hashlib.sha256(b"repos\0")
+    for rel in ("engines/cloud-engine-master", "pos"):
+        expected.update(rel.encode() + b"\0" + git_revision(parent / rel).encode() + b"\0")
+    assert first == "repos:" + expected.hexdigest()[:20]
+    assert git_revision(parent) == first  # deterministic
+    (parent / "node_modules" / "dep" / "app.txt").write_text("x", encoding="utf-8")
+    assert git_revision(parent) == first
+
+    monkeypatch.setattr(task_ledger, "RUNTIME_DIR", tmp_path / "runtime")
+    plan = _plan()
+    task = append_block("แก้ audio_mode seedance_only", "impact-plan", plan)
+    task_ledger.create_assignment(
+        "project", "backend", str(parent), task, "goal", "feature", "codex", task_id="task-m"
+    )
+    evidence = append_block("done", "impact-evidence", _evidence(plan, "task-m", first))
+    (parent / "engines" / "cloud-engine-master" / "app.txt").write_text("y", encoding="utf-8")
+    second = git_revision(parent)
+    assert second != first
+    assert "revision" in task_ledger.check_impact_completion(
+        "project", "backend", "task-m", evidence
+    )
+    for stale in (None, "no-git"):  # the #1001 marker no longer fits a parent with repos
+        stale_note = append_block("done", "impact-evidence", _evidence(plan, "task-m", stale))
+        assert task_ledger.check_impact_completion("project", "backend", "task-m", stale_note)
+    fresh = append_block("done", "impact-evidence", _evidence(plan, "task-m", second))
+    assert not task_ledger.check_impact_completion("project", "backend", "task-m", fresh)
+
+
+def test_registered_paths_win_over_the_scan_1070(tmp_path: Path, monkeypatch) -> None:
+    from agent_takkub import config
+
+    parent = _multi_parent(tmp_path)
+    pos = parent / "pos"
+    monkeypatch.setattr(
+        config,
+        "load_projects",
+        lambda: {"projects": {"bp": {"paths": {"pos": str(pos / "src"), "x": str(tmp_path)}}}},
+    )
+    (pos / "src").mkdir()
+    only_pos = git_revision(parent, "bp")
+    assert only_pos.startswith("repos:") and only_pos != git_revision(parent)
+    (parent / "engines" / "cloud-engine-master" / "app.txt").write_text("y", encoding="utf-8")
+    assert git_revision(parent, "bp") == only_pos  # not registered → not pinned
+    (pos / "app.txt").write_text("y", encoding="utf-8")
+    assert git_revision(parent, "bp") != only_pos
+
+
+def test_no_git_anywhere_names_where_it_looked_1070(tmp_path: Path) -> None:
+    from agent_takkub.impact_contract import NO_GIT_REVISION, validate_evidence
+
+    parent = tmp_path / "plain"
+    (parent / "a" / "b" / "c" / "d").mkdir(parents=True)
+    (parent / "a" / "b" / "c" / "d" / ".git").mkdir()  # deeper than the scan bound
+    if any((d / ".git").exists() for d in (parent.resolve(), *parent.resolve().parents)):
+        pytest.skip("tmp dir sits inside a git tree on this machine")
+    assert git_revision(parent) == NO_GIT_REVISION
+    plan = _plan()
+    error = validate_evidence(
+        plan, _evidence(plan, "t", "git:abc"), task_id="t", revision=NO_GIT_REVISION
+    )
+    assert "no git repo at the task cwd" in error and "depth 3" in error
+
+
 def test_assign_rejects_sensitive_task_before_backlog_or_spawn(monkeypatch) -> None:
     from agent_takkub.orchestrator import Orchestrator
 

@@ -3018,7 +3018,7 @@ def cmd_task(args: argparse.Namespace) -> dict:
     """
     _warn_deprecated_role(getattr(args, "role", None))
     if args.t_cmd == "impact":
-        from .impact_contract import git_revision
+        from .impact_contract import NO_GIT_HINT, NO_GIT_REVISION, git_revision
         from .task_ledger import open_impact
 
         project = getattr(args, "project", None) or _from_project() or "default"
@@ -3029,7 +3029,9 @@ def cmd_task(args: argparse.Namespace) -> dict:
                 "msg": f"no active task for {args.role} in {project}",
                 "structured_output": True,
             }
-        active["revision"] = git_revision(active["cwd"])
+        active["revision"] = git_revision(active["cwd"], project)
+        if active["revision"] == NO_GIT_REVISION:
+            active["revision_note"] = NO_GIT_HINT  # #1070: say where it looked
         # #1047: `done` only requires the checks this role owns; the rest stay
         # owed on the plan (leave them out, or report them `pending`).
         _plan = (active.get("impact") or {}).get("plan")

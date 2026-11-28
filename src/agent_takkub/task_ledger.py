@@ -512,7 +512,7 @@ def check_impact_completion(
     evidence, error = evidence_from_note(note)
     if error:
         return error
-    current_revision = revision if revision is not None else git_revision(active["cwd"])
+    current_revision = revision if revision is not None else git_revision(active["cwd"], project)
     error = validate_evidence(
         active["impact"]["plan"], evidence, task_id=task_id, revision=current_revision, role=role
     )

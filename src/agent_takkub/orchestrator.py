@@ -2906,10 +2906,13 @@ class Orchestrator(
         failed: bool = False,
         cancelled: bool = False,
         cancelled_by: str = "",
+        impact_revision: str | None = None,
     ) -> tuple[bool, str]:
         """Complete a pending native child through done-equivalent sinks (#268).
         `cancelled` (#1068) follows `done(cancelled=True)`: not a FAILED;
-        `cancelled_by` is "lead" only from cancel_task (server-set)."""
+        `cancelled_by` is "lead" only from cancel_task (server-set).
+        `impact_revision` (#1070) is read off the Qt thread by cli_server;
+        None falls back to reading it here."""
         try:
             role_name = validate_name(role_name, "role")
         except ValueError as exc:
@@ -2930,6 +2933,7 @@ class Orchestrator(
                 role_name,
                 state.get("task_id", ""),
                 note,
+                revision=impact_revision,
                 task_text=state.get("task", ""),
             )
             if impact_error:
